@@ -1,5 +1,3 @@
-//#![allow(dead_code)]
-
 #[derive(Debug, Eq, PartialEq)]
 enum TokenKind {
     Number(i32),
@@ -52,46 +50,52 @@ impl<'a> Lexer<'a> {
         self.rest = &self.rest[extra..];
         Some(token)
     }
+
+    fn skip_whitespace(&mut self) {
+        let trimmed = self.rest.trim_start();
+        let whitespace_skipped = self.rest.len() - trimmed.len();
+        self.position += whitespace_skipped;
+        self.rest = trimmed;
+    }
 }
 
 impl<'a> Iterator for Lexer<'a> {
     type Item = Token<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let mut chars = self.rest.chars();
-            let c = chars.next()?;
-            let c_at = self.position;
-            let c_rest = self.rest;
-            self.rest = chars.as_str();
-            self.position += c.len_utf8();
+        self.skip_whitespace();
 
-            let tok = |kind: TokenKind| -> Option<Token<'a>> {
-                Some(Token {
-                    kind,
-                    lexeme: None,
-                    offset: c_at,
-                })
-            };
+        let mut chars = self.rest.chars();
+        let c = chars.next()?;
+        let c_at = self.position;
+        let c_rest = self.rest;
+        self.rest = chars.as_str();
+        self.position += c.len_utf8();
 
-            let tok = match c {
-                c if c.is_ascii_whitespace() => continue,
-                '0'..='9' => self.lex_number(c_rest, c_at),
-                '(' => tok(TokenKind::LeftParen),
-                ')' => tok(TokenKind::RightParen),
+        let tok = |kind: TokenKind| -> Option<Token<'a>> {
+            Some(Token {
+                kind,
+                lexeme: None,
+                offset: c_at,
+            })
+        };
 
-                '+' => tok(TokenKind::Plus),
-                '-' => tok(TokenKind::Minus),
-                '*' => tok(TokenKind::Asterisk),
-                '/' => tok(TokenKind::Slash),
+        let tok = match c {
+            '0'..='9' => self.lex_number(c_rest, c_at),
+            '(' => tok(TokenKind::LeftParen),
+            ')' => tok(TokenKind::RightParen),
 
-                other => {
-                    eprintln!("Invalid character '{other}'");
-                    None
-                }
-            };
-            break tok;
-        }
+            '+' => tok(TokenKind::Plus),
+            '-' => tok(TokenKind::Minus),
+            '*' => tok(TokenKind::Asterisk),
+            '/' => tok(TokenKind::Slash),
+
+            other => {
+                eprintln!("Invalid character '{other}'");
+                None
+            }
+        };
+        tok
     }
 }
 
