@@ -1,5 +1,6 @@
-#[derive(Debug, Eq, PartialEq)]
-enum TokenKind {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TokenKind<'a> {
+    String(&'a str),
     Number(i32),
     LeftParen,
     RightParen,
@@ -11,7 +12,7 @@ enum TokenKind {
 
 #[derive(Debug, Eq, PartialEq)]
 struct Token<'a> {
-    kind: TokenKind,
+    kind: TokenKind<'a>,
     lexeme: Option<&'a str>,
     offset: usize,
 }
@@ -51,6 +52,20 @@ impl<'a> Lexer<'a> {
         Some(token)
     }
 
+    fn lex_string(&mut self, rest: &'a str, start: usize) -> Option<Token<'a>> {
+        let first_after_string = self.rest.find('"')?;
+        let literal = &rest[..first_after_string + 1 + 1];
+        let literal = literal.trim_matches('"');
+        let token = Token {
+            kind: TokenKind::String(literal),
+            lexeme: None,
+            offset: start,
+        };
+        self.position += first_after_string + 1;
+        self.rest = &self.rest[first_after_string + 1..];
+        Some(token)
+    }
+
     fn skip_whitespace(&mut self) {
         let trimmed = self.rest.trim_start();
         let whitespace_skipped = self.rest.len() - trimmed.len();
@@ -72,7 +87,7 @@ impl<'a> Iterator for Lexer<'a> {
         self.rest = chars.as_str();
         self.position += c.len_utf8();
 
-        let tok = |kind: TokenKind| -> Option<Token<'a>> {
+        let tok = |kind: TokenKind<'a>| -> Option<Token<'a>> {
             Some(Token {
                 kind,
                 lexeme: None,
@@ -82,6 +97,7 @@ impl<'a> Iterator for Lexer<'a> {
 
         let tok = match c {
             '0'..='9' => self.lex_number(c_rest, c_at),
+            '"' => self.lex_string(c_rest, c_at),
             '(' => tok(TokenKind::LeftParen),
             ')' => tok(TokenKind::RightParen),
 
@@ -165,5 +181,18 @@ mod tests {
         let lexer = Lexer::new(s);
         let tokens: Vec<Token> = lexer.into_iter().collect();
         dbg!(tokens);
+    }
+
+    #[test]
+    fn test_string() {
+        let s = r#""hello world""#;
+        let mut lexer = Lexer::new(s);
+        let token = lexer.next().unwrap();
+        let expected = Token {
+            kind: TokenKind::String("hello world"),
+            lexeme: None,
+            offset: 0,
+        };
+        assert_eq!(expected, token);
     }
 }
