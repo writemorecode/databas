@@ -16,7 +16,7 @@ fn main() -> std::io::Result<()> {
         }
         let lexer = Lexer::new(line);
         for token in lexer {
-            dbg!(token);
+            println!("{}", token);
         }
         println!();
     }

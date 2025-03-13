@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenKind<'a> {
     String(&'a str),
@@ -20,11 +22,47 @@ pub enum TokenKind<'a> {
     Or,
 }
 
+impl Display for TokenKind<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TokenKind::String(s) => write!(f, "STRING ('{s}')"),
+            TokenKind::Number(n) => write!(f, "NUMBER ({n})"),
+            TokenKind::LeftParen => write!(f, "LP"),
+            TokenKind::RightParen => write!(f, "RP"),
+            TokenKind::Plus => write!(f, "PLUS"),
+            TokenKind::Minus => write!(f, "MINUS"),
+            TokenKind::LessThan => write!(f, "LT"),
+            TokenKind::GreaterThan => write!(f, "GT"),
+            TokenKind::Asterisk => write!(f, "ASTERISK"),
+            TokenKind::Comma => write!(f, "COMMA"),
+            TokenKind::Semicolon => write!(f, "SEMICOLON"),
+            TokenKind::Slash => write!(f, "SLASH"),
+            TokenKind::Identifier => write!(f, "IDENT"),
+            TokenKind::Select => write!(f, "SELECT"),
+            TokenKind::From => write!(f, "FROM"),
+            TokenKind::Where => write!(f, "WHERE"),
+            TokenKind::And => write!(f, "AND"),
+            TokenKind::Or => write!(f, "OR"),
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct Token<'a> {
     pub kind: TokenKind<'a>,
     pub lexeme: Option<&'a str>,
     pub offset: usize,
+}
+
+impl Display for Token<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Position: {}\t", self.offset)?;
+        write!(f, "{}\t", self.kind)?;
+        if let Some(lexeme) = self.lexeme {
+            write!(f, "\"{lexeme}\"\t")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
