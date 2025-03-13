@@ -6,8 +6,18 @@ pub enum TokenKind<'a> {
     RightParen,
     Plus,
     Minus,
+    LessThan,
+    GreaterThan,
     Asterisk,
+    Comma,
+    Semicolon,
     Slash,
+    Identifier,
+    Select,
+    From,
+    Where,
+    And,
+    Or,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -65,6 +75,38 @@ impl<'a> Lexer<'a> {
         Some(token)
     }
 
+    fn lex_keyword(&mut self, rest: &'a str, start: usize) -> Option<Token<'a>> {
+        let first_after = rest
+            .chars()
+            .position(|c| !matches!(c, 'a'..='z' | 'A'..='Z' | '_' ))
+            .unwrap_or(rest.len());
+        let literal = &rest[..first_after];
+
+        let kind = match literal {
+            "SELECT" => TokenKind::Select,
+            "FROM" => TokenKind::From,
+            "WHERE" => TokenKind::Where,
+            "AND" => TokenKind::And,
+            "OR" => TokenKind::Or,
+            _ => TokenKind::Identifier,
+        };
+        let lexeme = if kind == TokenKind::Identifier {
+            Some(literal)
+        } else {
+            None
+        };
+
+        let token = Token {
+            kind,
+            lexeme,
+            offset: start,
+        };
+
+        self.position += first_after - 1;
+        self.rest = &self.rest[first_after - 1..];
+        Some(token)
+    }
+
     fn skip_whitespace(&mut self) {
         let trimmed = self.rest.trim_start();
         let whitespace_skipped = self.rest.len() - trimmed.len();
@@ -97,13 +139,18 @@ impl<'a> Iterator for Lexer<'a> {
         let tok = match c {
             '0'..='9' => self.lex_number(c_rest, c_at),
             '"' => self.lex_string(c_rest, c_at),
+            'a'..='z' | 'A'..='Z' => self.lex_keyword(c_rest, c_at),
+
             '(' => tok(TokenKind::LeftParen),
             ')' => tok(TokenKind::RightParen),
-
+            '<' => tok(TokenKind::LessThan),
+            '>' => tok(TokenKind::GreaterThan),
             '+' => tok(TokenKind::Plus),
             '-' => tok(TokenKind::Minus),
             '*' => tok(TokenKind::Asterisk),
             '/' => tok(TokenKind::Slash),
+            ',' => tok(TokenKind::Comma),
+            ';' => tok(TokenKind::Semicolon),
 
             other => {
                 eprintln!("Invalid character '{other}'");

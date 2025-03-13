@@ -67,3 +67,41 @@ fn test_string() {
     };
     assert_eq!(expected, token);
 }
+
+#[test]
+fn test_keywords() {
+    let s = "SELECT * FROM users;";
+    let mut lexer = Lexer::new(s);
+    let expected = [
+        Token {
+            kind: TokenKind::Select,
+            lexeme: None,
+            offset: 0,
+        },
+        Token {
+            kind: TokenKind::Asterisk,
+            lexeme: None,
+            offset: 7,
+        },
+        Token {
+            kind: TokenKind::From,
+            lexeme: None,
+            offset: 9,
+        },
+        Token {
+            kind: TokenKind::Identifier,
+            lexeme: Some("users"),
+            offset: 14,
+        },
+        Token {
+            kind: TokenKind::Semicolon,
+            lexeme: None,
+            offset: 19,
+        },
+    ];
+
+    for t in expected {
+        let got = lexer.next();
+        assert_eq!(got, Some(t));
+    }
+}
