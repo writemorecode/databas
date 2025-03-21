@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use databas::Lexer;
+use databas::lex::Lexer;
 
 fn main() -> std::io::Result<()> {
     let mut buf = String::new();

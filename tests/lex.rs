@@ -1,4 +1,4 @@
-use databas::{Lexer, Token, TokenKind};
+use databas::lex::{Lexer, Token, TokenKind};
 
 #[test]
 fn test_skip_whitespace() {
