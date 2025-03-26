@@ -108,11 +108,8 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_keyword(&mut self, rest: &'a str, start: usize) -> Option<Token<'a>> {
-        let first_after = rest
-            .chars()
-            .position(|c| !matches!(c, 'a'..='z' | 'A'..='Z' | '_' ))
-            .unwrap_or(rest.len());
-        let literal = &rest[..first_after];
+        let is_not_part_of_keyword = |c| !matches!(c, 'a'..='z' | 'A'..='Z' | '_' );
+        let literal = rest.split(is_not_part_of_keyword).next()?;
 
         let kind = match literal {
             "SELECT" => TokenKind::Select,
@@ -134,8 +131,8 @@ impl<'a> Lexer<'a> {
             offset: start,
         };
 
-        self.position += first_after - 1;
-        self.rest = &self.rest[first_after - 1..];
+        self.position += literal.len() - 1;
+        self.rest = &self.rest[literal.len() - 1..];
         Some(token)
     }
 
