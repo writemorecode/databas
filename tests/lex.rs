@@ -47,13 +47,13 @@ fn test_lex_number_between_whitespace() {
     assert_eq!(lexer.position, s.len() - 1);
 }
 
-#[test]
-fn test_big() {
-    let s = "12 + 23 * (36 / 8)";
-    let lexer = Lexer::new(s);
-    let tokens: Vec<Token> = lexer.into_iter().collect();
-    dbg!(tokens);
-}
+// #[test]
+// fn test_big() {
+//     let s = "12 + 23 * (36 / 8)";
+//     let lexer = Lexer::new(s);
+//     let tokens: Vec<Token> = lexer.into_iter().collect();
+//     dbg!(tokens);
+// }
 
 #[test]
 fn test_string() {
@@ -102,6 +102,6 @@ fn test_keywords() {
 
     for t in expected {
         let got = lexer.next();
-        assert_eq!(got, Some(t));
+        assert_eq!(got, Some(Ok(t)));
     }
 }

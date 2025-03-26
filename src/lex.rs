@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use crate::error::LexerError;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenKind<'a> {
     String(&'a str),
@@ -81,7 +83,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_number(&mut self, rest: &'a str, start: usize) -> Option<Token<'a>> {
+    fn lex_number(&mut self, rest: &'a str, start: usize) -> Option<Result<Token<'a>, LexerError>> {
         let literal = rest.split(|c: char| !c.is_ascii_digit()).next()?;
         let parsed = literal.parse::<i32>().unwrap();
         let token = Token {
@@ -92,11 +94,13 @@ impl<'a> Lexer<'a> {
         let extra = literal.len() - 1;
         self.position += extra;
         self.rest = &self.rest[extra..];
-        Some(token)
+        Some(Ok(token))
     }
 
-    fn lex_string(&mut self, start: usize) -> Option<Token<'a>> {
-        let (literal, rest) = self.rest.split_once('"')?;
+    fn lex_string(&mut self, start: usize) -> Option<Result<Token<'a>, LexerError>> {
+        let Some((literal, rest)) = self.rest.split_once('"') else {
+            return Some(Err(LexerError::UnterminatedString { pos: start }));
+        };
         let token = Token {
             kind: TokenKind::String(literal),
             lexeme: None,
@@ -104,10 +108,14 @@ impl<'a> Lexer<'a> {
         };
         self.position += literal.len() + 1;
         self.rest = rest;
-        Some(token)
+        Some(Ok(token))
     }
 
-    fn lex_keyword(&mut self, rest: &'a str, start: usize) -> Option<Token<'a>> {
+    fn lex_keyword(
+        &mut self,
+        rest: &'a str,
+        start: usize,
+    ) -> Option<Result<Token<'a>, LexerError>> {
         let is_not_part_of_keyword = |c| !matches!(c, 'a'..='z' | 'A'..='Z' | '_' );
         let literal = rest.split(is_not_part_of_keyword).next()?;
 
@@ -133,7 +141,7 @@ impl<'a> Lexer<'a> {
 
         self.position += literal.len() - 1;
         self.rest = &self.rest[literal.len() - 1..];
-        Some(token)
+        Some(Ok(token))
     }
 
     fn skip_whitespace(&mut self) {
@@ -145,7 +153,7 @@ impl<'a> Lexer<'a> {
 }
 
 impl<'a> Iterator for Lexer<'a> {
-    type Item = Token<'a>;
+    type Item = Result<Token<'a>, LexerError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.skip_whitespace();
@@ -157,12 +165,12 @@ impl<'a> Iterator for Lexer<'a> {
         self.rest = chars.as_str();
         self.position += c.len_utf8();
 
-        let tok = |kind: TokenKind<'a>| -> Option<Token<'a>> {
-            Some(Token {
+        let tok = |kind: TokenKind<'a>| -> Option<Result<Token<'a>, LexerError>> {
+            Some(Ok(Token {
                 kind,
                 lexeme: None,
                 offset: c_at,
-            })
+            }))
         };
 
         let tok = match c {
@@ -181,10 +189,7 @@ impl<'a> Iterator for Lexer<'a> {
             ',' => tok(TokenKind::Comma),
             ';' => tok(TokenKind::Semicolon),
 
-            other => {
-                eprintln!("Invalid character '{other}'");
-                None
-            }
+            c => Some(Err(LexerError::InvalidCharacter { c })),
         };
         tok
     }

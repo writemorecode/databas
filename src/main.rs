@@ -16,7 +16,13 @@ fn main() -> std::io::Result<()> {
         }
         let lexer = Lexer::new(line);
         for token in lexer {
-            println!("{}", token);
+            match token {
+                Ok(tok) => println!("{tok}"),
+                Err(err) => {
+                    eprintln!("{err}");
+                    break;
+                }
+            }
         }
         println!();
     }
