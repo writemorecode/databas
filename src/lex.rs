@@ -97,17 +97,15 @@ impl<'a> Lexer<'a> {
         Some(token)
     }
 
-    fn lex_string(&mut self, rest: &'a str, start: usize) -> Option<Token<'a>> {
-        let first_after_string = self.rest.find('"')?;
-        let literal = &rest[..first_after_string + 1 + 1];
-        let literal = literal.trim_matches('"');
+    fn lex_string(&mut self, start: usize) -> Option<Token<'a>> {
+        let (literal, rest) = self.rest.split_once('"')?;
         let token = Token {
             kind: TokenKind::String(literal),
             lexeme: None,
             offset: start,
         };
-        self.position += first_after_string + 1;
-        self.rest = &self.rest[first_after_string + 1..];
+        self.position += literal.len() + 1;
+        self.rest = rest;
         Some(token)
     }
 
@@ -174,7 +172,7 @@ impl<'a> Iterator for Lexer<'a> {
 
         let tok = match c {
             '0'..='9' => self.lex_number(c_rest, c_at),
-            '"' => self.lex_string(c_rest, c_at),
+            '"' => self.lex_string(c_at),
             'a'..='z' | 'A'..='Z' => self.lex_keyword(c_rest, c_at),
 
             '(' => tok(TokenKind::LeftParen),
