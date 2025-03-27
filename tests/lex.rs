@@ -62,38 +62,22 @@ fn test_string() {
 fn test_keywords() {
     let s = "SELECT * FROM users;";
     let mut lexer = Lexer::new(s);
-    let expected = [
-        Token {
-            kind: TokenKind::Select,
-            lexeme: None,
-            offset: 0,
-        },
-        Token {
-            kind: TokenKind::Asterisk,
-            lexeme: None,
-            offset: 7,
-        },
-        Token {
-            kind: TokenKind::From,
-            lexeme: None,
-            offset: 9,
-        },
-        Token {
-            kind: TokenKind::Identifier,
-            lexeme: Some("users"),
-            offset: 14,
-        },
-        Token {
-            kind: TokenKind::Semicolon,
-            lexeme: None,
-            offset: 19,
-        },
-    ];
 
-    for t in expected {
+    let mut expect = |kind: TokenKind, lexeme: Option<&str>, offset: usize| {
+        let expected = Token {
+            kind,
+            lexeme,
+            offset,
+        };
         let got = lexer.next();
-        assert_eq!(got, Some(Ok(t)));
-    }
+        assert_eq!(Some(Ok(expected)), got);
+    };
+
+    expect(TokenKind::Select, None, 0);
+    expect(TokenKind::Asterisk, None, 7);
+    expect(TokenKind::From, None, 9);
+    expect(TokenKind::Identifier, Some("users"), 14);
+    expect(TokenKind::Semicolon, None, 19);
 }
 
 #[test]
@@ -108,7 +92,7 @@ fn test_expression() {
             offset,
         };
         let got = lexer.next();
-        assert_eq!(got, Some(Ok(expected)));
+        assert_eq!(Some(Ok(expected)), got);
     };
 
     expect(TokenKind::Number(12), 0);
