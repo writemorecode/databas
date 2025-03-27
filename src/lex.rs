@@ -11,8 +11,14 @@ pub enum TokenKind<'a> {
     RightParen,
     Plus,
     Minus,
+    Equals,
+    Bang,
+    NotEquals,
+    EqualsEquals,
     LessThan,
     GreaterThan,
+    LessThanOrEqual,
+    GreaterThanOrEqual,
     Asterisk,
     Comma,
     Semicolon,
@@ -34,8 +40,14 @@ impl Display for TokenKind<'_> {
             TokenKind::RightParen => write!(f, "RP"),
             TokenKind::Plus => write!(f, "PLUS"),
             TokenKind::Minus => write!(f, "MINUS"),
+            TokenKind::Equals => write!(f, "EQ"),
+            TokenKind::Bang => write!(f, "BANG"),
+            TokenKind::NotEquals => write!(f, "NEQ"),
+            TokenKind::EqualsEquals => write!(f, "EQEQ"),
             TokenKind::LessThan => write!(f, "LT"),
             TokenKind::GreaterThan => write!(f, "GT"),
+            TokenKind::LessThanOrEqual => write!(f, "LTEQ"),
+            TokenKind::GreaterThanOrEqual => write!(f, "GTEQ"),
             TokenKind::Asterisk => write!(f, "ASTERISK"),
             TokenKind::Comma => write!(f, "COMMA"),
             TokenKind::Semicolon => write!(f, "SEMICOLON"),
@@ -132,12 +144,45 @@ impl<'a> Lexer<'a> {
         Some(Ok(token))
     }
 
+    fn lex_equals_op(
+        &mut self,
+        current: Started,
+        offset: usize,
+    ) -> Option<Result<Token<'a>, LexerError>> {
+        let kind = if self.rest.starts_with('=') {
+            self.position += 1;
+            self.rest = &self.rest[1..];
+            match current {
+                Started::LessThan => TokenKind::LessThanOrEqual,
+                Started::GreaterThan => TokenKind::GreaterThanOrEqual,
+                Started::Equals => TokenKind::EqualsEquals,
+                Started::Bang => TokenKind::NotEquals,
+            }
+        } else {
+            match current {
+                Started::LessThan => TokenKind::LessThan,
+                Started::GreaterThan => TokenKind::GreaterThan,
+                Started::Equals => TokenKind::Equals,
+                Started::Bang => TokenKind::Bang,
+            }
+        };
+        let token = Token { kind, offset };
+        Some(Ok(token))
+    }
+
     fn skip_whitespace(&mut self) {
         let trimmed = self.rest.trim_start();
         let whitespace_skipped = self.rest.len() - trimmed.len();
         self.position += whitespace_skipped;
         self.rest = trimmed;
     }
+}
+
+enum Started {
+    LessThan,
+    GreaterThan,
+    Equals,
+    Bang,
 }
 
 impl<'a> Iterator for Lexer<'a> {
@@ -161,11 +206,12 @@ impl<'a> Iterator for Lexer<'a> {
             '0'..='9' => self.lex_number(c_rest, c_at),
             '"' => self.lex_string(c_at),
             'a'..='z' | 'A'..='Z' => self.lex_keyword(c_rest, c_at),
-
+            '<' => self.lex_equals_op(Started::LessThan, c_at),
+            '>' => self.lex_equals_op(Started::GreaterThan, c_at),
+            '!' => self.lex_equals_op(Started::Bang, c_at),
+            '=' => self.lex_equals_op(Started::Equals, c_at),
             '(' => tok(TokenKind::LeftParen),
             ')' => tok(TokenKind::RightParen),
-            '<' => tok(TokenKind::LessThan),
-            '>' => tok(TokenKind::GreaterThan),
             '+' => tok(TokenKind::Plus),
             '-' => tok(TokenKind::Minus),
             '*' => tok(TokenKind::Asterisk),

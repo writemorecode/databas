@@ -1,15 +1,42 @@
 use databas::lex::{Lexer, Token, TokenKind};
 
+trait LexerExt {
+    fn expect(&mut self, kind: TokenKind, offset: usize);
+}
+
+impl<'a> LexerExt for Lexer<'a> {
+    fn expect(&mut self, kind: TokenKind, offset: usize) {
+        let expected = Token { kind, offset };
+        let got = self.next();
+        assert_eq!(Some(Ok(expected)), got);
+    }
+}
+
+#[test]
+fn test_comparison_symbols() {
+    let s = " <  <=   >=  >";
+    let mut lexer = Lexer::new(s);
+    lexer.expect(TokenKind::LessThan, 1);
+    lexer.expect(TokenKind::LessThanOrEqual, 4);
+    lexer.expect(TokenKind::GreaterThanOrEqual, 9);
+    lexer.expect(TokenKind::GreaterThan, 13);
+}
+
+#[test]
+fn test_equality_symbols() {
+    let s = "== != ! =";
+    let mut lexer = Lexer::new(s);
+    lexer.expect(TokenKind::EqualsEquals, 0);
+    lexer.expect(TokenKind::NotEquals, 3);
+    lexer.expect(TokenKind::Bang, 6);
+    lexer.expect(TokenKind::Equals, 8);
+}
+
 #[test]
 fn test_skip_whitespace() {
     let s = "   (";
     let mut lexer = Lexer::new(s);
-    let got = lexer.next();
-    let expected = Token {
-        kind: TokenKind::LeftParen,
-        offset: 3,
-    };
-    assert_eq!(Some(Ok(expected)), got);
+    lexer.expect(TokenKind::LeftParen, 3);
     assert!(lexer.rest.is_empty());
     assert_eq!(lexer.position, s.len());
 }
@@ -18,12 +45,7 @@ fn test_skip_whitespace() {
 fn test_lex_number() {
     let s = "1234";
     let mut lexer = Lexer::new(s);
-    let next = lexer.next();
-    let expected = Token {
-        kind: TokenKind::Number(1234),
-        offset: 0,
-    };
-    assert_eq!(Some(Ok(expected)), next);
+    lexer.expect(TokenKind::Number(1234), 0);
     assert!(lexer.rest.is_empty());
     assert_eq!(lexer.position, s.len());
 }
@@ -32,12 +54,7 @@ fn test_lex_number() {
 fn test_lex_number_between_whitespace() {
     let s = " 1234 ";
     let mut lexer = Lexer::new(s);
-    let got = lexer.next();
-    let expected = Token {
-        kind: TokenKind::Number(1234),
-        offset: 1,
-    };
-    assert_eq!(Some(Ok(expected)), got);
+    lexer.expect(TokenKind::Number(1234), 1);
     assert_eq!(lexer.rest, " ");
     assert_eq!(lexer.position, s.len() - 1);
 }
@@ -46,49 +63,30 @@ fn test_lex_number_between_whitespace() {
 fn test_string() {
     let s = r#""hello world""#;
     let mut lexer = Lexer::new(s);
-    let got = lexer.next();
-    let expected = Token {
-        kind: TokenKind::String("hello world"),
-        offset: 0,
-    };
-    assert_eq!(Some(Ok(expected)), got);
+    lexer.expect(TokenKind::String("hello world"), 0);
 }
 
 #[test]
 fn test_keywords() {
     let s = "SELECT * FROM users;";
     let mut lexer = Lexer::new(s);
-
-    let mut expect = |kind: TokenKind, offset: usize| {
-        let expected = Token { kind, offset };
-        let got = lexer.next();
-        assert_eq!(Some(Ok(expected)), got);
-    };
-
-    expect(TokenKind::Select, 0);
-    expect(TokenKind::Asterisk, 7);
-    expect(TokenKind::From, 9);
-    expect(TokenKind::Identifier("users"), 14);
-    expect(TokenKind::Semicolon, 19);
+    lexer.expect(TokenKind::Select, 0);
+    lexer.expect(TokenKind::Asterisk, 7);
+    lexer.expect(TokenKind::From, 9);
+    lexer.expect(TokenKind::Identifier("users"), 14);
+    lexer.expect(TokenKind::Semicolon, 19);
 }
 
 #[test]
 fn test_expression() {
     let s = "12 + 23 * (36 / 8)";
     let mut lexer = Lexer::new(s);
-
-    let mut expect = |kind: TokenKind, offset: usize| {
-        let expected = Token { kind, offset };
-        let got = lexer.next();
-        assert_eq!(Some(Ok(expected)), got);
-    };
-
-    expect(TokenKind::Number(12), 0);
-    expect(TokenKind::Plus, 3);
-    expect(TokenKind::Number(23), 5);
-    expect(TokenKind::Asterisk, 8);
-    expect(TokenKind::LeftParen, 10);
-    expect(TokenKind::Number(36), 11);
-    expect(TokenKind::Slash, 14);
-    expect(TokenKind::Number(8), 16);
+    lexer.expect(TokenKind::Number(12), 0);
+    lexer.expect(TokenKind::Plus, 3);
+    lexer.expect(TokenKind::Number(23), 5);
+    lexer.expect(TokenKind::Asterisk, 8);
+    lexer.expect(TokenKind::LeftParen, 10);
+    lexer.expect(TokenKind::Number(36), 11);
+    lexer.expect(TokenKind::Slash, 14);
+    lexer.expect(TokenKind::Number(8), 16);
 }
