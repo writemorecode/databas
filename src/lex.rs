@@ -202,7 +202,7 @@ impl<'a> Iterator for Lexer<'a> {
             Some(Ok(Token { kind, offset: c_at }))
         };
 
-        let tok = match c {
+        match c {
             '0'..='9' => self.lex_number(c_rest, c_at),
             '"' => self.lex_string(c_at),
             'a'..='z' | 'A'..='Z' => self.lex_keyword(c_rest, c_at),
@@ -220,7 +220,6 @@ impl<'a> Iterator for Lexer<'a> {
             ';' => tok(TokenKind::Semicolon),
 
             c => Some(Err(LexerError::InvalidCharacter { c, pos: c_at })),
-        };
-        tok
+        }
     }
 }
