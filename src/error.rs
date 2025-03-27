@@ -3,7 +3,7 @@ use std::fmt::Display;
 #[derive(Debug, PartialEq)]
 pub enum LexerError {
     UnterminatedString { pos: usize },
-    InvalidCharacter { c: char },
+    InvalidCharacter { pos: usize, c: char },
 }
 
 impl Display for LexerError {
@@ -11,10 +11,10 @@ impl Display for LexerError {
         write!(f, "Lexer error: ")?;
         match self {
             LexerError::UnterminatedString { pos } => {
-                write!(f, "Unterminated string at position {}", pos)
+                write!(f, "Unterminated string starting at position {pos}")
             }
-            LexerError::InvalidCharacter { c } => {
-                write!(f, "Invalid character at position {}", c)
+            LexerError::InvalidCharacter { c, pos } => {
+                write!(f, "Invalid character '{c}' at position {pos}")
             }
         }
     }

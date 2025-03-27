@@ -173,7 +173,7 @@ impl<'a> Iterator for Lexer<'a> {
             ',' => tok(TokenKind::Comma),
             ';' => tok(TokenKind::Semicolon),
 
-            c => Some(Err(LexerError::InvalidCharacter { c })),
+            c => Some(Err(LexerError::InvalidCharacter { c, pos: c_at })),
         };
         tok
     }
