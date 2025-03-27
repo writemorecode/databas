@@ -5,6 +5,7 @@ use crate::error::LexerError;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenKind<'a> {
     String(&'a str),
+    Identifier(&'a str),
     Number(i32),
     LeftParen,
     RightParen,
@@ -16,7 +17,6 @@ pub enum TokenKind<'a> {
     Comma,
     Semicolon,
     Slash,
-    Identifier,
     Select,
     From,
     Where,
@@ -29,6 +29,7 @@ impl Display for TokenKind<'_> {
         match self {
             TokenKind::String(s) => write!(f, "STRING ('{s}')"),
             TokenKind::Number(n) => write!(f, "NUMBER ({n})"),
+            TokenKind::Identifier(id) => write!(f, "IDENT ('{id}')"),
             TokenKind::LeftParen => write!(f, "LP"),
             TokenKind::RightParen => write!(f, "RP"),
             TokenKind::Plus => write!(f, "PLUS"),
@@ -39,7 +40,6 @@ impl Display for TokenKind<'_> {
             TokenKind::Comma => write!(f, "COMMA"),
             TokenKind::Semicolon => write!(f, "SEMICOLON"),
             TokenKind::Slash => write!(f, "SLASH"),
-            TokenKind::Identifier => write!(f, "IDENT"),
             TokenKind::Select => write!(f, "SELECT"),
             TokenKind::From => write!(f, "FROM"),
             TokenKind::Where => write!(f, "WHERE"),
@@ -52,7 +52,6 @@ impl Display for TokenKind<'_> {
 #[derive(Debug, Eq, PartialEq)]
 pub struct Token<'a> {
     pub kind: TokenKind<'a>,
-    pub lexeme: Option<&'a str>,
     pub offset: usize,
 }
 
@@ -60,9 +59,6 @@ impl Display for Token<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Position: {}\t", self.offset)?;
         write!(f, "{}\t", self.kind)?;
-        if let Some(lexeme) = self.lexeme {
-            write!(f, "\"{lexeme}\"\t")?;
-        }
         Ok(())
     }
 }
@@ -88,7 +84,6 @@ impl<'a> Lexer<'a> {
         let parsed = literal.parse::<i32>().unwrap();
         let token = Token {
             kind: TokenKind::Number(parsed),
-            lexeme: None,
             offset: start,
         };
         let extra = literal.len() - 1;
@@ -103,7 +98,6 @@ impl<'a> Lexer<'a> {
         };
         let token = Token {
             kind: TokenKind::String(literal),
-            lexeme: None,
             offset: start,
         };
         self.position += literal.len() + 1;
@@ -125,17 +119,11 @@ impl<'a> Lexer<'a> {
             "WHERE" => TokenKind::Where,
             "AND" => TokenKind::And,
             "OR" => TokenKind::Or,
-            _ => TokenKind::Identifier,
-        };
-        let lexeme = if kind == TokenKind::Identifier {
-            Some(literal)
-        } else {
-            None
+            id => TokenKind::Identifier(id),
         };
 
         let token = Token {
             kind,
-            lexeme,
             offset: start,
         };
 
@@ -166,11 +154,7 @@ impl<'a> Iterator for Lexer<'a> {
         self.position += c.len_utf8();
 
         let tok = |kind: TokenKind<'a>| -> Option<Result<Token<'a>, LexerError>> {
-            Some(Ok(Token {
-                kind,
-                lexeme: None,
-                offset: c_at,
-            }))
+            Some(Ok(Token { kind, offset: c_at }))
         };
 
         let tok = match c {
