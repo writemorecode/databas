@@ -1,4 +1,7 @@
-use databas::lex::{Lexer, Token, TokenKind};
+use databas::{
+    error::LexerError,
+    lex::{Lexer, Token, TokenKind},
+};
 
 trait LexerExt {
     fn expect(&mut self, kind: TokenKind, offset: usize);
@@ -89,4 +92,14 @@ fn test_expression() {
     lexer.expect(TokenKind::Number(36), 11);
     lexer.expect(TokenKind::Slash, 14);
     lexer.expect(TokenKind::Number(8), 16);
+}
+
+#[test]
+fn test_unterminated_string() {
+    let s = r#""hello world"#;
+    let mut lexer = Lexer::new(s);
+    assert_eq!(
+        lexer.next(),
+        Some(Err(LexerError::UnterminatedString { pos: 0 }))
+    );
 }
