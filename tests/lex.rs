@@ -7,7 +7,7 @@ trait LexerExt {
     fn expect(&mut self, kind: TokenKind, offset: usize);
 }
 
-impl<'a> LexerExt for Lexer<'a> {
+impl LexerExt for Lexer<'_> {
     fn expect(&mut self, kind: TokenKind, offset: usize) {
         let expected = Token { kind, offset };
         let got = self.next();
