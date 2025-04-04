@@ -1,21 +1,10 @@
-use std::fmt::Display;
+pub mod error;
+pub mod token;
+pub mod token_kind;
 
-use crate::error::LexerError;
-use crate::token_kind::TokenKind;
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct Token<'a> {
-    pub kind: TokenKind<'a>,
-    pub offset: usize,
-}
-
-impl Display for Token<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Position: {}\t", self.offset)?;
-        write!(f, "{}\t", self.kind)?;
-        Ok(())
-    }
-}
+use error::LexerError;
+use token::Token;
+use token_kind::TokenKind;
 
 #[derive(Debug)]
 pub struct Lexer<'a> {

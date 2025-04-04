@@ -1,8 +1,7 @@
-use databas::{
-    error::LexerError,
-    lex::{Lexer, Token},
-    token_kind::TokenKind,
-};
+use databas::lexer::Lexer;
+use databas::lexer::error::LexerError;
+use databas::lexer::token::Token;
+use databas::lexer::token_kind::TokenKind;
 
 trait LexerExt {
     fn expect(&mut self, kind: TokenKind, offset: usize);
