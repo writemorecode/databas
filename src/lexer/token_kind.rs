@@ -1,10 +1,16 @@
 use std::fmt::Display;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum NumberKind {
+    Integer(i32),
+    Float(f32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TokenKind<'a> {
     String(&'a str),
     Identifier(&'a str),
-    Number(i32),
+    Number(NumberKind),
     LeftParen,
     RightParen,
     Plus,
@@ -32,7 +38,8 @@ impl Display for TokenKind<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TokenKind::String(s) => write!(f, "STRING ('{s}')"),
-            TokenKind::Number(n) => write!(f, "NUMBER ({n})"),
+            TokenKind::Number(NumberKind::Integer(n)) => write!(f, "INTEGER ({n})"),
+            TokenKind::Number(NumberKind::Float(n)) => write!(f, "FLOAT ({n})"),
             TokenKind::Identifier(id) => write!(f, "IDENT ('{id}')"),
             TokenKind::LeftParen => write!(f, "LP"),
             TokenKind::RightParen => write!(f, "RP"),

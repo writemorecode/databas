@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use crate::lexer::token_kind::TokenKind;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct Token<'a> {
     pub kind: TokenKind<'a>,
     pub offset: usize,

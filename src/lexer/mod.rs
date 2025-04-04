@@ -4,7 +4,7 @@ pub mod token_kind;
 
 use error::LexerError;
 use token::Token;
-use token_kind::TokenKind;
+use token_kind::{NumberKind, TokenKind};
 
 #[derive(Debug)]
 pub struct Lexer<'a> {
@@ -117,12 +117,20 @@ impl<'a> Iterator for Lexer<'a> {
 
         match started {
             Started::Number => {
-                let literal = c_rest.split(|c: char| !c.is_ascii_digit()).next()?;
-                let Ok(parsed) = literal.parse::<i32>() else {
+                let literal = c_rest
+                    .split(|c: char| !matches!(c, '.' | '0'..='9'))
+                    .next()?;
+
+                let kind = if let Ok(parsed) = literal.parse::<i32>() {
+                    NumberKind::Integer(parsed)
+                } else if let Ok(parsed) = literal.parse::<f32>() {
+                    NumberKind::Float(parsed)
+                } else {
                     return Some(Err(LexerError::InvalidNumber { pos: c_at }));
                 };
+
                 let token = Token {
-                    kind: TokenKind::Number(parsed),
+                    kind: TokenKind::Number(kind),
                     offset: c_at,
                 };
                 let extra = literal.len() - 1;

@@ -1,6 +1,8 @@
 use databas::lexer::Lexer;
 use databas::lexer::error::LexerError;
 use databas::lexer::token::Token;
+use databas::lexer::token_kind::NumberKind::Float;
+use databas::lexer::token_kind::NumberKind::Integer;
 use databas::lexer::token_kind::TokenKind;
 
 trait LexerExt {
@@ -48,7 +50,16 @@ fn test_skip_whitespace() {
 fn test_lex_number() {
     let s = "1234";
     let mut lexer = Lexer::new(s);
-    lexer.expect(TokenKind::Number(1234), 0);
+    lexer.expect(TokenKind::Number(Integer(1234)), 0);
+    assert!(lexer.rest.is_empty());
+    assert_eq!(lexer.position, s.len());
+}
+
+#[test]
+fn test_lex_floating_point_number() {
+    let s = "12.345";
+    let mut lexer = Lexer::new(s);
+    lexer.expect(TokenKind::Number(Float(12.345f32)), 0);
     assert!(lexer.rest.is_empty());
     assert_eq!(lexer.position, s.len());
 }
@@ -57,7 +68,7 @@ fn test_lex_number() {
 fn test_lex_number_between_whitespace() {
     let s = " 1234 ";
     let mut lexer = Lexer::new(s);
-    lexer.expect(TokenKind::Number(1234), 1);
+    lexer.expect(TokenKind::Number(Integer(1234)), 1);
     assert_eq!(lexer.rest, " ");
     assert_eq!(lexer.position, s.len() - 1);
 }
@@ -91,14 +102,14 @@ fn test_keywords() {
 fn test_expression() {
     let s = "12 + 23 * (36 / 8)";
     let mut lexer = Lexer::new(s);
-    lexer.expect(TokenKind::Number(12), 0);
+    lexer.expect(TokenKind::Number(Integer(12)), 0);
     lexer.expect(TokenKind::Plus, 3);
-    lexer.expect(TokenKind::Number(23), 5);
+    lexer.expect(TokenKind::Number(Integer(23)), 5);
     lexer.expect(TokenKind::Asterisk, 8);
     lexer.expect(TokenKind::LeftParen, 10);
-    lexer.expect(TokenKind::Number(36), 11);
+    lexer.expect(TokenKind::Number(Integer(36)), 11);
     lexer.expect(TokenKind::Slash, 14);
-    lexer.expect(TokenKind::Number(8), 16);
+    lexer.expect(TokenKind::Number(Integer(8)), 16);
 }
 
 #[test]
@@ -115,28 +126,28 @@ fn test_unterminated_string() {
 fn test_line_comment() {
     let s = "3 -- 4 5";
     let mut lexer = Lexer::new(s);
-    lexer.expect(TokenKind::Number(3), 0);
+    lexer.expect(TokenKind::Number(Integer(3)), 0);
     assert_eq!(lexer.next(), None);
 
     let s = "3 -- 4 5\n6";
     let mut lexer = Lexer::new(s);
-    lexer.expect(TokenKind::Number(3), 0);
-    lexer.expect(TokenKind::Number(6), 9);
+    lexer.expect(TokenKind::Number(Integer(3)), 0);
+    lexer.expect(TokenKind::Number(Integer(6)), 9);
 }
 
 #[test]
 fn test_block_comment() {
     let s = "3 /* 4 5 */ 6";
     let mut lexer = Lexer::new(s);
-    lexer.expect(TokenKind::Number(3), 0);
-    lexer.expect(TokenKind::Number(6), 12);
+    lexer.expect(TokenKind::Number(Integer(3)), 0);
+    lexer.expect(TokenKind::Number(Integer(6)), 12);
 }
 
 #[test]
 fn test_multiline_line_comment() {
     let s = "-- hello world\n-- another comment\n123 * 456";
     let mut lexer = Lexer::new(&s);
-    lexer.expect(TokenKind::Number(123), 34);
+    lexer.expect(TokenKind::Number(Integer(123)), 34);
     lexer.expect(TokenKind::Asterisk, 38);
-    lexer.expect(TokenKind::Number(456), 40);
+    lexer.expect(TokenKind::Number(Integer(456)), 40);
 }
