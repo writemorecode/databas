@@ -63,8 +63,15 @@ fn test_lex_number_between_whitespace() {
 }
 
 #[test]
-fn test_string() {
+fn test_double_quoted_string() {
     let s = r#""hello world""#;
+    let mut lexer = Lexer::new(s);
+    lexer.expect(TokenKind::String("hello world"), 0);
+}
+
+#[test]
+fn test_single_quoted_string() {
+    let s = r#"'hello world'"#;
     let mut lexer = Lexer::new(s);
     lexer.expect(TokenKind::String("hello world"), 0);
 }

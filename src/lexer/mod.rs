@@ -59,7 +59,8 @@ impl<'a> Lexer<'a> {
 
 enum Started {
     Number,
-    String,
+    DoubleQuotedString,
+    SingleQuotedString,
     Keyword,
     MaybeEqualsOp(MaybeEquals),
 }
@@ -95,7 +96,8 @@ impl<'a> Iterator for Lexer<'a> {
 
         let started = match c {
             '0'..='9' => Started::Number,
-            '"' => Started::String,
+            '"' => Started::DoubleQuotedString,
+            '\'' => Started::SingleQuotedString,
             'a'..='z' | 'A'..='Z' => Started::Keyword,
             '<' => Started::MaybeEqualsOp(MaybeEquals::LessThan),
             '>' => Started::MaybeEqualsOp(MaybeEquals::GreaterThan),
@@ -128,8 +130,13 @@ impl<'a> Iterator for Lexer<'a> {
                 self.rest = &self.rest[extra..];
                 Some(Ok(token))
             }
-            Started::String => {
-                let Some((literal, rest)) = self.rest.split_once('"') else {
+            quote @ (Started::SingleQuotedString | Started::DoubleQuotedString) => {
+                let terminator = if let Started::SingleQuotedString = quote {
+                    '\''
+                } else {
+                    '"'
+                };
+                let Some((literal, rest)) = self.rest.split_once(terminator) else {
                     return Some(Err(LexerError::UnterminatedString { pos: c_at }));
                 };
                 let token = Token {
