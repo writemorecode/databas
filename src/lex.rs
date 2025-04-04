@@ -61,6 +61,19 @@ impl Display for TokenKind<'_> {
     }
 }
 
+impl<'a> From<&'a str> for TokenKind<'a> {
+    fn from(value: &'a str) -> Self {
+        match value {
+            "SELECT" => TokenKind::Select,
+            "FROM" => TokenKind::From,
+            "WHERE" => TokenKind::Where,
+            "AND" => TokenKind::And,
+            "OR" => TokenKind::Or,
+            id => TokenKind::Identifier(id),
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct Token<'a> {
     pub kind: TokenKind<'a>,
@@ -181,15 +194,7 @@ impl<'a> Iterator for Lexer<'a> {
                 let is_not_part_of_keyword = |c| !matches!(c, 'a'..='z' | 'A'..='Z' | '_' );
                 let literal = c_rest.split(is_not_part_of_keyword).next()?;
 
-                let kind = match literal {
-                    "SELECT" => TokenKind::Select,
-                    "FROM" => TokenKind::From,
-                    "WHERE" => TokenKind::Where,
-                    "AND" => TokenKind::And,
-                    "OR" => TokenKind::Or,
-                    id => TokenKind::Identifier(id),
-                };
-
+                let kind = TokenKind::from(literal);
                 let token = Token { kind, offset: c_at };
 
                 self.position += literal.len() - 1;
