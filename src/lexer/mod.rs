@@ -28,6 +28,33 @@ impl<'a> Lexer<'a> {
         self.position += whitespace_skipped;
         self.rest = trimmed;
     }
+
+    fn skip_comment(&mut self) -> bool {
+        let mut skipped = false;
+        if self.rest.starts_with("--") {
+            if let Some((comment_text, rest)) = self.rest.split_once("\n") {
+                self.position += comment_text.len() + 1;
+                self.rest = rest;
+                skipped = true;
+            } else {
+                self.position = self.source.len();
+                self.rest = "";
+                skipped = false;
+            }
+        } else if self.rest.starts_with("/*") {
+            if let Some((comment_text, rest)) = self.rest.split_once("*/") {
+                self.position += comment_text.len() + 2;
+                self.rest = rest;
+                skipped = true;
+            } else {
+                self.position = self.source.len();
+                self.rest = "";
+                skipped = false;
+            }
+        }
+        self.skip_whitespace();
+        skipped
+    }
 }
 
 enum Started {
@@ -49,6 +76,11 @@ impl<'a> Iterator for Lexer<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.skip_whitespace();
+        loop {
+            if !self.skip_comment() {
+                break;
+            };
+        }
 
         let mut chars = self.rest.chars();
         let c = chars.next()?;

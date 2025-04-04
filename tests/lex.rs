@@ -103,3 +103,33 @@ fn test_unterminated_string() {
         Some(Err(LexerError::UnterminatedString { pos: 0 }))
     );
 }
+
+#[test]
+fn test_line_comment() {
+    let s = "3 -- 4 5";
+    let mut lexer = Lexer::new(s);
+    lexer.expect(TokenKind::Number(3), 0);
+    assert_eq!(lexer.next(), None);
+
+    let s = "3 -- 4 5\n6";
+    let mut lexer = Lexer::new(s);
+    lexer.expect(TokenKind::Number(3), 0);
+    lexer.expect(TokenKind::Number(6), 9);
+}
+
+#[test]
+fn test_block_comment() {
+    let s = "3 /* 4 5 */ 6";
+    let mut lexer = Lexer::new(s);
+    lexer.expect(TokenKind::Number(3), 0);
+    lexer.expect(TokenKind::Number(6), 12);
+}
+
+#[test]
+fn test_multiline_line_comment() {
+    let s = "-- hello world\n-- another comment\n123 * 456";
+    let mut lexer = Lexer::new(&s);
+    lexer.expect(TokenKind::Number(123), 34);
+    lexer.expect(TokenKind::Asterisk, 38);
+    lexer.expect(TokenKind::Number(456), 40);
+}
