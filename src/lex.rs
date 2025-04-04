@@ -93,7 +93,9 @@ impl<'a> Lexer<'a> {
 
     fn lex_number(&mut self, rest: &'a str, start: usize) -> Option<Result<Token<'a>, LexerError>> {
         let literal = rest.split(|c: char| !c.is_ascii_digit()).next()?;
-        let parsed = literal.parse::<i32>().unwrap();
+        let Ok(parsed) = literal.parse::<i32>() else {
+            return Some(Err(LexerError::InvalidNumber { pos: start }));
+        };
         let token = Token {
             kind: TokenKind::Number(parsed),
             offset: start,

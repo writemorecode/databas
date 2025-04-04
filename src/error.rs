@@ -4,6 +4,7 @@ use std::fmt::Display;
 pub enum LexerError {
     UnterminatedString { pos: usize },
     InvalidCharacter { pos: usize, c: char },
+    InvalidNumber { pos: usize },
 }
 
 impl Display for LexerError {
@@ -15,6 +16,9 @@ impl Display for LexerError {
             }
             LexerError::InvalidCharacter { c, pos } => {
                 write!(f, "Invalid character '{c}' at position {pos}")
+            }
+            LexerError::InvalidNumber { pos } => {
+                write!(f, "Invalid numeric literal at position {pos}")
             }
         }
     }
