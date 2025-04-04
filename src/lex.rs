@@ -63,14 +63,20 @@ impl Display for TokenKind<'_> {
 
 impl<'a> From<&'a str> for TokenKind<'a> {
     fn from(value: &'a str) -> Self {
-        match value {
-            "SELECT" => TokenKind::Select,
-            "FROM" => TokenKind::From,
-            "WHERE" => TokenKind::Where,
-            "AND" => TokenKind::And,
-            "OR" => TokenKind::Or,
-            id => TokenKind::Identifier(id),
-        }
+        let kind: TokenKind = if value.eq_ignore_ascii_case("SELECT") {
+            TokenKind::Select
+        } else if value.eq_ignore_ascii_case("FROM") {
+            TokenKind::From
+        } else if value.eq_ignore_ascii_case("WHERE") {
+            TokenKind::Where
+        } else if value.eq_ignore_ascii_case("AND") {
+            TokenKind::And
+        } else if value.eq_ignore_ascii_case("OR") {
+            TokenKind::Or
+        } else {
+            TokenKind::Identifier(value)
+        };
+        kind
     }
 }
 

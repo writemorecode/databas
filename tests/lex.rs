@@ -71,7 +71,7 @@ fn test_string() {
 
 #[test]
 fn test_keywords() {
-    let s = "SELECT * FROM users;";
+    let s = "sEleCT * FrOm users;";
     let mut lexer = Lexer::new(s);
     lexer.expect(TokenKind::Select, 0);
     lexer.expect(TokenKind::Asterisk, 7);
