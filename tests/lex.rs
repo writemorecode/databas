@@ -1,6 +1,7 @@
 use databas::{
     error::LexerError,
-    lex::{Lexer, Token, TokenKind},
+    lex::{Lexer, Token},
+    token_kind::TokenKind,
 };
 
 trait LexerExt {
