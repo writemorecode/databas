@@ -91,87 +91,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_number(&mut self, rest: &'a str, start: usize) -> Option<Result<Token<'a>, LexerError>> {
-        let literal = rest.split(|c: char| !c.is_ascii_digit()).next()?;
-        let Ok(parsed) = literal.parse::<i32>() else {
-            return Some(Err(LexerError::InvalidNumber { pos: start }));
-        };
-        let token = Token {
-            kind: TokenKind::Number(parsed),
-            offset: start,
-        };
-        let extra = literal.len() - 1;
-        self.position += extra;
-        self.rest = &self.rest[extra..];
-        Some(Ok(token))
-    }
-
-    fn lex_string(&mut self, start: usize) -> Option<Result<Token<'a>, LexerError>> {
-        let Some((literal, rest)) = self.rest.split_once('"') else {
-            return Some(Err(LexerError::UnterminatedString { pos: start }));
-        };
-        let token = Token {
-            kind: TokenKind::String(literal),
-            offset: start,
-        };
-        self.position += literal.len() + 1;
-        self.rest = rest;
-        Some(Ok(token))
-    }
-
-    fn lex_keyword(
-        &mut self,
-        rest: &'a str,
-        start: usize,
-    ) -> Option<Result<Token<'a>, LexerError>> {
-        let is_not_part_of_keyword = |c| !matches!(c, 'a'..='z' | 'A'..='Z' | '_' );
-        let literal = rest.split(is_not_part_of_keyword).next()?;
-
-        let kind = match literal {
-            "SELECT" => TokenKind::Select,
-            "FROM" => TokenKind::From,
-            "WHERE" => TokenKind::Where,
-            "AND" => TokenKind::And,
-            "OR" => TokenKind::Or,
-            id => TokenKind::Identifier(id),
-        };
-
-        let token = Token {
-            kind,
-            offset: start,
-        };
-
-        self.position += literal.len() - 1;
-        self.rest = &self.rest[literal.len() - 1..];
-        Some(Ok(token))
-    }
-
-    fn lex_equals_op(
-        &mut self,
-        current: Started,
-        offset: usize,
-    ) -> Option<Result<Token<'a>, LexerError>> {
-        let kind = if self.rest.starts_with('=') {
-            self.position += 1;
-            self.rest = &self.rest[1..];
-            match current {
-                Started::LessThan => TokenKind::LessThanOrEqual,
-                Started::GreaterThan => TokenKind::GreaterThanOrEqual,
-                Started::Equals => TokenKind::EqualsEquals,
-                Started::Bang => TokenKind::NotEquals,
-            }
-        } else {
-            match current {
-                Started::LessThan => TokenKind::LessThan,
-                Started::GreaterThan => TokenKind::GreaterThan,
-                Started::Equals => TokenKind::Equals,
-                Started::Bang => TokenKind::Bang,
-            }
-        };
-        let token = Token { kind, offset };
-        Some(Ok(token))
-    }
-
     fn skip_whitespace(&mut self) {
         let trimmed = self.rest.trim_start();
         let whitespace_skipped = self.rest.len() - trimmed.len();
@@ -181,6 +100,13 @@ impl<'a> Lexer<'a> {
 }
 
 enum Started {
+    Number,
+    String,
+    Keyword,
+    MaybeEqualsOp(MaybeEquals),
+}
+
+enum MaybeEquals {
     LessThan,
     GreaterThan,
     Equals,
@@ -204,24 +130,93 @@ impl<'a> Iterator for Lexer<'a> {
             Some(Ok(Token { kind, offset: c_at }))
         };
 
-        match c {
-            '0'..='9' => self.lex_number(c_rest, c_at),
-            '"' => self.lex_string(c_at),
-            'a'..='z' | 'A'..='Z' => self.lex_keyword(c_rest, c_at),
-            '<' => self.lex_equals_op(Started::LessThan, c_at),
-            '>' => self.lex_equals_op(Started::GreaterThan, c_at),
-            '!' => self.lex_equals_op(Started::Bang, c_at),
-            '=' => self.lex_equals_op(Started::Equals, c_at),
-            '(' => tok(TokenKind::LeftParen),
-            ')' => tok(TokenKind::RightParen),
-            '+' => tok(TokenKind::Plus),
-            '-' => tok(TokenKind::Minus),
-            '*' => tok(TokenKind::Asterisk),
-            '/' => tok(TokenKind::Slash),
-            ',' => tok(TokenKind::Comma),
-            ';' => tok(TokenKind::Semicolon),
+        let started = match c {
+            '0'..='9' => Started::Number,
+            '"' => Started::String,
+            'a'..='z' | 'A'..='Z' => Started::Keyword,
+            '<' => Started::MaybeEqualsOp(MaybeEquals::LessThan),
+            '>' => Started::MaybeEqualsOp(MaybeEquals::GreaterThan),
+            '!' => Started::MaybeEqualsOp(MaybeEquals::Bang),
+            '=' => Started::MaybeEqualsOp(MaybeEquals::Equals),
+            '(' => return tok(TokenKind::LeftParen),
+            ')' => return tok(TokenKind::RightParen),
+            '+' => return tok(TokenKind::Plus),
+            '-' => return tok(TokenKind::Minus),
+            '*' => return tok(TokenKind::Asterisk),
+            '/' => return tok(TokenKind::Slash),
+            ',' => return tok(TokenKind::Comma),
+            ';' => return tok(TokenKind::Semicolon),
 
-            c => Some(Err(LexerError::InvalidCharacter { c, pos: c_at })),
+            c => return Some(Err(LexerError::InvalidCharacter { c, pos: c_at })),
+        };
+
+        match started {
+            Started::Number => {
+                let literal = c_rest.split(|c: char| !c.is_ascii_digit()).next()?;
+                let Ok(parsed) = literal.parse::<i32>() else {
+                    return Some(Err(LexerError::InvalidNumber { pos: c_at }));
+                };
+                let token = Token {
+                    kind: TokenKind::Number(parsed),
+                    offset: c_at,
+                };
+                let extra = literal.len() - 1;
+                self.position += extra;
+                self.rest = &self.rest[extra..];
+                Some(Ok(token))
+            }
+            Started::String => {
+                let Some((literal, rest)) = self.rest.split_once('"') else {
+                    return Some(Err(LexerError::UnterminatedString { pos: c_at }));
+                };
+                let token = Token {
+                    kind: TokenKind::String(literal),
+                    offset: c_at,
+                };
+                self.position += literal.len() + 1;
+                self.rest = rest;
+                Some(Ok(token))
+            }
+            Started::Keyword => {
+                let is_not_part_of_keyword = |c| !matches!(c, 'a'..='z' | 'A'..='Z' | '_' );
+                let literal = c_rest.split(is_not_part_of_keyword).next()?;
+
+                let kind = match literal {
+                    "SELECT" => TokenKind::Select,
+                    "FROM" => TokenKind::From,
+                    "WHERE" => TokenKind::Where,
+                    "AND" => TokenKind::And,
+                    "OR" => TokenKind::Or,
+                    id => TokenKind::Identifier(id),
+                };
+
+                let token = Token { kind, offset: c_at };
+
+                self.position += literal.len() - 1;
+                self.rest = &self.rest[literal.len() - 1..];
+                Some(Ok(token))
+            }
+            Started::MaybeEqualsOp(maybe_equals) => {
+                let kind = if self.rest.starts_with('=') {
+                    self.position += 1;
+                    self.rest = &self.rest[1..];
+                    match maybe_equals {
+                        MaybeEquals::LessThan => TokenKind::LessThanOrEqual,
+                        MaybeEquals::GreaterThan => TokenKind::GreaterThanOrEqual,
+                        MaybeEquals::Equals => TokenKind::EqualsEquals,
+                        MaybeEquals::Bang => TokenKind::NotEquals,
+                    }
+                } else {
+                    match maybe_equals {
+                        MaybeEquals::LessThan => TokenKind::LessThan,
+                        MaybeEquals::GreaterThan => TokenKind::GreaterThan,
+                        MaybeEquals::Equals => TokenKind::Equals,
+                        MaybeEquals::Bang => TokenKind::Bang,
+                    }
+                };
+                let token = Token { kind, offset: c_at };
+                Some(Ok(token))
+            }
         }
     }
 }
