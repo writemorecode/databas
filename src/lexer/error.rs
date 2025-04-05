@@ -23,8 +23,3 @@ impl Display for LexerError {
         }
     }
 }
-
-#[derive(Debug)]
-pub struct UnterminatedStringError {
-    pub pos: usize,
-}
