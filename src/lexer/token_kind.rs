@@ -10,6 +10,7 @@ pub enum NumberKind {
 pub enum TokenKind<'a> {
     String(&'a str),
     Identifier(&'a str),
+    Keyword(Keyword),
     Number(NumberKind),
     LeftParen,
     RightParen,
@@ -27,6 +28,10 @@ pub enum TokenKind<'a> {
     Comma,
     Semicolon,
     Slash,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Keyword {
     Select,
     From,
     Where,
@@ -41,6 +46,11 @@ impl Display for TokenKind<'_> {
             TokenKind::Number(NumberKind::Integer(n)) => write!(f, "INTEGER ({n})"),
             TokenKind::Number(NumberKind::Float(n)) => write!(f, "FLOAT ({n})"),
             TokenKind::Identifier(id) => write!(f, "IDENT ('{id}')"),
+            TokenKind::Keyword(Keyword::Select) => write!(f, "SELECT"),
+            TokenKind::Keyword(Keyword::From) => write!(f, "FROM"),
+            TokenKind::Keyword(Keyword::Where) => write!(f, "WHERE"),
+            TokenKind::Keyword(Keyword::And) => write!(f, "AND"),
+            TokenKind::Keyword(Keyword::Or) => write!(f, "OR"),
             TokenKind::LeftParen => write!(f, "LP"),
             TokenKind::RightParen => write!(f, "RP"),
             TokenKind::Plus => write!(f, "PLUS"),
@@ -57,11 +67,6 @@ impl Display for TokenKind<'_> {
             TokenKind::Comma => write!(f, "COMMA"),
             TokenKind::Semicolon => write!(f, "SEMICOLON"),
             TokenKind::Slash => write!(f, "SLASH"),
-            TokenKind::Select => write!(f, "SELECT"),
-            TokenKind::From => write!(f, "FROM"),
-            TokenKind::Where => write!(f, "WHERE"),
-            TokenKind::And => write!(f, "AND"),
-            TokenKind::Or => write!(f, "OR"),
         }
     }
 }
@@ -69,15 +74,15 @@ impl Display for TokenKind<'_> {
 impl<'a> From<&'a str> for TokenKind<'a> {
     fn from(value: &'a str) -> Self {
         let kind: TokenKind = if value.eq_ignore_ascii_case("SELECT") {
-            TokenKind::Select
+            TokenKind::Keyword(Keyword::Select)
         } else if value.eq_ignore_ascii_case("FROM") {
-            TokenKind::From
+            TokenKind::Keyword(Keyword::From)
         } else if value.eq_ignore_ascii_case("WHERE") {
-            TokenKind::Where
+            TokenKind::Keyword(Keyword::Where)
         } else if value.eq_ignore_ascii_case("AND") {
-            TokenKind::And
+            TokenKind::Keyword(Keyword::And)
         } else if value.eq_ignore_ascii_case("OR") {
-            TokenKind::Or
+            TokenKind::Keyword(Keyword::Or)
         } else {
             TokenKind::Identifier(value)
         };
