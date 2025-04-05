@@ -1,8 +1,7 @@
-pub mod error;
 pub mod token;
 pub mod token_kind;
 
-use error::LexerError;
+use crate::error::Error;
 use token::Token;
 use token_kind::{NumberKind, TokenKind};
 
@@ -11,6 +10,8 @@ pub struct Lexer<'a> {
     pub source: &'a str,
     pub rest: &'a str,
     pub position: usize,
+
+    pub peeked: Option<Result<Token<'a>, Error<'a>>>,
 }
 
 impl<'a> Lexer<'a> {
@@ -19,6 +20,22 @@ impl<'a> Lexer<'a> {
             source,
             rest: source,
             position: 0,
+            peeked: None,
+        }
+    }
+
+    pub fn expect_token(&mut self, expected_kind: TokenKind<'a>) -> Result<(), Error<'a>> {
+        let Some(token_result) = self.next() else {
+            return Err(Error::UnexpectedEnd { pos: self.position });
+        };
+        let token = token_result?;
+        if token.kind == expected_kind {
+            Ok(())
+        } else {
+            Err(Error::UnexpectedTokenKind {
+                expected: expected_kind,
+                got: token.kind,
+            })
         }
     }
 
@@ -55,6 +72,14 @@ impl<'a> Lexer<'a> {
         self.skip_whitespace();
         skipped
     }
+
+    pub fn peek(&mut self) -> Option<&Result<Token<'a>, Error>> {
+        if self.peeked.is_some() {
+            return self.peeked.as_ref();
+        }
+        self.peeked = self.next();
+        self.peeked.as_ref()
+    }
 }
 
 enum Started {
@@ -73,9 +98,13 @@ enum MaybeEquals {
 }
 
 impl<'a> Iterator for Lexer<'a> {
-    type Item = Result<Token<'a>, LexerError>;
+    type Item = Result<Token<'a>, Error<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(next) = self.peeked.take() {
+            return Some(next);
+        }
+
         self.skip_whitespace();
         loop {
             if !self.skip_comment() {
@@ -90,7 +119,7 @@ impl<'a> Iterator for Lexer<'a> {
         self.rest = chars.as_str();
         self.position += c.len_utf8();
 
-        let tok = |kind: TokenKind<'a>| -> Option<Result<Token<'a>, LexerError>> {
+        let tok = |kind: TokenKind<'a>| -> Option<Result<Token<'a>, Error>> {
             Some(Ok(Token { kind, offset: c_at }))
         };
 
@@ -112,7 +141,7 @@ impl<'a> Iterator for Lexer<'a> {
             ',' => return tok(TokenKind::Comma),
             ';' => return tok(TokenKind::Semicolon),
 
-            c => return Some(Err(LexerError::InvalidCharacter { c, pos: c_at })),
+            c => return Some(Err(Error::InvalidCharacter { c, pos: c_at })),
         };
 
         match started {
@@ -126,7 +155,7 @@ impl<'a> Iterator for Lexer<'a> {
                 } else if let Ok(parsed) = literal.parse::<f32>() {
                     NumberKind::Float(parsed)
                 } else {
-                    return Some(Err(LexerError::InvalidNumber { pos: c_at }));
+                    return Some(Err(Error::InvalidNumber { pos: c_at }));
                 };
 
                 let token = Token {
@@ -145,7 +174,7 @@ impl<'a> Iterator for Lexer<'a> {
                     '"'
                 };
                 let Some((literal, rest)) = self.rest.split_once(terminator) else {
-                    return Some(Err(LexerError::UnterminatedString { pos: c_at }));
+                    return Some(Err(Error::UnterminatedString { pos: c_at }));
                 };
                 let token = Token {
                     kind: TokenKind::String(literal),

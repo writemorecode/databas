@@ -1,6 +1,7 @@
+use databas::error::Error;
 use databas::lexer::Lexer;
-use databas::lexer::error::LexerError;
 use databas::lexer::token::Token;
+use databas::lexer::token_kind::Keyword;
 use databas::lexer::token_kind::NumberKind::Float;
 use databas::lexer::token_kind::NumberKind::Integer;
 use databas::lexer::token_kind::TokenKind;
@@ -91,9 +92,9 @@ fn test_single_quoted_string() {
 fn test_keywords() {
     let s = "sEleCT * FrOm users;";
     let mut lexer = Lexer::new(s);
-    lexer.expect(TokenKind::Select, 0);
+    lexer.expect(TokenKind::Keyword(Keyword::Select), 0);
     lexer.expect(TokenKind::Asterisk, 7);
-    lexer.expect(TokenKind::From, 9);
+    lexer.expect(TokenKind::Keyword(Keyword::From), 9);
     lexer.expect(TokenKind::Identifier("users"), 14);
     lexer.expect(TokenKind::Semicolon, 19);
 }
@@ -118,7 +119,7 @@ fn test_unterminated_string() {
     let mut lexer = Lexer::new(s);
     assert_eq!(
         lexer.next(),
-        Some(Err(LexerError::UnterminatedString { pos: 0 }))
+        Some(Err(Error::UnterminatedString { pos: 0 }))
     );
 }
 

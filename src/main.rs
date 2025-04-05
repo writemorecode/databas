@@ -1,30 +1,21 @@
-use std::io::{Read, Write};
+use std::io::Write;
 
-use databas::lexer::Lexer;
+use databas::parser::Parser;
 
 fn run(buf: String) {
-    let lexer = Lexer::new(&buf);
-    for token in lexer {
-        match token {
-            Ok(tok) => println!("{tok}"),
-            Err(err) => {
-                eprintln!("{err}");
-                break;
-            }
+    //let lexer = Lexer::new(&buf);
+    let parser = Parser::new(&buf);
+    let exp = parser.expr();
+    match exp {
+        Ok(expr) => {
+            dbg!(expr);
         }
-    }
+        Err(err) => println!("Error: {}", err),
+    };
     println!();
 }
 
 fn main() -> std::io::Result<()> {
-    if let Some(file_arg) = std::env::args().nth(1) {
-        let mut file = std::fs::File::open(file_arg)?;
-        let mut buf = String::new();
-        file.read_to_string(&mut buf)?;
-        run(buf);
-        return Ok(());
-    }
-
     let mut buf = String::new();
     let stdin = std::io::stdin();
     loop {
