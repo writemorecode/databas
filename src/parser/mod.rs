@@ -25,11 +25,11 @@ pub enum Literal<'a> {
     Boolean(bool),
 }
 
-impl<'a> TryFrom<TokenKind<'a>> for Op {
+impl<'a> TryFrom<Token<'a>> for Op {
     type Error = Error<'a>;
 
-    fn try_from(kind: TokenKind<'a>) -> Result<Self, Self::Error> {
-        let op = match kind {
+    fn try_from(token: Token<'a>) -> Result<Self, Self::Error> {
+        let op = match token.kind {
             TokenKind::Keyword(Keyword::And) => Op::And,
             TokenKind::Keyword(Keyword::Or) => Op::Or,
             TokenKind::Plus => Op::Add,
@@ -43,7 +43,12 @@ impl<'a> TryFrom<TokenKind<'a>> for Op {
             TokenKind::GreaterThan => Op::GreaterThan,
             TokenKind::LessThanOrEqual => Op::LessThanOrEqual,
             TokenKind::GreaterThanOrEqual => Op::GreaterThanOrEqual,
-            _ => return Err(Error::Other(kind)),
+            _ => {
+                return Err(Error::InvalidOperator {
+                    op: token.kind,
+                    pos: token.offset,
+                });
+            }
         };
         Ok(op)
     }
@@ -98,7 +103,7 @@ impl<'a> Parser<'a> {
             }
 
             TokenKind::Minus => {
-                let op = Op::try_from(token.kind)?;
+                let op = Op::try_from(token)?;
                 if let Some(((), r_bp)) = prefix_binding_power(&op) {
                     let rhs = self.expr_bp(r_bp)?;
                     Expression::UnaryOp((Op::Neg, Box::new(rhs)))
@@ -111,7 +116,7 @@ impl<'a> Parser<'a> {
             }
 
             TokenKind::Bang => {
-                let op = Op::try_from(token.kind)?;
+                let op = Op::try_from(token)?;
                 if let Some(((), r_bp)) = prefix_binding_power(&op) {
                     let rhs = self.expr_bp(r_bp)?;
                     Expression::UnaryOp((Op::Not, Box::new(rhs)))
@@ -129,89 +134,19 @@ impl<'a> Parser<'a> {
         };
 
         loop {
-            let op = self.lexer.peek();
-            if op.is_some_and(|op| op.is_err()) {
-                return Err(self
-                    .lexer
-                    .next()
-                    .expect("checked Some above")
-                    .expect_err("checked Err above"));
-            }
-            let op = match op.map(|res| res.as_ref().expect("checked Some above")) {
-                None => break,
+            let peeked = self.lexer.peek();
 
-                Some(Token {
+            let token = match peeked {
+                None => break,
+                Some(Err(_)) => return Err(self.lexer.next().unwrap().unwrap_err()),
+                Some(Ok(Token {
                     kind: TokenKind::Comma | TokenKind::RightParen | TokenKind::Semicolon,
                     ..
-                }) => break,
-
-                Some(Token {
-                    kind: TokenKind::Plus,
-                    ..
-                }) => Op::Add,
-
-                Some(Token {
-                    kind: TokenKind::Minus,
-                    ..
-                }) => Op::Sub,
-
-                Some(Token {
-                    kind: TokenKind::Asterisk,
-                    ..
-                }) => Op::Mul,
-
-                Some(Token {
-                    kind: TokenKind::Slash,
-                    ..
-                }) => Op::Div,
-
-                Some(Token {
-                    kind: TokenKind::Keyword(Keyword::And),
-                    ..
-                }) => Op::And,
-
-                Some(Token {
-                    kind: TokenKind::Keyword(Keyword::Or),
-                    ..
-                }) => Op::Or,
-
-                Some(Token {
-                    kind: TokenKind::NotEquals,
-                    ..
-                }) => Op::NotEquals,
-
-                Some(Token {
-                    kind: TokenKind::EqualsEquals,
-                    ..
-                }) => Op::EqualsEquals,
-
-                Some(Token {
-                    kind: TokenKind::LessThan,
-                    ..
-                }) => Op::LessThan,
-
-                Some(Token {
-                    kind: TokenKind::GreaterThan,
-                    ..
-                }) => Op::GreaterThan,
-
-                Some(Token {
-                    kind: TokenKind::LessThanOrEqual,
-                    ..
-                }) => Op::LessThanOrEqual,
-
-                Some(Token {
-                    kind: TokenKind::GreaterThanOrEqual,
-                    ..
-                }) => Op::GreaterThanOrEqual,
-
-                Some(Token { kind, offset }) => {
-                    return Err(Error::InvalidOperator {
-                        op: *kind,
-                        pos: *offset,
-                    });
-                }
+                })) => break,
+                Some(Ok(tok)) => tok,
             };
+
+            let op = Op::try_from(token.to_owned())?;
 
             if let Some((l_bp, r_bp)) = infix_binding_power(&op) {
                 if l_bp < min_bp {
