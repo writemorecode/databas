@@ -160,7 +160,12 @@ impl<'a> Parser<'a> {
                     ..
                 }) => Op::Div,
 
-                other => panic!("Op {other:?} not yet implemented!"),
+                Some(Token { kind, offset }) => {
+                    return Err(Error::InvalidOperator {
+                        op: *kind,
+                        pos: *offset,
+                    });
+                }
             };
 
             if let Some((l_bp, r_bp)) = infix_binding_power(&op) {

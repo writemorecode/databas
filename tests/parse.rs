@@ -1,4 +1,8 @@
-use databas::parser::{Expression, Op, Parser};
+use databas::{
+    error::Error,
+    lexer::token_kind::TokenKind,
+    parser::{Expression, Op, Parser},
+};
 
 #[test]
 fn test_parse_plus_exp() {
@@ -67,4 +71,15 @@ fn test_negative_exp() {
         Expression::UnaryOp((Op::Neg, a))
     };
     assert_eq!(Ok(expected), parser.expr());
+}
+
+#[test]
+fn test_invalid_operator() {
+    let s = "operand invalid_operator";
+    let parser = Parser::new(s);
+    let expected_err = Error::InvalidOperator {
+        op: TokenKind::Identifier("invalid_operator"),
+        pos: 8,
+    };
+    assert_eq!(Err(expected_err), parser.expr());
 }
