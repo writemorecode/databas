@@ -73,7 +73,9 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::False) => Expression::Literal(Literal::Boolean(false)),
             TokenKind::Identifier(id) => Expression::Identifier(id),
             TokenKind::LeftParen => {
-                let lhs = self.expr_bp(0)?;
+                let lhs = self
+                    .expr_bp(0)
+                    .map_err(|_| Error::UnclosedParenthesis { pos: token.offset })?;
                 self.lexer.expect_token(TokenKind::RightParen)?;
                 lhs
             }

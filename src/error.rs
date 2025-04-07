@@ -26,6 +26,10 @@ pub enum Error<'a> {
         pos: usize,
     },
     Other(TokenKind<'a>),
+
+    UnclosedParenthesis {
+        pos: usize,
+    },
 }
 
 impl Display for Error<'_> {
@@ -48,6 +52,9 @@ impl Display for Error<'_> {
             }
             Error::InvalidPrefixOperator { op, pos } => {
                 write!(f, "Invalid prefix operator '{op}' at position {pos}.")
+            }
+            Error::UnclosedParenthesis { pos } => {
+                write!(f, "Parenthesis at position {pos} not closed.")
             }
             Error::Other(token) => {
                 write!(f, "Bad token: {token}")
