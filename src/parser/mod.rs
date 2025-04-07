@@ -1,11 +1,13 @@
+pub mod expr;
 pub mod op;
 
+use expr::{Expression, Literal};
 use op::{Op, infix_binding_power, prefix_binding_power};
 
 use crate::error::Error;
 use crate::lexer::Lexer;
 use crate::lexer::token::Token;
-use crate::lexer::token_kind::{Keyword, NumberKind, TokenKind};
+use crate::lexer::token_kind::{Keyword, TokenKind};
 
 #[derive(Debug)]
 pub struct Parser<'a> {
@@ -17,33 +19,6 @@ impl<'a> Parser<'a> {
         Self {
             lexer: Lexer::new(source),
         }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Literal<'a> {
-    String(&'a str),
-    Number(NumberKind),
-    Boolean(bool),
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Expression<'a> {
-    Literal(Literal<'a>),
-    Identifier(&'a str),
-    UnaryOp((Op, Box<Expression<'a>>)),
-    BinaryOp((Box<Expression<'a>>, Op, Box<Expression<'a>>)),
-}
-
-impl From<i32> for Expression<'_> {
-    fn from(value: i32) -> Self {
-        Expression::Literal(Literal::Number(NumberKind::Integer(value)))
-    }
-}
-
-impl From<bool> for Expression<'_> {
-    fn from(value: bool) -> Self {
-        Expression::Literal(Literal::Boolean(value))
     }
 }
 
