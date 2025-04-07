@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::error::Error;
 use crate::lexer::Lexer;
 use crate::lexer::token::Token;
@@ -32,6 +34,7 @@ impl<'a> TryFrom<TokenKind<'a>> for Op {
             TokenKind::Minus => Op::Sub,
             TokenKind::Asterisk => Op::Mul,
             TokenKind::Slash => Op::Div,
+            TokenKind::Bang => Op::Not,
             _ => return Err(Error::Other(kind)),
         };
         Ok(op)
@@ -49,6 +52,12 @@ pub enum Expression<'a> {
 impl From<i32> for Expression<'_> {
     fn from(value: i32) -> Self {
         Expression::Literal(Literal::Number(NumberKind::Integer(value)))
+    }
+}
+
+impl From<bool> for Expression<'_> {
+    fn from(value: bool) -> Self {
+        Expression::Literal(Literal::Boolean(value))
     }
 }
 
@@ -80,11 +89,24 @@ impl<'a> Parser<'a> {
                 lhs
             }
 
-            TokenKind::Minus | TokenKind::Bang => {
+            TokenKind::Minus => {
                 let op = Op::try_from(token.kind)?;
                 if let Some(((), r_bp)) = prefix_binding_power(&op) {
                     let rhs = self.expr_bp(r_bp)?;
                     Expression::UnaryOp((Op::Neg, Box::new(rhs)))
+                } else {
+                    return Err(Error::InvalidPrefixOperator {
+                        op: token.kind,
+                        pos: self.lexer.position,
+                    });
+                }
+            }
+
+            TokenKind::Bang => {
+                let op = Op::try_from(token.kind)?;
+                if let Some(((), r_bp)) = prefix_binding_power(&op) {
+                    let rhs = self.expr_bp(r_bp)?;
+                    Expression::UnaryOp((Op::Not, Box::new(rhs)))
                 } else {
                     return Err(Error::InvalidPrefixOperator {
                         op: token.kind,
@@ -166,9 +188,22 @@ pub enum Op {
     Div,
 }
 
+impl Display for Op {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Op::Neg => write!(f, "-"),
+            Op::Not => write!(f, "!"),
+            Op::Add => write!(f, "+"),
+            Op::Sub => write!(f, "-"),
+            Op::Mul => write!(f, "*"),
+            Op::Div => write!(f, "/"),
+        }
+    }
+}
+
 fn prefix_binding_power(op: &Op) -> Option<((), u8)> {
     let res = match op {
-        Op::Sub | Op::Neg => ((), 5),
+        Op::Not | Op::Sub => ((), 5),
         _ => return None,
     };
     Some(res)

@@ -2,7 +2,7 @@ use crate::lexer::token_kind::TokenKind;
 
 use std::fmt::Display;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Error<'a> {
     UnterminatedString {
         pos: usize,
@@ -26,7 +26,6 @@ pub enum Error<'a> {
         pos: usize,
     },
     Other(TokenKind<'a>),
-
     UnclosedParenthesis {
         pos: usize,
     },

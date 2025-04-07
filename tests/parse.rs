@@ -38,3 +38,33 @@ fn test_parse_mul_and_plus_exp_with_parens() {
     };
     assert_eq!(Ok(expected), parser.expr())
 }
+
+#[test]
+fn test_parse_not_exp() {
+    let s = "!true";
+    let parser = Parser::new(s);
+    let expected = {
+        let a = Box::new(Expression::from(true));
+        Expression::UnaryOp((Op::Not, a))
+    };
+    assert_eq!(Ok(expected), parser.expr());
+
+    let s = "!false";
+    let parser = Parser::new(s);
+    let expected = {
+        let a = Box::new(Expression::from(false));
+        Expression::UnaryOp((Op::Not, a))
+    };
+    assert_eq!(Ok(expected), parser.expr());
+}
+
+#[test]
+fn test_negative_exp() {
+    let s = "-12";
+    let parser = Parser::new(s);
+    let expected = {
+        let a = Box::new(Expression::from(12));
+        Expression::UnaryOp((Op::Neg, a))
+    };
+    assert_eq!(Ok(expected), parser.expr());
+}
