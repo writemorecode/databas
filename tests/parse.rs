@@ -1,7 +1,7 @@
 use databas::{
     error::Error,
     lexer::token_kind::TokenKind,
-    parser::{Expression, Op, Parser},
+    parser::{Expression, Parser, op::Op},
 };
 
 #[test]
