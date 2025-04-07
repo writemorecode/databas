@@ -35,10 +35,24 @@ pub enum Keyword {
     Select,
     From,
     Where,
-    And,
-    Or,
     True,
     False,
+    And,
+    Or,
+}
+
+impl Display for Keyword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Keyword::Select => write!(f, "SELECT"),
+            Keyword::From => write!(f, "FROM"),
+            Keyword::Where => write!(f, "WHERE"),
+            Keyword::And => write!(f, "AND"),
+            Keyword::Or => write!(f, "OR"),
+            Keyword::True => write!(f, "TRUE"),
+            Keyword::False => write!(f, "FALSE"),
+        }
+    }
 }
 
 impl Display for TokenKind<'_> {
@@ -48,13 +62,7 @@ impl Display for TokenKind<'_> {
             TokenKind::Number(NumberKind::Integer(n)) => write!(f, "INTEGER ({n})"),
             TokenKind::Number(NumberKind::Float(n)) => write!(f, "FLOAT ({n})"),
             TokenKind::Identifier(id) => write!(f, "IDENT ('{id}')"),
-            TokenKind::Keyword(Keyword::Select) => write!(f, "SELECT"),
-            TokenKind::Keyword(Keyword::From) => write!(f, "FROM"),
-            TokenKind::Keyword(Keyword::Where) => write!(f, "WHERE"),
-            TokenKind::Keyword(Keyword::And) => write!(f, "AND"),
-            TokenKind::Keyword(Keyword::Or) => write!(f, "OR"),
-            TokenKind::Keyword(Keyword::True) => write!(f, "TRUE"),
-            TokenKind::Keyword(Keyword::False) => write!(f, "FALSE"),
+            TokenKind::Keyword(keyword) => keyword.fmt(f),
             TokenKind::LeftParen => write!(f, "LP"),
             TokenKind::RightParen => write!(f, "RP"),
             TokenKind::Plus => write!(f, "PLUS"),

@@ -30,11 +30,19 @@ impl<'a> TryFrom<TokenKind<'a>> for Op {
 
     fn try_from(kind: TokenKind<'a>) -> Result<Self, Self::Error> {
         let op = match kind {
+            TokenKind::Keyword(Keyword::And) => Op::And,
+            TokenKind::Keyword(Keyword::Or) => Op::Or,
             TokenKind::Plus => Op::Add,
             TokenKind::Minus => Op::Sub,
             TokenKind::Asterisk => Op::Mul,
             TokenKind::Slash => Op::Div,
             TokenKind::Bang => Op::Not,
+            TokenKind::EqualsEquals => Op::EqualsEquals,
+            TokenKind::NotEquals => Op::NotEquals,
+            TokenKind::LessThan => Op::LessThan,
+            TokenKind::GreaterThan => Op::GreaterThan,
+            TokenKind::LessThanOrEqual => Op::LessThanOrEqual,
+            TokenKind::GreaterThanOrEqual => Op::GreaterThanOrEqual,
             _ => return Err(Error::Other(kind)),
         };
         Ok(op)
@@ -129,10 +137,7 @@ impl<'a> Parser<'a> {
                     .expect("checked Some above")
                     .expect_err("checked Err above"));
             }
-            let op = match op.map(|res| {
-                res.as_ref().expect("checked Some above")
-                //.expect_err("checked Err above")
-            }) {
+            let op = match op.map(|res| res.as_ref().expect("checked Some above")) {
                 None => break,
 
                 Some(Token {
@@ -160,6 +165,46 @@ impl<'a> Parser<'a> {
                     ..
                 }) => Op::Div,
 
+                Some(Token {
+                    kind: TokenKind::Keyword(Keyword::And),
+                    ..
+                }) => Op::And,
+
+                Some(Token {
+                    kind: TokenKind::Keyword(Keyword::Or),
+                    ..
+                }) => Op::Or,
+
+                Some(Token {
+                    kind: TokenKind::NotEquals,
+                    ..
+                }) => Op::NotEquals,
+
+                Some(Token {
+                    kind: TokenKind::EqualsEquals,
+                    ..
+                }) => Op::EqualsEquals,
+
+                Some(Token {
+                    kind: TokenKind::LessThan,
+                    ..
+                }) => Op::LessThan,
+
+                Some(Token {
+                    kind: TokenKind::GreaterThan,
+                    ..
+                }) => Op::GreaterThan,
+
+                Some(Token {
+                    kind: TokenKind::LessThanOrEqual,
+                    ..
+                }) => Op::LessThanOrEqual,
+
+                Some(Token {
+                    kind: TokenKind::GreaterThanOrEqual,
+                    ..
+                }) => Op::GreaterThanOrEqual,
+
                 Some(Token { kind, offset }) => {
                     return Err(Error::InvalidOperator {
                         op: *kind,
@@ -185,6 +230,14 @@ impl<'a> Parser<'a> {
 
 #[derive(Debug, PartialEq)]
 pub enum Op {
+    And,
+    Or,
+    NotEquals,
+    EqualsEquals,
+    LessThan,
+    GreaterThan,
+    LessThanOrEqual,
+    GreaterThanOrEqual,
     Neg,
     Not,
     Add,
@@ -196,19 +249,27 @@ pub enum Op {
 impl Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Op::And => write!(f, "&&"),
+            Op::Or => write!(f, "||"),
             Op::Neg => write!(f, "-"),
             Op::Not => write!(f, "!"),
             Op::Add => write!(f, "+"),
             Op::Sub => write!(f, "-"),
             Op::Mul => write!(f, "*"),
             Op::Div => write!(f, "/"),
+            Op::NotEquals => write!(f, "!="),
+            Op::EqualsEquals => write!(f, "=="),
+            Op::LessThan => write!(f, "<"),
+            Op::GreaterThan => write!(f, ">"),
+            Op::LessThanOrEqual => write!(f, "<="),
+            Op::GreaterThanOrEqual => write!(f, ">="),
         }
     }
 }
 
 fn prefix_binding_power(op: &Op) -> Option<((), u8)> {
     let res = match op {
-        Op::Not | Op::Sub => ((), 5),
+        Op::Not | Op::Sub => ((), 7),
         _ => return None,
     };
     Some(res)
@@ -216,8 +277,15 @@ fn prefix_binding_power(op: &Op) -> Option<((), u8)> {
 
 fn infix_binding_power(op: &Op) -> Option<(u8, u8)> {
     let res = match op {
-        Op::Add | Op::Sub => (1, 2),
-        Op::Mul | Op::Div => (3, 4),
+        Op::And | Op::Or => (1, 2),
+        Op::NotEquals
+        | Op::EqualsEquals
+        | Op::LessThan
+        | Op::GreaterThan
+        | Op::LessThanOrEqual
+        | Op::GreaterThanOrEqual => (3, 4),
+        Op::Add | Op::Sub => (5, 6),
+        Op::Mul | Op::Div => (6, 7),
         _ => return None,
     };
     Some(res)

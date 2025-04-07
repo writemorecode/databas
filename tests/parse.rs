@@ -83,3 +83,42 @@ fn test_invalid_operator() {
     };
     assert_eq!(Err(expected_err), parser.expr());
 }
+
+#[test]
+fn test_parse_inequality_operators() {
+    let s = "12 < 34";
+    let parser = Parser::new(s);
+    let expected = {
+        let a = Box::new(Expression::from(12));
+        let b = Box::new(Expression::from(34));
+        Expression::BinaryOp((a, Op::LessThan, b))
+    };
+    assert_eq!(Ok(expected), parser.expr());
+
+    let s = "12 <= 34";
+    let parser = Parser::new(s);
+    let expected = {
+        let a = Box::new(Expression::from(12));
+        let b = Box::new(Expression::from(34));
+        Expression::BinaryOp((a, Op::LessThanOrEqual, b))
+    };
+    assert_eq!(Ok(expected), parser.expr());
+
+    let s = "12 > 34";
+    let parser = Parser::new(s);
+    let expected = {
+        let a = Box::new(Expression::from(12));
+        let b = Box::new(Expression::from(34));
+        Expression::BinaryOp((a, Op::GreaterThan, b))
+    };
+    assert_eq!(Ok(expected), parser.expr());
+
+    let s = "12 >= 34";
+    let parser = Parser::new(s);
+    let expected = {
+        let a = Box::new(Expression::from(12));
+        let b = Box::new(Expression::from(34));
+        Expression::BinaryOp((a, Op::GreaterThanOrEqual, b))
+    };
+    assert_eq!(Ok(expected), parser.expr());
+}
