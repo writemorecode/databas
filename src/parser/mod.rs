@@ -1,7 +1,7 @@
 use crate::error::Error;
 use crate::lexer::Lexer;
 use crate::lexer::token::Token;
-use crate::lexer::token_kind::{NumberKind, TokenKind};
+use crate::lexer::token_kind::{Keyword, NumberKind, TokenKind};
 
 #[derive(Debug)]
 pub struct Parser<'a> {
@@ -20,6 +20,7 @@ impl<'a> Parser<'a> {
 pub enum Literal<'a> {
     String(&'a str),
     Number(NumberKind),
+    Boolean(bool),
 }
 
 impl<'a> TryFrom<TokenKind<'a>> for Op {
@@ -68,6 +69,8 @@ impl<'a> Parser<'a> {
         let mut lhs = match op {
             TokenKind::String(lit) => Expression::Literal(Literal::String(lit)),
             TokenKind::Number(num) => Expression::Literal(Literal::Number(num)),
+            TokenKind::Keyword(Keyword::True) => Expression::Literal(Literal::Boolean(true)),
+            TokenKind::Keyword(Keyword::False) => Expression::Literal(Literal::Boolean(false)),
             TokenKind::Identifier(id) => Expression::Identifier(id),
             TokenKind::LeftParen => {
                 let lhs = self.expr_bp(0)?;

@@ -37,6 +37,8 @@ pub enum Keyword {
     Where,
     And,
     Or,
+    True,
+    False,
 }
 
 impl Display for TokenKind<'_> {
@@ -51,6 +53,8 @@ impl Display for TokenKind<'_> {
             TokenKind::Keyword(Keyword::Where) => write!(f, "WHERE"),
             TokenKind::Keyword(Keyword::And) => write!(f, "AND"),
             TokenKind::Keyword(Keyword::Or) => write!(f, "OR"),
+            TokenKind::Keyword(Keyword::True) => write!(f, "TRUE"),
+            TokenKind::Keyword(Keyword::False) => write!(f, "FALSE"),
             TokenKind::LeftParen => write!(f, "LP"),
             TokenKind::RightParen => write!(f, "RP"),
             TokenKind::Plus => write!(f, "PLUS"),
@@ -83,6 +87,10 @@ impl<'a> From<&'a str> for TokenKind<'a> {
             TokenKind::Keyword(Keyword::And)
         } else if value.eq_ignore_ascii_case("OR") {
             TokenKind::Keyword(Keyword::Or)
+        } else if value.eq_ignore_ascii_case("TRUE") {
+            TokenKind::Keyword(Keyword::True)
+        } else if value.eq_ignore_ascii_case("FALSE") {
+            TokenKind::Keyword(Keyword::False)
         } else {
             TokenKind::Identifier(value)
         };
