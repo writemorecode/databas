@@ -1,7 +1,12 @@
 use databas::{
     error::Error,
     lexer::token_kind::TokenKind,
-    parser::{Parser, expr::Expression, op::Op},
+    parser::{
+        Parser,
+        expr::Expression,
+        op::Op,
+        stmt::{SelectQuery, Statement::Select},
+    },
 };
 
 #[test]
@@ -121,4 +126,98 @@ fn test_parse_inequality_operators() {
         Expression::BinaryOp((a, Op::GreaterThanOrEqual, b))
     };
     assert_eq!(Ok(expected), parser.expr());
+}
+
+#[test]
+fn test_parse_select_query() {
+    let s = "SELECT abc, def, ghi;";
+    let mut parser = Parser::new(s);
+    let expected_query = SelectQuery {
+        columns: vec![
+            Expression::Identifier("abc"),
+            Expression::Identifier("def"),
+            Expression::Identifier("ghi"),
+        ],
+        table: None,
+        where_clause: None,
+        order_by: None,
+        limit: None,
+    };
+    let expected = Select(expected_query);
+    assert_eq!(Ok(expected), parser.stmt());
+}
+
+#[test]
+fn test_parse_select_query_with_from_table() {
+    let s = "SELECT abc, def, ghi FROM table;";
+    let mut parser = Parser::new(s);
+    let expected_query = SelectQuery {
+        columns: vec![
+            Expression::Identifier("abc"),
+            Expression::Identifier("def"),
+            Expression::Identifier("ghi"),
+        ],
+        table: Some("table"),
+        where_clause: None,
+        order_by: None,
+        limit: None,
+    };
+    let expected = Select(expected_query);
+    assert_eq!(Ok(expected), parser.stmt());
+}
+
+#[test]
+fn test_parse_select_query_with_from_table_and_where_clause() {
+    let s = "SELECT abc, def, ghi FROM table WHERE abc < def;";
+    let mut parser = Parser::new(s);
+    let expected_query = SelectQuery {
+        columns: vec![
+            Expression::Identifier("abc"),
+            Expression::Identifier("def"),
+            Expression::Identifier("ghi"),
+        ],
+        table: Some("table"),
+        where_clause: Some(Expression::BinaryOp((
+            Box::new(Expression::Identifier("abc")),
+            Op::LessThan,
+            Box::new(Expression::Identifier("def")),
+        ))),
+        order_by: None,
+        limit: None,
+    };
+    let expected = Select(expected_query);
+    assert_eq!(Ok(expected), parser.stmt());
+}
+
+#[test]
+fn test_parse_select_query_without_from() {
+    let s = "SELECT 3 WHERE 1;";
+    let mut parser = Parser::new(s);
+    let expected_query = SelectQuery {
+        columns: vec![Expression::from(3)],
+        table: None,
+        where_clause: Some(Expression::from(1)),
+        order_by: None,
+        limit: None,
+    };
+    let expected = Select(expected_query);
+    assert_eq!(Ok(expected), parser.stmt());
+}
+
+#[test]
+fn test_parse_invalid_select_query() {
+    let s = "SELECT";
+    let mut parser = Parser::new(s);
+    let expected = Err(Error::ExpectedExpression { pos: 6 });
+    assert_eq!(expected, parser.stmt());
+
+    let s = "SELECT 1";
+    let mut parser = Parser::new(s);
+    let expected = Err(Error::ExpectedCommaOrSemicolon { pos: 8 });
+    assert_eq!(expected, parser.stmt());
+
+    let s = "SELECT 1,";
+    let mut parser = Parser::new(s);
+    let expected = Err(Error::ExpectedExpression { pos: 9 });
+    assert_eq!(expected, parser.stmt());
 }
