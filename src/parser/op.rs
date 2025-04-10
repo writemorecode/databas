@@ -54,10 +54,10 @@ pub enum Op {
 impl Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Op::And => write!(f, "&&"),
-            Op::Or => write!(f, "||"),
+            Op::And => write!(f, "AND"),
+            Op::Or => write!(f, "OR"),
             Op::Neg => write!(f, "-"),
-            Op::Not => write!(f, "NOT"),
+            Op::Not => write!(f, "NOT "),
             Op::Add => write!(f, "+"),
             Op::Sub => write!(f, "-"),
             Op::Mul => write!(f, "*"),

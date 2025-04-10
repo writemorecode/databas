@@ -6,6 +6,7 @@ fn run(buf: String) {
     let out = parser.stmt();
     match out {
         Ok(out) => {
+            println!("{}", out);
             dbg!(out);
         }
         Err(err) => {

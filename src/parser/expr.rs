@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::lexer::token_kind::NumberKind;
 use crate::parser::Op;
 
@@ -24,5 +26,26 @@ impl From<i32> for Expression<'_> {
 impl From<bool> for Expression<'_> {
     fn from(value: bool) -> Self {
         Expression::Literal(Literal::Boolean(value))
+    }
+}
+
+impl Display for Expression<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expression::Literal(literal) => write!(f, "{}", literal),
+            Expression::Identifier(ident) => write!(f, "{}", ident),
+            Expression::UnaryOp((op, expr)) => write!(f, "{}{}", op, expr),
+            Expression::BinaryOp((left, op, right)) => write!(f, "{} {} {}", left, op, right),
+        }
+    }
+}
+
+impl Display for Literal<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Literal::String(s) => write!(f, "\"{}\"", s),
+            Literal::Number(n) => write!(f, "{}", n),
+            Literal::Boolean(b) => write!(f, "{}", b),
+        }
     }
 }
