@@ -5,7 +5,7 @@ use databas::{
         Parser,
         expr::Expression,
         op::Op,
-        stmt::{SelectQuery, Statement::Select},
+        stmt::{OrderBy, Ordering, SelectQuery, Statement::Select},
     },
 };
 
@@ -232,4 +232,25 @@ fn test_parse_invalid_select_query() {
     let mut parser = Parser::new(s);
     let expected = Err(Error::ExpectedExpression { pos: 9 });
     assert_eq!(expected, parser.stmt());
+}
+
+#[test]
+fn test_parse_select_query_with_order_by() {
+    let s = "SELECT foo FROM bar WHERE baz ORDER BY qax, quux DESC;";
+    let mut parser = Parser::new(s);
+    let expected_query = SelectQuery {
+        columns: vec![Expression::Identifier("foo")],
+        table: Some("bar"),
+        where_clause: Some(Expression::Identifier("baz")),
+        order_by: Some(OrderBy {
+            terms: vec![
+                Expression::Identifier("qax"),
+                Expression::Identifier("quux"),
+            ],
+            order: Some(Ordering::Descending),
+        }),
+        limit: None,
+    };
+    let expected = Select(expected_query);
+    assert_eq!(Ok(expected), parser.stmt());
 }

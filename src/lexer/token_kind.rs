@@ -34,6 +34,10 @@ pub enum Keyword {
     Select,
     From,
     Where,
+    Order,
+    By,
+    Asc,
+    Desc,
     True,
     False,
     And,
@@ -47,6 +51,10 @@ impl Display for Keyword {
             Keyword::Select => write!(f, "SELECT"),
             Keyword::From => write!(f, "FROM"),
             Keyword::Where => write!(f, "WHERE"),
+            Keyword::Order => write!(f, "ORDER"),
+            Keyword::By => write!(f, "BY"),
+            Keyword::Asc => write!(f, "ASC"),
+            Keyword::Desc => write!(f, "DESC"),
             Keyword::And => write!(f, "AND"),
             Keyword::Or => write!(f, "OR"),
             Keyword::True => write!(f, "TRUE"),
@@ -101,6 +109,14 @@ impl<'a> From<&'a str> for TokenKind<'a> {
             TokenKind::Keyword(Keyword::False)
         } else if value.eq_ignore_ascii_case("NOT") {
             TokenKind::Keyword(Keyword::Not)
+        } else if value.eq_ignore_ascii_case("ORDER") {
+            TokenKind::Keyword(Keyword::Order)
+        } else if value.eq_ignore_ascii_case("BY") {
+            TokenKind::Keyword(Keyword::By)
+        } else if value.eq_ignore_ascii_case("ASC") {
+            TokenKind::Keyword(Keyword::Asc)
+        } else if value.eq_ignore_ascii_case("DESC") {
+            TokenKind::Keyword(Keyword::Desc)
         } else {
             TokenKind::Identifier(value)
         };
