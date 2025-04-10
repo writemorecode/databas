@@ -181,7 +181,7 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            TokenKind::Bang => {
+            TokenKind::Keyword(Keyword::Not) => {
                 let op = Op::try_from(token)?;
                 if let Some(((), r_bp)) = prefix_binding_power(&op) {
                     let rhs = self.expr_bp(r_bp)?;

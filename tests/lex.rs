@@ -30,12 +30,11 @@ fn test_comparison_symbols() {
 
 #[test]
 fn test_equality_symbols() {
-    let s = "== != ! =";
+    let s = "== != =";
     let mut lexer = Lexer::new(s);
     lexer.expect(TokenKind::EqualsEquals, 0);
     lexer.expect(TokenKind::NotEquals, 3);
-    lexer.expect(TokenKind::Bang, 6);
-    lexer.expect(TokenKind::Equals, 8);
+    lexer.expect(TokenKind::Equals, 6);
 }
 
 #[test]
@@ -90,13 +89,20 @@ fn test_single_quoted_string() {
 
 #[test]
 fn test_keywords() {
-    let s = "sEleCT * FrOm users;";
+    let s = "sEleCT * FrOm users whERe user_id < 100 aND NoT is_admin;";
     let mut lexer = Lexer::new(s);
     lexer.expect(TokenKind::Keyword(Keyword::Select), 0);
     lexer.expect(TokenKind::Asterisk, 7);
     lexer.expect(TokenKind::Keyword(Keyword::From), 9);
     lexer.expect(TokenKind::Identifier("users"), 14);
-    lexer.expect(TokenKind::Semicolon, 19);
+    lexer.expect(TokenKind::Keyword(Keyword::Where), 20);
+    lexer.expect(TokenKind::Identifier("user_id"), 26);
+    lexer.expect(TokenKind::LessThan, 34);
+    lexer.expect(TokenKind::Number(Integer(100)), 36);
+    lexer.expect(TokenKind::Keyword(Keyword::And), 40);
+    lexer.expect(TokenKind::Keyword(Keyword::Not), 44);
+    lexer.expect(TokenKind::Identifier("is_admin"), 48);
+    lexer.expect(TokenKind::Semicolon, 56);
 }
 
 #[test]
@@ -151,4 +157,12 @@ fn test_multiline_line_comment() {
     lexer.expect(TokenKind::Number(Integer(123)), 34);
     lexer.expect(TokenKind::Asterisk, 38);
     lexer.expect(TokenKind::Number(Integer(456)), 40);
+}
+
+#[test]
+fn test_logical_not() {
+    let s = "NOT false";
+    let mut lexer = Lexer::new(s);
+    lexer.expect(TokenKind::Keyword(Keyword::Not), 0);
+    lexer.expect(TokenKind::Keyword(Keyword::False), 4);
 }

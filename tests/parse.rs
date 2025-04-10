@@ -50,7 +50,7 @@ fn test_parse_mul_and_plus_exp_with_parens() {
 
 #[test]
 fn test_parse_not_exp() {
-    let s = "!true";
+    let s = "not true";
     let parser = Parser::new(s);
     let expected = {
         let a = Box::new(Expression::from(true));
@@ -58,11 +58,23 @@ fn test_parse_not_exp() {
     };
     assert_eq!(Ok(expected), parser.expr());
 
-    let s = "!false";
+    let s = "not false";
     let parser = Parser::new(s);
     let expected = {
         let a = Box::new(Expression::from(false));
         Expression::UnaryOp((Op::Not, a))
+    };
+    assert_eq!(Ok(expected), parser.expr());
+
+    let s = "not (a AND (b != c))";
+    let parser = Parser::new(s);
+    let expected = {
+        let a = Box::new(Expression::Identifier("a"));
+        let b = Box::new(Expression::Identifier("b"));
+        let c = Box::new(Expression::Identifier("c"));
+        let d = Box::new(Expression::BinaryOp((b, Op::NotEquals, c)));
+        let e = Box::new(Expression::BinaryOp((a, Op::And, d)));
+        Expression::UnaryOp((Op::Not, e))
     };
     assert_eq!(Ok(expected), parser.expr());
 }

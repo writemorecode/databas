@@ -94,7 +94,7 @@ enum MaybeEquals {
     LessThan,
     GreaterThan,
     Equals,
-    Bang,
+    NotEquals,
 }
 
 impl<'a> Iterator for Lexer<'a> {
@@ -130,7 +130,7 @@ impl<'a> Iterator for Lexer<'a> {
             'a'..='z' | 'A'..='Z' => Started::Keyword,
             '<' => Started::MaybeEqualsOp(MaybeEquals::LessThan),
             '>' => Started::MaybeEqualsOp(MaybeEquals::GreaterThan),
-            '!' => Started::MaybeEqualsOp(MaybeEquals::Bang),
+            '!' => Started::MaybeEqualsOp(MaybeEquals::NotEquals),
             '=' => Started::MaybeEqualsOp(MaybeEquals::Equals),
             '(' => return tok(TokenKind::LeftParen),
             ')' => return tok(TokenKind::RightParen),
@@ -203,14 +203,19 @@ impl<'a> Iterator for Lexer<'a> {
                         MaybeEquals::LessThan => TokenKind::LessThanOrEqual,
                         MaybeEquals::GreaterThan => TokenKind::GreaterThanOrEqual,
                         MaybeEquals::Equals => TokenKind::EqualsEquals,
-                        MaybeEquals::Bang => TokenKind::NotEquals,
+                        MaybeEquals::NotEquals => TokenKind::NotEquals,
                     }
                 } else {
                     match maybe_equals {
                         MaybeEquals::LessThan => TokenKind::LessThan,
                         MaybeEquals::GreaterThan => TokenKind::GreaterThan,
                         MaybeEquals::Equals => TokenKind::Equals,
-                        MaybeEquals::Bang => TokenKind::Bang,
+                        MaybeEquals::NotEquals => {
+                            return Some(Err(Error::InvalidCharacter {
+                                pos: self.position,
+                                c: '!',
+                            }));
+                        }
                     }
                 };
                 let token = Token { kind, offset: c_at };

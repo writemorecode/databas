@@ -17,7 +17,6 @@ pub enum TokenKind<'a> {
     Plus,
     Minus,
     Equals,
-    Bang,
     NotEquals,
     EqualsEquals,
     LessThan,
@@ -39,6 +38,7 @@ pub enum Keyword {
     False,
     And,
     Or,
+    Not,
 }
 
 impl Display for Keyword {
@@ -51,6 +51,7 @@ impl Display for Keyword {
             Keyword::Or => write!(f, "OR"),
             Keyword::True => write!(f, "TRUE"),
             Keyword::False => write!(f, "FALSE"),
+            Keyword::Not => write!(f, "NOT"),
         }
     }
 }
@@ -68,7 +69,6 @@ impl Display for TokenKind<'_> {
             TokenKind::Plus => write!(f, "PLUS"),
             TokenKind::Minus => write!(f, "MINUS"),
             TokenKind::Equals => write!(f, "EQ"),
-            TokenKind::Bang => write!(f, "BANG"),
             TokenKind::NotEquals => write!(f, "NEQ"),
             TokenKind::EqualsEquals => write!(f, "EQEQ"),
             TokenKind::LessThan => write!(f, "LT"),
@@ -99,6 +99,8 @@ impl<'a> From<&'a str> for TokenKind<'a> {
             TokenKind::Keyword(Keyword::True)
         } else if value.eq_ignore_ascii_case("FALSE") {
             TokenKind::Keyword(Keyword::False)
+        } else if value.eq_ignore_ascii_case("NOT") {
+            TokenKind::Keyword(Keyword::Not)
         } else {
             TokenKind::Identifier(value)
         };
