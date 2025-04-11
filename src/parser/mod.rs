@@ -4,7 +4,7 @@ pub mod stmt;
 
 use expr::{Expression, Literal};
 use op::{Op, infix_binding_power, prefix_binding_power};
-use stmt::{OrderBy, Ordering, SelectQuery, Statement};
+use stmt::{OrderBy, SelectQuery, Statement};
 
 use crate::error::Error;
 use crate::lexer::Lexer;
@@ -116,47 +116,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let order_by: Option<OrderBy> = if let Some(Ok(Token {
-            kind: TokenKind::Keyword(Keyword::Order),
-            ..
-        })) = self.lexer.peek()
-        {
-            self.lexer.next();
-            self.lexer.expect_token(TokenKind::Keyword(Keyword::By))?;
-            let terms = self.parse_expression_list()?;
-
-            let Some(next) = self.lexer.peek() else {
-                return Err(Error::UnexpectedEnd {
-                    pos: self.lexer.position,
-                });
-            };
-            let order: Option<Ordering> = match next {
-                Ok(Token {
-                    kind: TokenKind::Keyword(Keyword::Asc),
-                    ..
-                }) => {
-                    self.lexer.next();
-                    Some(Ordering::Ascending)
-                }
-                Ok(Token {
-                    kind: TokenKind::Keyword(Keyword::Desc),
-                    ..
-                }) => {
-                    self.lexer.next();
-                    Some(Ordering::Descending)
-                }
-                Ok(Token {
-                    kind: TokenKind::Semicolon,
-                    ..
-                }) => None,
-                Ok(other) => return Err(Error::Other(other.kind)),
-                Err(_) => return Err(self.lexer.next().unwrap().unwrap_err()),
-            };
-
-            Some(OrderBy { terms, order })
-        } else {
-            None
-        };
+        let order_by = OrderBy::parse(self)?;
 
         self.lexer
             .expect_token(TokenKind::Semicolon)

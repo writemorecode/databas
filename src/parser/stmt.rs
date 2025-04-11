@@ -1,6 +1,14 @@
 use std::fmt::Display;
 
-use super::expr::Expression;
+use crate::{
+    error::Error,
+    lexer::{
+        token::Token,
+        token_kind::{Keyword, TokenKind},
+    },
+};
+
+use super::{Parser, expr::Expression};
 
 #[derive(Debug, PartialEq)]
 pub enum Statement<'a> {
@@ -35,6 +43,50 @@ impl Display for Ordering {
 pub struct OrderBy<'a> {
     pub terms: Vec<Expression<'a>>,
     pub order: Option<Ordering>,
+}
+
+impl<'a> OrderBy<'a> {
+    pub fn parse(parser: &mut Parser<'a>) -> Result<Option<OrderBy<'a>>, Error<'a>> {
+        let Some(res) = parser.lexer.peek() else {
+            return Ok(None);
+        };
+
+        let Ok(Token {
+            kind: TokenKind::Keyword(Keyword::Order),
+            ..
+        }) = res
+        else {
+            return Ok(None);
+        };
+
+        parser.lexer.next();
+        parser.lexer.expect_token(TokenKind::Keyword(Keyword::By))?;
+        let terms = parser.parse_expression_list()?;
+
+        let Some(peeked) = parser.lexer.peek() else {
+            return Err(Error::UnexpectedEnd {
+                pos: parser.lexer.position,
+            });
+        };
+        let Ok(token) = peeked else {
+            return Err(parser.lexer.next().unwrap().unwrap_err());
+        };
+
+        let order = match token.kind {
+            TokenKind::Keyword(Keyword::Asc) => {
+                parser.lexer.next();
+                Some(Ordering::Ascending)
+            }
+            TokenKind::Keyword(Keyword::Desc) => {
+                parser.lexer.next();
+                Some(Ordering::Descending)
+            }
+            TokenKind::Semicolon => None,
+            other => return Err(Error::Other(other)),
+        };
+
+        Ok(Some(OrderBy { terms, order }))
+    }
 }
 
 impl Display for OrderBy<'_> {
