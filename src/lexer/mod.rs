@@ -24,19 +24,17 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn expect_token(&mut self, expected_kind: TokenKind<'a>) -> Result<(), Error<'a>> {
-        let Some(token_result) = self.next() else {
-            return Err(Error::UnexpectedEnd { pos: self.position });
-        };
-        let token = token_result?;
-        if token.kind == expected_kind {
-            Ok(())
-        } else {
-            Err(Error::UnexpectedTokenKind {
-                expected: expected_kind,
-                got: token.kind,
-            })
+    pub fn expect_where(&mut self, check: impl Fn(TokenKind<'a>) -> bool) -> Result<(), Error<'a>> {
+        match self.next() {
+            Some(Ok(token)) if check(token.kind) => Ok(()),
+            Some(Ok(token)) => Err(Error::Other(token.kind)),
+            Some(Err(err)) => Err(err),
+            None => Err(Error::UnexpectedEnd { pos: self.position }),
         }
+    }
+
+    pub fn expect_token(&mut self, expected_kind: TokenKind<'a>) -> Result<(), Error<'a>> {
+        self.expect_where(|kind| kind == expected_kind)
     }
 
     fn skip_whitespace(&mut self) {
