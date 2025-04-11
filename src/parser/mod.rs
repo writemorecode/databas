@@ -36,7 +36,13 @@ impl<'a> Parser<'a> {
                 Ok(Token {
                     kind:
                         TokenKind::Semicolon
-                        | TokenKind::Keyword(Keyword::From | Keyword::Where | Keyword::Order),
+                        | TokenKind::Keyword(
+                            Keyword::From
+                            | Keyword::Where
+                            | Keyword::Order
+                            | Keyword::Asc
+                            | Keyword::Desc,
+                        ),
                     ..
                 }) => break,
 
@@ -311,6 +317,21 @@ mod parser_tests {
     #[test]
     fn test_parse_expression_list_single_where() {
         let s = "abc WHERE";
+        let mut parser = Parser::new(s);
+        let expr_list = parser.parse_expression_list();
+        let expected_expr_list: Vec<Expression> = vec![Expression::Identifier("abc")];
+        assert_eq!(Ok(expected_expr_list), expr_list);
+    }
+
+    #[test]
+    fn test_parse_expression_list_single_asc_desc() {
+        let s = "abc ASC";
+        let mut parser = Parser::new(s);
+        let expr_list = parser.parse_expression_list();
+        let expected_expr_list: Vec<Expression> = vec![Expression::Identifier("abc")];
+        assert_eq!(Ok(expected_expr_list), expr_list);
+
+        let s = "abc DESC";
         let mut parser = Parser::new(s);
         let expr_list = parser.parse_expression_list();
         let expected_expr_list: Vec<Expression> = vec![Expression::Identifier("abc")];
