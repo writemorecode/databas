@@ -4,7 +4,7 @@ pub mod stmt;
 
 use expr::{Expression, Literal};
 use op::{Op, infix_binding_power, prefix_binding_power};
-use stmt::{OrderBy, SelectQuery, Statement};
+use stmt::{SelectQuery, Statement};
 
 use crate::error::Error;
 use crate::lexer::Lexer;
@@ -55,59 +55,12 @@ impl<'a> Parser<'a> {
             })?
     }
 
-    fn parse_select_query(&mut self) -> Result<Statement<'a>, Error<'a>> {
-        let columns = match self.parse_expression_list() {
-            Err(Error::UnexpectedEnd { pos }) => return Err(Error::ExpectedExpression { pos }),
-            Ok(cols) => cols,
-            Err(err) => return Err(err),
-        };
-
-        let table = if let Some(Ok(Token {
-            kind: TokenKind::Keyword(Keyword::From),
-            ..
-        })) = self.lexer.peek()
-        {
-            self.lexer.next();
-            Some(self.parse_identifier()?)
-        } else {
-            None
-        };
-
-        let where_clause = if let Some(Ok(Token {
-            kind: TokenKind::Keyword(Keyword::Where),
-            ..
-        })) = self.lexer.peek()
-        {
-            self.lexer.next();
-            Some(self.expr_bp(0)?)
-        } else {
-            None
-        };
-
-        let order_by = OrderBy::parse(self)?;
-
-        self.lexer
-            .expect_token(TokenKind::Semicolon)
-            .map_err(|err| match err {
-                Error::UnexpectedEnd { pos } => Error::ExpectedCommaOrSemicolon { pos },
-                err => err,
-            })?;
-
-        Ok(Statement::Select(SelectQuery {
-            columns,
-            table,
-            where_clause,
-            order_by,
-            limit: None,
-        }))
-    }
-
     pub fn stmt(&mut self) -> Result<Statement<'a>, Error<'a>> {
         let token = self.lexer.next().ok_or(Error::UnexpectedEnd {
             pos: self.lexer.position,
         })??;
         match token.kind {
-            TokenKind::Keyword(Keyword::Select) => self.parse_select_query(),
+            TokenKind::Keyword(Keyword::Select) => SelectQuery::parse(self),
             other => Err(Error::Other(other)),
         }
     }

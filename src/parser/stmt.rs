@@ -127,3 +127,53 @@ impl Display for Statement<'_> {
         }
     }
 }
+
+impl<'a> SelectQuery<'a> {
+    pub fn parse(parser: &mut Parser<'a>) -> Result<Statement<'a>, Error<'a>> {
+        let columns = match parser.parse_expression_list() {
+            Err(Error::UnexpectedEnd { pos }) => return Err(Error::ExpectedExpression { pos }),
+            Ok(cols) => cols,
+            Err(err) => return Err(err),
+        };
+
+        let table = if let Some(Ok(Token {
+            kind: TokenKind::Keyword(Keyword::From),
+            ..
+        })) = parser.lexer.peek()
+        {
+            parser.lexer.next();
+            Some(parser.parse_identifier()?)
+        } else {
+            None
+        };
+
+        let where_clause = if let Some(Ok(Token {
+            kind: TokenKind::Keyword(Keyword::Where),
+            ..
+        })) = parser.lexer.peek()
+        {
+            parser.lexer.next();
+            Some(parser.expr_bp(0)?)
+        } else {
+            None
+        };
+
+        let order_by = OrderBy::parse(parser)?;
+
+        parser
+            .lexer
+            .expect_token(TokenKind::Semicolon)
+            .map_err(|err| match err {
+                Error::UnexpectedEnd { pos } => Error::ExpectedCommaOrSemicolon { pos },
+                err => err,
+            })?;
+
+        Ok(Statement::Select(SelectQuery {
+            columns,
+            table,
+            where_clause,
+            order_by,
+            limit: None,
+        }))
+    }
+}
