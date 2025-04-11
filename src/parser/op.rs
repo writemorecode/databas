@@ -23,10 +23,7 @@ impl<'a> TryFrom<Token<'a>> for Op {
             TokenKind::LessThanOrEqual => Op::LessThanOrEqual,
             TokenKind::GreaterThanOrEqual => Op::GreaterThanOrEqual,
             _ => {
-                return Err(Error::InvalidOperator {
-                    op: token.kind,
-                    pos: token.offset,
-                });
+                return Err(Error::InvalidOperator { op: token.kind, pos: token.offset });
             }
         };
         Ok(op)

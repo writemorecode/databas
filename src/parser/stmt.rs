@@ -47,10 +47,7 @@ pub struct OrderBy<'a> {
 
 impl<'a> OrderBy<'a> {
     pub fn parse(parser: &mut Parser<'a>) -> Result<Option<OrderBy<'a>>, Error<'a>> {
-        let Some(Ok(Token {
-            kind: TokenKind::Keyword(Keyword::Order),
-            ..
-        })) = parser.lexer.peek()
+        let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Order), .. })) = parser.lexer.peek()
         else {
             return Ok(None);
         };
@@ -58,17 +55,11 @@ impl<'a> OrderBy<'a> {
         parser.lexer.expect_token(TokenKind::Keyword(Keyword::By))?;
         let terms = parser.parse_expression_list()?;
         let order = match parser.lexer.peek() {
-            Some(Ok(Token {
-                kind: TokenKind::Keyword(Keyword::Asc),
-                ..
-            })) => {
+            Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Asc), .. })) => {
                 parser.lexer.next();
                 Some(Ordering::Ascending)
             }
-            Some(Ok(Token {
-                kind: TokenKind::Keyword(Keyword::Desc),
-                ..
-            })) => {
+            Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Desc), .. })) => {
                 parser.lexer.next();
                 Some(Ordering::Descending)
             }
@@ -136,10 +127,8 @@ impl<'a> SelectQuery<'a> {
             Err(err) => return Err(err),
         };
 
-        let table = if let Some(Ok(Token {
-            kind: TokenKind::Keyword(Keyword::From),
-            ..
-        })) = parser.lexer.peek()
+        let table = if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::From), .. })) =
+            parser.lexer.peek()
         {
             parser.lexer.next();
             Some(parser.parse_identifier()?)
@@ -147,33 +136,23 @@ impl<'a> SelectQuery<'a> {
             None
         };
 
-        let where_clause = if let Some(Ok(Token {
-            kind: TokenKind::Keyword(Keyword::Where),
-            ..
-        })) = parser.lexer.peek()
-        {
-            parser.lexer.next();
-            Some(parser.expr_bp(0)?)
-        } else {
-            None
-        };
+        let where_clause =
+            if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Where), .. })) =
+                parser.lexer.peek()
+            {
+                parser.lexer.next();
+                Some(parser.expr_bp(0)?)
+            } else {
+                None
+            };
 
         let order_by = OrderBy::parse(parser)?;
 
-        parser
-            .lexer
-            .expect_token(TokenKind::Semicolon)
-            .map_err(|err| match err {
-                Error::UnexpectedEnd { pos } => Error::ExpectedCommaOrSemicolon { pos },
-                err => err,
-            })?;
+        parser.lexer.expect_token(TokenKind::Semicolon).map_err(|err| match err {
+            Error::UnexpectedEnd { pos } => Error::ExpectedCommaOrSemicolon { pos },
+            err => err,
+        })?;
 
-        Ok(Statement::Select(SelectQuery {
-            columns,
-            table,
-            where_clause,
-            order_by,
-            limit: None,
-        }))
+        Ok(Statement::Select(SelectQuery { columns, table, where_clause, order_by, limit: None }))
     }
 }

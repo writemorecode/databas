@@ -123,10 +123,7 @@ fn test_expression() {
 fn test_unterminated_string() {
     let s = r#""hello world"#;
     let mut lexer = Lexer::new(s);
-    assert_eq!(
-        lexer.next(),
-        Some(Err(Error::UnterminatedString { pos: 0 }))
-    );
+    assert_eq!(lexer.next(), Some(Err(Error::UnterminatedString { pos: 0 })));
 }
 
 #[test]

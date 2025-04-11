@@ -16,12 +16,7 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a str) -> Self {
-        Self {
-            source,
-            rest: source,
-            position: 0,
-            peeked: None,
-        }
+        Self { source, rest: source, position: 0, peeked: None }
     }
 
     pub fn expect_where(&mut self, check: impl Fn(TokenKind<'a>) -> bool) -> Result<(), Error<'a>> {
@@ -144,9 +139,7 @@ impl<'a> Iterator for Lexer<'a> {
 
         match started {
             Started::Number => {
-                let literal = c_rest
-                    .split(|c: char| !matches!(c, '.' | '0'..='9'))
-                    .next()?;
+                let literal = c_rest.split(|c: char| !matches!(c, '.' | '0'..='9')).next()?;
 
                 let kind = if let Ok(parsed) = literal.parse::<i32>() {
                     NumberKind::Integer(parsed)
@@ -156,28 +149,18 @@ impl<'a> Iterator for Lexer<'a> {
                     return Some(Err(Error::InvalidNumber { pos: c_at }));
                 };
 
-                let token = Token {
-                    kind: TokenKind::Number(kind),
-                    offset: c_at,
-                };
+                let token = Token { kind: TokenKind::Number(kind), offset: c_at };
                 let extra = literal.len() - 1;
                 self.position += extra;
                 self.rest = &self.rest[extra..];
                 Some(Ok(token))
             }
             quote @ (Started::SingleQuotedString | Started::DoubleQuotedString) => {
-                let terminator = if let Started::SingleQuotedString = quote {
-                    '\''
-                } else {
-                    '"'
-                };
+                let terminator = if let Started::SingleQuotedString = quote { '\'' } else { '"' };
                 let Some((literal, rest)) = self.rest.split_once(terminator) else {
                     return Some(Err(Error::UnterminatedString { pos: c_at }));
                 };
-                let token = Token {
-                    kind: TokenKind::String(literal),
-                    offset: c_at,
-                };
+                let token = Token { kind: TokenKind::String(literal), offset: c_at };
                 self.position += literal.len() + 1;
                 self.rest = rest;
                 Some(Ok(token))

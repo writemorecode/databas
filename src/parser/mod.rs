@@ -18,20 +18,14 @@ pub struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     pub fn new(source: &'a str) -> Self {
-        Self {
-            lexer: Lexer::new(source),
-        }
+        Self { lexer: Lexer::new(source) }
     }
 }
 
 impl<'a> Parser<'a> {
     fn parse_expression_list(&mut self) -> Result<Vec<Expression<'a>>, Error<'a>> {
         let mut expr_list = vec![self.expr_bp(0)?];
-        while let Some(Ok(Token {
-            kind: TokenKind::Comma,
-            ..
-        })) = self.lexer.peek()
-        {
+        while let Some(Ok(Token { kind: TokenKind::Comma, .. })) = self.lexer.peek() {
             self.lexer.next();
             expr_list.push(self.expr_bp(0)?);
         }
@@ -39,26 +33,21 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_identifier(&mut self) -> Result<&'a str, Error<'a>> {
-        self.lexer
-            .next()
-            .ok_or(Error::UnexpectedEnd {
-                pos: self.lexer.position,
-            })
-            .and_then(|tok| {
+        self.lexer.next().ok_or(Error::UnexpectedEnd { pos: self.lexer.position }).and_then(
+            |tok| {
                 tok.map(|tok| match tok.kind {
                     TokenKind::Identifier(id) => Ok(id),
-                    other => Err(Error::ExpectedIdentifier {
-                        pos: self.lexer.position,
-                        got: other,
-                    }),
+                    other => {
+                        Err(Error::ExpectedIdentifier { pos: self.lexer.position, got: other })
+                    }
                 })
-            })?
+            },
+        )?
     }
 
     pub fn stmt(&mut self) -> Result<Statement<'a>, Error<'a>> {
-        let token = self.lexer.next().ok_or(Error::UnexpectedEnd {
-            pos: self.lexer.position,
-        })??;
+        let token =
+            self.lexer.next().ok_or(Error::UnexpectedEnd { pos: self.lexer.position })??;
         match token.kind {
             TokenKind::Keyword(Keyword::Select) => SelectQuery::parse(self),
             other => Err(Error::Other(other)),
@@ -67,10 +56,8 @@ impl<'a> Parser<'a> {
 
     pub fn parse_unary_op(&mut self, tok: Token<'a>) -> Result<Expression<'a>, Error<'a>> {
         let op = tok.try_into()?;
-        let ((), r_bp) = prefix_binding_power(&op).ok_or(Error::InvalidPrefixOperator {
-            op: tok.kind,
-            pos: tok.offset,
-        })?;
+        let ((), r_bp) = prefix_binding_power(&op)
+            .ok_or(Error::InvalidPrefixOperator { op: tok.kind, pos: tok.offset })?;
         let rhs = self.expr_bp(r_bp)?;
         Ok(Expression::UnaryOp((op, Box::new(rhs))))
     }
@@ -80,9 +67,8 @@ impl<'a> Parser<'a> {
     }
 
     fn expr_bp(&mut self, min_bp: u8) -> Result<Expression<'a>, Error<'a>> {
-        let token = self.lexer.next().ok_or(Error::UnexpectedEnd {
-            pos: self.lexer.position,
-        })??;
+        let token =
+            self.lexer.next().ok_or(Error::UnexpectedEnd { pos: self.lexer.position })??;
         let mut lhs = match token.kind {
             TokenKind::String(lit) => Expression::Literal(Literal::String(lit)),
             TokenKind::Number(num) => Expression::Literal(Literal::Number(num)),
@@ -119,10 +105,8 @@ impl<'a> Parser<'a> {
                 break;
             }
             let op = Op::try_from(*token)?;
-            let (l_bp, r_bp) = infix_binding_power(&op).ok_or(Error::InvalidOperator {
-                op: token.kind,
-                pos: token.offset,
-            })?;
+            let (l_bp, r_bp) = infix_binding_power(&op)
+                .ok_or(Error::InvalidOperator { op: token.kind, pos: token.offset })?;
             if l_bp < min_bp {
                 break;
             }

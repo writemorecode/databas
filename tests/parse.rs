@@ -94,10 +94,8 @@ fn test_negative_exp() {
 fn test_invalid_operator() {
     let s = "operand invalid_operator";
     let parser = Parser::new(s);
-    let expected_err = Error::InvalidOperator {
-        op: TokenKind::Identifier("invalid_operator"),
-        pos: 8,
-    };
+    let expected_err =
+        Error::InvalidOperator { op: TokenKind::Identifier("invalid_operator"), pos: 8 };
     assert_eq!(Err(expected_err), parser.expr());
 }
 
@@ -243,10 +241,7 @@ fn test_parse_select_query_with_order_by() {
         table: Some("bar"),
         where_clause: Some(Expression::Identifier("baz")),
         order_by: Some(OrderBy {
-            terms: vec![
-                Expression::Identifier("qax"),
-                Expression::Identifier("quux"),
-            ],
+            terms: vec![Expression::Identifier("qax"), Expression::Identifier("quux")],
             order: Some(Ordering::Descending),
         }),
         limit: None,
