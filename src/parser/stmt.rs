@@ -47,42 +47,32 @@ pub struct OrderBy<'a> {
 
 impl<'a> OrderBy<'a> {
     pub fn parse(parser: &mut Parser<'a>) -> Result<Option<OrderBy<'a>>, Error<'a>> {
-        let Some(res) = parser.lexer.peek() else {
-            return Ok(None);
-        };
-
-        let Ok(Token {
+        let Some(Ok(Token {
             kind: TokenKind::Keyword(Keyword::Order),
             ..
-        }) = res
+        })) = parser.lexer.peek()
         else {
             return Ok(None);
         };
-
         parser.lexer.next();
         parser.lexer.expect_token(TokenKind::Keyword(Keyword::By))?;
         let terms = parser.parse_expression_list()?;
-
-        let Some(peeked) = parser.lexer.peek() else {
-            return Err(Error::UnexpectedEnd {
-                pos: parser.lexer.position,
-            });
-        };
-        let Ok(token) = peeked else {
-            return Err(parser.lexer.next().unwrap().unwrap_err());
-        };
-
-        let order = match token.kind {
-            TokenKind::Keyword(Keyword::Asc) => {
+        let order = match parser.lexer.peek() {
+            Some(Ok(Token {
+                kind: TokenKind::Keyword(Keyword::Asc),
+                ..
+            })) => {
                 parser.lexer.next();
                 Some(Ordering::Ascending)
             }
-            TokenKind::Keyword(Keyword::Desc) => {
+            Some(Ok(Token {
+                kind: TokenKind::Keyword(Keyword::Desc),
+                ..
+            })) => {
                 parser.lexer.next();
                 Some(Ordering::Descending)
             }
-            TokenKind::Semicolon => None,
-            other => return Err(Error::Other(other)),
+            _ => None,
         };
 
         Ok(Some(OrderBy { terms, order }))
