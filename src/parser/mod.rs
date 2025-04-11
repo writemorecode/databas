@@ -119,6 +119,16 @@ impl<'a> Parser<'a> {
         }
     }
 
+    pub fn parse_unary_op(&mut self, tok: Token<'a>) -> Result<Expression<'a>, Error<'a>> {
+        let op = tok.try_into()?;
+        let ((), r_bp) = prefix_binding_power(&op).ok_or(Error::InvalidPrefixOperator {
+            op: tok.kind,
+            pos: tok.offset,
+        })?;
+        let rhs = self.expr_bp(r_bp)?;
+        Ok(Expression::UnaryOp((op, Box::new(rhs))))
+    }
+
     pub fn expr(mut self) -> Result<Expression<'a>, Error<'a>> {
         self.expr_bp(0)
     }
@@ -145,33 +155,7 @@ impl<'a> Parser<'a> {
                 self.lexer.expect_token(TokenKind::RightParen)?;
                 lhs
             }
-
-            TokenKind::Minus => {
-                let op = Op::try_from(token)?;
-                if let Some(((), r_bp)) = prefix_binding_power(&op) {
-                    let rhs = self.expr_bp(r_bp)?;
-                    Expression::UnaryOp((Op::Neg, Box::new(rhs)))
-                } else {
-                    return Err(Error::InvalidPrefixOperator {
-                        op: token.kind,
-                        pos: self.lexer.position,
-                    });
-                }
-            }
-
-            TokenKind::Keyword(Keyword::Not) => {
-                let op = Op::try_from(token)?;
-                if let Some(((), r_bp)) = prefix_binding_power(&op) {
-                    let rhs = self.expr_bp(r_bp)?;
-                    Expression::UnaryOp((Op::Not, Box::new(rhs)))
-                } else {
-                    return Err(Error::InvalidPrefixOperator {
-                        op: token.kind,
-                        pos: self.lexer.position,
-                    });
-                }
-            }
-
+            TokenKind::Minus | TokenKind::Keyword(Keyword::Not) => self.parse_unary_op(token)?,
             other => {
                 return Err(Error::Other(other));
             }
