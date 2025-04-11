@@ -103,16 +103,9 @@ impl<'a> Parser<'a> {
     }
 
     pub fn stmt(&mut self) -> Result<Statement<'a>, Error<'a>> {
-        let token = match self.lexer.next() {
-            None => {
-                return Err(Error::UnexpectedEnd {
-                    pos: self.lexer.position,
-                });
-            }
-            Some(Err(err)) => return Err(err),
-            Some(Ok(token)) => token,
-        };
-
+        let token = self.lexer.next().ok_or(Error::UnexpectedEnd {
+            pos: self.lexer.position,
+        })??;
         match token.kind {
             TokenKind::Keyword(Keyword::Select) => self.parse_select_query(),
             other => Err(Error::Other(other)),
