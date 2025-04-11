@@ -134,15 +134,10 @@ impl<'a> Parser<'a> {
     }
 
     fn expr_bp(&mut self, min_bp: u8) -> Result<Expression<'a>, Error<'a>> {
-        let Some(token_result) = self.lexer.next() else {
-            return Err(Error::UnexpectedEnd {
-                pos: self.lexer.position,
-            });
-        };
-        let token = token_result?;
-        let op = token.kind;
-
-        let mut lhs = match op {
+        let token = self.lexer.next().ok_or(Error::UnexpectedEnd {
+            pos: self.lexer.position,
+        })??;
+        let mut lhs = match token.kind {
             TokenKind::String(lit) => Expression::Literal(Literal::String(lit)),
             TokenKind::Number(num) => Expression::Literal(Literal::Number(num)),
             TokenKind::Keyword(Keyword::True) => Expression::Literal(Literal::Boolean(true)),
@@ -156,46 +151,38 @@ impl<'a> Parser<'a> {
                 lhs
             }
             TokenKind::Minus | TokenKind::Keyword(Keyword::Not) => self.parse_unary_op(token)?,
-            other => {
-                return Err(Error::Other(other));
-            }
+            other => return Err(Error::Other(other)),
         };
 
-        loop {
-            let peeked = self.lexer.peek();
-
-            let token = match peeked {
-                None => break,
-                Some(Err(_)) => return Err(self.lexer.next().unwrap().unwrap_err()),
-                Some(Ok(Token {
-                    kind:
-                        TokenKind::Comma
+        while let Some(Ok(token)) = self.lexer.peek() {
+            if {
+                matches!(
+                    token.kind,
+                    TokenKind::Comma
                         | TokenKind::RightParen
                         | TokenKind::Semicolon
                         | TokenKind::Keyword(
                             Keyword::From
-                            | Keyword::Where
-                            | Keyword::Order
-                            | Keyword::Desc
-                            | Keyword::Asc,
+                                | Keyword::Where
+                                | Keyword::Order
+                                | Keyword::Desc
+                                | Keyword::Asc,
                         ),
-                    ..
-                })) => break,
-                Some(Ok(tok)) => tok,
-            };
-
-            let op = Op::try_from(token.to_owned())?;
-
-            if let Some((l_bp, r_bp)) = infix_binding_power(&op) {
-                if l_bp < min_bp {
-                    break;
-                }
-                self.lexer.next();
-                let rhs = self.expr_bp(r_bp)?;
-                lhs = Expression::BinaryOp((Box::new(lhs), op, Box::new(rhs)));
-                continue;
+                )
+            } {
+                break;
             }
-            break;
+            let op = Op::try_from(*token)?;
+            let (l_bp, r_bp) = infix_binding_power(&op).ok_or(Error::InvalidOperator {
+                op: token.kind,
+                pos: token.offset,
+            })?;
+            if l_bp < min_bp {
+                break;
+            }
+            self.lexer.next();
+            let rhs = self.expr_bp(r_bp)?;
+            lhs = Expression::BinaryOp((Box::new(lhs), op, Box::new(rhs)));
         }
         Ok(lhs)
     }
