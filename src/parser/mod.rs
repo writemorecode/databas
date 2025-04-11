@@ -26,47 +26,15 @@ impl<'a> Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn parse_expression_list(&mut self) -> Result<Vec<Expression<'a>>, Error<'a>> {
-        let expr = self.expr_bp(0)?;
-        let mut expr_list = vec![expr];
-
-        while let Some(next) = self.lexer.peek() {
-            match next {
-                Err(_) => return Err(self.lexer.next().unwrap().unwrap_err()),
-
-                Ok(Token {
-                    kind:
-                        TokenKind::Semicolon
-                        | TokenKind::Keyword(
-                            Keyword::From
-                            | Keyword::Where
-                            | Keyword::Order
-                            | Keyword::Asc
-                            | Keyword::Desc,
-                        ),
-                    ..
-                }) => break,
-
-                Ok(Token {
-                    kind: TokenKind::Comma,
-                    ..
-                }) => {
-                    self.lexer.next();
-                    let expr = self.expr_bp(0)?;
-                    expr_list.push(expr);
-
-                    let Some(Ok(Token {
-                        kind: TokenKind::Comma,
-                        ..
-                    })) = self.lexer.peek()
-                    else {
-                        break;
-                    };
-                }
-
-                Ok(other_token) => return Err(Error::Other(other_token.kind)),
-            }
+        let mut expr_list = vec![self.expr_bp(0)?];
+        while let Some(Ok(Token {
+            kind: TokenKind::Comma,
+            ..
+        })) = self.lexer.peek()
+        {
+            self.lexer.next();
+            expr_list.push(self.expr_bp(0)?);
         }
-
         Ok(expr_list)
     }
 
