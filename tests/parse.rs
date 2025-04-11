@@ -85,7 +85,7 @@ fn test_negative_exp() {
     let parser = Parser::new(s);
     let expected = {
         let a = Box::new(Expression::from(12));
-        Expression::UnaryOp((Op::Neg, a))
+        Expression::UnaryOp((Op::Sub, a))
     };
     assert_eq!(Ok(expected), parser.expr());
 }

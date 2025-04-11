@@ -43,7 +43,6 @@ pub enum Op {
     GreaterThan,
     LessThanOrEqual,
     GreaterThanOrEqual,
-    Neg,
     Not,
     Add,
     Sub,
@@ -56,7 +55,6 @@ impl Display for Op {
         match self {
             Op::And => write!(f, "AND"),
             Op::Or => write!(f, "OR"),
-            Op::Neg => write!(f, "-"),
             Op::Not => write!(f, "NOT "),
             Op::Add => write!(f, "+"),
             Op::Sub => write!(f, "-"),
