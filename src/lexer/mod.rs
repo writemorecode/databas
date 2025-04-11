@@ -5,7 +5,7 @@ use crate::error::Error;
 use token::Token;
 use token_kind::{NumberKind, TokenKind};
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug)]
 pub struct Lexer<'a> {
     pub source: &'a str,
     pub rest: &'a str,
