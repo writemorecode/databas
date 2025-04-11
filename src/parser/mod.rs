@@ -39,20 +39,20 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_identifier(&mut self) -> Result<&'a str, Error<'a>> {
-        match self.lexer.next() {
-            Some(Ok(Token {
-                kind: TokenKind::Identifier(id),
-                ..
-            })) => Ok(id),
-            None => Err(Error::UnexpectedEnd {
+        self.lexer
+            .next()
+            .ok_or(Error::UnexpectedEnd {
                 pos: self.lexer.position,
-            }),
-            Some(Ok(other)) => Err(Error::ExpectedIdentifier {
-                pos: other.offset,
-                got: other.kind,
-            }),
-            Some(Err(err)) => Err(err),
-        }
+            })
+            .and_then(|tok| {
+                tok.map(|tok| match tok.kind {
+                    TokenKind::Identifier(id) => Ok(id),
+                    other => Err(Error::ExpectedIdentifier {
+                        pos: self.lexer.position,
+                        got: other,
+                    }),
+                })
+            })?
     }
 
     fn parse_select_query(&mut self) -> Result<Statement<'a>, Error<'a>> {
