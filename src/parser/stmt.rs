@@ -120,7 +120,7 @@ impl Display for Statement<'_> {
 }
 
 impl<'a> SelectQuery<'a> {
-    pub fn parse(parser: &mut Parser<'a>) -> Result<Statement<'a>, Error<'a>> {
+    pub fn parse(mut parser: Parser<'a>) -> Result<Statement<'a>, Error<'a>> {
         let columns = match parser.parse_expression_list() {
             Err(Error::UnexpectedEnd { pos }) => return Err(Error::ExpectedExpression { pos }),
             Ok(cols) => cols,
@@ -146,13 +146,22 @@ impl<'a> SelectQuery<'a> {
                 None
             };
 
-        let order_by = OrderBy::parse(parser)?;
+        let order_by = OrderBy::parse(&mut parser)?;
+
+        let limit = if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Limit), .. })) =
+            parser.lexer.peek()
+        {
+            parser.lexer.next();
+            parser.parse_non_negative_integer()?
+        } else {
+            None
+        };
 
         parser.lexer.expect_token(TokenKind::Semicolon).map_err(|err| match err {
             Error::UnexpectedEnd { pos } => Error::ExpectedCommaOrSemicolon { pos },
             err => err,
         })?;
 
-        Ok(Statement::Select(SelectQuery { columns, table, where_clause, order_by, limit: None }))
+        Ok(Statement::Select(SelectQuery { columns, table, where_clause, order_by, limit }))
     }
 }

@@ -141,7 +141,7 @@ fn test_parse_inequality_operators() {
 #[test]
 fn test_parse_select_query() {
     let s = "SELECT abc, def, ghi;";
-    let mut parser = Parser::new(s);
+    let parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![
             Expression::Identifier("abc"),
@@ -160,7 +160,7 @@ fn test_parse_select_query() {
 #[test]
 fn test_parse_select_query_with_from_table() {
     let s = "SELECT abc, def, ghi FROM table;";
-    let mut parser = Parser::new(s);
+    let parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![
             Expression::Identifier("abc"),
@@ -179,7 +179,7 @@ fn test_parse_select_query_with_from_table() {
 #[test]
 fn test_parse_select_query_with_from_table_and_where_clause() {
     let s = "SELECT abc, def, ghi FROM table WHERE abc < def;";
-    let mut parser = Parser::new(s);
+    let parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![
             Expression::Identifier("abc"),
@@ -202,7 +202,7 @@ fn test_parse_select_query_with_from_table_and_where_clause() {
 #[test]
 fn test_parse_select_query_without_from() {
     let s = "SELECT 3 WHERE 1;";
-    let mut parser = Parser::new(s);
+    let parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![Expression::from(3)],
         table: None,
@@ -217,17 +217,17 @@ fn test_parse_select_query_without_from() {
 #[test]
 fn test_parse_invalid_select_query() {
     let s = "SELECT";
-    let mut parser = Parser::new(s);
+    let parser = Parser::new(s);
     let expected = Err(Error::ExpectedExpression { pos: 6 });
     assert_eq!(expected, parser.stmt());
 
     let s = "SELECT 1";
-    let mut parser = Parser::new(s);
+    let parser = Parser::new(s);
     let expected = Err(Error::ExpectedCommaOrSemicolon { pos: 8 });
     assert_eq!(expected, parser.stmt());
 
     let s = "SELECT 1,";
-    let mut parser = Parser::new(s);
+    let parser = Parser::new(s);
     let expected = Err(Error::ExpectedExpression { pos: 9 });
     assert_eq!(expected, parser.stmt());
 }
@@ -235,7 +235,7 @@ fn test_parse_invalid_select_query() {
 #[test]
 fn test_parse_select_query_with_order_by() {
     let s = "SELECT foo FROM bar WHERE baz ORDER BY qax, quux DESC;";
-    let mut parser = Parser::new(s);
+    let parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![Expression::Identifier("foo")],
         table: Some("bar"),
@@ -250,7 +250,7 @@ fn test_parse_select_query_with_order_by() {
     assert_eq!(Ok(expected), parser.stmt());
 
     let s = "SELECT foo FROM bar WHERE baz ORDER BY qax ASC;";
-    let mut parser = Parser::new(s);
+    let parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![Expression::Identifier("foo")],
         table: Some("bar"),
@@ -263,4 +263,36 @@ fn test_parse_select_query_with_order_by() {
     };
     let expected = Select(expected_query);
     assert_eq!(Ok(expected), parser.stmt());
+}
+
+#[test]
+fn test_parse_select_query_with_limit() {
+    let s = "SELECT foo FROM bar LIMIT 5;";
+    let parser = Parser::new(s);
+    let expected_query = SelectQuery {
+        columns: vec![Expression::Identifier("foo")],
+        table: Some("bar"),
+        where_clause: None,
+        order_by: None,
+        limit: Some(5),
+    };
+    let expected = Select(expected_query);
+    assert_eq!(Ok(expected), parser.stmt());
+
+    let s = "SELECT foo FROM bar WHERE baz ORDER BY qux LIMIT 10;";
+    let parser = Parser::new(s);
+    let expected_query = SelectQuery {
+        columns: vec![Expression::Identifier("foo")],
+        table: Some("bar"),
+        where_clause: Some(Expression::Identifier("baz")),
+        order_by: Some(OrderBy { terms: vec![Expression::Identifier("qux")], order: None }),
+        limit: Some(10),
+    };
+    let expected = Select(expected_query);
+    assert_eq!(Ok(expected), parser.stmt());
+
+    let s = "SELECT foo LIMIT -1;";
+    let parser = Parser::new(s);
+    let expected = Error::ExpectedNonNegativeInteger { pos: 17, got: -1 };
+    assert_eq!(Err(expected), parser.stmt());
 }
