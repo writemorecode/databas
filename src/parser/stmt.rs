@@ -22,6 +22,7 @@ pub struct SelectQuery<'a> {
     pub where_clause: Option<Expression<'a>>,
     pub order_by: Option<OrderBy<'a>>,
     pub limit: Option<u32>,
+    pub offset: Option<u32>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -157,11 +158,20 @@ impl<'a> SelectQuery<'a> {
             None
         };
 
+        let offset = if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Offset), .. })) =
+            parser.lexer.peek()
+        {
+            parser.lexer.next();
+            parser.parse_non_negative_integer()?
+        } else {
+            None
+        };
+
         parser.lexer.expect_token(TokenKind::Semicolon).map_err(|err| match err {
             Error::UnexpectedEnd { pos } => Error::ExpectedCommaOrSemicolon { pos },
             err => err,
         })?;
 
-        Ok(Statement::Select(SelectQuery { columns, table, where_clause, order_by, limit }))
+        Ok(Statement::Select(SelectQuery { columns, table, where_clause, order_by, limit, offset }))
     }
 }

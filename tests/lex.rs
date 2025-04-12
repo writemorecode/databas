@@ -150,7 +150,7 @@ fn test_block_comment() {
 #[test]
 fn test_multiline_line_comment() {
     let s = "-- hello world\n-- another comment\n123 * 456";
-    let mut lexer = Lexer::new(&s);
+    let mut lexer = Lexer::new(s);
     lexer.expect(TokenKind::Number(Integer(123)), 34);
     lexer.expect(TokenKind::Asterisk, 38);
     lexer.expect(TokenKind::Number(Integer(456)), 40);

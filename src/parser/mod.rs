@@ -121,7 +121,8 @@ impl<'a> Parser<'a> {
                                 | Keyword::Order
                                 | Keyword::Desc
                                 | Keyword::Asc
-                                | Keyword::Limit,
+                                | Keyword::Limit
+                                | Keyword::Offset,
                         ),
                 )
             } {

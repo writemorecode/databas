@@ -152,6 +152,7 @@ fn test_parse_select_query() {
         where_clause: None,
         order_by: None,
         limit: None,
+        offset: None,
     };
     let expected = Select(expected_query);
     assert_eq!(Ok(expected), parser.stmt());
@@ -171,6 +172,7 @@ fn test_parse_select_query_with_from_table() {
         where_clause: None,
         order_by: None,
         limit: None,
+        offset: None,
     };
     let expected = Select(expected_query);
     assert_eq!(Ok(expected), parser.stmt());
@@ -194,6 +196,7 @@ fn test_parse_select_query_with_from_table_and_where_clause() {
         ))),
         order_by: None,
         limit: None,
+        offset: None,
     };
     let expected = Select(expected_query);
     assert_eq!(Ok(expected), parser.stmt());
@@ -209,6 +212,7 @@ fn test_parse_select_query_without_from() {
         where_clause: Some(Expression::from(1)),
         order_by: None,
         limit: None,
+        offset: None,
     };
     let expected = Select(expected_query);
     assert_eq!(Ok(expected), parser.stmt());
@@ -245,6 +249,7 @@ fn test_parse_select_query_with_order_by() {
             order: Some(Ordering::Descending),
         }),
         limit: None,
+        offset: None,
     };
     let expected = Select(expected_query);
     assert_eq!(Ok(expected), parser.stmt());
@@ -260,12 +265,14 @@ fn test_parse_select_query_with_order_by() {
             order: Some(Ordering::Ascending),
         }),
         limit: None,
+        offset: None,
     };
     let expected = Select(expected_query);
     assert_eq!(Ok(expected), parser.stmt());
 }
 
 #[test]
+
 fn test_parse_select_query_with_limit() {
     let s = "SELECT foo FROM bar LIMIT 5;";
     let parser = Parser::new(s);
@@ -275,6 +282,7 @@ fn test_parse_select_query_with_limit() {
         where_clause: None,
         order_by: None,
         limit: Some(5),
+        offset: None,
     };
     let expected = Select(expected_query);
     assert_eq!(Ok(expected), parser.stmt());
@@ -287,6 +295,7 @@ fn test_parse_select_query_with_limit() {
         where_clause: Some(Expression::Identifier("baz")),
         order_by: Some(OrderBy { terms: vec![Expression::Identifier("qux")], order: None }),
         limit: Some(10),
+        offset: None,
     };
     let expected = Select(expected_query);
     assert_eq!(Ok(expected), parser.stmt());
@@ -295,4 +304,33 @@ fn test_parse_select_query_with_limit() {
     let parser = Parser::new(s);
     let expected = Error::ExpectedNonNegativeInteger { pos: 17, got: -1 };
     assert_eq!(Err(expected), parser.stmt());
+}
+
+#[test]
+fn test_parse_select_query_with_offset() {
+    let s = "SELECT foo FROM bar OFFSET 5;";
+    let parser = Parser::new(s);
+    let expected_query = SelectQuery {
+        columns: vec![Expression::Identifier("foo")],
+        table: Some("bar"),
+        where_clause: None,
+        order_by: None,
+        limit: None,
+        offset: Some(5),
+    };
+    let expected = Select(expected_query);
+    assert_eq!(Ok(expected), parser.stmt());
+
+    let s = "SELECT foo FROM bar LIMIT 10 OFFSET 5;";
+    let parser = Parser::new(s);
+    let expected_query = SelectQuery {
+        columns: vec![Expression::Identifier("foo")],
+        table: Some("bar"),
+        where_clause: None,
+        order_by: None,
+        limit: Some(10),
+        offset: Some(5),
+    };
+    let expected = Select(expected_query);
+    assert_eq!(Ok(expected), parser.stmt());
 }
