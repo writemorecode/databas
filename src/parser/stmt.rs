@@ -4,7 +4,7 @@ use crate::{
     error::Error,
     lexer::{
         token::Token,
-        token_kind::{Keyword, TokenKind},
+        token_kind::{Keyword, NumberKind, TokenKind},
     },
 };
 
@@ -153,6 +153,24 @@ impl<'a> SelectQuery<'a> {
         {
             parser.lexer.next();
             parser.parse_non_negative_integer()?
+        } else {
+            None
+        };
+
+        let limit = if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Limit), .. })) =
+            parser.lexer.peek()
+        {
+            parser.lexer.next();
+            parser
+                .lexer
+                .next()
+                .ok_or(Error::UnexpectedEnd { pos: parser.lexer.position })
+                .and_then(|tok| {
+                    tok.map(|tok| match tok.kind {
+                        TokenKind::Number(NumberKind::Integer(num)) => Ok(num.try_into().ok()),
+                        other => Err(Error::ExpectedInteger { pos: tok.offset, got: other }),
+                    })
+                })??
         } else {
             None
         };
