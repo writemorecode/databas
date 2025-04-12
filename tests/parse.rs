@@ -5,7 +5,8 @@ use databas::{
         Parser,
         expr::Expression,
         op::Op,
-        stmt::{OrderBy, Ordering, SelectQuery, Statement::Select},
+        stmt::Statement::Select,
+        stmt::select::{OrderBy, Ordering, SelectQuery},
     },
 };
 

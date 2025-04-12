@@ -4,7 +4,8 @@ pub mod stmt;
 
 use expr::{Expression, Literal};
 use op::{Op, infix_binding_power, prefix_binding_power};
-use stmt::{SelectQuery, Statement};
+use stmt::Statement;
+use stmt::select::SelectQuery;
 
 use crate::error::Error;
 use crate::lexer::Lexer;

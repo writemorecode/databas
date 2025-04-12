@@ -6,24 +6,10 @@ use crate::{
         token::Token,
         token_kind::{Keyword, TokenKind},
     },
+    parser::{Parser, expr::Expression},
 };
 
-use super::{Parser, expr::Expression};
-
-#[derive(Debug, PartialEq)]
-pub enum Statement<'a> {
-    Select(SelectQuery<'a>),
-}
-
-#[derive(Debug, PartialEq)]
-pub struct SelectQuery<'a> {
-    pub columns: Vec<Expression<'a>>,
-    pub table: Option<&'a str>,
-    pub where_clause: Option<Expression<'a>>,
-    pub order_by: Option<OrderBy<'a>>,
-    pub limit: Option<u32>,
-    pub offset: Option<u32>,
-}
+use super::Statement;
 
 #[derive(Debug, PartialEq)]
 pub enum Ordering {
@@ -86,6 +72,15 @@ impl Display for OrderBy<'_> {
         Ok(())
     }
 }
+#[derive(Debug, PartialEq)]
+pub struct SelectQuery<'a> {
+    pub columns: Vec<Expression<'a>>,
+    pub table: Option<&'a str>,
+    pub where_clause: Option<Expression<'a>>,
+    pub order_by: Option<OrderBy<'a>>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
 
 impl Display for SelectQuery<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -109,14 +104,6 @@ impl Display for SelectQuery<'_> {
         }
 
         writeln!(f, ";")
-    }
-}
-
-impl Display for Statement<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Statement::Select(query) => query.fmt(f),
-        }
     }
 }
 
@@ -173,5 +160,56 @@ impl<'a> SelectQuery<'a> {
         })?;
 
         Ok(Statement::Select(SelectQuery { columns, table, where_clause, order_by, limit, offset }))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct SelectQueryBuilder {
+    pub columns: Vec<Expression<'static>>,
+    pub table: Option<&'static str>,
+    pub where_clause: Option<Expression<'static>>,
+    pub order_by: Option<OrderBy<'static>>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+impl SelectQueryBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn offset(mut self, offset: u32) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+    pub fn limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+    pub fn order_by(mut self, order_by: OrderBy<'static>) -> Self {
+        self.order_by = Some(order_by);
+        self
+    }
+    pub fn where_clause(mut self, where_clause: Expression<'static>) -> Self {
+        self.where_clause = Some(where_clause);
+        self
+    }
+    pub fn table(mut self, table: &'static str) -> Self {
+        self.table = Some(table);
+        self
+    }
+    pub fn columns(mut self, columns: Vec<Expression<'static>>) -> Self {
+        self.columns = columns;
+        self
+    }
+    pub fn build(self) -> SelectQuery<'static> {
+        SelectQuery {
+            columns: self.columns,
+            table: self.table,
+            where_clause: self.where_clause,
+            order_by: self.order_by,
+            limit: self.limit,
+            offset: self.offset,
+        }
     }
 }
