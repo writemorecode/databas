@@ -98,7 +98,8 @@ impl<'a> Parser<'a> {
                                 | Keyword::Where
                                 | Keyword::Order
                                 | Keyword::Desc
-                                | Keyword::Asc,
+                                | Keyword::Asc
+                                | Keyword::Limit,
                         ),
                 )
             } {

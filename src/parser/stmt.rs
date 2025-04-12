@@ -4,7 +4,7 @@ use crate::{
     error::Error,
     lexer::{
         token::Token,
-        token_kind::{Keyword, TokenKind},
+        token_kind::{Keyword, NumberKind, TokenKind},
     },
 };
 
@@ -148,11 +148,29 @@ impl<'a> SelectQuery<'a> {
 
         let order_by = OrderBy::parse(parser)?;
 
+        let limit = if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Limit), .. })) =
+            parser.lexer.peek()
+        {
+            parser.lexer.next();
+            parser
+                .lexer
+                .next()
+                .ok_or(Error::UnexpectedEnd { pos: parser.lexer.position })
+                .and_then(|tok| {
+                    tok.map(|tok| match tok.kind {
+                        TokenKind::Number(NumberKind::Integer(num)) => Ok(num.try_into().ok()),
+                        other => Err(Error::ExpectedInteger { pos: tok.offset, got: other }),
+                    })
+                })??
+        } else {
+            None
+        };
+
         parser.lexer.expect_token(TokenKind::Semicolon).map_err(|err| match err {
             Error::UnexpectedEnd { pos } => Error::ExpectedCommaOrSemicolon { pos },
             err => err,
         })?;
 
-        Ok(Statement::Select(SelectQuery { columns, table, where_clause, order_by, limit: None }))
+        Ok(Statement::Select(SelectQuery { columns, table, where_clause, order_by, limit }))
     }
 }

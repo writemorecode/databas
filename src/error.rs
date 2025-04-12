@@ -18,6 +18,7 @@ pub enum Error<'a> {
     ExpectedOther { pos: usize, expected: TokenKind<'a> },
     ExpectedIdentifier { pos: usize, got: TokenKind<'a> },
     ExpectedCommaOrSemicolon { pos: usize },
+    ExpectedInteger { pos: usize, got: TokenKind<'a> },
 }
 
 impl Display for Error<'_> {
@@ -64,6 +65,9 @@ impl Display for Error<'_> {
             }
             Error::ExpectedCommaOrSemicolon { pos } => {
                 write!(f, "Expected colon or semicolon at position {pos}")
+            }
+            Error::ExpectedInteger { pos, got } => {
+                write!(f, "Expected integer at position {pos}, got token kind {got}")
             }
         }
     }

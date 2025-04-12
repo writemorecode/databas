@@ -264,3 +264,35 @@ fn test_parse_select_query_with_order_by() {
     let expected = Select(expected_query);
     assert_eq!(Ok(expected), parser.stmt());
 }
+
+#[test]
+fn test_parse_select_query_with_limit() {
+    let s = "SELECT foo FROM bar LIMIT 5;";
+    let mut parser = Parser::new(s);
+    let expected_query = SelectQuery {
+        columns: vec![Expression::Identifier("foo")],
+        table: Some("bar"),
+        where_clause: None,
+        order_by: None,
+        limit: Some(5),
+    };
+    let expected = Select(expected_query);
+    assert_eq!(Ok(expected), parser.stmt());
+
+    let s = "SELECT foo FROM bar WHERE baz ORDER BY qux LIMIT 10;";
+    let mut parser = Parser::new(s);
+    let expected_query = SelectQuery {
+        columns: vec![Expression::Identifier("foo")],
+        table: Some("bar"),
+        where_clause: Some(Expression::Identifier("baz")),
+        order_by: Some(OrderBy { terms: vec![Expression::Identifier("qux")], order: None }),
+        limit: Some(10),
+    };
+    let expected = Select(expected_query);
+    assert_eq!(Ok(expected), parser.stmt());
+
+    let s = "SELECT foo LIMIT -1;";
+    let mut parser = Parser::new(s);
+    let expected = Error::ExpectedInteger { pos: 17, got: TokenKind::Minus };
+    assert_eq!(Err(expected), parser.stmt());
+}
