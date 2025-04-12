@@ -2,7 +2,7 @@ use databas::parser::Parser;
 use std::io::Write;
 
 fn run(buf: String) {
-    let mut parser = Parser::new(&buf);
+    let parser = Parser::new(&buf);
     let out = parser.stmt();
     match out {
         Ok(out) => {

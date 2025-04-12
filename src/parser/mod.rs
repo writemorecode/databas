@@ -9,7 +9,7 @@ use stmt::{SelectQuery, Statement};
 use crate::error::Error;
 use crate::lexer::Lexer;
 use crate::lexer::token::Token;
-use crate::lexer::token_kind::{Keyword, TokenKind};
+use crate::lexer::token_kind::{Keyword, NumberKind, TokenKind};
 
 #[derive(Debug)]
 pub struct Parser<'a> {
@@ -19,6 +19,28 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     pub fn new(source: &'a str) -> Self {
         Self { lexer: Lexer::new(source) }
+    }
+
+    fn parse_non_negative_integer(&mut self) -> Result<Option<u32>, Error<'a>> {
+        self.lexer.next().ok_or(Error::UnexpectedEnd { pos: self.lexer.position }).and_then(
+            |tok| {
+                tok.map(|tok| match tok.kind {
+                    TokenKind::Number(NumberKind::Integer(num)) => Ok(num.try_into().ok()),
+                    TokenKind::Minus => {
+                        if let Some(Ok(Token {
+                            kind: TokenKind::Number(NumberKind::Integer(num)),
+                            ..
+                        })) = self.lexer.next()
+                        {
+                            Err(Error::ExpectedNonNegativeInteger { pos: tok.offset, got: -num })
+                        } else {
+                            Err(Error::Other(TokenKind::Minus))
+                        }
+                    }
+                    other => Err(Error::ExpectedInteger { pos: tok.offset, got: other }),
+                })
+            },
+        )?
     }
 }
 
@@ -45,7 +67,7 @@ impl<'a> Parser<'a> {
         )?
     }
 
-    pub fn stmt(&mut self) -> Result<Statement<'a>, Error<'a>> {
+    pub fn stmt(mut self) -> Result<Statement<'a>, Error<'a>> {
         let token =
             self.lexer.next().ok_or(Error::UnexpectedEnd { pos: self.lexer.position })??;
         match token.kind {
@@ -98,7 +120,8 @@ impl<'a> Parser<'a> {
                                 | Keyword::Where
                                 | Keyword::Order
                                 | Keyword::Desc
-                                | Keyword::Asc,
+                                | Keyword::Asc
+                                | Keyword::Limit,
                         ),
                 )
             } {
@@ -115,5 +138,27 @@ impl<'a> Parser<'a> {
             lhs = Expression::BinaryOp((Box::new(lhs), op, Box::new(rhs)));
         }
         Ok(lhs)
+    }
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+    #[test]
+    fn test_parse_non_negative_integer() {
+        let mut parser = Parser::new("123");
+        assert_eq!(parser.parse_non_negative_integer(), Ok(Some(123)));
+
+        let mut parser = Parser::new("-123");
+        assert_eq!(
+            parser.parse_non_negative_integer(),
+            Err(Error::ExpectedNonNegativeInteger { pos: 0, got: -123 })
+        );
+
+        let mut parser = Parser::new("abc");
+        assert_eq!(
+            parser.parse_non_negative_integer(),
+            Err(Error::ExpectedInteger { pos: 0, got: TokenKind::Identifier("abc") })
+        );
     }
 }
