@@ -98,6 +98,7 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::True) => Expression::Literal(Literal::Boolean(true)),
             TokenKind::Keyword(Keyword::False) => Expression::Literal(Literal::Boolean(false)),
             TokenKind::Identifier(id) => Expression::Identifier(id),
+            TokenKind::Asterisk => Expression::Wildcard,
             TokenKind::LeftParen => {
                 let lhs = self
                     .expr_bp(0)
