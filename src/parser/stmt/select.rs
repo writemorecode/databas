@@ -103,12 +103,12 @@ impl Display for SelectQuery<'_> {
             write!(f, " ORDER BY {}", order_by_clause)?;
         }
 
-        writeln!(f, ";")
+        write!(f, ";")
     }
 }
 
 impl<'a> SelectQuery<'a> {
-    pub fn parse(mut parser: Parser<'a>) -> Result<Statement<'a>, Error<'a>> {
+    pub fn parse(parser: &mut Parser<'a>) -> Result<Statement<'a>, Error<'a>> {
         let columns = match parser.parse_expression_list() {
             Err(Error::UnexpectedEnd { pos }) => return Err(Error::ExpectedExpression { pos }),
             Ok(cols) => cols,
@@ -134,7 +134,7 @@ impl<'a> SelectQuery<'a> {
                 None
             };
 
-        let order_by = OrderBy::parse(&mut parser)?;
+        let order_by = OrderBy::parse(parser)?;
 
         let limit = if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Limit), .. })) =
             parser.lexer.peek()

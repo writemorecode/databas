@@ -3,16 +3,15 @@ use std::io::Write;
 
 fn run(buf: String) {
     let parser = Parser::new(&buf);
-    let out = parser.stmt();
-    match out {
-        Ok(out) => {
-            println!("{}", out);
-            dbg!(out);
+    for tree in parser {
+        match tree {
+            Ok(t) => println!("'{t}'"),
+            Err(err) => {
+                eprintln!("ERROR: {err}");
+                return;
+            }
         }
-        Err(err) => {
-            println!("Error: {}", err);
-        }
-    };
+    }
     println!();
 }
 

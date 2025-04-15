@@ -17,6 +17,17 @@ pub struct Parser<'a> {
     lexer: Lexer<'a>,
 }
 
+impl<'a> Iterator for Parser<'a> {
+    type Item = Result<Statement<'a>, Error<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.stmt() {
+            Err(Error::UnexpectedEnd { .. }) => None,
+            other => Some(other),
+        }
+    }
+}
+
 impl<'a> Parser<'a> {
     pub fn new(source: &'a str) -> Self {
         Self { lexer: Lexer::new(source) }
@@ -68,7 +79,7 @@ impl<'a> Parser<'a> {
         )?
     }
 
-    pub fn stmt(mut self) -> Result<Statement<'a>, Error<'a>> {
+    pub fn stmt(&mut self) -> Result<Statement<'a>, Error<'a>> {
         let token =
             self.lexer.next().ok_or(Error::UnexpectedEnd { pos: self.lexer.position })??;
         match token.kind {

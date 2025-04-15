@@ -12,7 +12,7 @@ use databas::{
 #[test]
 fn test_parse_select_query() {
     let s = "SELECT abc, def, ghi;";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![
             Expression::Identifier("abc"),
@@ -32,7 +32,7 @@ fn test_parse_select_query() {
 #[test]
 fn test_parse_select_query_with_from_table() {
     let s = "SELECT abc, def, ghi FROM table;";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![
             Expression::Identifier("abc"),
@@ -52,7 +52,7 @@ fn test_parse_select_query_with_from_table() {
 #[test]
 fn test_parse_select_query_with_from_table_and_where_clause() {
     let s = "SELECT abc, def, ghi FROM table WHERE abc < def;";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![
             Expression::Identifier("abc"),
@@ -76,7 +76,7 @@ fn test_parse_select_query_with_from_table_and_where_clause() {
 #[test]
 fn test_parse_select_query_without_from() {
     let s = "SELECT 3 WHERE 1;";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![Expression::from(3)],
         table: None,
@@ -92,17 +92,17 @@ fn test_parse_select_query_without_from() {
 #[test]
 fn test_parse_invalid_select_query() {
     let s = "SELECT";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected = Err(Error::ExpectedExpression { pos: 6 });
     assert_eq!(expected, parser.stmt());
 
     let s = "SELECT 1";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected = Err(Error::ExpectedCommaOrSemicolon { pos: 8 });
     assert_eq!(expected, parser.stmt());
 
     let s = "SELECT 1,";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected = Err(Error::ExpectedExpression { pos: 9 });
     assert_eq!(expected, parser.stmt());
 }
@@ -110,7 +110,7 @@ fn test_parse_invalid_select_query() {
 #[test]
 fn test_parse_select_query_with_order_by() {
     let s = "SELECT foo FROM bar WHERE baz ORDER BY qax, quux DESC;";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![Expression::Identifier("foo")],
         table: Some("bar"),
@@ -126,7 +126,7 @@ fn test_parse_select_query_with_order_by() {
     assert_eq!(Ok(expected), parser.stmt());
 
     let s = "SELECT foo FROM bar WHERE baz ORDER BY qax ASC;";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![Expression::Identifier("foo")],
         table: Some("bar"),
@@ -146,7 +146,7 @@ fn test_parse_select_query_with_order_by() {
 
 fn test_parse_select_query_with_limit() {
     let s = "SELECT foo FROM bar LIMIT 5;";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![Expression::Identifier("foo")],
         table: Some("bar"),
@@ -159,7 +159,7 @@ fn test_parse_select_query_with_limit() {
     assert_eq!(Ok(expected), parser.stmt());
 
     let s = "SELECT foo FROM bar WHERE baz ORDER BY qux LIMIT 10;";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![Expression::Identifier("foo")],
         table: Some("bar"),
@@ -172,7 +172,7 @@ fn test_parse_select_query_with_limit() {
     assert_eq!(Ok(expected), parser.stmt());
 
     let s = "SELECT foo LIMIT -1;";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected = Error::ExpectedNonNegativeInteger { pos: 17, got: -1 };
     assert_eq!(Err(expected), parser.stmt());
 }
@@ -180,7 +180,7 @@ fn test_parse_select_query_with_limit() {
 #[test]
 fn test_parse_select_query_with_offset() {
     let s = "SELECT foo FROM bar OFFSET 5;";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![Expression::Identifier("foo")],
         table: Some("bar"),
@@ -193,7 +193,7 @@ fn test_parse_select_query_with_offset() {
     assert_eq!(Ok(expected), parser.stmt());
 
     let s = "SELECT foo FROM bar LIMIT 10 OFFSET 5;";
-    let parser = Parser::new(s);
+    let mut parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: vec![Expression::Identifier("foo")],
         table: Some("bar"),
