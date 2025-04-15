@@ -39,31 +39,27 @@ impl<'a> Lexer<'a> {
         self.rest = trimmed;
     }
 
-    fn skip_comment(&mut self) -> bool {
-        let mut skipped = false;
-        if self.rest.starts_with("--") {
-            if let Some((comment_text, rest)) = self.rest.split_once("\n") {
-                self.position += comment_text.len() + 1;
-                self.rest = rest;
-                skipped = true;
+    fn skip_to_next(&mut self, end: &str) {
+        if let Some((comment_text, rest)) = self.rest.split_once(end) {
+            self.position += comment_text.len() + end.len();
+            self.rest = rest;
+        } else {
+            self.position += self.rest.len();
+            self.rest = "";
+        }
+    }
+
+    fn skip_comment(&mut self) {
+        loop {
+            if self.rest.starts_with("--") {
+                self.skip_to_next("\n");
+            } else if self.rest.starts_with("/*") {
+                self.skip_to_next("*/");
             } else {
-                self.position = self.source.len();
-                self.rest = "";
-                skipped = false;
-            }
-        } else if self.rest.starts_with("/*") {
-            if let Some((comment_text, rest)) = self.rest.split_once("*/") {
-                self.position += comment_text.len() + 2;
-                self.rest = rest;
-                skipped = true;
-            } else {
-                self.position = self.source.len();
-                self.rest = "";
-                skipped = false;
+                break;
             }
         }
         self.skip_whitespace();
-        skipped
     }
 
     pub fn peek(&mut self) -> Option<&Result<Token<'a>, Error>> {
@@ -99,11 +95,7 @@ impl<'a> Iterator for Lexer<'a> {
         }
 
         self.skip_whitespace();
-        loop {
-            if !self.skip_comment() {
-                break;
-            };
-        }
+        self.skip_comment();
 
         let mut chars = self.rest.chars();
         let c = chars.next()?;
