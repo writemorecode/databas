@@ -11,6 +11,7 @@ trait LexerExt {
 }
 
 impl LexerExt for Lexer<'_> {
+    #[track_caller]
     fn expect(&mut self, kind: TokenKind, offset: usize) {
         let expected = Token { kind, offset };
         let got = self.next();
