@@ -15,6 +15,7 @@ pub enum Expression<'a> {
     Identifier(&'a str),
     UnaryOp((Op, Box<Expression<'a>>)),
     BinaryOp((Box<Expression<'a>>, Op, Box<Expression<'a>>)),
+    Wildcard,
 }
 
 impl From<i32> for Expression<'_> {
@@ -36,6 +37,7 @@ impl Display for Expression<'_> {
             Expression::Identifier(ident) => write!(f, "{}", ident),
             Expression::UnaryOp((op, expr)) => write!(f, "{}{}", op, expr),
             Expression::BinaryOp((left, op, right)) => write!(f, "{} {} {}", left, op, right),
+            Expression::Wildcard => write!(f, "*"),
         }
     }
 }
