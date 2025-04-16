@@ -108,7 +108,7 @@ impl Display for SelectQuery<'_> {
 }
 
 impl<'a> SelectQuery<'a> {
-    pub fn parse(parser: &mut Parser<'a>) -> Result<Statement<'a>, Error<'a>> {
+    pub fn parse(parser: &mut Parser<'a>) -> Result<SelectQuery<'a>, Error<'a>> {
         let columns = match parser.parse_expression_list() {
             Err(Error::UnexpectedEnd { pos }) => return Err(Error::ExpectedExpression { pos }),
             Ok(cols) => cols,
@@ -159,7 +159,7 @@ impl<'a> SelectQuery<'a> {
             err => err,
         })?;
 
-        Ok(Statement::Select(SelectQuery { columns, table, where_clause, order_by, limit, offset }))
+        Ok(SelectQuery { columns, table, where_clause, order_by, limit, offset })
     }
 }
 

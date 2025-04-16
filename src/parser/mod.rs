@@ -83,7 +83,7 @@ impl<'a> Parser<'a> {
         let token =
             self.lexer.next().ok_or(Error::UnexpectedEnd { pos: self.lexer.position })??;
         match token.kind {
-            TokenKind::Keyword(Keyword::Select) => SelectQuery::parse(self),
+            TokenKind::Keyword(Keyword::Select) => Ok(Statement::Select(SelectQuery::parse(self)?)),
             other => Err(Error::Other(other)),
         }
     }
