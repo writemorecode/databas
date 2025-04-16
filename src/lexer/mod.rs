@@ -49,8 +49,9 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn skip_comment(&mut self) {
+    fn skip_whitespace_and_comments(&mut self) {
         loop {
+            self.skip_whitespace();
             if self.rest.starts_with("--") {
                 self.skip_to_next("\n");
             } else if self.rest.starts_with("/*") {
@@ -59,7 +60,6 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        self.skip_whitespace();
     }
 
     pub fn peek(&mut self) -> Option<&Result<Token<'a>, Error>> {
@@ -94,8 +94,7 @@ impl<'a> Iterator for Lexer<'a> {
             return Some(next);
         }
 
-        self.skip_whitespace();
-        self.skip_comment();
+        self.skip_whitespace_and_comments();
 
         let mut chars = self.rest.chars();
         let c = chars.next()?;
