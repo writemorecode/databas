@@ -8,9 +8,6 @@ use crate::{
     },
     parser::{Parser, expr::Expression},
 };
-
-use super::Statement;
-
 #[derive(Debug, PartialEq)]
 pub enum Ordering {
     Ascending,

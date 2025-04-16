@@ -5,6 +5,7 @@ pub mod stmt;
 use expr::{Expression, Literal};
 use op::{Op, infix_binding_power, prefix_binding_power};
 use stmt::Statement;
+use stmt::insert::InsertQuery;
 use stmt::select::SelectQuery;
 
 use crate::error::Error;
@@ -54,14 +55,21 @@ impl<'a> Parser<'a> {
             },
         )?
     }
-}
 
-impl<'a> Parser<'a> {
     fn parse_expression_list(&mut self) -> Result<Vec<Expression<'a>>, Error<'a>> {
         let mut expr_list = vec![self.expr_bp(0)?];
         while let Some(Ok(Token { kind: TokenKind::Comma, .. })) = self.lexer.peek() {
             self.lexer.next();
             expr_list.push(self.expr_bp(0)?);
+        }
+        Ok(expr_list)
+    }
+
+    fn parse_identifier_list(&mut self) -> Result<Vec<&'a str>, Error<'a>> {
+        let mut expr_list = vec![self.parse_identifier()?];
+        while let Some(Ok(Token { kind: TokenKind::Comma, .. })) = self.lexer.peek() {
+            self.lexer.next();
+            expr_list.push(self.parse_identifier()?);
         }
         Ok(expr_list)
     }
@@ -84,6 +92,7 @@ impl<'a> Parser<'a> {
             self.lexer.next().ok_or(Error::UnexpectedEnd { pos: self.lexer.position })??;
         match token.kind {
             TokenKind::Keyword(Keyword::Select) => Ok(Statement::Select(SelectQuery::parse(self)?)),
+            TokenKind::Keyword(Keyword::Insert) => Ok(Statement::Insert(InsertQuery::parse(self)?)),
             other => Err(Error::Other(other)),
         }
     }
