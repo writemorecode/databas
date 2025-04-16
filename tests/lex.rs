@@ -104,6 +104,13 @@ fn test_keywords() {
     lexer.expect(TokenKind::Keyword(Keyword::Not), 44);
     lexer.expect(TokenKind::Identifier("is_admin"), 48);
     lexer.expect(TokenKind::Semicolon, 56);
+
+    let s = "INSERT INTO some_table VALUES (a, b, c);";
+    let mut lexer = Lexer::new(s);
+    lexer.expect(TokenKind::Keyword(Keyword::Insert), 0);
+    lexer.expect(TokenKind::Keyword(Keyword::Into), 7);
+    lexer.expect(TokenKind::Identifier("some_table"), 12);
+    lexer.expect(TokenKind::Keyword(Keyword::Values), 23);
 }
 
 #[test]

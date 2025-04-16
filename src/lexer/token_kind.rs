@@ -45,6 +45,9 @@ pub enum Keyword {
     Not,
     Limit,
     Offset,
+    Insert,
+    Into,
+    Values,
 }
 
 impl Display for Keyword {
@@ -64,6 +67,9 @@ impl Display for Keyword {
             Keyword::Not => write!(f, "NOT"),
             Keyword::Limit => write!(f, "LIMIT"),
             Keyword::Offset => write!(f, "OFFSET"),
+            Keyword::Insert => write!(f, "INSERT"),
+            Keyword::Into => write!(f, "INTO"),
+            Keyword::Values => write!(f, "VALUES"),
         }
     }
 }
@@ -125,6 +131,12 @@ impl<'a> From<&'a str> for TokenKind<'a> {
             TokenKind::Keyword(Keyword::Limit)
         } else if value.eq_ignore_ascii_case("OFFSET") {
             TokenKind::Keyword(Keyword::Offset)
+        } else if value.eq_ignore_ascii_case("INSERT") {
+            TokenKind::Keyword(Keyword::Insert)
+        } else if value.eq_ignore_ascii_case("INTO") {
+            TokenKind::Keyword(Keyword::Into)
+        } else if value.eq_ignore_ascii_case("VALUES") {
+            TokenKind::Keyword(Keyword::Values)
         } else {
             TokenKind::Identifier(value)
         };
