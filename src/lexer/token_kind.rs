@@ -103,44 +103,27 @@ impl Display for TokenKind<'_> {
 
 impl<'a> From<&'a str> for TokenKind<'a> {
     fn from(value: &'a str) -> Self {
-        let kind: TokenKind = if value.eq_ignore_ascii_case("SELECT") {
-            TokenKind::Keyword(Keyword::Select)
-        } else if value.eq_ignore_ascii_case("FROM") {
-            TokenKind::Keyword(Keyword::From)
-        } else if value.eq_ignore_ascii_case("WHERE") {
-            TokenKind::Keyword(Keyword::Where)
-        } else if value.eq_ignore_ascii_case("AND") {
-            TokenKind::Keyword(Keyword::And)
-        } else if value.eq_ignore_ascii_case("OR") {
-            TokenKind::Keyword(Keyword::Or)
-        } else if value.eq_ignore_ascii_case("TRUE") {
-            TokenKind::Keyword(Keyword::True)
-        } else if value.eq_ignore_ascii_case("FALSE") {
-            TokenKind::Keyword(Keyword::False)
-        } else if value.eq_ignore_ascii_case("NOT") {
-            TokenKind::Keyword(Keyword::Not)
-        } else if value.eq_ignore_ascii_case("ORDER") {
-            TokenKind::Keyword(Keyword::Order)
-        } else if value.eq_ignore_ascii_case("BY") {
-            TokenKind::Keyword(Keyword::By)
-        } else if value.eq_ignore_ascii_case("ASC") {
-            TokenKind::Keyword(Keyword::Asc)
-        } else if value.eq_ignore_ascii_case("DESC") {
-            TokenKind::Keyword(Keyword::Desc)
-        } else if value.eq_ignore_ascii_case("LIMIT") {
-            TokenKind::Keyword(Keyword::Limit)
-        } else if value.eq_ignore_ascii_case("OFFSET") {
-            TokenKind::Keyword(Keyword::Offset)
-        } else if value.eq_ignore_ascii_case("INSERT") {
-            TokenKind::Keyword(Keyword::Insert)
-        } else if value.eq_ignore_ascii_case("INTO") {
-            TokenKind::Keyword(Keyword::Into)
-        } else if value.eq_ignore_ascii_case("VALUES") {
-            TokenKind::Keyword(Keyword::Values)
-        } else {
-            TokenKind::Identifier(value)
-        };
-        kind
+        let uppercase = value.to_uppercase();
+        match uppercase.as_ref() {
+            "SELECT" => TokenKind::Keyword(Keyword::Select),
+            "FROM" => TokenKind::Keyword(Keyword::From),
+            "WHERE" => TokenKind::Keyword(Keyword::Where),
+            "ORDER" => TokenKind::Keyword(Keyword::Order),
+            "BY" => TokenKind::Keyword(Keyword::By),
+            "ASC" => TokenKind::Keyword(Keyword::Asc),
+            "DESC" => TokenKind::Keyword(Keyword::Desc),
+            "AND" => TokenKind::Keyword(Keyword::And),
+            "OR" => TokenKind::Keyword(Keyword::Or),
+            "TRUE" => TokenKind::Keyword(Keyword::True),
+            "FALSE" => TokenKind::Keyword(Keyword::False),
+            "NOT" => TokenKind::Keyword(Keyword::Not),
+            "LIMIT" => TokenKind::Keyword(Keyword::Limit),
+            "OFFSET" => TokenKind::Keyword(Keyword::Offset),
+            "INSERT" => TokenKind::Keyword(Keyword::Insert),
+            "INTO" => TokenKind::Keyword(Keyword::Into),
+            "VALUES" => TokenKind::Keyword(Keyword::Values),
+            _ => TokenKind::Identifier(value),
+        }
     }
 }
 
