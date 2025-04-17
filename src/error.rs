@@ -3,76 +3,94 @@ use crate::lexer::token_kind::TokenKind;
 use std::fmt::Display;
 
 #[derive(Debug, PartialEq, Copy, Clone)]
-pub enum Error<'a> {
-    UnterminatedString { pos: usize },
-    InvalidCharacter { pos: usize, c: char },
-    InvalidNumber { pos: usize },
-    UnexpectedEnd { pos: usize },
-    UnexpectedTokenKind { expected: TokenKind<'a>, got: TokenKind<'a> },
-    InvalidPrefixOperator { op: TokenKind<'a>, pos: usize },
-    InvalidOperator { op: TokenKind<'a>, pos: usize },
-    Other(TokenKind<'a>),
-    UnclosedParenthesis { pos: usize },
-    ExpectedExpression { pos: usize },
-    UnterminatedStatement { pos: usize },
-    ExpectedOther { pos: usize, expected: TokenKind<'a> },
-    ExpectedIdentifier { pos: usize, got: TokenKind<'a> },
-    ExpectedCommaOrSemicolon { pos: usize },
-    ExpectedInteger { pos: usize, got: TokenKind<'a> },
-    ExpectedNonNegativeInteger { pos: usize, got: i32 },
+pub struct SQLError<'a> {
+    pub kind: SQLErrorKind<'a>,
+    pub pos: usize,
 }
 
-impl Display for Error<'_> {
+impl<'a> SQLError<'a> {
+    pub fn new(kind: SQLErrorKind<'a>, pos: usize) -> Self {
+        Self { kind, pos }
+    }
+}
+
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub enum SQLErrorKind<'a> {
+    ExpectedCommaOrSemicolon,
+    ExpectedExpression,
+    ExpectedIdentifier { got: TokenKind<'a> },
+    ExpectedInteger { got: TokenKind<'a> },
+    ExpectedNonNegativeInteger { got: i32 },
+    ExpectedOther { expected: TokenKind<'a> },
+    InvalidCharacter { c: char },
+    InvalidNumber,
+    InvalidOperator { op: TokenKind<'a> },
+    InvalidPrefixOperator { op: TokenKind<'a> },
+    Other(TokenKind<'a>),
+    UnclosedParenthesis,
+    UnexpectedEnd,
+    UnexpectedTokenKind { expected: TokenKind<'a>, got: TokenKind<'a> },
+    UnterminatedStatement,
+    UnterminatedString,
+}
+
+impl Display for SQLErrorKind<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::UnterminatedString { pos } => {
-                write!(f, "Unterminated string starting at position {pos}")
+            SQLErrorKind::UnterminatedString => {
+                write!(f, "Unterminated string")
             }
-            Error::InvalidCharacter { c, pos } => {
-                write!(f, "Invalid character '{c}' at position {pos}")
+            SQLErrorKind::InvalidCharacter { c } => {
+                write!(f, "Invalid character '{c}'")
             }
-            Error::InvalidNumber { pos } => {
-                write!(f, "Invalid numeric literal at position {pos}")
+            SQLErrorKind::InvalidNumber => {
+                write!(f, "Invalid numeric literal")
             }
-            Error::UnexpectedEnd { pos } => {
-                write!(f, "Unexpected end of input at position {pos}.")
+            SQLErrorKind::UnexpectedEnd => {
+                write!(f, "Unexpected end of input")
             }
-            Error::UnexpectedTokenKind { expected, got } => {
-                write!(f, "Unexpected token, got {got}, expected {expected}.")
+            SQLErrorKind::UnexpectedTokenKind { expected, got } => {
+                write!(f, "Unexpected token, got {got}, expected {expected}")
             }
-            Error::InvalidPrefixOperator { op, pos } => {
-                write!(f, "Invalid prefix operator '{op}' at position {pos}.")
+            SQLErrorKind::InvalidPrefixOperator { op } => {
+                write!(f, "Invalid prefix operator '{op}'")
             }
-            Error::InvalidOperator { op, pos } => {
-                write!(f, "Invalid operator '{op}' at position {pos}.")
+            SQLErrorKind::InvalidOperator { op } => {
+                write!(f, "Invalid operator '{op}'")
             }
-            Error::UnclosedParenthesis { pos } => {
-                write!(f, "Parenthesis at position {pos} not closed.")
+            SQLErrorKind::UnclosedParenthesis => {
+                write!(f, "Parenthesis not closed")
             }
-            Error::Other(token) => {
+            SQLErrorKind::Other(token) => {
                 write!(f, "Bad token: {token}")
             }
-            Error::ExpectedExpression { pos } => {
-                write!(f, "Unexpected end of input at position {pos}. Expected expression.")
+            SQLErrorKind::ExpectedExpression => {
+                write!(f, "Unexpected end of input, expected expression")
             }
-            Error::UnterminatedStatement { pos } => {
-                write!(f, "Unterminated statement at position {pos}. Missing semicolon.")
+            SQLErrorKind::UnterminatedStatement => {
+                write!(f, "Unterminated statement, missing semicolon")
             }
-            Error::ExpectedOther { pos, expected } => {
-                write!(f, "Expected token {expected} at  position {pos}.")
+            SQLErrorKind::ExpectedOther { expected } => {
+                write!(f, "Expected token {expected}")
             }
-            Error::ExpectedIdentifier { pos, got } => {
-                write!(f, "Expected identifier at position {pos}, got token kind {got}")
+            SQLErrorKind::ExpectedIdentifier { got } => {
+                write!(f, "Expected identifier got token kind {got}")
             }
-            Error::ExpectedCommaOrSemicolon { pos } => {
-                write!(f, "Expected colon or semicolon at position {pos}")
+            SQLErrorKind::ExpectedCommaOrSemicolon => {
+                write!(f, "Expected colon or semicolon")
             }
-            Error::ExpectedInteger { pos, got } => {
-                write!(f, "Expected integer at position {pos}, got token kind {got}")
+            SQLErrorKind::ExpectedInteger { got } => {
+                write!(f, "Expected integer, got token kind {got}")
             }
-            Error::ExpectedNonNegativeInteger { pos, got } => {
-                write!(f, "Expected non-negative integer at position {pos}, got {got}")
+            SQLErrorKind::ExpectedNonNegativeInteger { got } => {
+                write!(f, "Expected non-negative integer, got {got}")
             }
         }
+    }
+}
+
+impl Display for SQLError<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Error at position {}: {}.", self.pos, self.kind)
     }
 }

@@ -1,5 +1,5 @@
 use databas::{
-    error::Error,
+    error::{SQLError, SQLErrorKind},
     lexer::token_kind::TokenKind,
     parser::{Parser, expr::Expression, op::Op},
 };
@@ -89,8 +89,10 @@ fn test_negative_exp() {
 fn test_invalid_operator() {
     let s = "operand invalid_operator";
     let parser = Parser::new(s);
-    let expected_err =
-        Error::InvalidOperator { op: TokenKind::Identifier("invalid_operator"), pos: 8 };
+    let expected_err = SQLError::new(
+        SQLErrorKind::InvalidOperator { op: TokenKind::Identifier("invalid_operator") },
+        8,
+    );
     assert_eq!(Err(expected_err), parser.expr());
 }
 

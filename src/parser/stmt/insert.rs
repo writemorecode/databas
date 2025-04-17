@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use crate::{
-    error::Error,
+    error::SQLError,
     lexer::{
         token::Token,
         token_kind::{Keyword, TokenKind},
@@ -23,7 +23,7 @@ impl Display for Values<'_> {
 }
 
 impl<'a> Parser<'a> {
-    fn parse_values(&mut self) -> Result<Values<'a>, Error<'a>> {
+    fn parse_values(&mut self) -> Result<Values<'a>, SQLError<'a>> {
         self.lexer.expect_token(TokenKind::LeftParen)?;
         let mut values = vec![self.parse_expression_list()?];
         self.lexer.expect_token(TokenKind::RightParen)?;
@@ -51,7 +51,7 @@ impl Display for InsertQuery<'_> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn parse_insert_query(&mut self) -> Result<InsertQuery<'a>, Error<'a>> {
+    pub fn parse_insert_query(&mut self) -> Result<InsertQuery<'a>, SQLError<'a>> {
         self.lexer.expect_token(TokenKind::Keyword(Keyword::Into))?;
         let table = self.parse_identifier()?;
 

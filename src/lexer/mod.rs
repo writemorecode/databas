@@ -1,7 +1,7 @@
 pub mod token;
 pub mod token_kind;
 
-use crate::error::Error;
+use crate::error::{SQLError, SQLErrorKind};
 use token::Token;
 use token_kind::{NumberKind, TokenKind};
 
@@ -11,7 +11,7 @@ pub struct Lexer<'a> {
     pub rest: &'a str,
     pub position: usize,
 
-    pub peeked: Option<Result<Token<'a>, Error<'a>>>,
+    pub peeked: Option<Result<Token<'a>, SQLError<'a>>>,
 }
 
 impl<'a> Lexer<'a> {
@@ -19,16 +19,19 @@ impl<'a> Lexer<'a> {
         Self { source, rest: source, position: 0, peeked: None }
     }
 
-    pub fn expect_where(&mut self, check: impl Fn(TokenKind<'a>) -> bool) -> Result<(), Error<'a>> {
+    pub fn expect_where(
+        &mut self,
+        check: impl Fn(TokenKind<'a>) -> bool,
+    ) -> Result<(), SQLError<'a>> {
         match self.next() {
             Some(Ok(token)) if check(token.kind) => Ok(()),
-            Some(Ok(token)) => Err(Error::Other(token.kind)),
+            Some(Ok(token)) => Err(SQLError::new(SQLErrorKind::Other(token.kind), token.offset)),
             Some(Err(err)) => Err(err),
-            None => Err(Error::UnexpectedEnd { pos: self.position }),
+            None => Err(SQLError::new(SQLErrorKind::UnexpectedEnd, self.position)),
         }
     }
 
-    pub fn expect_token(&mut self, expected_kind: TokenKind<'a>) -> Result<(), Error<'a>> {
+    pub fn expect_token(&mut self, expected_kind: TokenKind<'a>) -> Result<(), SQLError<'a>> {
         self.expect_where(|kind| kind == expected_kind)
     }
 
@@ -62,7 +65,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn peek(&mut self) -> Option<&Result<Token<'a>, Error>> {
+    pub fn peek(&mut self) -> Option<&Result<Token<'a>, SQLError>> {
         if self.peeked.is_some() {
             return self.peeked.as_ref();
         }
@@ -87,7 +90,7 @@ enum MaybeEquals {
 }
 
 impl<'a> Iterator for Lexer<'a> {
-    type Item = Result<Token<'a>, Error<'a>>;
+    type Item = Result<Token<'a>, SQLError<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(next) = self.peeked.take() {
@@ -103,7 +106,7 @@ impl<'a> Iterator for Lexer<'a> {
         self.rest = chars.as_str();
         self.position += c.len_utf8();
 
-        let tok = |kind: TokenKind<'a>| -> Option<Result<Token<'a>, Error>> {
+        let tok = |kind: TokenKind<'a>| -> Option<Result<Token<'a>, SQLError>> {
             Some(Ok(Token { kind, offset: c_at }))
         };
 
@@ -125,7 +128,12 @@ impl<'a> Iterator for Lexer<'a> {
             ',' => return tok(TokenKind::Comma),
             ';' => return tok(TokenKind::Semicolon),
 
-            c => return Some(Err(Error::InvalidCharacter { c, pos: c_at })),
+            c => {
+                return Some(Err(SQLError::new(
+                    SQLErrorKind::InvalidCharacter { c },
+                    self.position,
+                )));
+            }
         };
 
         match started {
@@ -137,7 +145,7 @@ impl<'a> Iterator for Lexer<'a> {
                 } else if let Ok(parsed) = literal.parse::<f32>() {
                     NumberKind::Float(parsed)
                 } else {
-                    return Some(Err(Error::InvalidNumber { pos: c_at }));
+                    return Some(Err(SQLError::new(SQLErrorKind::InvalidNumber, c_at)));
                 };
 
                 let token = Token { kind: TokenKind::Number(kind), offset: c_at };
@@ -149,7 +157,7 @@ impl<'a> Iterator for Lexer<'a> {
             quote @ (Started::SingleQuotedString | Started::DoubleQuotedString) => {
                 let terminator = if let Started::SingleQuotedString = quote { '\'' } else { '"' };
                 let Some((literal, rest)) = self.rest.split_once(terminator) else {
-                    return Some(Err(Error::UnterminatedString { pos: c_at }));
+                    return Some(Err(SQLError::new(SQLErrorKind::UnterminatedString, c_at)));
                 };
                 let token = Token { kind: TokenKind::String(literal), offset: c_at };
                 self.position += literal.len() + 1;
@@ -183,10 +191,10 @@ impl<'a> Iterator for Lexer<'a> {
                         MaybeEquals::GreaterThan => TokenKind::GreaterThan,
                         MaybeEquals::Equals => TokenKind::Equals,
                         MaybeEquals::NotEquals => {
-                            return Some(Err(Error::InvalidCharacter {
-                                pos: self.position,
-                                c: '!',
-                            }));
+                            return Some(Err(SQLError::new(
+                                SQLErrorKind::InvalidCharacter { c: '!' },
+                                self.position,
+                            )));
                         }
                     }
                 };

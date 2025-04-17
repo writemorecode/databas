@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use crate::{
-    error::Error,
+    error::{SQLError, SQLErrorKind},
     lexer::{
         token::Token,
         token_kind::{Keyword, TokenKind},
@@ -30,7 +30,7 @@ pub struct OrderBy<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn parse_order_by(&mut self) -> Result<Option<OrderBy<'a>>, Error<'a>> {
+    pub fn parse_order_by(&mut self) -> Result<Option<OrderBy<'a>>, SQLError<'a>> {
         let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Order), .. })) = self.lexer.peek()
         else {
             return Ok(None);
@@ -94,9 +94,11 @@ impl Display for SelectQuery<'_> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn parse_select_query(&mut self) -> Result<SelectQuery<'a>, Error<'a>> {
+    pub fn parse_select_query(&mut self) -> Result<SelectQuery<'a>, SQLError<'a>> {
         let columns = match self.parse_expression_list() {
-            Err(Error::UnexpectedEnd { pos }) => return Err(Error::ExpectedExpression { pos }),
+            Err(SQLError { kind: SQLErrorKind::UnexpectedEnd, pos }) => {
+                return Err(SQLError { kind: SQLErrorKind::ExpectedExpression, pos });
+            }
             Ok(cols) => cols,
             Err(err) => return Err(err),
         };
@@ -141,7 +143,9 @@ impl<'a> Parser<'a> {
         };
 
         self.lexer.expect_token(TokenKind::Semicolon).map_err(|err| match err {
-            Error::UnexpectedEnd { pos } => Error::ExpectedCommaOrSemicolon { pos },
+            SQLError { kind: SQLErrorKind::UnexpectedEnd, pos } => {
+                SQLError { kind: SQLErrorKind::ExpectedCommaOrSemicolon, pos }
+            }
             err => err,
         })?;
 

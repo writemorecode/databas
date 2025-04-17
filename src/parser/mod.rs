@@ -7,7 +7,7 @@ use op::{Op, infix_binding_power, prefix_binding_power};
 use stmt::Statement;
 use stmt::lists::{ExpressionList, IdentifierList};
 
-use crate::error::Error;
+use crate::error::{SQLError, SQLErrorKind};
 use crate::lexer::Lexer;
 use crate::lexer::token::Token;
 use crate::lexer::token_kind::{Keyword, NumberKind, TokenKind};
@@ -18,11 +18,11 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Iterator for Parser<'a> {
-    type Item = Result<Statement<'a>, Error<'a>>;
+    type Item = Result<Statement<'a>, SQLError<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.stmt() {
-            Err(Error::UnexpectedEnd { .. }) => None,
+            Err(SQLError { kind: SQLErrorKind::UnexpectedEnd, .. }) => None,
             other => Some(other),
         }
     }
@@ -33,9 +33,11 @@ impl<'a> Parser<'a> {
         Self { lexer: Lexer::new(source) }
     }
 
-    fn parse_non_negative_integer(&mut self) -> Result<Option<u32>, Error<'a>> {
-        self.lexer.next().ok_or(Error::UnexpectedEnd { pos: self.lexer.position }).and_then(
-            |tok| {
+    fn parse_non_negative_integer(&mut self) -> Result<Option<u32>, SQLError<'a>> {
+        self.lexer
+            .next()
+            .ok_or(SQLError { kind: SQLErrorKind::UnexpectedEnd, pos: self.lexer.position })
+            .and_then(|tok| {
                 tok.map(|tok| match tok.kind {
                     TokenKind::Number(NumberKind::Integer(num)) => Ok(num.try_into().ok()),
                     TokenKind::Minus => {
@@ -44,18 +46,22 @@ impl<'a> Parser<'a> {
                             ..
                         })) = self.lexer.next()
                         {
-                            Err(Error::ExpectedNonNegativeInteger { pos: tok.offset, got: -num })
+                            Err(SQLError::new(
+                                SQLErrorKind::ExpectedNonNegativeInteger { got: -num },
+                                tok.offset,
+                            ))
                         } else {
-                            Err(Error::Other(TokenKind::Minus))
+                            Err(SQLError::new(SQLErrorKind::Other(TokenKind::Minus), tok.offset))
                         }
                     }
-                    other => Err(Error::ExpectedInteger { pos: tok.offset, got: other }),
+                    other => {
+                        Err(SQLError::new(SQLErrorKind::ExpectedInteger { got: other }, tok.offset))
+                    }
                 })
-            },
-        )?
+            })?
     }
 
-    fn parse_expression_list(&mut self) -> Result<ExpressionList<'a>, Error<'a>> {
+    fn parse_expression_list(&mut self) -> Result<ExpressionList<'a>, SQLError<'a>> {
         let mut expr_list = vec![self.expr_bp(0)?];
         while let Some(Ok(Token { kind: TokenKind::Comma, .. })) = self.lexer.peek() {
             self.lexer.next();
@@ -64,7 +70,7 @@ impl<'a> Parser<'a> {
         Ok(ExpressionList(expr_list))
     }
 
-    fn parse_identifier_list(&mut self) -> Result<IdentifierList<'a>, Error<'a>> {
+    fn parse_identifier_list(&mut self) -> Result<IdentifierList<'a>, SQLError<'a>> {
         let mut expr_list = vec![self.parse_identifier()?];
         while let Some(Ok(Token { kind: TokenKind::Comma, .. })) = self.lexer.peek() {
             self.lexer.next();
@@ -73,22 +79,26 @@ impl<'a> Parser<'a> {
         Ok(IdentifierList(expr_list))
     }
 
-    fn parse_identifier(&mut self) -> Result<&'a str, Error<'a>> {
-        self.lexer.next().ok_or(Error::UnexpectedEnd { pos: self.lexer.position }).and_then(
-            |tok| {
+    fn parse_identifier(&mut self) -> Result<&'a str, SQLError<'a>> {
+        self.lexer
+            .next()
+            .ok_or(SQLError { kind: SQLErrorKind::UnexpectedEnd, pos: self.lexer.position })
+            .and_then(|tok| {
                 tok.map(|tok| match tok.kind {
                     TokenKind::Identifier(id) => Ok(id),
-                    other => {
-                        Err(Error::ExpectedIdentifier { pos: self.lexer.position, got: other })
-                    }
+                    other => Err(SQLError::new(
+                        SQLErrorKind::ExpectedIdentifier { got: other },
+                        self.lexer.position,
+                    )),
                 })
-            },
-        )?
+            })?
     }
 
-    pub fn stmt(&mut self) -> Result<Statement<'a>, Error<'a>> {
-        let token =
-            self.lexer.next().ok_or(Error::UnexpectedEnd { pos: self.lexer.position })??;
+    pub fn stmt(&mut self) -> Result<Statement<'a>, SQLError<'a>> {
+        let token = self
+            .lexer
+            .next()
+            .ok_or(SQLError { kind: SQLErrorKind::UnexpectedEnd, pos: self.lexer.position })??;
         match token.kind {
             TokenKind::Keyword(Keyword::Select) => {
                 Ok(Statement::Select(self.parse_select_query()?))
@@ -96,25 +106,29 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Insert) => {
                 Ok(Statement::Insert(self.parse_insert_query()?))
             }
-            other => Err(Error::Other(other)),
+            other => Err(SQLError::new(SQLErrorKind::Other(other), token.offset)),
         }
     }
 
-    pub fn parse_unary_op(&mut self, tok: Token<'a>) -> Result<Expression<'a>, Error<'a>> {
+    pub fn parse_unary_op(&mut self, tok: Token<'a>) -> Result<Expression<'a>, SQLError<'a>> {
         let op = tok.try_into()?;
-        let ((), r_bp) = prefix_binding_power(&op)
-            .ok_or(Error::InvalidPrefixOperator { op: tok.kind, pos: tok.offset })?;
+        let ((), r_bp) = prefix_binding_power(&op).ok_or(SQLError::new(
+            SQLErrorKind::InvalidPrefixOperator { op: tok.kind },
+            tok.offset,
+        ))?;
         let rhs = self.expr_bp(r_bp)?;
         Ok(Expression::UnaryOp((op, Box::new(rhs))))
     }
 
-    pub fn expr(mut self) -> Result<Expression<'a>, Error<'a>> {
+    pub fn expr(mut self) -> Result<Expression<'a>, SQLError<'a>> {
         self.expr_bp(0)
     }
 
-    fn expr_bp(&mut self, min_bp: u8) -> Result<Expression<'a>, Error<'a>> {
-        let token =
-            self.lexer.next().ok_or(Error::UnexpectedEnd { pos: self.lexer.position })??;
+    fn expr_bp(&mut self, min_bp: u8) -> Result<Expression<'a>, SQLError<'a>> {
+        let token = self
+            .lexer
+            .next()
+            .ok_or(SQLError { kind: SQLErrorKind::UnexpectedEnd, pos: self.lexer.position })??;
         let mut lhs = match token.kind {
             TokenKind::String(lit) => Expression::Literal(Literal::String(lit)),
             TokenKind::Number(num) => Expression::Literal(Literal::Number(num)),
@@ -125,12 +139,14 @@ impl<'a> Parser<'a> {
             TokenKind::LeftParen => {
                 let lhs = self
                     .expr_bp(0)
-                    .map_err(|_| Error::UnclosedParenthesis { pos: token.offset })?;
+                    .map_err(|_| SQLError::new(SQLErrorKind::UnclosedParenthesis, token.offset))?;
                 self.lexer.expect_token(TokenKind::RightParen)?;
                 lhs
             }
             TokenKind::Minus | TokenKind::Keyword(Keyword::Not) => self.parse_unary_op(token)?,
-            other => return Err(Error::Other(other)),
+            other => {
+                return Err(SQLError::new(SQLErrorKind::Other(other), token.offset));
+            }
         };
 
         while let Some(Ok(token)) = self.lexer.peek() {
@@ -154,8 +170,10 @@ impl<'a> Parser<'a> {
                 break;
             }
             let op = Op::try_from(*token)?;
-            let (l_bp, r_bp) = infix_binding_power(&op)
-                .ok_or(Error::InvalidOperator { op: token.kind, pos: token.offset })?;
+            let (l_bp, r_bp) = infix_binding_power(&op).ok_or(SQLError::new(
+                SQLErrorKind::InvalidOperator { op: token.kind },
+                token.offset,
+            ))?;
             if l_bp < min_bp {
                 break;
             }
@@ -178,13 +196,16 @@ mod parser_tests {
         let mut parser = Parser::new("-123");
         assert_eq!(
             parser.parse_non_negative_integer(),
-            Err(Error::ExpectedNonNegativeInteger { pos: 0, got: -123 })
+            Err(SQLError { kind: SQLErrorKind::ExpectedNonNegativeInteger { got: -123 }, pos: 0 })
         );
 
         let mut parser = Parser::new("abc");
         assert_eq!(
             parser.parse_non_negative_integer(),
-            Err(Error::ExpectedInteger { pos: 0, got: TokenKind::Identifier("abc") })
+            Err(SQLError {
+                kind: SQLErrorKind::ExpectedInteger { got: TokenKind::Identifier("abc") },
+                pos: 0
+            })
         );
     }
 }

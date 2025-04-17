@@ -1,11 +1,11 @@
 use std::fmt::Display;
 
-use crate::error::Error;
+use crate::error::{SQLError, SQLErrorKind};
 use crate::lexer::token::Token;
 use crate::lexer::token_kind::{Keyword, TokenKind};
 
 impl<'a> TryFrom<Token<'a>> for Op {
-    type Error = Error<'a>;
+    type Error = SQLError<'a>;
 
     fn try_from(token: Token<'a>) -> Result<Self, Self::Error> {
         let op = match token.kind {
@@ -23,7 +23,10 @@ impl<'a> TryFrom<Token<'a>> for Op {
             TokenKind::LessThanOrEqual => Op::LessThanOrEqual,
             TokenKind::GreaterThanOrEqual => Op::GreaterThanOrEqual,
             _ => {
-                return Err(Error::InvalidOperator { op: token.kind, pos: token.offset });
+                return Err(SQLError::new(
+                    SQLErrorKind::InvalidOperator { op: token.kind },
+                    token.offset,
+                ));
             }
         };
         Ok(op)

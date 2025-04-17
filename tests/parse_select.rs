@@ -1,5 +1,5 @@
 use databas::{
-    error::Error,
+    error::{SQLError, SQLErrorKind},
     parser::{
         Parser,
         expr::Expression,
@@ -96,17 +96,17 @@ fn test_parse_select_query_without_from() {
 fn test_parse_invalid_select_query() {
     let s = "SELECT";
     let mut parser = Parser::new(s);
-    let expected = Err(Error::ExpectedExpression { pos: 6 });
+    let expected = Err(SQLError::new(SQLErrorKind::ExpectedExpression, 6));
     assert_eq!(expected, parser.stmt());
 
     let s = "SELECT 1";
     let mut parser = Parser::new(s);
-    let expected = Err(Error::ExpectedCommaOrSemicolon { pos: 8 });
+    let expected = Err(SQLError::new(SQLErrorKind::ExpectedCommaOrSemicolon, 8));
     assert_eq!(expected, parser.stmt());
 
     let s = "SELECT 1,";
     let mut parser = Parser::new(s);
-    let expected = Err(Error::ExpectedExpression { pos: 9 });
+    let expected = Err(SQLError::new(SQLErrorKind::ExpectedExpression, 9));
     assert_eq!(expected, parser.stmt());
 }
 
@@ -182,7 +182,7 @@ fn test_parse_select_query_with_limit() {
 
     let s = "SELECT foo LIMIT -1;";
     let mut parser = Parser::new(s);
-    let expected = Error::ExpectedNonNegativeInteger { pos: 17, got: -1 };
+    let expected = SQLError::new(SQLErrorKind::ExpectedNonNegativeInteger { got: -1 }, 17);
     assert_eq!(Err(expected), parser.stmt());
 }
 
