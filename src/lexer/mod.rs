@@ -31,8 +31,13 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn expect_token(&mut self, expected_kind: TokenKind<'a>) -> Result<(), SQLError<'a>> {
-        self.expect_where(|kind| kind == expected_kind)
+    pub fn expect_token(&mut self, expected: TokenKind<'a>) -> Result<(), SQLError<'a>> {
+        match self.expect_where(|kind| kind == expected) {
+            Err(SQLError { kind: SQLErrorKind::Other(got), pos }) => {
+                Err(SQLError { kind: SQLErrorKind::UnexpectedTokenKind { expected, got }, pos })
+            }
+            other => other,
+        }
     }
 
     fn skip_whitespace(&mut self) {
