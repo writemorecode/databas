@@ -3,6 +3,8 @@ use std::fmt::Display;
 pub mod insert;
 pub mod select;
 
+pub mod lists;
+
 use select::SelectQuery;
 
 use insert::InsertQuery;

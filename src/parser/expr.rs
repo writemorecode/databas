@@ -24,6 +24,12 @@ impl From<i32> for Expression<'_> {
     }
 }
 
+impl From<f32> for Expression<'_> {
+    fn from(value: f32) -> Self {
+        Expression::Literal(Literal::Number(NumberKind::Float(value)))
+    }
+}
+
 impl From<bool> for Expression<'_> {
     fn from(value: bool) -> Self {
         Expression::Literal(Literal::Boolean(value))

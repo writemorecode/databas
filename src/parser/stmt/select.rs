@@ -6,7 +6,7 @@ use crate::{
         token::Token,
         token_kind::{Keyword, TokenKind},
     },
-    parser::{Parser, expr::Expression},
+    parser::{Parser, expr::Expression, stmt::lists::ExpressionList},
 };
 #[derive(Debug, PartialEq)]
 pub enum Ordering {
@@ -25,26 +25,26 @@ impl Display for Ordering {
 
 #[derive(Debug, PartialEq)]
 pub struct OrderBy<'a> {
-    pub terms: Vec<Expression<'a>>,
+    pub terms: ExpressionList<'a>,
     pub order: Option<Ordering>,
 }
 
-impl<'a> OrderBy<'a> {
-    pub fn parse(parser: &mut Parser<'a>) -> Result<Option<OrderBy<'a>>, Error<'a>> {
-        let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Order), .. })) = parser.lexer.peek()
+impl<'a> Parser<'a> {
+    pub fn parse_order_by(&mut self) -> Result<Option<OrderBy<'a>>, Error<'a>> {
+        let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Order), .. })) = self.lexer.peek()
         else {
             return Ok(None);
         };
-        parser.lexer.next();
-        parser.lexer.expect_token(TokenKind::Keyword(Keyword::By))?;
-        let terms = parser.parse_expression_list()?;
-        let order = match parser.lexer.peek() {
+        self.lexer.next();
+        self.lexer.expect_token(TokenKind::Keyword(Keyword::By))?;
+        let terms = self.parse_expression_list()?;
+        let order = match self.lexer.peek() {
             Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Asc), .. })) => {
-                parser.lexer.next();
+                self.lexer.next();
                 Some(Ordering::Ascending)
             }
             Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Desc), .. })) => {
-                parser.lexer.next();
+                self.lexer.next();
                 Some(Ordering::Descending)
             }
             _ => None,
@@ -56,12 +56,7 @@ impl<'a> OrderBy<'a> {
 
 impl Display for OrderBy<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (i, col) in self.terms.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", col)?;
-        }
+        write!(f, "{}", self.terms)?;
 
         if let Some(ref order) = self.order {
             write!(f, " {}", order)?;
@@ -71,7 +66,7 @@ impl Display for OrderBy<'_> {
 }
 #[derive(Debug, PartialEq)]
 pub struct SelectQuery<'a> {
-    pub columns: Vec<Expression<'a>>,
+    pub columns: ExpressionList<'a>,
     pub table: Option<&'a str>,
     pub where_clause: Option<Expression<'a>>,
     pub order_by: Option<OrderBy<'a>>,
@@ -81,13 +76,7 @@ pub struct SelectQuery<'a> {
 
 impl Display for SelectQuery<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SELECT ")?;
-        for (i, col) in self.columns.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", col)?;
-        }
+        write!(f, "SELECT {}", self.columns)?;
 
         if let Some(table) = self.table {
             write!(f, " FROM {}", table)?;
@@ -104,109 +93,58 @@ impl Display for SelectQuery<'_> {
     }
 }
 
-impl<'a> SelectQuery<'a> {
-    pub fn parse(parser: &mut Parser<'a>) -> Result<SelectQuery<'a>, Error<'a>> {
-        let columns = match parser.parse_expression_list() {
+impl<'a> Parser<'a> {
+    pub fn parse_select_query(&mut self) -> Result<SelectQuery<'a>, Error<'a>> {
+        let columns = match self.parse_expression_list() {
             Err(Error::UnexpectedEnd { pos }) => return Err(Error::ExpectedExpression { pos }),
             Ok(cols) => cols,
             Err(err) => return Err(err),
         };
 
         let table = if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::From), .. })) =
-            parser.lexer.peek()
+            self.lexer.peek()
         {
-            parser.lexer.next();
-            Some(parser.parse_identifier()?)
+            self.lexer.next();
+            Some(self.parse_identifier()?)
         } else {
             None
         };
 
         let where_clause =
             if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Where), .. })) =
-                parser.lexer.peek()
+                self.lexer.peek()
             {
-                parser.lexer.next();
-                Some(parser.expr_bp(0)?)
+                self.lexer.next();
+                Some(self.expr_bp(0)?)
             } else {
                 None
             };
 
-        let order_by = OrderBy::parse(parser)?;
+        let order_by = self.parse_order_by()?;
 
         let limit = if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Limit), .. })) =
-            parser.lexer.peek()
+            self.lexer.peek()
         {
-            parser.lexer.next();
-            parser.parse_non_negative_integer()?
+            self.lexer.next();
+            self.parse_non_negative_integer()?
         } else {
             None
         };
 
         let offset = if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Offset), .. })) =
-            parser.lexer.peek()
+            self.lexer.peek()
         {
-            parser.lexer.next();
-            parser.parse_non_negative_integer()?
+            self.lexer.next();
+            self.parse_non_negative_integer()?
         } else {
             None
         };
 
-        parser.lexer.expect_token(TokenKind::Semicolon).map_err(|err| match err {
+        self.lexer.expect_token(TokenKind::Semicolon).map_err(|err| match err {
             Error::UnexpectedEnd { pos } => Error::ExpectedCommaOrSemicolon { pos },
             err => err,
         })?;
 
         Ok(SelectQuery { columns, table, where_clause, order_by, limit, offset })
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct SelectQueryBuilder {
-    pub columns: Vec<Expression<'static>>,
-    pub table: Option<&'static str>,
-    pub where_clause: Option<Expression<'static>>,
-    pub order_by: Option<OrderBy<'static>>,
-    pub limit: Option<u32>,
-    pub offset: Option<u32>,
-}
-
-impl SelectQueryBuilder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn offset(mut self, offset: u32) -> Self {
-        self.offset = Some(offset);
-        self
-    }
-    pub fn limit(mut self, limit: u32) -> Self {
-        self.limit = Some(limit);
-        self
-    }
-    pub fn order_by(mut self, order_by: OrderBy<'static>) -> Self {
-        self.order_by = Some(order_by);
-        self
-    }
-    pub fn where_clause(mut self, where_clause: Expression<'static>) -> Self {
-        self.where_clause = Some(where_clause);
-        self
-    }
-    pub fn table(mut self, table: &'static str) -> Self {
-        self.table = Some(table);
-        self
-    }
-    pub fn columns(mut self, columns: Vec<Expression<'static>>) -> Self {
-        self.columns = columns;
-        self
-    }
-    pub fn build(self) -> SelectQuery<'static> {
-        SelectQuery {
-            columns: self.columns,
-            table: self.table,
-            where_clause: self.where_clause,
-            order_by: self.order_by,
-            limit: self.limit,
-            offset: self.offset,
-        }
     }
 }

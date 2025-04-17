@@ -6,56 +6,63 @@ use crate::{
         token::Token,
         token_kind::{Keyword, TokenKind},
     },
-    parser::{Parser, expr::Expression},
+    parser::{
+        Parser,
+        stmt::lists::{ExpressionList, IdentifierList},
+    },
 };
+
+#[derive(Debug, PartialEq)]
+pub struct Values<'a>(pub Vec<ExpressionList<'a>>);
+
+impl Display for Values<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = self.0.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+        write!(f, "{s}")
+    }
+}
+
+impl<'a> Parser<'a> {
+    fn parse_values(&mut self) -> Result<Values<'a>, Error<'a>> {
+        self.lexer.expect_token(TokenKind::LeftParen)?;
+        let mut values = vec![self.parse_expression_list()?];
+        self.lexer.expect_token(TokenKind::RightParen)?;
+        while let Some(Ok(Token { kind: TokenKind::Comma, .. })) = self.lexer.peek() {
+            self.lexer.next();
+            self.lexer.expect_token(TokenKind::LeftParen)?;
+            values.push(self.parse_expression_list()?);
+            self.lexer.expect_token(TokenKind::RightParen)?;
+        }
+        Ok(Values(values))
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub struct InsertQuery<'a> {
     pub table: &'a str,
-    pub columns: Vec<&'a str>,
-    pub values: Vec<Vec<Expression<'a>>>,
+    pub columns: IdentifierList<'a>,
+    pub values: Values<'a>,
 }
 
 impl Display for InsertQuery<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let columns_string: String =
-            self.columns.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ");
-        write!(f, "INSERT INTO {} ({}) VALUES (", self.table, columns_string)?;
-        for (i, v) in self.values.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            let values_string: String =
-                v.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ");
-            write!(f, "({values_string})")?;
-        }
-        write!(f, ";")
+        write!(f, "INSERT INTO {} ({}) VALUES ({});", self.table, self.columns, self.values)
     }
 }
 
-impl<'a> InsertQuery<'a> {
-    pub fn parse(parser: &mut Parser<'a>) -> Result<InsertQuery<'a>, Error<'a>> {
-        parser.lexer.expect_token(TokenKind::Keyword(Keyword::Into))?;
-        let table = parser.parse_identifier()?;
+impl<'a> Parser<'a> {
+    pub fn parse_insert_query(&mut self) -> Result<InsertQuery<'a>, Error<'a>> {
+        self.lexer.expect_token(TokenKind::Keyword(Keyword::Into))?;
+        let table = self.parse_identifier()?;
 
-        parser.lexer.expect_token(TokenKind::LeftParen)?;
-        let columns = parser.parse_identifier_list()?;
-        parser.lexer.expect_token(TokenKind::RightParen)?;
+        self.lexer.expect_token(TokenKind::LeftParen)?;
+        let columns = self.parse_identifier_list()?;
+        self.lexer.expect_token(TokenKind::RightParen)?;
 
-        parser.lexer.expect_token(TokenKind::Keyword(Keyword::Values))?;
+        self.lexer.expect_token(TokenKind::Keyword(Keyword::Values))?;
 
-        parser.lexer.expect_token(TokenKind::LeftParen)?;
-        let mut values = vec![parser.parse_expression_list()?];
-        parser.lexer.expect_token(TokenKind::RightParen)?;
-        while let Some(Ok(Token { kind: TokenKind::Comma, .. })) = parser.lexer.peek() {
-            parser.lexer.next();
-
-            parser.lexer.expect_token(TokenKind::LeftParen)?;
-            values.push(parser.parse_expression_list()?);
-            parser.lexer.expect_token(TokenKind::RightParen)?;
-        }
-
-        parser.lexer.expect_token(TokenKind::Semicolon)?;
+        let values = self.parse_values()?;
+        self.lexer.expect_token(TokenKind::Semicolon)?;
         Ok(InsertQuery { table, columns, values })
     }
 }

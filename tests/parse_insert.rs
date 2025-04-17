@@ -1,25 +1,33 @@
-use databas::{
-    lexer::token_kind::NumberKind,
-    parser::{
-        Parser,
-        expr::{Expression, Literal},
-        stmt::{Statement, insert::InsertQuery},
+use databas::parser::{
+    Parser,
+    expr::{Expression, Literal},
+    stmt::{
+        Statement,
+        insert::{InsertQuery, Values},
+        lists::{ExpressionList, IdentifierList},
     },
 };
 
 #[test]
-fn test_insert() {
-    let s = "INSERT INTO products (id, name, price) VALUES (123, 'Chocolate Cake', 45.67);";
+fn test_parse_insert_query() {
+    let s = "INSERT INTO products (id, name, price) VALUES (123, 'Cake', 45.67), (789, 'Waffles', 10.00);";
     let mut parser = Parser::new(s);
     let got = parser.next();
     let expected = InsertQuery {
         table: "products",
-        columns: vec!["id", "name", "price"],
-        values: vec![vec![
-            Expression::Literal(Literal::Number(NumberKind::Integer(123))),
-            Expression::Literal(Literal::String("Chocolate Cake")),
-            Expression::Literal(Literal::Number(NumberKind::Float(45.67f32))),
-        ]],
+        columns: IdentifierList(vec!["id", "name", "price"]),
+        values: Values(vec![
+            ExpressionList(vec![
+                Expression::from(123),
+                Expression::Literal(Literal::String("Cake")),
+                Expression::from(45.67f32),
+            ]),
+            ExpressionList(vec![
+                Expression::from(789),
+                Expression::Literal(Literal::String("Waffles")),
+                Expression::from(10.00f32),
+            ]),
+        ]),
     };
     assert_eq!(Some(Ok(Statement::Insert(expected))), got);
 }
