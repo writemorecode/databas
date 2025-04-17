@@ -89,6 +89,14 @@ impl Display for SelectQuery<'_> {
             write!(f, " ORDER BY {}", order_by_clause)?;
         }
 
+        if let Some(ref limit) = self.limit {
+            write!(f, " LIMIT {}", limit)?;
+        }
+
+        if let Some(ref offset) = self.offset {
+            write!(f, " OFFSET {}", offset)?;
+        }
+
         write!(f, ";")
     }
 }
