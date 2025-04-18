@@ -55,7 +55,7 @@ fn test_parse_select_query_with_from_table() {
 
 #[test]
 fn test_parse_select_query_with_from_table_and_where_clause() {
-    let s = "SELECT abc, def, ghi FROM table WHERE abc < def;";
+    let s = "SELECT abc, def, ghi FROM some_table WHERE abc < def;";
     let mut parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: ExpressionList(vec![
@@ -63,7 +63,7 @@ fn test_parse_select_query_with_from_table_and_where_clause() {
             Expression::Identifier("def"),
             Expression::Identifier("ghi"),
         ]),
-        table: Some("table"),
+        table: Some("some_table"),
         where_clause: Some(Expression::BinaryOp((
             Box::new(Expression::Identifier("abc")),
             Op::LessThan,
@@ -223,7 +223,7 @@ fn test_parse_select_with_invalid_table_name() {
     let got = parser.stmt();
     let expected = SQLError {
         kind: SQLErrorKind::ExpectedIdentifier { got: TokenKind::Keyword(Keyword::Table) },
-        pos: 5,
+        pos: 21,
     };
     assert_eq!(Err(expected), got);
 }
