@@ -70,26 +70,28 @@ impl Display for Op {
     }
 }
 
-pub fn prefix_binding_power(op: &Op) -> Option<((), u8)> {
-    let res = match op {
-        Op::Not | Op::Sub => ((), 7),
-        _ => return None,
-    };
-    Some(res)
-}
+impl Op {
+    pub fn prefix_binding_power(&self) -> Option<((), u8)> {
+        let res = match self {
+            Op::Not | Op::Sub => ((), 7),
+            _ => return None,
+        };
+        Some(res)
+    }
 
-pub fn infix_binding_power(op: &Op) -> Option<(u8, u8)> {
-    let res = match op {
-        Op::And | Op::Or => (1, 2),
-        Op::NotEquals
-        | Op::EqualsEquals
-        | Op::LessThan
-        | Op::GreaterThan
-        | Op::LessThanOrEqual
-        | Op::GreaterThanOrEqual => (3, 4),
-        Op::Add | Op::Sub => (5, 6),
-        Op::Mul | Op::Div => (6, 7),
-        _ => return None,
-    };
-    Some(res)
+    pub fn infix_binding_power(&self) -> Option<(u8, u8)> {
+        let res = match self {
+            Op::And | Op::Or => (1, 2),
+            Op::NotEquals
+            | Op::EqualsEquals
+            | Op::LessThan
+            | Op::GreaterThan
+            | Op::LessThanOrEqual
+            | Op::GreaterThanOrEqual => (3, 4),
+            Op::Add | Op::Sub => (5, 6),
+            Op::Mul | Op::Div => (6, 7),
+            _ => return None,
+        };
+        Some(res)
+    }
 }
