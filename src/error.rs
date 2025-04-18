@@ -26,6 +26,7 @@ pub enum SQLErrorKind<'a> {
     InvalidNumber,
     InvalidOperator { op: TokenKind<'a> },
     InvalidPrefixOperator { op: TokenKind<'a> },
+    InvalidDataType { got: TokenKind<'a> },
     Other(TokenKind<'a>),
     UnclosedParenthesis,
     UnexpectedEnd,
@@ -84,6 +85,9 @@ impl Display for SQLErrorKind<'_> {
             }
             SQLErrorKind::ExpectedNonNegativeInteger { got } => {
                 write!(f, "Expected non-negative integer, got {got}")
+            }
+            SQLErrorKind::InvalidDataType { got: data_type } => {
+                write!(f, "Invalid data type '{data_type}'")
             }
         }
     }

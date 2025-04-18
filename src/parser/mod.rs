@@ -106,6 +106,9 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Insert) => {
                 Ok(Statement::Insert(self.parse_insert_query()?))
             }
+            TokenKind::Keyword(Keyword::Create) => {
+                Ok(Statement::CreateTable(self.parse_create_table_query()?))
+            }
             other => Err(SQLError::new(SQLErrorKind::Other(other), token.offset)),
         }
     }

@@ -48,6 +48,11 @@ pub enum Keyword {
     Insert,
     Into,
     Values,
+    Create,
+    Table,
+    Int,
+    Float,
+    Text,
 }
 
 impl Display for Keyword {
@@ -70,6 +75,11 @@ impl Display for Keyword {
             Keyword::Insert => write!(f, "INSERT"),
             Keyword::Into => write!(f, "INTO"),
             Keyword::Values => write!(f, "VALUES"),
+            Keyword::Create => write!(f, "CREATE"),
+            Keyword::Table => write!(f, "TABLE"),
+            Keyword::Int => write!(f, "INT"),
+            Keyword::Float => write!(f, "FLOAT"),
+            Keyword::Text => write!(f, "TEXT"),
         }
     }
 }
@@ -122,6 +132,11 @@ impl<'a> From<&'a str> for TokenKind<'a> {
             "INSERT" => TokenKind::Keyword(Keyword::Insert),
             "INTO" => TokenKind::Keyword(Keyword::Into),
             "VALUES" => TokenKind::Keyword(Keyword::Values),
+            "CREATE" => TokenKind::Keyword(Keyword::Create),
+            "TABLE" => TokenKind::Keyword(Keyword::Table),
+            "INT" => TokenKind::Keyword(Keyword::Int),
+            "FLOAT" => TokenKind::Keyword(Keyword::Float),
+            "TEXT" => TokenKind::Keyword(Keyword::Text),
             _ => TokenKind::Identifier(value),
         }
     }

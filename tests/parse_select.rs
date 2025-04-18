@@ -1,5 +1,6 @@
 use databas::{
     error::{SQLError, SQLErrorKind},
+    lexer::token_kind::{Keyword, TokenKind},
     parser::{
         Parser,
         expr::Expression,
@@ -34,7 +35,7 @@ fn test_parse_select_query() {
 
 #[test]
 fn test_parse_select_query_with_from_table() {
-    let s = "SELECT abc, def, ghi FROM table;";
+    let s = "SELECT abc, def, ghi FROM big_table;";
     let mut parser = Parser::new(s);
     let expected_query = SelectQuery {
         columns: ExpressionList(vec![
@@ -42,7 +43,7 @@ fn test_parse_select_query_with_from_table() {
             Expression::Identifier("def"),
             Expression::Identifier("ghi"),
         ]),
-        table: Some("table"),
+        table: Some("big_table"),
         where_clause: None,
         order_by: None,
         limit: None,
@@ -213,4 +214,16 @@ fn test_parse_select_query_with_offset() {
     };
     let expected = Select(expected_query);
     assert_eq!(Ok(expected), parser.stmt());
+}
+
+#[test]
+fn test_parse_select_with_invalid_table_name() {
+    let s = "SELECT col FROM table;";
+    let mut parser = Parser::new(s);
+    let got = parser.stmt();
+    let expected = SQLError {
+        kind: SQLErrorKind::ExpectedIdentifier { got: TokenKind::Keyword(Keyword::Table) },
+        pos: 5,
+    };
+    assert_eq!(Err(expected), got);
 }

@@ -1,18 +1,20 @@
 use std::fmt::Display;
 
+pub mod create_table;
 pub mod insert;
 pub mod select;
 
 pub mod lists;
 
-use select::SelectQuery;
-
+use create_table::CreateTableQuery;
 use insert::InsertQuery;
+use select::SelectQuery;
 
 #[derive(Debug, PartialEq)]
 pub enum Statement<'a> {
     Select(SelectQuery<'a>),
     Insert(InsertQuery<'a>),
+    CreateTable(CreateTableQuery<'a>),
 }
 
 impl Display for Statement<'_> {
@@ -20,6 +22,7 @@ impl Display for Statement<'_> {
         match self {
             Statement::Select(query) => query.fmt(f),
             Statement::Insert(query) => query.fmt(f),
+            Statement::CreateTable(query) => query.fmt(f),
         }
     }
 }
