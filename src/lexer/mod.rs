@@ -119,7 +119,7 @@ impl<'a> Iterator for Lexer<'a> {
             '0'..='9' => Started::Number,
             '"' => Started::DoubleQuotedString,
             '\'' => Started::SingleQuotedString,
-            'a'..='z' | 'A'..='Z' => Started::Keyword,
+            c if c.is_alphabetic() => Started::Keyword,
             '<' => Started::MaybeEqualsOp(MaybeEquals::LessThan),
             '>' => Started::MaybeEqualsOp(MaybeEquals::GreaterThan),
             '!' => Started::MaybeEqualsOp(MaybeEquals::NotEquals),
@@ -154,7 +154,7 @@ impl<'a> Iterator for Lexer<'a> {
                 };
 
                 let token = Token { kind: TokenKind::Number(kind), offset: c_at };
-                let extra = literal.len() - 1;
+                let extra = literal.len() - c.len_utf8();
                 self.position += extra;
                 self.rest = &self.rest[extra..];
                 Some(Ok(token))
@@ -170,14 +170,15 @@ impl<'a> Iterator for Lexer<'a> {
                 Some(Ok(token))
             }
             Started::Keyword => {
-                let is_not_part_of_keyword = |c| !matches!(c, 'a'..='z' | 'A'..='Z' | '_' );
+                let is_not_part_of_keyword = |c: char| !(c.is_alphabetic() || c == '_');
                 let literal = c_rest.split(is_not_part_of_keyword).next()?;
 
                 let kind = TokenKind::from(literal);
                 let token = Token { kind, offset: c_at };
 
-                self.position += literal.len() - 1;
-                self.rest = &self.rest[literal.len() - 1..];
+                let extra = literal.len() - c.len_utf8();
+                self.position += extra;
+                self.rest = &self.rest[extra..];
                 Some(Ok(token))
             }
             Started::MaybeEqualsOp(maybe_equals) => {

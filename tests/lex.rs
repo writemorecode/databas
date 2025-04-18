@@ -175,3 +175,12 @@ fn test_logical_not() {
     lexer.expect(TokenKind::Keyword(Keyword::Not), 0);
     lexer.expect(TokenKind::Keyword(Keyword::False), 4);
 }
+
+#[test]
+fn test_non_ascii_identifier() {
+    let s = "åäö";
+    let mut lexer = Lexer::new(s);
+    let got = lexer.next();
+    let expected = Token { kind: TokenKind::Identifier("åäö"), offset: 0 };
+    assert_eq!(Some(Ok(expected)), got);
+}
