@@ -29,7 +29,7 @@ impl<'a> Iterator for Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(source: &'a str) -> Self {
+    pub const fn new(source: &'a str) -> Self {
         Self { lexer: Lexer::new(source) }
     }
 
@@ -115,10 +115,9 @@ impl<'a> Parser<'a> {
 
     pub fn parse_unary_op(&mut self, tok: Token<'a>) -> Result<Expression<'a>, SQLError<'a>> {
         let op: Op = tok.try_into()?;
-        let ((), r_bp) = op.prefix_binding_power().ok_or(SQLError::new(
-            SQLErrorKind::InvalidPrefixOperator { op: tok.kind },
-            tok.offset,
-        ))?;
+        let ((), r_bp) = op.prefix_binding_power().ok_or_else(|| {
+            SQLError::new(SQLErrorKind::InvalidPrefixOperator { op: tok.kind }, tok.offset)
+        })?;
         let rhs = self.expr_bp(r_bp)?;
         Ok(Expression::UnaryOp((op, Box::new(rhs))))
     }
@@ -173,10 +172,9 @@ impl<'a> Parser<'a> {
                 break;
             }
             let op = Op::try_from(*token)?;
-            let (l_bp, r_bp) = op.infix_binding_power().ok_or(SQLError::new(
-                SQLErrorKind::InvalidOperator { op: token.kind },
-                token.offset,
-            ))?;
+            let (l_bp, r_bp) = op.infix_binding_power().ok_or_else(|| {
+                SQLError::new(SQLErrorKind::InvalidOperator { op: token.kind }, token.offset)
+            })?;
             if l_bp < min_bp {
                 break;
             }

@@ -8,7 +8,7 @@ use crate::{
     },
     parser::{Parser, expr::Expression, stmt::lists::ExpressionList},
 };
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Ordering {
     Ascending,
     Descending,
@@ -17,8 +17,8 @@ pub enum Ordering {
 impl Display for Ordering {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Ordering::Ascending => write!(f, "ASC"),
-            Ordering::Descending => write!(f, "DESC"),
+            Self::Ascending => write!(f, "ASC"),
+            Self::Descending => write!(f, "DESC"),
         }
     }
 }

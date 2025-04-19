@@ -9,7 +9,7 @@ use crate::{
     parser::Parser,
 };
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ColumnType {
     Int,
     Float,
@@ -19,14 +19,14 @@ pub enum ColumnType {
 impl Display for ColumnType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ColumnType::Int => write!(f, "INT"),
-            ColumnType::Float => write!(f, "FLOAT"),
-            ColumnType::Text => write!(f, "TEXT"),
+            Self::Int => write!(f, "INT"),
+            Self::Float => write!(f, "FLOAT"),
+            Self::Text => write!(f, "TEXT"),
         }
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Column<'a> {
     pub name: &'a str,
     pub column_type: ColumnType,
@@ -38,7 +38,7 @@ impl Display for Column<'_> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct CreateTableQuery<'a> {
     pub table_name: &'a str,
     pub columns: Vec<Column<'a>>,

@@ -9,7 +9,7 @@ pub struct SQLError<'a> {
 }
 
 impl<'a> SQLError<'a> {
-    pub fn new(kind: SQLErrorKind<'a>, pos: usize) -> Self {
+    pub const fn new(kind: SQLErrorKind<'a>, pos: usize) -> Self {
         Self { kind, pos }
     }
 }

@@ -15,7 +15,7 @@ pub struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(source: &'a str) -> Self {
+    pub const fn new(source: &'a str) -> Self {
         Self { source, rest: source, position: 0, peeked: None }
     }
 
@@ -160,7 +160,8 @@ impl<'a> Iterator for Lexer<'a> {
                 Some(Ok(token))
             }
             quote @ (Started::SingleQuotedString | Started::DoubleQuotedString) => {
-                let terminator = if let Started::SingleQuotedString = quote { '\'' } else { '"' };
+                let terminator =
+                    if matches!(quote, Started::SingleQuotedString) { '\'' } else { '"' };
                 let Some((literal, rest)) = self.rest.split_once(terminator) else {
                     return Some(Err(SQLError::new(SQLErrorKind::UnterminatedString, c_at)));
                 };

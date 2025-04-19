@@ -9,19 +9,19 @@ impl<'a> TryFrom<Token<'a>> for Op {
 
     fn try_from(token: Token<'a>) -> Result<Self, Self::Error> {
         let op = match token.kind {
-            TokenKind::Keyword(Keyword::And) => Op::And,
-            TokenKind::Keyword(Keyword::Or) => Op::Or,
-            TokenKind::Keyword(Keyword::Not) => Op::Not,
-            TokenKind::Plus => Op::Add,
-            TokenKind::Minus => Op::Sub,
-            TokenKind::Asterisk => Op::Mul,
-            TokenKind::Slash => Op::Div,
-            TokenKind::EqualsEquals => Op::EqualsEquals,
-            TokenKind::NotEquals => Op::NotEquals,
-            TokenKind::LessThan => Op::LessThan,
-            TokenKind::GreaterThan => Op::GreaterThan,
-            TokenKind::LessThanOrEqual => Op::LessThanOrEqual,
-            TokenKind::GreaterThanOrEqual => Op::GreaterThanOrEqual,
+            TokenKind::Keyword(Keyword::And) => Self::And,
+            TokenKind::Keyword(Keyword::Or) => Self::Or,
+            TokenKind::Keyword(Keyword::Not) => Self::Not,
+            TokenKind::Plus => Self::Add,
+            TokenKind::Minus => Self::Sub,
+            TokenKind::Asterisk => Self::Mul,
+            TokenKind::Slash => Self::Div,
+            TokenKind::EqualsEquals => Self::EqualsEquals,
+            TokenKind::NotEquals => Self::NotEquals,
+            TokenKind::LessThan => Self::LessThan,
+            TokenKind::GreaterThan => Self::GreaterThan,
+            TokenKind::LessThanOrEqual => Self::LessThanOrEqual,
+            TokenKind::GreaterThanOrEqual => Self::GreaterThanOrEqual,
             _ => {
                 return Err(SQLError::new(
                     SQLErrorKind::InvalidOperator { op: token.kind },
@@ -33,7 +33,7 @@ impl<'a> TryFrom<Token<'a>> for Op {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Op {
     And,
     Or,
@@ -53,43 +53,43 @@ pub enum Op {
 impl Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Op::And => write!(f, "AND"),
-            Op::Or => write!(f, "OR"),
-            Op::Not => write!(f, "NOT "),
-            Op::Add => write!(f, "+"),
-            Op::Sub => write!(f, "-"),
-            Op::Mul => write!(f, "*"),
-            Op::Div => write!(f, "/"),
-            Op::NotEquals => write!(f, "!="),
-            Op::EqualsEquals => write!(f, "=="),
-            Op::LessThan => write!(f, "<"),
-            Op::GreaterThan => write!(f, ">"),
-            Op::LessThanOrEqual => write!(f, "<="),
-            Op::GreaterThanOrEqual => write!(f, ">="),
+            Self::And => write!(f, "AND"),
+            Self::Or => write!(f, "OR"),
+            Self::Not => write!(f, "NOT "),
+            Self::Add => write!(f, "+"),
+            Self::Sub => write!(f, "-"),
+            Self::Mul => write!(f, "*"),
+            Self::Div => write!(f, "/"),
+            Self::NotEquals => write!(f, "!="),
+            Self::EqualsEquals => write!(f, "=="),
+            Self::LessThan => write!(f, "<"),
+            Self::GreaterThan => write!(f, ">"),
+            Self::LessThanOrEqual => write!(f, "<="),
+            Self::GreaterThanOrEqual => write!(f, ">="),
         }
     }
 }
 
 impl Op {
-    pub fn prefix_binding_power(&self) -> Option<((), u8)> {
+    pub const fn prefix_binding_power(&self) -> Option<((), u8)> {
         let res = match self {
-            Op::Not | Op::Sub => ((), 7),
+            Self::Not | Self::Sub => ((), 7),
             _ => return None,
         };
         Some(res)
     }
 
-    pub fn infix_binding_power(&self) -> Option<(u8, u8)> {
+    pub const fn infix_binding_power(&self) -> Option<(u8, u8)> {
         let res = match self {
-            Op::And | Op::Or => (1, 2),
-            Op::NotEquals
-            | Op::EqualsEquals
-            | Op::LessThan
-            | Op::GreaterThan
-            | Op::LessThanOrEqual
-            | Op::GreaterThanOrEqual => (3, 4),
-            Op::Add | Op::Sub => (5, 6),
-            Op::Mul | Op::Div => (6, 7),
+            Self::And | Self::Or => (1, 2),
+            Self::NotEquals
+            | Self::EqualsEquals
+            | Self::LessThan
+            | Self::GreaterThan
+            | Self::LessThanOrEqual
+            | Self::GreaterThanOrEqual => (3, 4),
+            Self::Add | Self::Sub => (5, 6),
+            Self::Mul | Self::Div => (6, 7),
             _ => return None,
         };
         Some(res)

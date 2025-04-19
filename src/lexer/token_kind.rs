@@ -29,7 +29,7 @@ pub enum TokenKind<'a> {
     Slash,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keyword {
     Select,
     From,
@@ -58,28 +58,28 @@ pub enum Keyword {
 impl Display for Keyword {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Keyword::Select => write!(f, "SELECT"),
-            Keyword::From => write!(f, "FROM"),
-            Keyword::Where => write!(f, "WHERE"),
-            Keyword::Order => write!(f, "ORDER"),
-            Keyword::By => write!(f, "BY"),
-            Keyword::Asc => write!(f, "ASC"),
-            Keyword::Desc => write!(f, "DESC"),
-            Keyword::And => write!(f, "AND"),
-            Keyword::Or => write!(f, "OR"),
-            Keyword::True => write!(f, "TRUE"),
-            Keyword::False => write!(f, "FALSE"),
-            Keyword::Not => write!(f, "NOT"),
-            Keyword::Limit => write!(f, "LIMIT"),
-            Keyword::Offset => write!(f, "OFFSET"),
-            Keyword::Insert => write!(f, "INSERT"),
-            Keyword::Into => write!(f, "INTO"),
-            Keyword::Values => write!(f, "VALUES"),
-            Keyword::Create => write!(f, "CREATE"),
-            Keyword::Table => write!(f, "TABLE"),
-            Keyword::Int => write!(f, "INT"),
-            Keyword::Float => write!(f, "FLOAT"),
-            Keyword::Text => write!(f, "TEXT"),
+            Self::Select => write!(f, "SELECT"),
+            Self::From => write!(f, "FROM"),
+            Self::Where => write!(f, "WHERE"),
+            Self::Order => write!(f, "ORDER"),
+            Self::By => write!(f, "BY"),
+            Self::Asc => write!(f, "ASC"),
+            Self::Desc => write!(f, "DESC"),
+            Self::And => write!(f, "AND"),
+            Self::Or => write!(f, "OR"),
+            Self::True => write!(f, "TRUE"),
+            Self::False => write!(f, "FALSE"),
+            Self::Not => write!(f, "NOT"),
+            Self::Limit => write!(f, "LIMIT"),
+            Self::Offset => write!(f, "OFFSET"),
+            Self::Insert => write!(f, "INSERT"),
+            Self::Into => write!(f, "INTO"),
+            Self::Values => write!(f, "VALUES"),
+            Self::Create => write!(f, "CREATE"),
+            Self::Table => write!(f, "TABLE"),
+            Self::Int => write!(f, "INT"),
+            Self::Float => write!(f, "FLOAT"),
+            Self::Text => write!(f, "TEXT"),
         }
     }
 }
@@ -145,8 +145,8 @@ impl<'a> From<&'a str> for TokenKind<'a> {
 impl Display for NumberKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NumberKind::Integer(value) => write!(f, "{value}"),
-            NumberKind::Float(value) => write!(f, "{value}"),
+            Self::Integer(value) => write!(f, "{value}"),
+            Self::Float(value) => write!(f, "{value}"),
         }
     }
 }

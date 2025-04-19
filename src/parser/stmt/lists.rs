@@ -12,7 +12,7 @@ impl Display for ExpressionList<'_> {
     }
 }
 
-#[derive(Debug, PartialEq, Default)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub struct IdentifierList<'a>(pub Vec<&'a str>);
 impl Display for IdentifierList<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
