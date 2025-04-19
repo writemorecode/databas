@@ -13,7 +13,7 @@ fn test_parse_plus_exp() {
         let b = Box::new(Expression::from(34));
         Expression::BinaryOp((a, Op::Add, b))
     };
-    assert_eq!(Ok(expected), parser.expr())
+    assert_eq!(Ok(expected), parser.expr());
 }
 
 #[test]
@@ -27,7 +27,7 @@ fn test_parse_mul_and_plus_exp() {
         Expression::BinaryOp((a, Op::Add, Box::new(Expression::BinaryOp((b, Op::Mul, c)))))
     };
 
-    assert_eq!(Ok(expected), parser.expr())
+    assert_eq!(Ok(expected), parser.expr());
 }
 
 #[test]
@@ -40,7 +40,7 @@ fn test_parse_mul_and_plus_exp_with_parens() {
         let c = Box::new(Expression::from(56));
         Expression::BinaryOp((a, Op::Add, Box::new(Expression::BinaryOp((b, Op::Mul, c)))))
     };
-    assert_eq!(Ok(expected), parser.expr())
+    assert_eq!(Ok(expected), parser.expr());
 }
 
 #[test]

@@ -50,9 +50,9 @@ impl Display for CreateTableQuery<'_> {
 
         let mut column_iter = self.columns.iter();
         if let Some(first_col) = column_iter.next() {
-            write!(f, "{}", first_col)?;
+            write!(f, "{first_col}")?;
             for col in column_iter {
-                write!(f, ", {}", col)?;
+                write!(f, ", {col}")?;
             }
         }
 

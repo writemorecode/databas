@@ -39,10 +39,10 @@ impl From<bool> for Expression<'_> {
 impl Display for Expression<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Expression::Literal(literal) => write!(f, "{}", literal),
-            Expression::Identifier(ident) => write!(f, "{}", ident),
-            Expression::UnaryOp((op, expr)) => write!(f, "{}{}", op, expr),
-            Expression::BinaryOp((left, op, right)) => write!(f, "{} {} {}", left, op, right),
+            Expression::Literal(literal) => write!(f, "{literal}"),
+            Expression::Identifier(ident) => write!(f, "{ident}"),
+            Expression::UnaryOp((op, expr)) => write!(f, "{op}{expr}"),
+            Expression::BinaryOp((left, op, right)) => write!(f, "{left} {op} {right}"),
             Expression::Wildcard => write!(f, "*"),
         }
     }
@@ -51,9 +51,9 @@ impl Display for Expression<'_> {
 impl Display for Literal<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Literal::String(s) => write!(f, "\"{}\"", s),
-            Literal::Number(n) => write!(f, "{}", n),
-            Literal::Boolean(b) => write!(f, "{}", b),
+            Literal::String(s) => write!(f, "\"{s}\""),
+            Literal::Number(n) => write!(f, "{n}"),
+            Literal::Boolean(b) => write!(f, "{b}"),
         }
     }
 }

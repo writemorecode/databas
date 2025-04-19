@@ -59,7 +59,7 @@ impl Display for OrderBy<'_> {
         write!(f, "{}", self.terms)?;
 
         if let Some(ref order) = self.order {
-            write!(f, " {}", order)?;
+            write!(f, " {order}")?;
         }
         Ok(())
     }
@@ -79,22 +79,22 @@ impl Display for SelectQuery<'_> {
         write!(f, "SELECT {}", self.columns)?;
 
         if let Some(table) = self.table {
-            write!(f, " FROM {}", table)?;
+            write!(f, " FROM {table}")?;
         }
         if let Some(ref where_clause) = self.where_clause {
-            write!(f, " WHERE {}", where_clause)?;
+            write!(f, " WHERE {where_clause}")?;
         }
 
         if let Some(ref order_by_clause) = self.order_by {
-            write!(f, " ORDER BY {}", order_by_clause)?;
+            write!(f, " ORDER BY {order_by_clause}")?;
         }
 
         if let Some(ref limit) = self.limit {
-            write!(f, " LIMIT {}", limit)?;
+            write!(f, " LIMIT {limit}")?;
         }
 
         if let Some(ref offset) = self.offset {
-            write!(f, " OFFSET {}", offset)?;
+            write!(f, " OFFSET {offset}")?;
         }
 
         write!(f, ";")

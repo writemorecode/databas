@@ -145,8 +145,8 @@ impl<'a> From<&'a str> for TokenKind<'a> {
 impl Display for NumberKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NumberKind::Integer(value) => write!(f, "{}", value),
-            NumberKind::Float(value) => write!(f, "{}", value),
+            NumberKind::Integer(value) => write!(f, "{value}"),
+            NumberKind::Float(value) => write!(f, "{value}"),
         }
     }
 }

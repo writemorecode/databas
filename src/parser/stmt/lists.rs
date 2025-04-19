@@ -6,7 +6,7 @@ use crate::parser::expr::Expression;
 pub struct ExpressionList<'a>(pub Vec<Expression<'a>>);
 impl Display for ExpressionList<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let strings: Vec<String> = self.0.iter().map(|v| v.to_string()).collect();
+        let strings: Vec<String> = self.0.iter().map(std::string::ToString::to_string).collect();
         let joined = strings.join(", ");
         write!(f, "{joined}")
     }

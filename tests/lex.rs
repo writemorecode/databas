@@ -84,7 +84,7 @@ fn test_double_quoted_string() {
 
 #[test]
 fn test_single_quoted_string() {
-    let s = r#"'hello world'"#;
+    let s = r"'hello world'";
     let mut lexer = Lexer::new(s);
     lexer.expect(TokenKind::String("hello world"), 0);
 }

@@ -17,7 +17,7 @@ pub struct Values<'a>(pub Vec<ExpressionList<'a>>);
 
 impl Display for Values<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = self.0.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+        let s = self.0.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(", ");
         write!(f, "{s}")
     }
 }
