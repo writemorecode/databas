@@ -3,12 +3,5 @@
 version = 4
 
 [[package]]
-name = "databas"
-version = "0.1.0"
-dependencies = [
- "databas_sql_parser",
-]
-
-[[package]]
 name = "databas_sql_parser"
 version = "0.1.0"
