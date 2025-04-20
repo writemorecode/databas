@@ -2,3 +2,6 @@
 name = "databas"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+databas_sql_parser = { version = "0.1.0", path = "crates/databas_sql_parser" }
