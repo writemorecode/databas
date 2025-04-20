@@ -1,4 +1,4 @@
-use databas::parser::Parser;
+use databas_sql_parser::parser::Parser;
 use std::io::Write;
 
 fn run(buf: String) {
