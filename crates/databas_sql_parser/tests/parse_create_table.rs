@@ -1,4 +1,4 @@
-use databas::{
+use databas_sql_parser::{
     error::{SQLError, SQLErrorKind},
     lexer::token_kind::TokenKind,
     parser::{

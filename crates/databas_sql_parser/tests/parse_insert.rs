@@ -1,4 +1,4 @@
-use databas::parser::{
+use databas_sql_parser::parser::{
     Parser,
     expr::{Expression, Literal},
     stmt::{

@@ -1,11 +1,11 @@
-use databas::error::SQLError;
-use databas::error::SQLErrorKind;
-use databas::lexer::Lexer;
-use databas::lexer::token::Token;
-use databas::lexer::token_kind::Keyword;
-use databas::lexer::token_kind::NumberKind::Float;
-use databas::lexer::token_kind::NumberKind::Integer;
-use databas::lexer::token_kind::TokenKind;
+use databas_sql_parser::error::SQLError;
+use databas_sql_parser::error::SQLErrorKind;
+use databas_sql_parser::lexer::Lexer;
+use databas_sql_parser::lexer::token::Token;
+use databas_sql_parser::lexer::token_kind::Keyword;
+use databas_sql_parser::lexer::token_kind::NumberKind::Float;
+use databas_sql_parser::lexer::token_kind::NumberKind::Integer;
+use databas_sql_parser::lexer::token_kind::TokenKind;
 
 trait LexerExt {
     fn expect(&mut self, kind: TokenKind, offset: usize);
