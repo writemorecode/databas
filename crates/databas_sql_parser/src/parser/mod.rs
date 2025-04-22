@@ -34,31 +34,27 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_non_negative_integer(&mut self) -> Result<Option<u32>, SQLError<'a>> {
-        self.lexer
+        let tok = self
+            .lexer
             .next()
-            .ok_or(SQLError { kind: SQLErrorKind::UnexpectedEnd, pos: self.lexer.position })
-            .and_then(|tok| {
-                tok.map(|tok| match tok.kind {
-                    TokenKind::Number(NumberKind::Integer(num)) => Ok(num.try_into().ok()),
-                    TokenKind::Minus => {
-                        if let Some(Ok(Token {
-                            kind: TokenKind::Number(NumberKind::Integer(num)),
-                            ..
-                        })) = self.lexer.next()
-                        {
-                            Err(SQLError::new(
-                                SQLErrorKind::ExpectedNonNegativeInteger { got: -num },
-                                tok.offset,
-                            ))
-                        } else {
-                            Err(SQLError::new(SQLErrorKind::Other(TokenKind::Minus), tok.offset))
-                        }
-                    }
-                    other => {
-                        Err(SQLError::new(SQLErrorKind::ExpectedInteger { got: other }, tok.offset))
-                    }
-                })
-            })?
+            .ok_or(SQLError { kind: SQLErrorKind::UnexpectedEnd, pos: self.lexer.position })??;
+        match tok.kind {
+            TokenKind::Number(NumberKind::Integer(num)) => Ok(num.try_into().ok()),
+            TokenKind::Minus => {
+                if let Some(Ok(Token {
+                    kind: TokenKind::Number(NumberKind::Integer(num)), ..
+                })) = self.lexer.next()
+                {
+                    Err(SQLError::new(
+                        SQLErrorKind::ExpectedNonNegativeInteger { got: -num },
+                        tok.offset,
+                    ))
+                } else {
+                    Err(SQLError::new(SQLErrorKind::Other(TokenKind::Minus), tok.offset))
+                }
+            }
+            other => Err(SQLError::new(SQLErrorKind::ExpectedInteger { got: other }, tok.offset)),
+        }
     }
 
     fn parse_expression_list(&mut self) -> Result<ExpressionList<'a>, SQLError<'a>> {
