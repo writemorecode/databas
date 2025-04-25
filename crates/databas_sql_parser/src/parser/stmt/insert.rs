@@ -14,7 +14,7 @@ pub struct Values<'a>(pub Vec<ExpressionList<'a>>);
 
 impl Display for Values<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = self.0.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+        let s = self.0.iter().map(|v| format!("({v})")).collect::<Vec<_>>().join(", ");
         write!(f, "{s}")
     }
 }
@@ -34,7 +34,7 @@ pub struct InsertQuery<'a> {
 
 impl Display for InsertQuery<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "INSERT INTO {} ({}) VALUES ({});", self.table, self.columns, self.values)
+        write!(f, "INSERT INTO {} ({}) VALUES {};", self.table, self.columns, self.values)
     }
 }
 
