@@ -67,12 +67,7 @@ impl<'a> Parser<'a> {
 
         self.lexer.expect_token(TokenKind::LeftParen)?;
 
-        let mut columns = vec![self.parse_column_definition()?];
-
-        while let Some(Ok(Token { kind: TokenKind::Comma, .. })) = self.lexer.peek() {
-            self.lexer.next();
-            columns.push(self.parse_column_definition()?);
-        }
+        let columns = self.parse_comma_separated_list(|p| p.parse_column_definition())?;
 
         self.lexer.expect_token(TokenKind::RightParen)?;
         self.lexer.expect_token(TokenKind::Semicolon)?;

@@ -57,22 +57,42 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_expression_list(&mut self) -> Result<ExpressionList<'a>, SQLError<'a>> {
-        let mut expr_list = vec![self.expr_bp(0)?];
+    fn parse_comma_separated_list_in_parenthesis<T>(
+        &mut self,
+        mut parse_item: impl FnMut(&mut Self) -> Result<T, SQLError<'a>>,
+    ) -> Result<Vec<T>, SQLError<'a>>
+    where
+        T: 'a,
+    {
+        self.parse_comma_separated_list(|p| {
+            p.lexer.expect_token(TokenKind::LeftParen)?;
+            let item = parse_item(p)?;
+            p.lexer.expect_token(TokenKind::RightParen)?;
+            Ok(item)
+        })
+    }
+
+    fn parse_comma_separated_list<T>(
+        &mut self,
+        mut parse_item: impl FnMut(&mut Self) -> Result<T, SQLError<'a>>,
+    ) -> Result<Vec<T>, SQLError<'a>>
+    where
+        T: 'a,
+    {
+        let mut list = vec![parse_item(self)?];
         while let Some(Ok(Token { kind: TokenKind::Comma, .. })) = self.lexer.peek() {
             self.lexer.next();
-            expr_list.push(self.expr_bp(0)?);
+            list.push(parse_item(self)?);
         }
-        Ok(ExpressionList(expr_list))
+        Ok(list)
+    }
+
+    fn parse_expression_list(&mut self) -> Result<ExpressionList<'a>, SQLError<'a>> {
+        Ok(ExpressionList(self.parse_comma_separated_list(|p| p.expr_bp(0))?))
     }
 
     fn parse_identifier_list(&mut self) -> Result<IdentifierList<'a>, SQLError<'a>> {
-        let mut expr_list = vec![self.parse_identifier()?];
-        while let Some(Ok(Token { kind: TokenKind::Comma, .. })) = self.lexer.peek() {
-            self.lexer.next();
-            expr_list.push(self.parse_identifier()?);
-        }
-        Ok(IdentifierList(expr_list))
+        Ok(IdentifierList(self.parse_comma_separated_list(|p| p.parse_identifier())?))
     }
 
     fn parse_identifier(&mut self) -> Result<&'a str, SQLError<'a>> {

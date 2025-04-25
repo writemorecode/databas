@@ -2,10 +2,7 @@ use std::fmt::Display;
 
 use crate::{
     error::SQLError,
-    lexer::{
-        token::Token,
-        token_kind::{Keyword, TokenKind},
-    },
+    lexer::token_kind::{Keyword, TokenKind},
     parser::{
         Parser,
         stmt::lists::{ExpressionList, IdentifierList},
@@ -24,16 +21,7 @@ impl Display for Values<'_> {
 
 impl<'a> Parser<'a> {
     fn parse_values(&mut self) -> Result<Values<'a>, SQLError<'a>> {
-        self.lexer.expect_token(TokenKind::LeftParen)?;
-        let mut values = vec![self.parse_expression_list()?];
-        self.lexer.expect_token(TokenKind::RightParen)?;
-        while let Some(Ok(Token { kind: TokenKind::Comma, .. })) = self.lexer.peek() {
-            self.lexer.next();
-            self.lexer.expect_token(TokenKind::LeftParen)?;
-            values.push(self.parse_expression_list()?);
-            self.lexer.expect_token(TokenKind::RightParen)?;
-        }
-        Ok(Values(values))
+        Ok(Values(self.parse_comma_separated_list_in_parenthesis(|p| p.parse_expression_list())?))
     }
 }
 
