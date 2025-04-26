@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "databas"
+name = "databas_cli"
 version = "0.1.0"
 dependencies = [
  "databas_sql_parser",

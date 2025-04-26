@@ -1,7 +1,12 @@
-[package]
-name = "databas"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = '2'
+members = [
+    'crates/databas_cli',
+    'crates/databas_sql_parser',
+]
 
-[dependencies]
-databas_sql_parser = { version = "0.1.0", path = "crates/databas_sql_parser" }
+[workspace.package]
+version = '0.1.0'
+authors = ['writemorecode']
+edition = '2024'
+repository = 'https://github.com/writemorecode/databas'
