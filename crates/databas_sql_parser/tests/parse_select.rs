@@ -3,7 +3,7 @@ use databas_sql_parser::{
     lexer::token_kind::{Keyword, TokenKind},
     parser::{
         Parser,
-        expr::Expression,
+        expr::{AggregateFunction, Expression},
         op::Op,
         stmt::{
             Statement::Select,

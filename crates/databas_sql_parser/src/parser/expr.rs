@@ -9,6 +9,17 @@ pub enum Literal<'a> {
     Number(NumberKind),
     Boolean(bool),
 }
+
+#[derive(Debug, PartialEq)]
+pub enum AggregateFunction<'a> {
+    Sum(Box<Expression<'a>>),
+    Count(Box<Expression<'a>>),
+    Avg(Box<Expression<'a>>),
+    StdDev(Box<Expression<'a>>),
+    Min(Box<Expression<'a>>),
+    Max(Box<Expression<'a>>),
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Expression<'a> {
     Literal(Literal<'a>),
@@ -16,6 +27,7 @@ pub enum Expression<'a> {
     UnaryOp((Op, Box<Expression<'a>>)),
     BinaryOp((Box<Expression<'a>>, Op, Box<Expression<'a>>)),
     Wildcard,
+    AggregateFunction(AggregateFunction<'a>),
 }
 
 impl From<i32> for Expression<'_> {
@@ -44,6 +56,20 @@ impl Display for Expression<'_> {
             Expression::UnaryOp((op, expr)) => write!(f, "{}{}", op, expr),
             Expression::BinaryOp((left, op, right)) => write!(f, "{} {} {}", left, op, right),
             Expression::Wildcard => write!(f, "*"),
+            Expression::AggregateFunction(agg) => write!(f, "{}", agg),
+        }
+    }
+}
+
+impl Display for AggregateFunction<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AggregateFunction::Sum(expr) => write!(f, "SUM({})", expr),
+            AggregateFunction::Count(expr) => write!(f, "COUNT({})", expr),
+            AggregateFunction::Avg(expr) => write!(f, "AVG({})", expr),
+            AggregateFunction::StdDev(expr) => write!(f, "STDDEV({})", expr),
+            AggregateFunction::Min(expr) => write!(f, "MIN({})", expr),
+            AggregateFunction::Max(expr) => write!(f, "MAX({})", expr),
         }
     }
 }

@@ -2,7 +2,7 @@ pub mod expr;
 pub mod op;
 pub mod stmt;
 
-use expr::{Expression, Literal};
+use expr::{AggregateFunction, Expression, Literal};
 use op::Op;
 use stmt::Statement;
 use stmt::lists::{ExpressionList, IdentifierList};
@@ -10,7 +10,7 @@ use stmt::lists::{ExpressionList, IdentifierList};
 use crate::error::{SQLError, SQLErrorKind};
 use crate::lexer::Lexer;
 use crate::lexer::token::Token;
-use crate::lexer::token_kind::{Keyword, NumberKind, TokenKind};
+use crate::lexer::token_kind::{Aggregate, Keyword, NumberKind, TokenKind};
 
 #[derive(Debug)]
 pub struct Parser<'a> {
@@ -163,6 +163,7 @@ impl<'a> Parser<'a> {
                 lhs
             }
             TokenKind::Minus | TokenKind::Keyword(Keyword::Not) => self.parse_unary_op(token)?,
+            TokenKind::Keyword(Keyword::Aggregate(agg)) => self.parse_aggregate_function(agg)?,
             other => {
                 return Err(SQLError::new(SQLErrorKind::Other(other), token.offset));
             }
@@ -201,6 +202,32 @@ impl<'a> Parser<'a> {
             lhs = Expression::BinaryOp((Box::new(lhs), op, Box::new(rhs)));
         }
         Ok(lhs)
+    }
+
+    fn parse_aggregate_function(&mut self, agg: Aggregate) -> Result<Expression<'a>, SQLError<'a>> {
+        self.lexer.expect_token(TokenKind::LeftParen)?;
+        let expr = self.expr_bp(0)?;
+        self.lexer.expect_token(TokenKind::RightParen)?;
+        match agg {
+            Aggregate::Count => {
+                Ok(Expression::AggregateFunction(AggregateFunction::Count(Box::new(expr))))
+            }
+            Aggregate::Sum => {
+                Ok(Expression::AggregateFunction(AggregateFunction::Sum(Box::new(expr))))
+            }
+            Aggregate::Avg => {
+                Ok(Expression::AggregateFunction(AggregateFunction::Avg(Box::new(expr))))
+            }
+            Aggregate::StdDev => {
+                Ok(Expression::AggregateFunction(AggregateFunction::StdDev(Box::new(expr))))
+            }
+            Aggregate::Min => {
+                Ok(Expression::AggregateFunction(AggregateFunction::Min(Box::new(expr))))
+            }
+            Aggregate::Max => {
+                Ok(Expression::AggregateFunction(AggregateFunction::Max(Box::new(expr))))
+            }
+        }
     }
 }
 

@@ -53,6 +53,17 @@ pub enum Keyword {
     Int,
     Float,
     Text,
+    Aggregate(Aggregate),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Aggregate {
+    Sum,
+    Avg,
+    StdDev,
+    Min,
+    Max,
+    Count,
 }
 
 impl Display for Keyword {
@@ -80,6 +91,14 @@ impl Display for Keyword {
             Keyword::Int => write!(f, "INT"),
             Keyword::Float => write!(f, "FLOAT"),
             Keyword::Text => write!(f, "TEXT"),
+            Keyword::Aggregate(aggregate) => match aggregate {
+                Aggregate::Sum => write!(f, "SUM"),
+                Aggregate::Avg => write!(f, "AVG"),
+                Aggregate::StdDev => write!(f, "STDDEV"),
+                Aggregate::Min => write!(f, "MIN"),
+                Aggregate::Max => write!(f, "MAX"),
+                Aggregate::Count => write!(f, "COUNT"),
+            },
         }
     }
 }
@@ -137,6 +156,14 @@ impl<'a> From<&'a str> for TokenKind<'a> {
             "INT" => TokenKind::Keyword(Keyword::Int),
             "FLOAT" => TokenKind::Keyword(Keyword::Float),
             "TEXT" => TokenKind::Keyword(Keyword::Text),
+
+            "SUM" => TokenKind::Keyword(Keyword::Aggregate(Aggregate::Sum)),
+            "AVG" => TokenKind::Keyword(Keyword::Aggregate(Aggregate::Avg)),
+            "STDDEV" => TokenKind::Keyword(Keyword::Aggregate(Aggregate::StdDev)),
+            "MIN" => TokenKind::Keyword(Keyword::Aggregate(Aggregate::Min)),
+            "MAX" => TokenKind::Keyword(Keyword::Aggregate(Aggregate::Max)),
+            "COUNT" => TokenKind::Keyword(Keyword::Aggregate(Aggregate::Count)),
+
             _ => TokenKind::Identifier(value),
         }
     }
