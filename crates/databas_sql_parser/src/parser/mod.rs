@@ -2,7 +2,7 @@ pub mod expr;
 pub mod op;
 pub mod stmt;
 
-use expr::{AggregateFunction, Expression, Literal};
+use expr::{AggregateFunction, AggregateFunctionKind, Expression, Literal};
 use op::Op;
 use stmt::Statement;
 use stmt::lists::{ExpressionList, IdentifierList};
@@ -208,26 +208,18 @@ impl<'a> Parser<'a> {
         self.lexer.expect_token(TokenKind::LeftParen)?;
         let expr = self.expr_bp(0)?;
         self.lexer.expect_token(TokenKind::RightParen)?;
-        match agg {
-            Aggregate::Count => {
-                Ok(Expression::AggregateFunction(AggregateFunction::Count(Box::new(expr))))
-            }
-            Aggregate::Sum => {
-                Ok(Expression::AggregateFunction(AggregateFunction::Sum(Box::new(expr))))
-            }
-            Aggregate::Avg => {
-                Ok(Expression::AggregateFunction(AggregateFunction::Avg(Box::new(expr))))
-            }
-            Aggregate::StdDev => {
-                Ok(Expression::AggregateFunction(AggregateFunction::StdDev(Box::new(expr))))
-            }
-            Aggregate::Min => {
-                Ok(Expression::AggregateFunction(AggregateFunction::Min(Box::new(expr))))
-            }
-            Aggregate::Max => {
-                Ok(Expression::AggregateFunction(AggregateFunction::Max(Box::new(expr))))
-            }
-        }
+        let kind = match agg {
+            Aggregate::Count => AggregateFunctionKind::Count,
+            Aggregate::Sum => AggregateFunctionKind::Sum,
+            Aggregate::Avg => AggregateFunctionKind::Avg,
+            Aggregate::StdDev => AggregateFunctionKind::StdDev,
+            Aggregate::Min => AggregateFunctionKind::Min,
+            Aggregate::Max => AggregateFunctionKind::Max,
+        };
+        Ok(Expression::AggregateFunction(AggregateFunction {
+            kind,
+            expr: Box::new(expr),
+        }))
     }
 }
 

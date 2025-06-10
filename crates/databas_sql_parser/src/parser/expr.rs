@@ -10,14 +10,20 @@ pub enum Literal<'a> {
     Boolean(bool),
 }
 
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub enum AggregateFunctionKind {
+    Sum,
+    Count,
+    Avg,
+    StdDev,
+    Min,
+    Max,
+}
+
 #[derive(Debug, PartialEq)]
-pub enum AggregateFunction<'a> {
-    Sum(Box<Expression<'a>>),
-    Count(Box<Expression<'a>>),
-    Avg(Box<Expression<'a>>),
-    StdDev(Box<Expression<'a>>),
-    Min(Box<Expression<'a>>),
-    Max(Box<Expression<'a>>),
+pub struct AggregateFunction<'a> {
+    pub kind: AggregateFunctionKind,
+    pub expr: Box<Expression<'a>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -61,16 +67,22 @@ impl Display for Expression<'_> {
     }
 }
 
-impl Display for AggregateFunction<'_> {
+impl Display for AggregateFunctionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AggregateFunction::Sum(expr) => write!(f, "SUM({})", expr),
-            AggregateFunction::Count(expr) => write!(f, "COUNT({})", expr),
-            AggregateFunction::Avg(expr) => write!(f, "AVG({})", expr),
-            AggregateFunction::StdDev(expr) => write!(f, "STDDEV({})", expr),
-            AggregateFunction::Min(expr) => write!(f, "MIN({})", expr),
-            AggregateFunction::Max(expr) => write!(f, "MAX({})", expr),
+            AggregateFunctionKind::Sum => write!(f, "SUM"),
+            AggregateFunctionKind::Count => write!(f, "COUNT"),
+            AggregateFunctionKind::Avg => write!(f, "AVG"),
+            AggregateFunctionKind::StdDev => write!(f, "STDDEV"),
+            AggregateFunctionKind::Min => write!(f, "MIN"),
+            AggregateFunctionKind::Max => write!(f, "MAX"),
         }
+    }
+}
+
+impl Display for AggregateFunction<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}({})", self.kind, self.expr)
     }
 }
 
@@ -103,22 +115,30 @@ mod tests {
         let expected_query = Statement::Select(SelectQuery {
             table: Some("products"),
             columns: ExpressionList(vec![
-                Expression::AggregateFunction(AggregateFunction::Count(Box::new(Expression::Wildcard))),
-                Expression::AggregateFunction(AggregateFunction::Sum(Box::new(
-                    Expression::Identifier("price"),
-                ))),
-                Expression::AggregateFunction(AggregateFunction::Avg(Box::new(
-                    Expression::Identifier("price"),
-                ))),
-                Expression::AggregateFunction(AggregateFunction::StdDev(Box::new(
-                    Expression::Identifier("price"),
-                ))),
-                Expression::AggregateFunction(AggregateFunction::Max(Box::new(
-                    Expression::Identifier("price"),
-                ))),
-                Expression::AggregateFunction(AggregateFunction::Min(Box::new(
-                    Expression::Identifier("price"),
-                ))),
+                Expression::AggregateFunction(AggregateFunction {
+                    kind: AggregateFunctionKind::Count,
+                    expr: Box::new(Expression::Wildcard),
+                }),
+                Expression::AggregateFunction(AggregateFunction {
+                    kind: AggregateFunctionKind::Sum,
+                    expr: Box::new(Expression::Identifier("price")),
+                }),
+                Expression::AggregateFunction(AggregateFunction {
+                    kind: AggregateFunctionKind::Avg,
+                    expr: Box::new(Expression::Identifier("price")),
+                }),
+                Expression::AggregateFunction(AggregateFunction {
+                    kind: AggregateFunctionKind::StdDev,
+                    expr: Box::new(Expression::Identifier("price")),
+                }),
+                Expression::AggregateFunction(AggregateFunction {
+                    kind: AggregateFunctionKind::Max,
+                    expr: Box::new(Expression::Identifier("price")),
+                }),
+                Expression::AggregateFunction(AggregateFunction {
+                    kind: AggregateFunctionKind::Min,
+                    expr: Box::new(Expression::Identifier("price")),
+                }),
             ]),
             where_clause: None,
             order_by: None,
@@ -126,5 +146,47 @@ mod tests {
             offset: None,
         });
         assert_eq!(query, Ok(expected_query));
+        
+        // Test that the struct format works correctly
+        let test_agg = AggregateFunction {
+            kind: AggregateFunctionKind::Sum,
+            expr: Box::new(Expression::Identifier("price")),
+        };
+        assert_eq!(format!("{}", test_agg), "SUM(price)");
+    }
+
+    #[test]
+    fn test_aggregate_function_struct_usage() {
+        // Test direct field access
+        let sum_func = AggregateFunction {
+            kind: AggregateFunctionKind::Sum,
+            expr: Box::new(Expression::Identifier("salary")),
+        };
+        
+        assert_eq!(sum_func.kind, AggregateFunctionKind::Sum);
+        assert_eq!(*sum_func.expr, Expression::Identifier("salary"));
+        assert_eq!(format!("{}", sum_func), "SUM(salary)");
+        
+        // Test different aggregate kinds
+        let kinds = vec![
+            AggregateFunctionKind::Count,
+            AggregateFunctionKind::Avg,
+            AggregateFunctionKind::Max,
+            AggregateFunctionKind::Min,
+            AggregateFunctionKind::StdDev,
+        ];
+        
+        for kind in kinds {
+            let agg = AggregateFunction {
+                kind,
+                expr: Box::new(Expression::Wildcard),
+            };
+            
+            // Test that kind field is accessible
+            assert_eq!(agg.kind, kind);
+            
+            // Test that expression field is accessible
+            assert_eq!(*agg.expr, Expression::Wildcard);
+        }
     }
 }
