@@ -104,8 +104,8 @@ mod tests {
         ];
         for value in values {
             let encoded_size = varint_encode(value as u64, &mut Cursor::new(&mut buf[..])).unwrap();
-            let decoded = varint_decode(&mut Cursor::new(&buf[..]));
-            assert_eq!(Ok(value), decoded);
+            let decoded = varint_decode(&mut Cursor::new(&buf[..])).unwrap();
+            assert_eq!(value, decoded);
             assert_eq!(encoded_size, varint_size(value));
         }
     }
@@ -145,8 +145,8 @@ mod tests {
             let mut write_cursor = Cursor::new(&mut buf[..]);
             varint_encode_signed(value, &mut write_cursor).unwrap();
             let mut read_cursor = Cursor::new(&buf[..]);
-            let decoded_value = varint_decode_signed(&mut read_cursor);
-            assert_eq!(Ok(value), decoded_value);
+            let decoded_value = varint_decode_signed(&mut read_cursor).unwrap();
+            assert_eq!(value, decoded_value);
         }
     }
 }

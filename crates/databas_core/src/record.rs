@@ -4,12 +4,12 @@ use std::{
 };
 
 use crate::varint::{
-    varint_decode, varint_decode_signed, varint_encode, varint_encode_signed, varint_size, varint_size_signed,
+    varint_decode, varint_decode_signed, varint_encode, varint_encode_signed, varint_size,
+    varint_size_signed,
 };
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum SerializationError {
-    UnexpectedEof,
     InvalidData(String),
     InvalidTag(u8),
     BufferTooSmall { required: usize, available: usize },
@@ -17,11 +17,12 @@ pub enum SerializationError {
     InvalidVarInt,
     StringTooLong,
     InvalidSignedInteger(u64),
+    IoError(std::io::Error),
 }
 
 impl From<std::io::Error> for SerializationError {
-    fn from(_err: std::io::Error) -> Self {
-        SerializationError::UnexpectedEof
+    fn from(err: std::io::Error) -> Self {
+        SerializationError::IoError(err)
     }
 }
 
@@ -247,25 +248,21 @@ mod tests {
         let record = Record(vec![Value::Integer(42)]);
         let mut buffer = [0u8; 1];
         let result = record.serialize(&mut Cursor::new(&mut buffer[..]));
-        assert!(matches!(result, Err(SerializationError::UnexpectedEof)));
+        assert!(matches!(result, Err(SerializationError::IoError(_))));
     }
 
     #[test]
     fn test_deserialize_from_empty_buffer() {
-        assert_eq!(
-            Record::deserialize(&mut Cursor::new(&mut [])),
-            Err(SerializationError::UnexpectedEof)
-        );
+        let record = Record::deserialize(&mut Cursor::new(&mut []));
+        assert!(matches!(record, Err(SerializationError::IoError(_))));
     }
 
     #[test]
     fn test_deserialize_invalid_tag() {
         let invalid_tag: u8 = 99;
         let buffer = [invalid_tag; 1];
-        assert_eq!(
-            Value::deserialize(&mut Cursor::new(&buffer[..])),
-            Err(SerializationError::InvalidTag(invalid_tag))
-        );
+        let err = Value::deserialize(&mut Cursor::new(&buffer[..])).unwrap_err();
+        assert!(matches!(err, SerializationError::InvalidTag(tag) if tag == invalid_tag));
     }
 
     #[test]
