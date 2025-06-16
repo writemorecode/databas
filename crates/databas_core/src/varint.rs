@@ -2,6 +2,33 @@ use std::io::{Cursor, Read, Write};
 
 use crate::record::SerializationError;
 
+fn zigzag_encode_i64(value: i64) -> u64 {
+    ((value << 1) ^ (value >> 63)) as u64
+}
+
+fn zigzag_decode_i64(value: u64) -> i64 {
+    ((value >> 1) as i64) ^ -((value & 1) as i64)
+}
+
+pub fn varint_encode_signed(
+    value: i64,
+    buf: &mut Cursor<&mut [u8]>,
+) -> Result<usize, SerializationError> {
+    let zigzag_value = zigzag_encode_i64(value);
+    varint_encode(zigzag_value, buf)
+}
+
+pub fn varint_decode_signed(buf: &mut Cursor<&[u8]>) -> Result<i64, SerializationError> {
+    let value = varint_decode(buf)?;
+    let decoded = zigzag_decode_i64(value);
+    Ok(decoded)
+}
+
+pub fn varint_size_signed(value: i64) -> usize {
+    let zigzag_value = zigzag_encode_i64(value);
+    varint_size(zigzag_value)
+}
+
 pub fn varint_encode(value: u64, buf: &mut Cursor<&mut [u8]>) -> Result<usize, SerializationError> {
     if value <= 0x7F {
         buf.write_all(&[(value & 0x7F) as u8])?;
@@ -96,6 +123,30 @@ mod tests {
         for value in &values {
             let decoded = varint_decode(&mut read_cursor).unwrap();
             assert_eq!(*value, decoded);
+        }
+    }
+
+    #[test]
+    fn test_encode_decode_signed_varint() {
+        let values = [
+            0_i64,
+            -127,
+            -128 - 16383,
+            -16384,
+            i16::MAX as i64,
+            i16::MIN as i64,
+            i32::MAX as i64,
+            i32::MIN as i64,
+            i64::MAX,
+            i64::MIN,
+        ];
+        let mut buf = [0u8; 16];
+        for value in values {
+            let mut write_cursor = Cursor::new(&mut buf[..]);
+            varint_encode_signed(value, &mut write_cursor).unwrap();
+            let mut read_cursor = Cursor::new(&buf[..]);
+            let decoded_value = varint_decode_signed(&mut read_cursor);
+            assert_eq!(Ok(value), decoded_value);
         }
     }
 }

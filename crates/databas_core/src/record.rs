@@ -3,7 +3,9 @@ use std::{
     string::FromUtf8Error,
 };
 
-use crate::varint::{varint_decode, varint_encode, varint_size};
+use crate::varint::{
+    varint_decode, varint_decode_signed, varint_encode, varint_encode_signed, varint_size, varint_size_signed,
+};
 
 #[derive(Debug, PartialEq)]
 pub enum SerializationError {
@@ -14,7 +16,7 @@ pub enum SerializationError {
     VarIntBufferTooSmall { available: usize },
     InvalidVarInt,
     StringTooLong,
-    InvalidSignedInteger,
+    InvalidSignedInteger(u64),
 }
 
 impl From<std::io::Error> for SerializationError {
@@ -31,6 +33,7 @@ impl From<FromUtf8Error> for SerializationError {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Value {
+    UnsignedInteger(u64),
     Integer(i64),
     Float(f64),
     String(String),
@@ -44,6 +47,7 @@ enum Tag {
     String,
     Boolean,
     Null,
+    UnsignedInteger,
 }
 
 impl TryFrom<u8> for Tag {
@@ -51,11 +55,12 @@ impl TryFrom<u8> for Tag {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            1 => Ok(Tag::Integer),
-            2 => Ok(Tag::Float),
-            3 => Ok(Tag::String),
-            4 => Ok(Tag::Boolean),
-            5 => Ok(Tag::Null),
+            1 => Ok(Tag::UnsignedInteger),
+            2 => Ok(Tag::Integer),
+            3 => Ok(Tag::Float),
+            4 => Ok(Tag::String),
+            5 => Ok(Tag::Boolean),
+            6 => Ok(Tag::Null),
             other => Err(SerializationError::InvalidTag(other)),
         }
     }
@@ -64,7 +69,8 @@ impl TryFrom<u8> for Tag {
 impl Value {
     fn serialized_size(&self) -> usize {
         let data_size = match self {
-            Value::Integer(i) => varint_size({ *i } as u64),
+            Value::UnsignedInteger(i) => varint_size(*i),
+            Value::Integer(i) => varint_size_signed(*i),
             Value::Float(f) => std::mem::size_of_val(f),
             Value::String(s) => varint_size(s.len() as u64) + s.len(),
             Value::Boolean(b) => std::mem::size_of_val(b),
@@ -76,19 +82,23 @@ impl Value {
 
     fn tag(&self) -> u8 {
         match self {
-            Value::Integer(_) => 1,
-            Value::Float(_) => 2,
-            Value::String(_) => 3,
-            Value::Boolean(_) => 4,
-            Value::Null => 5,
+            Value::UnsignedInteger(_) => 1,
+            Value::Integer(_) => 2,
+            Value::Float(_) => 3,
+            Value::String(_) => 4,
+            Value::Boolean(_) => 5,
+            Value::Null => 6,
         }
     }
 
     pub fn serialize(&self, buf: &mut Cursor<&mut [u8]>) -> Result<(), SerializationError> {
         buf.write_all(&self.tag().to_le_bytes())?;
         match self {
-            Value::Integer(i) => {
+            Value::UnsignedInteger(i) => {
                 varint_encode(*i as u64, buf)?;
+            }
+            Value::Integer(i) => {
+                varint_encode_signed(*i, buf)?;
             }
             Value::Float(f) => buf.write_all(&f.to_le_bytes())?,
             Value::String(s) => {
@@ -109,10 +119,12 @@ impl Value {
         let tag = Tag::try_from(tag_buf[0])?;
 
         match tag {
-            Tag::Integer => {
+            Tag::UnsignedInteger => {
                 let uint = varint_decode(reader)?;
-                let int: i64 =
-                    uint.try_into().map_err(|_| SerializationError::InvalidSignedInteger)?;
+                Ok(Value::UnsignedInteger(uint))
+            }
+            Tag::Integer => {
+                let int = varint_decode_signed(reader)?;
                 Ok(Value::Integer(int))
             }
             Tag::Float => {
@@ -183,7 +195,9 @@ mod tests {
     #[test]
     fn test_serialize_deserialize_record() {
         let record = Record(vec![
-            Value::Integer(42),
+            Value::UnsignedInteger(1234),
+            Value::Integer(-42),
+            Value::Integer(500),
             Value::Float(3.1415),
             Value::Boolean(true),
             Value::String("hello world".to_string()),
@@ -201,7 +215,9 @@ mod tests {
     #[test]
     fn test_serialize_deserialize_multiple_record() {
         let values = vec![
-            Value::Integer(42),
+            Value::UnsignedInteger(900),
+            Value::Integer(-42),
+            Value::Integer(500),
             Value::Float(3.1415),
             Value::Boolean(true),
             Value::String("hello world".to_string()),
@@ -244,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_deserialize_invalid_tag() {
-        let invalid_tag: u8 = 6;
+        let invalid_tag: u8 = 99;
         let buffer = [invalid_tag; 1];
         assert_eq!(
             Value::deserialize(&mut Cursor::new(&buffer[..])),
@@ -254,8 +270,19 @@ mod tests {
 
     #[test]
     fn test_serialized_size_value_varint() {
-        assert_eq!(Value::Integer(100).serialized_size(), 1 + 1);
-        assert_eq!(Value::Integer(128).serialized_size(), 1 + 2);
+        assert_eq!(Value::UnsignedInteger(100).serialized_size(), 1 + 1);
+        assert_eq!(Value::Integer(-200).serialized_size(), 1 + 2);
         assert_eq!(Value::String("abcd".to_string()).serialized_size(), 1 + 1 + 4);
+    }
+
+    #[test]
+    fn test_serialize_deserialize_signed_integer_record() {
+        let record = Record(vec![Value::Integer(-42)]);
+        let mut buffer = [0u8; 8];
+        let mut cursor = Cursor::new(&mut buffer[..]);
+        record.serialize(&mut cursor).unwrap();
+        let mut cursor = Cursor::new(&buffer[..]);
+        let deserialized_record = Record::deserialize(&mut cursor).unwrap();
+        assert_eq!(record, deserialized_record);
     }
 }
