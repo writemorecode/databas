@@ -174,7 +174,7 @@ impl Record {
     pub fn deserialize(reader: &mut Cursor<&[u8]>) -> Result<Self, SerializationError> {
         let record_size = varint_decode(reader)?;
         let mut values = Vec::new();
-        let mut bytes_read = varint_size(record_size);
+        let mut bytes_read = 0;
         let record_size = record_size as usize;
         while bytes_read < record_size {
             let value = Value::deserialize(reader)?;
