@@ -135,7 +135,7 @@ impl Value {
                 Ok(Value::Float(float))
             }
             Tag::String => {
-                let len: usize = varint_decode(reader)?
+                let len: u32 = varint_decode(reader)?
                     .try_into()
                     .map_err(|_| SerializationError::StringTooLong)?;
 
