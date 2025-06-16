@@ -1,7 +1,9 @@
 use std::{
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
     string::FromUtf8Error,
 };
+
+use crate::varint::{varint_decode, varint_encode, varint_size};
 
 #[derive(Debug, PartialEq)]
 pub enum SerializationError {
@@ -12,6 +14,7 @@ pub enum SerializationError {
     VarIntBufferTooSmall { available: usize },
     InvalidVarInt,
     StringTooLong,
+    InvalidSignedInteger,
 }
 
 impl From<std::io::Error> for SerializationError {
@@ -26,7 +29,7 @@ impl From<FromUtf8Error> for SerializationError {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Value {
     Integer(i64),
     Float(f64),
@@ -61,9 +64,9 @@ impl TryFrom<u8> for Tag {
 impl Value {
     fn serialized_size(&self) -> usize {
         let data_size = match self {
-            Value::Integer(i) => std::mem::size_of_val(i),
+            Value::Integer(i) => varint_size({ *i } as u64),
             Value::Float(f) => std::mem::size_of_val(f),
-            Value::String(s) => std::mem::size_of::<u32>() + s.len(),
+            Value::String(s) => varint_size(s.len() as u64) + s.len(),
             Value::Boolean(b) => std::mem::size_of_val(b),
             Value::Null => 0,
         };
@@ -81,21 +84,16 @@ impl Value {
         }
     }
 
-    pub fn serialize(&self, mut buf: &mut [u8]) -> Result<(), SerializationError> {
-        let required_size = self.serialized_size();
-        if required_size > buf.len() {
-            return Err(SerializationError::BufferTooSmall {
-                required: required_size,
-                available: buf.len(),
-            });
-        }
+    pub fn serialize(&self, buf: &mut Cursor<&mut [u8]>) -> Result<(), SerializationError> {
         buf.write_all(&self.tag().to_le_bytes())?;
         match self {
-            Value::Integer(i) => buf.write_all(&i.to_le_bytes())?,
+            Value::Integer(i) => {
+                varint_encode(*i as u64, buf)?;
+            }
             Value::Float(f) => buf.write_all(&f.to_le_bytes())?,
             Value::String(s) => {
                 let len: u32 = s.len().try_into().map_err(|_| SerializationError::StringTooLong)?;
-                buf.write_all(&len.to_le_bytes())?;
+                varint_encode(len as u64, buf)?;
                 buf.write_all(s.as_bytes())?;
             }
             Value::Boolean(b) => buf.write_all(&[*b as u8])?,
@@ -105,17 +103,17 @@ impl Value {
         Ok(())
     }
 
-    pub fn deserialize(reader: &mut &[u8]) -> Result<Value, SerializationError> {
+    pub fn deserialize(reader: &mut Cursor<&[u8]>) -> Result<Value, SerializationError> {
         let mut tag_buf = [0u8; 1];
         reader.read_exact(&mut tag_buf)?;
         let tag = Tag::try_from(tag_buf[0])?;
 
         match tag {
             Tag::Integer => {
-                let mut int_buf = [0u8; 8];
-                reader.read_exact(&mut int_buf)?;
-                let integer = i64::from_le_bytes(int_buf);
-                Ok(Value::Integer(integer))
+                let uint = varint_decode(reader)?;
+                let int: i64 =
+                    uint.try_into().map_err(|_| SerializationError::InvalidSignedInteger)?;
+                Ok(Value::Integer(int))
             }
             Tag::Float => {
                 let mut float_buf = [0u8; 8];
@@ -124,9 +122,9 @@ impl Value {
                 Ok(Value::Float(float))
             }
             Tag::String => {
-                let mut len_buf = [0u8; 4];
-                reader.read_exact(&mut len_buf)?;
-                let len = u32::from_le_bytes(len_buf);
+                let len: usize = varint_decode(reader)?
+                    .try_into()
+                    .map_err(|_| SerializationError::StringTooLong)?;
 
                 let mut str_buf = vec![0u8; len as usize];
                 reader.read_exact(&mut str_buf)?;
@@ -149,42 +147,25 @@ pub struct Record(Vec<Value>);
 
 impl Record {
     fn serialized_size(&self) -> usize {
-        let data_size: usize = self.0.iter().map(|value| value.serialized_size()).sum();
-        std::mem::size_of::<u64>() + data_size
+        self.0.iter().map(|value| value.serialized_size()).sum()
     }
 
-    pub fn serialize(&self, mut buffer: &mut [u8]) -> Result<(), SerializationError> {
+    pub fn serialize(&self, buffer: &mut Cursor<&mut [u8]>) -> Result<(), SerializationError> {
         let record_size = self.serialized_size();
-        if buffer.len() < record_size {
-            return Err(SerializationError::BufferTooSmall {
-                required: record_size,
-                available: buffer.len(),
-            });
-        }
-
-        let record_size_bytes = (record_size as u64).to_le_bytes();
-        buffer.write_all(&record_size_bytes)?;
-
+        varint_encode(record_size as u64, buffer)?;
         for value in &self.0 {
-            let value_size = value.serialized_size();
             value.serialize(buffer)?;
-            buffer = &mut buffer[value_size..];
         }
-
         Ok(())
     }
 
-    pub fn deserialize(reader: &[u8]) -> Result<Self, SerializationError> {
-        let mut reader = reader;
-        let mut size_buf = [0u8; 8];
-        reader.read_exact(&mut size_buf)?;
-        let record_size = u64::from_le_bytes(size_buf) as usize;
-
+    pub fn deserialize(reader: &mut Cursor<&[u8]>) -> Result<Self, SerializationError> {
+        let record_size = varint_decode(reader)?;
         let mut values = Vec::new();
-        let mut bytes_read = 8;
-
+        let mut bytes_read = varint_size(record_size);
+        let record_size = record_size as usize;
         while bytes_read < record_size {
-            let value = Value::deserialize(&mut reader)?;
+            let value = Value::deserialize(reader)?;
             let value_size = value.serialized_size();
             bytes_read += value_size;
             values.push(value);
@@ -195,6 +176,8 @@ impl Record {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use super::{Record, SerializationError, Value};
 
     #[test]
@@ -207,23 +190,56 @@ mod tests {
         ]);
 
         let mut buffer = [0u8; 64];
-        record.serialize(&mut buffer[..]).expect("serialization failed");
+        let mut cursor = Cursor::new(&mut buffer[..]);
+        record.serialize(&mut cursor).expect("serialization failed");
 
-        let deserialize_record = Record::deserialize(&buffer[..]).expect("deserialization failed");
+        let mut cursor = Cursor::new(&buffer[..]);
+        let deserialize_record = Record::deserialize(&mut cursor).expect("deserialization failed");
         assert_eq!(record, deserialize_record);
+    }
+
+    #[test]
+    fn test_serialize_deserialize_multiple_record() {
+        let values = vec![
+            Value::Integer(42),
+            Value::Float(3.1415),
+            Value::Boolean(true),
+            Value::String("hello world".to_string()),
+        ];
+
+        let mut buffer = [0u8; 128];
+        let mut cursor = Cursor::new(&mut buffer[..]);
+        for value in &values {
+            let record = Record(vec![value.clone()]);
+            record.serialize(&mut cursor).expect("serialization failed");
+        }
+
+        let mut cursor = Cursor::new(&buffer[..]);
+        let mut deserialized_values = Vec::with_capacity(values.len());
+        for value in &values {
+            let record = Record(vec![value.clone()]);
+            let deserialize_record =
+                Record::deserialize(&mut cursor).expect("deserialization failed");
+            assert_eq!(record, deserialize_record);
+            deserialized_values.push(value.clone());
+        }
+        assert_eq!(values, deserialized_values);
     }
 
     #[test]
     fn test_serialize_into_buffer_too_small() {
         let record = Record(vec![Value::Integer(42)]);
-        let mut buffer = [0u8; 4];
-        let result = record.serialize(&mut buffer[..]);
-        assert!(matches!(result, Err(SerializationError::BufferTooSmall { .. })));
+        let mut buffer = [0u8; 1];
+        let result = record.serialize(&mut Cursor::new(&mut buffer[..]));
+        assert!(matches!(result, Err(SerializationError::UnexpectedEof)));
     }
 
     #[test]
     fn test_deserialize_from_empty_buffer() {
-        assert_eq!(Record::deserialize(&[]), Err(SerializationError::UnexpectedEof));
+        assert_eq!(
+            Record::deserialize(&mut Cursor::new(&mut [])),
+            Err(SerializationError::UnexpectedEof)
+        );
     }
 
     #[test]
@@ -231,8 +247,15 @@ mod tests {
         let invalid_tag: u8 = 6;
         let buffer = [invalid_tag; 1];
         assert_eq!(
-            Value::deserialize(&mut &buffer[..]),
+            Value::deserialize(&mut Cursor::new(&buffer[..])),
             Err(SerializationError::InvalidTag(invalid_tag))
         );
+    }
+
+    #[test]
+    fn test_serialized_size_value_varint() {
+        assert_eq!(Value::Integer(100).serialized_size(), 1 + 1);
+        assert_eq!(Value::Integer(128).serialized_size(), 1 + 2);
+        assert_eq!(Value::String("abcd".to_string()).serialized_size(), 1 + 1 + 4);
     }
 }
