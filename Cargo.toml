@@ -1,7 +1,7 @@
 [workspace]
 resolver = '2'
 members = [
-    'crates/databas_cli',
+    'crates/databas_cli', "crates/databas_core",
     'crates/databas_sql_parser',
 ]
 

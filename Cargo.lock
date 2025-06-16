@@ -10,5 +10,9 @@ dependencies = [
 ]
 
 [[package]]
+name = "databas_core"
+version = "0.1.0"
+
+[[package]]
 name = "databas_sql_parser"
 version = "0.1.0"
