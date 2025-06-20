@@ -28,8 +28,8 @@ impl Display for ColumnType {
 
 #[derive(Debug, PartialEq, Default)]
 pub struct ColumnConstraints {
-    primary_key: bool,
-    nullable: bool,
+    pub primary_key: bool,
+    pub nullable: bool,
 }
 
 #[derive(Debug, PartialEq)]
