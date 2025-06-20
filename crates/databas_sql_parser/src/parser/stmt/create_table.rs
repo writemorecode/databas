@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{collections::HashSet, fmt::Display};
 
 use crate::{
     error::{SQLError, SQLErrorKind},
@@ -26,22 +26,38 @@ impl Display for ColumnType {
     }
 }
 
-#[derive(Debug, PartialEq, Default)]
-pub struct ColumnConstraints {
-    pub primary_key: bool,
-    pub nullable: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ColumnConstraint {
+    PrimaryKey,
+    Nullable,
+}
+
+impl Display for ColumnConstraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ColumnConstraint::PrimaryKey => write!(f, "PRIMARY KEY"),
+            ColumnConstraint::Nullable => write!(f, "NULLABLE"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Column<'a> {
     pub name: &'a str,
     pub column_type: ColumnType,
-    pub constraints: ColumnConstraints,
+    pub constraints: HashSet<ColumnConstraint>,
 }
 
 impl Display for Column<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {}", self.name, self.column_type)
+        write!(f, "{} {}", self.name, self.column_type)?;
+        if let Some(constraint) = self.constraints.iter().next() {
+            write!(f, " {}", constraint)?;
+            for constraint in self.constraints.iter().skip(1) {
+                write!(f, " {}", constraint)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -98,18 +114,39 @@ impl<'a> Parser<'a> {
             }
         };
 
-        let constraints = match self.lexer.peek() {
-            Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Primary), .. })) => {
-                self.lexer.next();
-                self.lexer.expect_token(TokenKind::Keyword(Keyword::Key))?;
-                ColumnConstraints { primary_key: true, nullable: false }
+
+        let mut constraints = HashSet::new();
+        while let Some(Ok(token)) = self.lexer.peek() {
+            let pos = token.offset;
+            match &token.kind {
+                TokenKind::Keyword(Keyword::Primary) => {
+                    self.lexer.next();
+                    self.lexer.expect_token(TokenKind::Keyword(Keyword::Key))?;
+                    if !constraints.insert(ColumnConstraint::PrimaryKey) {
+                        return Err(SQLError::new(
+                            SQLErrorKind::DuplicateConstraint {
+                                column: name,
+                                constraint: ColumnConstraint::PrimaryKey,
+                            },
+                            pos,
+                        ));
+                    }
+                }
+                TokenKind::Keyword(Keyword::Nullable) => {
+                    self.lexer.next();
+                    if !constraints.insert(ColumnConstraint::Nullable) {
+                        return Err(SQLError::new(
+                            SQLErrorKind::DuplicateConstraint {
+                                column: name,
+                                constraint: ColumnConstraint::Nullable,
+                            },
+                            pos,
+                        ));
+                    }
+                }
+                _ => break,
             }
-            Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Nullable), .. })) => {
-                self.lexer.next();
-                ColumnConstraints { primary_key: false, nullable: true }
-            }
-            _ => ColumnConstraints::default(),
-        };
+        }
 
         Ok(Column { name, column_type, constraints })
     }
@@ -132,21 +169,9 @@ mod tests {
         let expected_query = CreateTableQuery {
             table_name: "users",
             columns: vec![
-                Column {
-                    name: "id",
-                    column_type: ColumnType::Int,
-                    constraints: ColumnConstraints::default(),
-                },
-                Column {
-                    name: "name",
-                    column_type: ColumnType::Text,
-                    constraints: ColumnConstraints::default(),
-                },
-                Column {
-                    name: "age",
-                    column_type: ColumnType::Int,
-                    constraints: ColumnConstraints::default(),
-                },
+                Column { name: "id", column_type: ColumnType::Int, constraints: HashSet::new() },
+                Column { name: "name", column_type: ColumnType::Text, constraints: HashSet::new() },
+                Column { name: "age", column_type: ColumnType::Int, constraints: HashSet::new() },
             ],
         };
 
@@ -162,20 +187,12 @@ mod tests {
         let expected_query = CreateTableQuery {
             table_name: "products",
             columns: vec![
-                Column {
-                    name: "id",
-                    column_type: ColumnType::Int,
-                    constraints: ColumnConstraints::default(),
-                },
-                Column {
-                    name: "name",
-                    column_type: ColumnType::Text,
-                    constraints: ColumnConstraints::default(),
-                },
+                Column { name: "id", column_type: ColumnType::Int, constraints: HashSet::new() },
+                Column { name: "name", column_type: ColumnType::Text, constraints: HashSet::new() },
                 Column {
                     name: "price",
                     column_type: ColumnType::Float,
-                    constraints: ColumnConstraints::default(),
+                    constraints: HashSet::new(),
                 },
             ],
         };
@@ -194,7 +211,7 @@ mod tests {
             columns: vec![Column {
                 name: "id",
                 column_type: ColumnType::Int,
-                constraints: ColumnConstraints::default(),
+                constraints: HashSet::new(),
             }],
         };
 
@@ -239,13 +256,9 @@ mod tests {
                 Column {
                     name: "id",
                     column_type: ColumnType::Int,
-                    constraints: ColumnConstraints { primary_key: true, nullable: false },
+                    constraints: HashSet::from([ColumnConstraint::PrimaryKey]),
                 },
-                Column {
-                    name: "name",
-                    column_type: ColumnType::Text,
-                    constraints: ColumnConstraints::default(),
-                },
+                Column { name: "name", column_type: ColumnType::Text, constraints: HashSet::new() },
             ],
         };
 
@@ -261,15 +274,11 @@ mod tests {
         let expected_query = CreateTableQuery {
             table_name: "users",
             columns: vec![
-                Column {
-                    name: "id",
-                    column_type: ColumnType::Int,
-                    constraints: ColumnConstraints::default(),
-                },
+                Column { name: "id", column_type: ColumnType::Int, constraints: HashSet::new() },
                 Column {
                     name: "name",
                     column_type: ColumnType::Text,
-                    constraints: ColumnConstraints { primary_key: false, nullable: true },
+                    constraints: HashSet::from_iter(vec![ColumnConstraint::Nullable]),
                 },
             ],
         };
@@ -288,11 +297,43 @@ mod tests {
             columns: vec![Column {
                 name: "a",
                 column_type: ColumnType::Int,
-                constraints: ColumnConstraints { primary_key: false, nullable: false },
+                constraints: HashSet::new(),
             }],
         };
 
         let expected = CreateTable(expected_query);
         assert_eq!(Ok(expected), parser.stmt());
+    }
+
+    #[test]
+    fn test_create_table_with_duplicate_nullable_constraint() {
+        let s = "CREATE TABLE users (id INT NULLABLE NULLABLE, name TEXT);";
+        let mut parser = Parser::new(s);
+
+        let err = SQLError {
+            kind: SQLErrorKind::DuplicateConstraint {
+                column: "id",
+                constraint: ColumnConstraint::Nullable,
+            },
+            pos: 36,
+        };
+
+        assert_eq!(Err(err), parser.stmt());
+    }
+
+    #[test]
+    fn test_create_table_with_duplicate_primary_key_constraint() {
+        let s = "CREATE TABLE users (id INT PRIMARY KEY PRIMARY KEY, name TEXT);";
+        let mut parser = Parser::new(s);
+
+        let err = SQLError {
+            kind: SQLErrorKind::DuplicateConstraint {
+                column: "id",
+                constraint: ColumnConstraint::PrimaryKey,
+            },
+            pos: 39,
+        };
+
+        assert_eq!(Err(err), parser.stmt());
     }
 }

@@ -1,4 +1,5 @@
 use crate::lexer::token_kind::TokenKind;
+use crate::parser::stmt::create_table::ColumnConstraint;
 
 use std::fmt::Display;
 
@@ -33,6 +34,7 @@ pub enum SQLErrorKind<'a> {
     UnexpectedTokenKind { expected: TokenKind<'a>, got: TokenKind<'a> },
     UnterminatedStatement,
     UnterminatedString,
+    DuplicateConstraint { column: &'a str, constraint: ColumnConstraint },
 }
 
 impl Display for SQLErrorKind<'_> {
@@ -88,6 +90,9 @@ impl Display for SQLErrorKind<'_> {
             }
             SQLErrorKind::InvalidDataType { got: data_type } => {
                 write!(f, "Invalid data type '{data_type}'")
+            }
+            SQLErrorKind::DuplicateConstraint { column, constraint } => {
+                write!(f, "Duplicate constraint for column '{column}': {constraint}")
             }
         }
     }
