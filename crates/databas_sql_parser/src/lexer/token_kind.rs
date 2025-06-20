@@ -54,6 +54,9 @@ pub enum Keyword {
     Float,
     Text,
     Aggregate(Aggregate),
+    Primary,
+    Key,
+    Nullable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -99,6 +102,9 @@ impl Display for Keyword {
                 Aggregate::Max => write!(f, "MAX"),
                 Aggregate::Count => write!(f, "COUNT"),
             },
+            Keyword::Primary => write!(f, "PRIMARY"),
+            Keyword::Key => write!(f, "KEY"),
+            Keyword::Nullable => write!(f, "NULLABLE"),
         }
     }
 }
@@ -163,6 +169,10 @@ impl<'a> From<&'a str> for TokenKind<'a> {
             "MIN" => TokenKind::Keyword(Keyword::Aggregate(Aggregate::Min)),
             "MAX" => TokenKind::Keyword(Keyword::Aggregate(Aggregate::Max)),
             "COUNT" => TokenKind::Keyword(Keyword::Aggregate(Aggregate::Count)),
+
+            "PRIMARY" => TokenKind::Keyword(Keyword::Primary),
+            "KEY" => TokenKind::Keyword(Keyword::Key),
+            "NULLABLE" => TokenKind::Keyword(Keyword::Nullable),
 
             _ => TokenKind::Identifier(value),
         }

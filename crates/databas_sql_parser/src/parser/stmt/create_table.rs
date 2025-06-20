@@ -26,10 +26,17 @@ impl Display for ColumnType {
     }
 }
 
+#[derive(Debug, PartialEq, Default)]
+pub struct ColumnConstraints {
+    primary_key: bool,
+    nullable: bool,
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Column<'a> {
     pub name: &'a str,
     pub column_type: ColumnType,
+    pub constraints: ColumnConstraints,
 }
 
 impl Display for Column<'_> {
@@ -91,7 +98,20 @@ impl<'a> Parser<'a> {
             }
         };
 
-        Ok(Column { name, column_type })
+        let constraints = match self.lexer.peek() {
+            Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Primary), .. })) => {
+                self.lexer.next();
+                self.lexer.expect_token(TokenKind::Keyword(Keyword::Key))?;
+                ColumnConstraints { primary_key: true, nullable: false }
+            }
+            Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Nullable), .. })) => {
+                self.lexer.next();
+                ColumnConstraints { primary_key: false, nullable: true }
+            }
+            _ => ColumnConstraints::default(),
+        };
+
+        Ok(Column { name, column_type, constraints })
     }
 }
 
@@ -101,10 +121,7 @@ mod tests {
     use crate::{
         error::{SQLError, SQLErrorKind},
         lexer::token_kind::TokenKind,
-        parser::{
-            stmt::Statement::CreateTable,
-            Parser,
-        },
+        parser::{Parser, stmt::Statement::CreateTable},
     };
 
     #[test]
@@ -115,9 +132,21 @@ mod tests {
         let expected_query = CreateTableQuery {
             table_name: "users",
             columns: vec![
-                Column { name: "id", column_type: ColumnType::Int },
-                Column { name: "name", column_type: ColumnType::Text },
-                Column { name: "age", column_type: ColumnType::Int },
+                Column {
+                    name: "id",
+                    column_type: ColumnType::Int,
+                    constraints: ColumnConstraints::default(),
+                },
+                Column {
+                    name: "name",
+                    column_type: ColumnType::Text,
+                    constraints: ColumnConstraints::default(),
+                },
+                Column {
+                    name: "age",
+                    column_type: ColumnType::Int,
+                    constraints: ColumnConstraints::default(),
+                },
             ],
         };
 
@@ -133,9 +162,21 @@ mod tests {
         let expected_query = CreateTableQuery {
             table_name: "products",
             columns: vec![
-                Column { name: "id", column_type: ColumnType::Int },
-                Column { name: "name", column_type: ColumnType::Text },
-                Column { name: "price", column_type: ColumnType::Float },
+                Column {
+                    name: "id",
+                    column_type: ColumnType::Int,
+                    constraints: ColumnConstraints::default(),
+                },
+                Column {
+                    name: "name",
+                    column_type: ColumnType::Text,
+                    constraints: ColumnConstraints::default(),
+                },
+                Column {
+                    name: "price",
+                    column_type: ColumnType::Float,
+                    constraints: ColumnConstraints::default(),
+                },
             ],
         };
 
@@ -150,7 +191,11 @@ mod tests {
 
         let expected_query = CreateTableQuery {
             table_name: "single_column",
-            columns: vec![Column { name: "id", column_type: ColumnType::Int }],
+            columns: vec![Column {
+                name: "id",
+                column_type: ColumnType::Int,
+                constraints: ColumnConstraints::default(),
+            }],
         };
 
         let expected = CreateTable(expected_query);
@@ -175,9 +220,79 @@ mod tests {
         let s = "CREATE TABLE (id INT);";
         let mut parser = Parser::new(s);
 
-        let err =
-            SQLError { kind: SQLErrorKind::ExpectedIdentifier { got: TokenKind::LeftParen }, pos: 14 };
+        let err = SQLError {
+            kind: SQLErrorKind::ExpectedIdentifier { got: TokenKind::LeftParen },
+            pos: 14,
+        };
 
         assert_eq!(Err(err), parser.stmt());
+    }
+
+    #[test]
+    fn test_create_table_with_primary_key_constraint() {
+        let s = "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);";
+        let mut parser = Parser::new(s);
+
+        let expected_query = CreateTableQuery {
+            table_name: "users",
+            columns: vec![
+                Column {
+                    name: "id",
+                    column_type: ColumnType::Int,
+                    constraints: ColumnConstraints { primary_key: true, nullable: false },
+                },
+                Column {
+                    name: "name",
+                    column_type: ColumnType::Text,
+                    constraints: ColumnConstraints::default(),
+                },
+            ],
+        };
+
+        let expected = CreateTable(expected_query);
+        assert_eq!(Ok(expected), parser.stmt());
+    }
+
+    #[test]
+    fn test_create_table_with_nullable_constraint() {
+        let s = "CREATE TABLE users (id INT, name TEXT NULLABLE);";
+        let mut parser = Parser::new(s);
+
+        let expected_query = CreateTableQuery {
+            table_name: "users",
+            columns: vec![
+                Column {
+                    name: "id",
+                    column_type: ColumnType::Int,
+                    constraints: ColumnConstraints::default(),
+                },
+                Column {
+                    name: "name",
+                    column_type: ColumnType::Text,
+                    constraints: ColumnConstraints { primary_key: false, nullable: true },
+                },
+            ],
+        };
+
+        let expected = CreateTable(expected_query);
+        assert_eq!(Ok(expected), parser.stmt());
+    }
+
+    #[test]
+    fn test_columns_not_nullable_by_default() {
+        let s = "CREATE TABLE test (a INT);";
+        let mut parser = Parser::new(s);
+
+        let expected_query = CreateTableQuery {
+            table_name: "test",
+            columns: vec![Column {
+                name: "a",
+                column_type: ColumnType::Int,
+                constraints: ColumnConstraints { primary_key: false, nullable: false },
+            }],
+        };
+
+        let expected = CreateTable(expected_query);
+        assert_eq!(Ok(expected), parser.stmt());
     }
 }
