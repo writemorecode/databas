@@ -1,6 +1,6 @@
 use std::io::{Cursor, Read, Write};
 
-use crate::error::SerializationError;
+use crate::record::SerializationError;
 
 fn zigzag_encode_i64(value: i64) -> u64 {
     ((value << 1) ^ (value >> 63)) as u64
