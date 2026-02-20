@@ -70,7 +70,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn peek(&mut self) -> Option<&Result<Token<'a>, SQLError>> {
+    pub fn peek(&mut self) -> Option<&Result<Token<'a>, SQLError<'_>>> {
         if self.peeked.is_some() {
             return self.peeked.as_ref();
         }
