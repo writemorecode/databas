@@ -167,11 +167,7 @@ mod tests {
     use crate::{
         error::{SQLError, SQLErrorKind},
         lexer::token_kind::{Keyword, TokenKind},
-        parser::{
-            op::Op,
-            stmt::Statement::Select,
-            Parser,
-        },
+        parser::{Parser, op::Op, stmt::Statement::Select},
     };
 
     #[test]

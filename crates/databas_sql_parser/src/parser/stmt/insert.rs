@@ -59,12 +59,12 @@ impl<'a> Parser<'a> {
 mod tests {
     use super::*;
     use crate::parser::{
+        Parser,
         expr::{Expression, Literal},
         stmt::{
-            lists::{ExpressionList, IdentifierList},
             Statement,
+            lists::{ExpressionList, IdentifierList},
         },
-        Parser,
     };
 
     #[test]

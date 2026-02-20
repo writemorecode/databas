@@ -216,10 +216,7 @@ impl<'a> Parser<'a> {
             Aggregate::Min => AggregateFunctionKind::Min,
             Aggregate::Max => AggregateFunctionKind::Max,
         };
-        Ok(Expression::AggregateFunction(AggregateFunction {
-            kind,
-            expr: Box::new(expr),
-        }))
+        Ok(Expression::AggregateFunction(AggregateFunction { kind, expr: Box::new(expr) }))
     }
 }
 

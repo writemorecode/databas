@@ -99,12 +99,12 @@ impl Display for Literal<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::Parser;
     use crate::parser::stmt::{
         Statement::{self},
         lists::ExpressionList,
         select::SelectQuery,
     };
-    use crate::parser::Parser;
 
     #[test]
     fn test_all_aggregate_functions() {
@@ -146,7 +146,7 @@ mod tests {
             offset: None,
         });
         assert_eq!(query, Ok(expected_query));
-        
+
         // Test that the struct format works correctly
         let test_agg = AggregateFunction {
             kind: AggregateFunctionKind::Sum,
@@ -162,11 +162,11 @@ mod tests {
             kind: AggregateFunctionKind::Sum,
             expr: Box::new(Expression::Identifier("salary")),
         };
-        
+
         assert_eq!(sum_func.kind, AggregateFunctionKind::Sum);
         assert_eq!(*sum_func.expr, Expression::Identifier("salary"));
         assert_eq!(format!("{}", sum_func), "SUM(salary)");
-        
+
         // Test different aggregate kinds
         let kinds = vec![
             AggregateFunctionKind::Count,
@@ -175,16 +175,13 @@ mod tests {
             AggregateFunctionKind::Min,
             AggregateFunctionKind::StdDev,
         ];
-        
+
         for kind in kinds {
-            let agg = AggregateFunction {
-                kind,
-                expr: Box::new(Expression::Wildcard),
-            };
-            
+            let agg = AggregateFunction { kind, expr: Box::new(Expression::Wildcard) };
+
             // Test that kind field is accessible
             assert_eq!(agg.kind, kind);
-            
+
             // Test that expression field is accessible
             assert_eq!(*agg.expr, Expression::Wildcard);
         }
