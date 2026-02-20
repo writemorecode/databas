@@ -1,3 +1,4 @@
+#[derive(Debug)]
 pub enum StorageError {
     IO(std::io::Error),
     InvalidPageId(u64),
