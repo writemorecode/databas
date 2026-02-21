@@ -7,8 +7,24 @@ pub enum StorageError {
 
 pub(crate) type StorageResult<T> = Result<T, StorageError>;
 
+#[derive(Debug)]
+pub(crate) enum PageCacheError {
+    Storage(StorageError),
+    NoEvictableFrame,
+    PinnedPage(u64),
+    InvalidFrameCount(usize),
+}
+
+pub(crate) type PageCacheResult<T> = Result<T, PageCacheError>;
+
 impl From<std::io::Error> for StorageError {
     fn from(err: std::io::Error) -> Self {
         Self::IO(err)
+    }
+}
+
+impl From<StorageError> for PageCacheError {
+    fn from(err: StorageError) -> Self {
+        Self::Storage(err)
     }
 }
