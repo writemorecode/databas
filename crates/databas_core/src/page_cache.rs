@@ -624,6 +624,30 @@ mod tests {
     }
 
     #[test]
+    fn new_page_changes_are_durable_after_flush_and_reopen() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+
+        let page_id = {
+            let mut cache = PageCache::new(disk_manager, 1).unwrap();
+            let (page_id, mut guard) = cache.new_page().unwrap();
+            let page = guard.page_mut();
+            page[0] = 61;
+            page[PAGE_SIZE - 1] = 142;
+            drop(guard);
+            cache.flush_page(page_id).unwrap();
+            page_id
+        };
+
+        let mut reopened_disk_manager = DiskManager::new(file.path()).unwrap();
+        let mut page = [0u8; PAGE_SIZE];
+        reopened_disk_manager.read_page(page_id, &mut page).unwrap();
+
+        assert_eq!(page[0], 61);
+        assert_eq!(page[PAGE_SIZE - 1], 142);
+    }
+
+    #[test]
     fn fetch_page_returns_error_for_corrupt_page_table_entry() {
         let file = NamedTempFile::new().unwrap();
         let disk_manager = DiskManager::new(file.path()).unwrap();
