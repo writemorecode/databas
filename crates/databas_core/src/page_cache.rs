@@ -54,7 +54,11 @@ impl PageCache {
     /// Cache misses use CLOCK replacement and may evict a dirty page.
     pub(crate) fn fetch_page(&mut self, page_id: PageId) -> PageCacheResult<PinGuard<'_>> {
         if let Some(&frame_id) = self.page_table.get(&page_id) {
-            let frame = &mut self.frames[frame_id];
+            let frame_count = self.frames.len();
+            let frame = self
+                .frames
+                .get_mut(frame_id)
+                .ok_or(PageCacheError::CorruptPageTableEntry { page_id, frame_id, frame_count })?;
             frame.reference = true;
             frame.pin_count = frame.pin_count.checked_add(1).expect("pin count overflow");
             return Ok(PinGuard::new(self, frame_id));
@@ -84,7 +88,12 @@ impl PageCache {
             return Ok(());
         };
 
-        if self.frames[frame_id].pin_count > 0 {
+        let frame = self.frames.get(frame_id).ok_or(PageCacheError::CorruptPageTableEntry {
+            page_id,
+            frame_id,
+            frame_count: self.frames.len(),
+        })?;
+        if frame.pin_count > 0 {
             return Err(PageCacheError::PinnedPage(page_id));
         }
 
@@ -612,5 +621,39 @@ mod tests {
         let mut page = [0u8; PAGE_SIZE];
         let read_result = disk_manager.read_page(0, &mut page);
         assert!(matches!(read_result, Err(crate::error::StorageError::InvalidPageId(0))));
+    }
+
+    #[test]
+    fn fetch_page_returns_error_for_corrupt_page_table_entry() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let mut cache = PageCache::new(disk_manager, 1).unwrap();
+
+        cache.page_table.insert(7, 99);
+
+        let result = cache.fetch_page(7);
+        assert!(matches!(
+            result,
+            Err(PageCacheError::CorruptPageTableEntry { page_id: 7, frame_id: 99, frame_count: 1 })
+        ));
+    }
+
+    #[test]
+    fn flush_page_returns_error_for_corrupt_page_table_entry() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let mut cache = PageCache::new(disk_manager, 1).unwrap();
+
+        cache.page_table.insert(8, 100);
+
+        let result = cache.flush_page(8);
+        assert!(matches!(
+            result,
+            Err(PageCacheError::CorruptPageTableEntry {
+                page_id: 8,
+                frame_id: 100,
+                frame_count: 1
+            })
+        ));
     }
 }
