@@ -13,6 +13,7 @@ pub(crate) enum PageCacheError {
     NoEvictableFrame,
     PinnedPage(u64),
     InvalidFrameCount(usize),
+    CorruptPageTableEntry { page_id: u64, frame_id: usize, frame_count: usize },
 }
 
 pub(crate) type PageCacheResult<T> = Result<T, PageCacheError>;
