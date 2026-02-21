@@ -18,6 +18,7 @@ struct Frame {
 }
 
 impl Frame {
+    /// Creates an empty frame with zeroed page data and cleared metadata bits.
     fn empty() -> Self {
         Self { page_id: None, data: [0u8; PAGE_SIZE], reference: false, dirty: false, pin_count: 0 }
     }
@@ -31,6 +32,9 @@ pub(crate) struct PageCache {
 }
 
 impl PageCache {
+    /// Creates a new page cache with a fixed number of preallocated frames.
+    ///
+    /// Returns an error when `frame_count` is zero.
     pub(crate) fn new(disk_manager: DiskManager, frame_count: usize) -> PageCacheResult<Self> {
         if frame_count == 0 {
             return Err(PageCacheError::InvalidFrameCount(frame_count));
@@ -44,6 +48,10 @@ impl PageCache {
         })
     }
 
+    /// Fetches an existing page into the cache and returns a pin guard.
+    ///
+    /// Cache hits set the reference bit and increment pin count.
+    /// Cache misses use CLOCK replacement and may evict a dirty page.
     pub(crate) fn fetch_page(&mut self, page_id: PageId) -> PageCacheResult<PinGuard<'_>> {
         if let Some(&frame_id) = self.page_table.get(&page_id) {
             let frame = &mut self.frames[frame_id];
@@ -57,6 +65,10 @@ impl PageCache {
         Ok(PinGuard::new(self, frame_id))
     }
 
+    /// Allocates a new on-disk page and returns it pinned in the cache.
+    ///
+    /// A victim frame is selected before allocation so a full pinned cache
+    /// returns `NoEvictableFrame` without growing the file.
     pub(crate) fn new_page(&mut self) -> PageCacheResult<(PageId, PinGuard<'_>)> {
         let frame_id = self.select_victim_frame().ok_or(PageCacheError::NoEvictableFrame)?;
         let page_id = self.disk_manager.new_page()?;
@@ -64,6 +76,9 @@ impl PageCache {
         Ok((page_id, PinGuard::new(self, frame_id)))
     }
 
+    /// Flushes one resident page if dirty.
+    ///
+    /// Non-resident pages are a no-op. Pinned pages return `PinnedPage`.
     pub(crate) fn flush_page(&mut self, page_id: PageId) -> PageCacheResult<()> {
         let Some(&frame_id) = self.page_table.get(&page_id) else {
             return Ok(());
@@ -76,6 +91,9 @@ impl PageCache {
         self.flush_frame_if_dirty(frame_id)
     }
 
+    /// Flushes all dirty pages that are currently unpinned.
+    ///
+    /// Returns `PinnedPage` if a dirty page is pinned.
     pub(crate) fn flush_all(&mut self) -> PageCacheResult<()> {
         for frame_id in 0..self.frames.len() {
             let (page_id, pin_count, dirty) = {
@@ -101,6 +119,9 @@ impl PageCache {
         Ok(())
     }
 
+    /// Selects a victim frame using CLOCK second-chance replacement.
+    ///
+    /// Pinned frames are skipped and referenced frames get one second chance.
     fn select_victim_frame(&mut self) -> Option<FrameId> {
         let max_scans = self.frames.len().saturating_mul(2);
 
@@ -124,6 +145,7 @@ impl PageCache {
         None
     }
 
+    /// Replaces frame contents with `new_page_id`, flushing old dirty data first.
     fn replace_frame(&mut self, frame_id: FrameId, new_page_id: PageId) -> PageCacheResult<()> {
         self.flush_frame_if_dirty(frame_id)?;
 
@@ -140,6 +162,7 @@ impl PageCache {
         Ok(())
     }
 
+    /// Writes a dirty resident frame to disk and clears its dirty bit.
     fn flush_frame_if_dirty(&mut self, frame_id: FrameId) -> PageCacheResult<()> {
         let (disk_manager, frames) = (&mut self.disk_manager, &mut self.frames);
         let frame = &mut frames[frame_id];
@@ -154,10 +177,12 @@ impl PageCache {
         Ok(())
     }
 
+    /// Advances the CLOCK hand, wrapping at the frame vector length.
     fn advance_clock_hand(&mut self) {
         self.clock_hand = (self.clock_hand + 1) % self.frames.len();
     }
 
+    /// Attempts to flush all dirty unpinned frames and ignores write errors.
     fn flush_best_effort_on_drop(&mut self) {
         let (disk_manager, frames) = (&mut self.disk_manager, &mut self.frames);
         for frame in frames.iter_mut() {
@@ -175,6 +200,7 @@ impl PageCache {
 }
 
 impl Drop for PageCache {
+    /// Performs best-effort flushing for dirty unpinned frames.
     fn drop(&mut self) {
         self.flush_best_effort_on_drop();
     }
@@ -186,14 +212,17 @@ pub(crate) struct PinGuard<'a> {
 }
 
 impl<'a> PinGuard<'a> {
+    /// Creates a new pin guard for a specific frame.
     fn new(page_cache: &'a mut PageCache, frame_id: FrameId) -> Self {
         Self { page_cache, frame_id }
     }
 
+    /// Returns an immutable reference to the pinned page bytes.
     pub(crate) fn page(&self) -> &[u8; PAGE_SIZE] {
         &self.page_cache.frames[self.frame_id].data
     }
 
+    /// Returns a mutable reference to the pinned page bytes and marks it dirty.
     pub(crate) fn page_mut(&mut self) -> &mut [u8; PAGE_SIZE] {
         let frame = &mut self.page_cache.frames[self.frame_id];
         frame.dirty = true;
@@ -202,6 +231,7 @@ impl<'a> PinGuard<'a> {
 }
 
 impl Drop for PinGuard<'_> {
+    /// Decrements the frame pin count when the guard leaves scope.
     fn drop(&mut self) {
         let frame = &mut self.page_cache.frames[self.frame_id];
         debug_assert!(frame.pin_count > 0, "pin count underflow");
@@ -219,6 +249,7 @@ mod tests {
 
     use super::*;
 
+    /// Generates a deterministic page payload from a seed byte.
     fn page_with_pattern(seed: u8) -> [u8; PAGE_SIZE] {
         let mut page = [0u8; PAGE_SIZE];
         for (index, byte) in page.iter_mut().enumerate() {
@@ -227,6 +258,7 @@ mod tests {
         page
     }
 
+    /// Creates a temporary database file and writes the provided pages to it.
     fn create_disk_with_pages(pages: &[[u8; PAGE_SIZE]]) -> (NamedTempFile, DiskManager) {
         let file = NamedTempFile::new().unwrap();
         let mut disk_manager = DiskManager::new(file.path()).unwrap();
@@ -237,6 +269,7 @@ mod tests {
         (file, disk_manager)
     }
 
+    /// Reads one page from disk for assertions in tests.
     fn read_disk_page(path: &Path, page_id: PageId) -> [u8; PAGE_SIZE] {
         let mut disk_manager = DiskManager::new(path).unwrap();
         let mut page = [0u8; PAGE_SIZE];
