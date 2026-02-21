@@ -1,3 +1,4 @@
+use crate::types::RowId;
 use std::{error::Error as StdError, fmt};
 
 #[derive(Debug)]
@@ -19,6 +20,19 @@ pub(crate) enum PageCacheError {
 }
 
 pub(crate) type PageCacheResult<T> = Result<T, PageCacheError>;
+
+#[derive(Debug)]
+pub(crate) enum TablePageError {
+    InvalidPageType(u8),
+    CorruptPage(&'static str),
+    CorruptCell { slot_index: u16 },
+    DuplicateRowId(RowId),
+    RowIdNotFound(RowId),
+    CellTooLarge { len: usize },
+    PageFull { needed: usize, available: usize },
+}
+
+pub(crate) type TablePageResult<T> = Result<T, TablePageError>;
 
 impl From<std::io::Error> for StorageError {
     fn from(err: std::io::Error) -> Self {
@@ -81,3 +95,23 @@ impl StdError for PageCacheError {
         }
     }
 }
+
+impl fmt::Display for TablePageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPageType(page_type) => write!(f, "invalid page type: {page_type}"),
+            Self::CorruptPage(reason) => write!(f, "corrupt page: {reason}"),
+            Self::CorruptCell { slot_index } => {
+                write!(f, "corrupt cell at slot index {slot_index}")
+            }
+            Self::DuplicateRowId(row_id) => write!(f, "duplicate row id: {row_id}"),
+            Self::RowIdNotFound(row_id) => write!(f, "row id not found: {row_id}"),
+            Self::CellTooLarge { len } => write!(f, "cell too large: {len} bytes"),
+            Self::PageFull { needed, available } => {
+                write!(f, "page full: need {needed} bytes, only {available} bytes available")
+            }
+        }
+    }
+}
+
+impl StdError for TablePageError {}
