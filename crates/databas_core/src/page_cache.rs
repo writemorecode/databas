@@ -130,13 +130,12 @@ impl PageCache {
         if let Some(old_page_id) = self.frames[frame_id].page_id {
             self.page_table.remove(&old_page_id);
         }
-        let (disk_manager, frames) = (&mut self.disk_manager, &mut self.frames);
-        let frame = &mut frames[frame_id];
-        disk_manager.read_page(new_page_id, &mut frame.data)?;
-        frame.page_id = Some(new_page_id);
-        frame.reference = true;
-        frame.dirty = false;
-        frame.pin_count = 1;
+
+        let mut data = [0u8; PAGE_SIZE];
+        self.disk_manager.read_page(new_page_id, &mut data)?;
+        self.frames[frame_id] =
+            Frame { page_id: Some(new_page_id), data, reference: true, dirty: false, pin_count: 1 };
+
         self.page_table.insert(new_page_id, frame_id);
         Ok(())
     }
