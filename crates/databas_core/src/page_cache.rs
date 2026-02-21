@@ -57,6 +57,13 @@ impl PageCache {
         Ok(PinGuard::new(self, frame_id))
     }
 
+    pub(crate) fn new_page(&mut self) -> PageCacheResult<(PageId, PinGuard<'_>)> {
+        let frame_id = self.select_victim_frame().ok_or(PageCacheError::NoEvictableFrame)?;
+        let page_id = self.disk_manager.new_page()?;
+        self.replace_frame(frame_id, page_id)?;
+        Ok((page_id, PinGuard::new(self, frame_id)))
+    }
+
     pub(crate) fn flush_page(&mut self, page_id: PageId) -> PageCacheResult<()> {
         let Some(&frame_id) = self.page_table.get(&page_id) else {
             return Ok(());
@@ -538,5 +545,54 @@ mod tests {
 
         let page_on_disk = read_disk_page(file.path(), 0);
         assert_eq!(page_on_disk[0], 144);
+    }
+
+    #[test]
+    fn new_page_returns_pinned_zero_initialized_page() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let mut cache = PageCache::new(disk_manager, 1).unwrap();
+
+        let (page_id, guard) = cache.new_page().unwrap();
+        assert_eq!(page_id, 0);
+        assert_eq!(guard.page(), &[0u8; PAGE_SIZE]);
+    }
+
+    #[test]
+    fn new_page_allocates_sequential_ids() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let mut cache = PageCache::new(disk_manager, 1).unwrap();
+
+        let (first_page_id, first_guard) = cache.new_page().unwrap();
+        assert_eq!(first_page_id, 0);
+        drop(first_guard);
+
+        let (second_page_id, second_guard) = cache.new_page().unwrap();
+        assert_eq!(second_page_id, 1);
+        drop(second_guard);
+    }
+
+    #[test]
+    fn new_page_returns_error_when_all_frames_are_pinned() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let mut cache = PageCache::new(disk_manager, 1).unwrap();
+
+        cache.frames[0] = Frame {
+            page_id: None,
+            data: [0u8; PAGE_SIZE],
+            reference: false,
+            dirty: false,
+            pin_count: 1,
+        };
+
+        let result = cache.new_page();
+        assert!(matches!(result, Err(PageCacheError::NoEvictableFrame)));
+
+        let mut disk_manager = DiskManager::new(file.path()).unwrap();
+        let mut page = [0u8; PAGE_SIZE];
+        let read_result = disk_manager.read_page(0, &mut page);
+        assert!(matches!(read_result, Err(crate::error::StorageError::InvalidPageId(0))));
     }
 }
