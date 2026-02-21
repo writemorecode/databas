@@ -127,16 +127,13 @@ impl PageCache {
     fn replace_frame(&mut self, frame_id: FrameId, new_page_id: PageId) -> PageCacheResult<()> {
         self.flush_frame_if_dirty(frame_id)?;
 
-        let mut data = [0u8; PAGE_SIZE];
-        self.disk_manager.read_page(new_page_id, &mut data)?;
-
         if let Some(old_page_id) = self.frames[frame_id].page_id {
             self.page_table.remove(&old_page_id);
         }
-
-        let frame = &mut self.frames[frame_id];
+        let (disk_manager, frames) = (&mut self.disk_manager, &mut self.frames);
+        let frame = &mut frames[frame_id];
+        disk_manager.read_page(new_page_id, &mut frame.data)?;
         frame.page_id = Some(new_page_id);
-        frame.data = data;
         frame.reference = true;
         frame.dirty = false;
         frame.pin_count = 1;
@@ -145,21 +142,16 @@ impl PageCache {
     }
 
     fn flush_frame_if_dirty(&mut self, frame_id: FrameId) -> PageCacheResult<()> {
-        let (page_id, dirty, data) = {
-            let frame = &self.frames[frame_id];
-            (frame.page_id, frame.dirty, frame.data)
-        };
-
-        if !dirty {
+        let (disk_manager, frames) = (&mut self.disk_manager, &mut self.frames);
+        let frame = &mut frames[frame_id];
+        if !frame.dirty {
             return Ok(());
         }
-
-        let Some(page_id) = page_id else {
+        let Some(page_id) = frame.page_id else {
             return Ok(());
         };
-
-        self.disk_manager.write_page(page_id, &data)?;
-        self.frames[frame_id].dirty = false;
+        disk_manager.write_page(page_id, &frame.data)?;
+        frame.dirty = false;
         Ok(())
     }
 
@@ -168,22 +160,16 @@ impl PageCache {
     }
 
     fn flush_best_effort_on_drop(&mut self) {
-        for frame_id in 0..self.frames.len() {
-            let (page_id, pin_count, dirty, data) = {
-                let frame = &self.frames[frame_id];
-                (frame.page_id, frame.pin_count, frame.dirty, frame.data)
-            };
-
-            if !dirty || pin_count > 0 {
+        let (disk_manager, frames) = (&mut self.disk_manager, &mut self.frames);
+        for frame in frames.iter_mut() {
+            if !frame.dirty || frame.pin_count > 0 {
                 continue;
             }
-
-            let Some(page_id) = page_id else {
+            let Some(page_id) = frame.page_id else {
                 continue;
             };
-
-            if self.disk_manager.write_page(page_id, &data).is_ok() {
-                self.frames[frame_id].dirty = false;
+            if disk_manager.write_page(page_id, &frame.data).is_ok() {
+                frame.dirty = false;
             }
         }
     }
