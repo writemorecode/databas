@@ -3,7 +3,7 @@ use crate::{
     types::{PAGE_SIZE, RowId},
 };
 
-use super::layout::{self, PageSpec, SpaceError};
+use super::layout::{self, PageSpec, SearchResult, SpaceError};
 
 const LEAF_SPEC: PageSpec =
     PageSpec { page_type: layout::LEAF_PAGE_TYPE, header_size: layout::LEAF_HEADER_SIZE };
@@ -37,8 +37,8 @@ impl<'a> TableLeafPageRef<'a> {
     pub(crate) fn search(&self, row_id: RowId) -> TablePageResult<Option<LeafCellRef<'a>>> {
         let slot_index =
             match layout::find_row_id(self.page, LEAF_SPEC, row_id, leaf_row_id_from_cell)? {
-                Ok(slot_index) => slot_index,
-                Err(_) => return Ok(None),
+                SearchResult::Found(slot_index) => slot_index,
+                SearchResult::NotFound(_) => return Ok(None),
             };
 
         decode_leaf_cell_at_slot(self.page, slot_index).map(Some)
@@ -75,8 +75,8 @@ impl<'a> TableLeafPageMut<'a> {
     pub(crate) fn insert(&mut self, row_id: RowId, payload: &[u8]) -> TablePageResult<()> {
         let insertion_index =
             match layout::find_row_id(self.page, LEAF_SPEC, row_id, leaf_row_id_from_cell)? {
-                Ok(_) => return Err(TablePageError::DuplicateRowId(row_id)),
-                Err(insertion_index) => insertion_index,
+                SearchResult::Found(_) => return Err(TablePageError::DuplicateRowId(row_id)),
+                SearchResult::NotFound(insertion_index) => insertion_index,
             };
 
         let cell = encode_leaf_cell(row_id, payload)?;
@@ -87,8 +87,8 @@ impl<'a> TableLeafPageMut<'a> {
     pub(crate) fn update(&mut self, row_id: RowId, payload: &[u8]) -> TablePageResult<()> {
         let slot_index =
             match layout::find_row_id(self.page, LEAF_SPEC, row_id, leaf_row_id_from_cell)? {
-                Ok(slot_index) => slot_index,
-                Err(_) => return Err(TablePageError::RowIdNotFound(row_id)),
+                SearchResult::Found(slot_index) => slot_index,
+                SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
             };
 
         let cell = encode_leaf_cell(row_id, payload)?;
@@ -99,8 +99,8 @@ impl<'a> TableLeafPageMut<'a> {
     pub(crate) fn delete(&mut self, row_id: RowId) -> TablePageResult<()> {
         let slot_index =
             match layout::find_row_id(self.page, LEAF_SPEC, row_id, leaf_row_id_from_cell)? {
-                Ok(slot_index) => slot_index,
-                Err(_) => return Err(TablePageError::RowIdNotFound(row_id)),
+                SearchResult::Found(slot_index) => slot_index,
+                SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
             };
 
         layout::remove_slot(self.page, LEAF_SPEC, slot_index)
