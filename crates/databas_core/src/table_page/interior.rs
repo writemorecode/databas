@@ -12,28 +12,35 @@ const LEFT_CHILD_SIZE: usize = 8;
 const ROW_ID_SIZE: usize = 8;
 const INTERIOR_CELL_SIZE: usize = LEFT_CHILD_SIZE + ROW_ID_SIZE;
 
+/// Decoded interior cell mapping a separator key to its left child page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct InteriorCell {
+    /// Child page id for keys less than `row_id` in this separator cell.
     pub(crate) left_child: PageId,
+    /// Separator row id for this interior cell.
     pub(crate) row_id: RowId,
 }
 
+/// Immutable wrapper over a validated table-interior page.
 #[derive(Debug)]
 pub(crate) struct TableInteriorPageRef<'a> {
     page: &'a [u8; PAGE_SIZE],
 }
 
+/// Mutable wrapper over a validated table-interior page.
 #[derive(Debug)]
 pub(crate) struct TableInteriorPageMut<'a> {
     page: &'a mut [u8; PAGE_SIZE],
 }
 
 impl<'a> TableInteriorPageRef<'a> {
+    /// Validates and wraps raw page bytes as an interior page.
     pub(crate) fn from_bytes(page: &'a [u8; PAGE_SIZE]) -> TablePageResult<Self> {
         layout::validate(page, INTERIOR_SPEC)?;
         Ok(Self { page })
     }
 
+    /// Looks up an interior cell by row id without mutable access.
     pub(crate) fn search(&self, row_id: RowId) -> TablePageResult<Option<InteriorCell>> {
         let slot_index =
             match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
@@ -45,20 +52,24 @@ impl<'a> TableInteriorPageRef<'a> {
         decode_interior_cell_at_slot(self.page, slot_index).map(Some)
     }
 
+    /// Returns the number of slot entries currently stored on the page.
     pub(crate) fn cell_count(&self) -> u16 {
         layout::cell_count(self.page)
     }
 
+    /// Returns the page header's rightmost child pointer.
     pub(crate) fn rightmost_child(&self) -> PageId {
         layout::read_u64_at(self.page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET)
     }
 
+    /// Returns free bytes between the slot directory and cell-content region.
     pub(crate) fn free_space(&self) -> usize {
         layout::free_space(self.page, INTERIOR_SPEC).expect("interior page must remain valid")
     }
 }
 
 impl<'a> TableInteriorPageMut<'a> {
+    /// Initializes an empty interior page and seeds the rightmost child pointer.
     pub(crate) fn init_empty(
         page: &'a mut [u8; PAGE_SIZE],
         rightmost_child: PageId,
@@ -68,19 +79,25 @@ impl<'a> TableInteriorPageMut<'a> {
         Ok(Self { page })
     }
 
+    /// Validates and wraps existing page bytes as a mutable interior page.
     pub(crate) fn from_bytes(page: &'a mut [u8; PAGE_SIZE]) -> TablePageResult<Self> {
         layout::validate(page, INTERIOR_SPEC)?;
         Ok(Self { page })
     }
 
+    /// Returns an immutable view over the same underlying page bytes.
     pub(crate) fn as_ref(&self) -> TableInteriorPageRef<'_> {
         TableInteriorPageRef { page: self.page }
     }
 
+    /// Immutable row-id lookup convenience method for mutable wrappers.
     pub(crate) fn search(&self, row_id: RowId) -> TablePageResult<Option<InteriorCell>> {
         self.as_ref().search(row_id)
     }
 
+    /// Inserts a new `(left_child, row_id)` cell in sorted order.
+    ///
+    /// Fails with [`TablePageError::DuplicateRowId`] if `row_id` already exists.
     pub(crate) fn insert(&mut self, row_id: RowId, left_child: PageId) -> TablePageResult<()> {
         let insertion_index =
             match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
@@ -94,6 +111,9 @@ impl<'a> TableInteriorPageMut<'a> {
         layout::insert_slot(self.page, INTERIOR_SPEC, insertion_index, cell_offset)
     }
 
+    /// Replaces the `left_child` pointer for an existing separator key.
+    ///
+    /// Fails with [`TablePageError::RowIdNotFound`] when `row_id` is absent.
     pub(crate) fn update(&mut self, row_id: RowId, left_child: PageId) -> TablePageResult<()> {
         let slot_index =
             match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
@@ -107,6 +127,9 @@ impl<'a> TableInteriorPageMut<'a> {
         layout::set_slot_offset(self.page, INTERIOR_SPEC, slot_index, cell_offset)
     }
 
+    /// Deletes the interior cell identified by `row_id`.
+    ///
+    /// Fails with [`TablePageError::RowIdNotFound`] when `row_id` is absent.
     pub(crate) fn delete(&mut self, row_id: RowId) -> TablePageResult<()> {
         let slot_index =
             match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
@@ -118,16 +141,19 @@ impl<'a> TableInteriorPageMut<'a> {
         layout::remove_slot(self.page, INTERIOR_SPEC, slot_index)
     }
 
+    /// Returns the current rightmost child pointer from the page header.
     pub(crate) fn rightmost_child(&self) -> PageId {
         self.as_ref().rightmost_child()
     }
 
+    /// Updates the page header's rightmost child pointer.
     pub(crate) fn set_rightmost_child(&mut self, page_id: PageId) -> TablePageResult<()> {
         layout::validate(self.page, INTERIOR_SPEC)?;
         layout::write_u64_at(self.page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET, page_id);
         Ok(())
     }
 
+    /// Compacts live cells toward the page end and rewrites slot offsets.
     pub(crate) fn defragment(&mut self) -> TablePageResult<()> {
         layout::defragment(self.page, INTERIOR_SPEC, interior_cell_len)
     }

@@ -12,28 +12,35 @@ const PAYLOAD_LEN_SIZE: usize = 2;
 const ROW_ID_SIZE: usize = 8;
 const LEAF_CELL_PREFIX_SIZE: usize = PAYLOAD_LEN_SIZE + ROW_ID_SIZE;
 
+/// Borrowed view of one leaf cell decoded from a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LeafCellRef<'a> {
+    /// Row identifier used as the key inside the page.
     pub(crate) row_id: RowId,
+    /// Borrowed payload bytes for the row.
     pub(crate) payload: &'a [u8],
 }
 
+/// Immutable wrapper over a validated table-leaf page.
 #[derive(Debug)]
 pub(crate) struct TableLeafPageRef<'a> {
     page: &'a [u8; PAGE_SIZE],
 }
 
+/// Mutable wrapper over a validated table-leaf page.
 #[derive(Debug)]
 pub(crate) struct TableLeafPageMut<'a> {
     page: &'a mut [u8; PAGE_SIZE],
 }
 
 impl<'a> TableLeafPageRef<'a> {
+    /// Validates and wraps raw page bytes as a leaf page.
     pub(crate) fn from_bytes(page: &'a [u8; PAGE_SIZE]) -> TablePageResult<Self> {
         layout::validate(page, LEAF_SPEC)?;
         Ok(Self { page })
     }
 
+    /// Looks up a cell by row id without requiring mutable access.
     pub(crate) fn search(&self, row_id: RowId) -> TablePageResult<Option<LeafCellRef<'a>>> {
         let slot_index =
             match layout::find_row_id(self.page, LEAF_SPEC, row_id, leaf_row_id_from_cell)? {
@@ -44,34 +51,43 @@ impl<'a> TableLeafPageRef<'a> {
         decode_leaf_cell_at_slot(self.page, slot_index).map(Some)
     }
 
+    /// Returns the number of slot entries currently stored on the page.
     pub(crate) fn cell_count(&self) -> u16 {
         layout::cell_count(self.page)
     }
 
+    /// Returns free bytes between the slot directory and cell-content region.
     pub(crate) fn free_space(&self) -> usize {
         layout::free_space(self.page, LEAF_SPEC).expect("leaf page must remain valid")
     }
 }
 
 impl<'a> TableLeafPageMut<'a> {
+    /// Initializes an empty leaf page in-place and returns a mutable wrapper.
     pub(crate) fn init_empty(page: &'a mut [u8; PAGE_SIZE]) -> TablePageResult<Self> {
         layout::init_empty(page, LEAF_SPEC)?;
         Ok(Self { page })
     }
 
+    /// Validates and wraps existing page bytes as a mutable leaf page.
     pub(crate) fn from_bytes(page: &'a mut [u8; PAGE_SIZE]) -> TablePageResult<Self> {
         layout::validate(page, LEAF_SPEC)?;
         Ok(Self { page })
     }
 
+    /// Returns an immutable view over the same underlying page bytes.
     pub(crate) fn as_ref(&self) -> TableLeafPageRef<'_> {
         TableLeafPageRef { page: self.page }
     }
 
+    /// Immutable row-id lookup convenience method for mutable wrappers.
     pub(crate) fn search(&self, row_id: RowId) -> TablePageResult<Option<LeafCellRef<'_>>> {
         self.as_ref().search(row_id)
     }
 
+    /// Inserts a new cell keyed by `row_id`, preserving sorted slot order.
+    ///
+    /// Fails with [`TablePageError::DuplicateRowId`] if the key already exists.
     pub(crate) fn insert(&mut self, row_id: RowId, payload: &[u8]) -> TablePageResult<()> {
         let insertion_index =
             match layout::find_row_id(self.page, LEAF_SPEC, row_id, leaf_row_id_from_cell)? {
@@ -84,6 +100,9 @@ impl<'a> TableLeafPageMut<'a> {
         layout::insert_slot(self.page, LEAF_SPEC, insertion_index, cell_offset)
     }
 
+    /// Replaces the payload for an existing row id.
+    ///
+    /// Fails with [`TablePageError::RowIdNotFound`] when the key is absent.
     pub(crate) fn update(&mut self, row_id: RowId, payload: &[u8]) -> TablePageResult<()> {
         let slot_index =
             match layout::find_row_id(self.page, LEAF_SPEC, row_id, leaf_row_id_from_cell)? {
@@ -96,6 +115,9 @@ impl<'a> TableLeafPageMut<'a> {
         layout::set_slot_offset(self.page, LEAF_SPEC, slot_index, cell_offset)
     }
 
+    /// Deletes the cell for `row_id`.
+    ///
+    /// Fails with [`TablePageError::RowIdNotFound`] when the key is absent.
     pub(crate) fn delete(&mut self, row_id: RowId) -> TablePageResult<()> {
         let slot_index =
             match layout::find_row_id(self.page, LEAF_SPEC, row_id, leaf_row_id_from_cell)? {
@@ -106,6 +128,7 @@ impl<'a> TableLeafPageMut<'a> {
         layout::remove_slot(self.page, LEAF_SPEC, slot_index)
     }
 
+    /// Compacts live cells toward the page end and rewrites slot offsets.
     pub(crate) fn defragment(&mut self) -> TablePageResult<()> {
         layout::defragment(self.page, LEAF_SPEC, leaf_cell_len)
     }

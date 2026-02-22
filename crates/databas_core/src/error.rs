@@ -21,14 +21,22 @@ pub(crate) enum PageCacheError {
 
 pub(crate) type PageCacheResult<T> = Result<T, PageCacheError>;
 
+/// Errors produced while parsing or mutating slotted table pages.
 #[derive(Debug)]
 pub(crate) enum TablePageError {
+    /// The page header did not match the expected page kind.
     InvalidPageType(u8),
+    /// The fixed page layout metadata is inconsistent.
     CorruptPage(&'static str),
+    /// A specific slot points at malformed cell bytes.
     CorruptCell { slot_index: u16 },
+    /// Insert attempted to add a row id that already exists.
     DuplicateRowId(RowId),
+    /// Update/delete attempted to access a missing row id.
     RowIdNotFound(RowId),
+    /// Encoded cell payload exceeded the supported on-page width.
     CellTooLarge { len: usize },
+    /// Cell write still could not fit after compaction.
     PageFull { needed: usize, available: usize },
 }
 
