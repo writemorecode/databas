@@ -3,7 +3,7 @@ use crate::{
     types::{PAGE_SIZE, PageId, RowId},
 };
 
-use super::layout::{self, PageSpec, SpaceError};
+use super::layout::{self, PageSpec, SearchResult, SpaceError};
 
 const INTERIOR_SPEC: PageSpec =
     PageSpec { page_type: layout::INTERIOR_PAGE_TYPE, header_size: layout::INTERIOR_HEADER_SIZE };
@@ -38,8 +38,8 @@ impl<'a> TableInteriorPageRef<'a> {
         let slot_index =
             match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
             {
-                Ok(slot_index) => slot_index,
-                Err(_) => return Ok(None),
+                SearchResult::Found(slot_index) => slot_index,
+                SearchResult::NotFound(_) => return Ok(None),
             };
 
         decode_interior_cell_at_slot(self.page, slot_index).map(Some)
@@ -85,8 +85,8 @@ impl<'a> TableInteriorPageMut<'a> {
         let insertion_index =
             match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
             {
-                Ok(_) => return Err(TablePageError::DuplicateRowId(row_id)),
-                Err(insertion_index) => insertion_index,
+                SearchResult::Found(_) => return Err(TablePageError::DuplicateRowId(row_id)),
+                SearchResult::NotFound(insertion_index) => insertion_index,
             };
 
         let cell = encode_interior_cell(left_child, row_id);
@@ -98,8 +98,8 @@ impl<'a> TableInteriorPageMut<'a> {
         let slot_index =
             match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
             {
-                Ok(slot_index) => slot_index,
-                Err(_) => return Err(TablePageError::RowIdNotFound(row_id)),
+                SearchResult::Found(slot_index) => slot_index,
+                SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
             };
 
         let cell = encode_interior_cell(left_child, row_id);
@@ -111,8 +111,8 @@ impl<'a> TableInteriorPageMut<'a> {
         let slot_index =
             match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
             {
-                Ok(slot_index) => slot_index,
-                Err(_) => return Err(TablePageError::RowIdNotFound(row_id)),
+                SearchResult::Found(slot_index) => slot_index,
+                SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
             };
 
         layout::remove_slot(self.page, INTERIOR_SPEC, slot_index)

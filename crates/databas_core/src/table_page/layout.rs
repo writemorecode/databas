@@ -29,6 +29,12 @@ pub(super) struct SpaceError {
     pub(super) available: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SearchResult {
+    Found(u16),
+    NotFound(u16),
+}
+
 pub(super) fn init_empty(page: &mut [u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<()> {
     validate_spec(spec)?;
 
@@ -78,7 +84,7 @@ pub(super) fn find_row_id<F>(
     spec: PageSpec,
     row_id: RowId,
     row_id_from_cell: F,
-) -> TablePageResult<Result<u16, u16>>
+) -> TablePageResult<SearchResult>
 where
     F: Fn(&[u8]) -> TablePageResult<RowId>,
 {
@@ -99,13 +105,13 @@ where
         match current_row_id.cmp(&row_id) {
             Ordering::Less => left = mid + 1,
             Ordering::Greater => right = mid,
-            Ordering::Equal => return Ok(Ok(mid_u16)),
+            Ordering::Equal => return Ok(SearchResult::Found(mid_u16)),
         }
     }
 
     let insertion_index =
         u16::try_from(left).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
-    Ok(Err(insertion_index))
+    Ok(SearchResult::NotFound(insertion_index))
 }
 
 pub(super) fn cell_bytes_at_slot<'a>(
