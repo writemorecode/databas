@@ -17,21 +17,30 @@ const CELL_COUNT_OFFSET: usize = 2;
 const CONTENT_START_OFFSET: usize = 4;
 const SLOT_WIDTH: usize = 2;
 
+/// Static properties for one table-page kind used by shared layout helpers.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PageSpec {
+    /// Discriminant written into the page-type header byte.
     pub(super) page_type: u8,
+    /// Total size of the fixed header before the slot directory starts.
     pub(super) header_size: usize,
 }
 
+/// Space accounting returned when append-at-end allocation cannot fit a cell.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SpaceError {
+    /// Bytes required by the requested write.
     pub(super) needed: usize,
+    /// Bytes currently available in the unallocated region.
     pub(super) available: usize,
 }
 
+/// Row-id lookup result containing either the matching slot or insertion point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SearchResult {
+    /// The row id exists and maps to this slot index.
     Found(u16),
+    /// The row id does not exist; the payload is the sorted insertion index.
     NotFound(u16),
 }
 
