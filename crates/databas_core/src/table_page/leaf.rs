@@ -171,9 +171,8 @@ fn write_leaf_cell_with_retry(
     cell: &[u8],
     extra_slots: usize,
 ) -> TablePageResult<u16> {
-    match layout::try_append_cell(page, LEAF_SPEC, cell, extra_slots)? {
-        Ok(offset) => return Ok(offset),
-        Err(_) => {}
+    if let Ok(offset) = layout::try_append_cell(page, LEAF_SPEC, cell, extra_slots)? {
+        return Ok(offset);
     }
 
     layout::defragment(page, LEAF_SPEC, leaf_cell_len)?;
