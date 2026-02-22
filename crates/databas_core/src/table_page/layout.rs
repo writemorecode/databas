@@ -44,6 +44,11 @@ pub(super) enum SearchResult {
     NotFound(u16),
 }
 
+/// Returns the raw page type byte from the fixed page header.
+pub(super) fn page_type(page: &[u8; PAGE_SIZE]) -> u8 {
+    page[PAGE_TYPE_OFFSET]
+}
+
 pub(super) fn init_empty(page: &mut [u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<()> {
     validate_spec(spec)?;
 
