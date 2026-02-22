@@ -52,6 +52,28 @@ impl<'a> TableInteriorPageRef<'a> {
         decode_interior_cell_at_slot(self.page, slot_index).map(Some)
     }
 
+    /// Returns the child page id to descend into for `row_id`.
+    ///
+    /// This uses the first separator key that is greater than or equal to `row_id`.
+    /// If no such separator exists, the page header's rightmost child is returned.
+    pub(crate) fn child_for_row_id(&self, row_id: RowId) -> TablePageResult<PageId> {
+        let slot_count = usize::from(self.cell_count());
+        let slot_index =
+            match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
+            {
+                SearchResult::Found(slot_index) => Some(slot_index),
+                SearchResult::NotFound(insertion_index) => {
+                    (usize::from(insertion_index) < slot_count).then_some(insertion_index)
+                }
+            };
+
+        if let Some(slot_index) = slot_index {
+            return Ok(decode_interior_cell_at_slot(self.page, slot_index)?.left_child);
+        }
+
+        Ok(self.rightmost_child())
+    }
+
     /// Returns the number of slot entries currently stored on the page.
     pub(crate) fn cell_count(&self) -> u16 {
         layout::cell_count(self.page)
@@ -93,6 +115,11 @@ impl<'a> TableInteriorPageMut<'a> {
     /// Immutable row-id lookup convenience method for mutable wrappers.
     pub(crate) fn search(&self, row_id: RowId) -> TablePageResult<Option<InteriorCell>> {
         self.as_ref().search(row_id)
+    }
+
+    /// Returns the child page id to descend into for `row_id`.
+    pub(crate) fn child_for_row_id(&self, row_id: RowId) -> TablePageResult<PageId> {
+        self.as_ref().child_for_row_id(row_id)
     }
 
     /// Inserts a new `(left_child, row_id)` cell in sorted order.
@@ -258,6 +285,38 @@ mod tests {
         let page = initialized_interior_page(7);
         let interior_ref = TableInteriorPageRef::from_bytes(&page).unwrap();
         assert_eq!(interior_ref.search(5).unwrap(), None);
+    }
+
+    #[test]
+    fn child_for_row_id_routes_by_separator_and_rightmost_fallback() {
+        let mut page = initialized_interior_page(400);
+        {
+            let mut interior = TableInteriorPageMut::from_bytes(&mut page).unwrap();
+            interior.insert(10, 100).unwrap();
+            interior.insert(20, 200).unwrap();
+            interior.insert(30, 300).unwrap();
+        }
+
+        let interior_ref = TableInteriorPageRef::from_bytes(&page).unwrap();
+        assert_eq!(interior_ref.child_for_row_id(5).unwrap(), 100);
+        assert_eq!(interior_ref.child_for_row_id(10).unwrap(), 100);
+        assert_eq!(interior_ref.child_for_row_id(15).unwrap(), 200);
+        assert_eq!(interior_ref.child_for_row_id(20).unwrap(), 200);
+        assert_eq!(interior_ref.child_for_row_id(29).unwrap(), 300);
+        assert_eq!(interior_ref.child_for_row_id(30).unwrap(), 300);
+        assert_eq!(interior_ref.child_for_row_id(31).unwrap(), 400);
+    }
+
+    #[test]
+    fn mutable_child_for_row_id_delegates_to_immutable_routing() {
+        let mut page = initialized_interior_page(999);
+        let mut interior = TableInteriorPageMut::from_bytes(&mut page).unwrap();
+        interior.insert(50, 500).unwrap();
+        interior.insert(100, 600).unwrap();
+
+        assert_eq!(interior.child_for_row_id(10).unwrap(), 500);
+        assert_eq!(interior.child_for_row_id(75).unwrap(), 600);
+        assert_eq!(interior.child_for_row_id(101).unwrap(), 999);
     }
 
     #[test]
