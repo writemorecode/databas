@@ -114,11 +114,11 @@ where
     Ok(SearchResult::NotFound(insertion_index))
 }
 
-pub(super) fn cell_bytes_at_slot<'a>(
-    page: &'a [u8; PAGE_SIZE],
+pub(super) fn cell_bytes_at_slot(
+    page: &[u8; PAGE_SIZE],
     spec: PageSpec,
     slot_index: u16,
-) -> TablePageResult<&'a [u8]> {
+) -> TablePageResult<&[u8]> {
     validate(page, spec)?;
     cell_bytes_at_slot_impl(page, spec, slot_index)
 }
@@ -367,11 +367,11 @@ fn write_slot_offset_raw(
     Ok(())
 }
 
-fn cell_bytes_at_slot_impl<'a>(
-    page: &'a [u8; PAGE_SIZE],
+fn cell_bytes_at_slot_impl(
+    page: &[u8; PAGE_SIZE],
     spec: PageSpec,
     slot_index: u16,
-) -> TablePageResult<&'a [u8]> {
+) -> TablePageResult<&[u8]> {
     let content_start = usize::from(content_start(page));
     let cell_offset = usize::from(slot_offset(page, spec, slot_index)?);
 
