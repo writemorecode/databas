@@ -186,6 +186,7 @@ impl<'a> TableInteriorPageMut<'a> {
     }
 }
 
+/// Decodes and validates the interior cell referenced by `slot_index`.
 fn decode_interior_cell_at_slot(
     page: &[u8; PAGE_SIZE],
     slot_index: u16,
@@ -199,6 +200,7 @@ fn decode_interior_cell_at_slot(
     Ok(InteriorCell { left_child, row_id })
 }
 
+/// Returns the encoded byte length of one interior cell.
 fn interior_cell_len(cell: &[u8]) -> TablePageResult<usize> {
     if cell.len() < INTERIOR_CELL_SIZE {
         return Err(TablePageError::CorruptPage("interior cell too short"));
@@ -207,6 +209,7 @@ fn interior_cell_len(cell: &[u8]) -> TablePageResult<usize> {
     Ok(INTERIOR_CELL_SIZE)
 }
 
+/// Extracts the separator row id from an encoded interior cell.
 fn interior_row_id_from_cell(cell: &[u8]) -> TablePageResult<RowId> {
     if cell.len() < INTERIOR_CELL_SIZE {
         return Err(TablePageError::CorruptPage("interior cell too short"));
@@ -215,6 +218,7 @@ fn interior_row_id_from_cell(cell: &[u8]) -> TablePageResult<RowId> {
     Ok(read_u64(cell, LEFT_CHILD_SIZE))
 }
 
+/// Encodes `(left_child, row_id)` into the fixed-width interior cell format.
 fn encode_interior_cell(left_child: PageId, row_id: RowId) -> [u8; INTERIOR_CELL_SIZE] {
     let mut cell = [0u8; INTERIOR_CELL_SIZE];
     cell[0..LEFT_CHILD_SIZE].copy_from_slice(&left_child.to_le_bytes());
@@ -222,6 +226,7 @@ fn encode_interior_cell(left_child: PageId, row_id: RowId) -> [u8; INTERIOR_CELL
     cell
 }
 
+/// Appends an interior cell, defragmenting once before returning page-full.
 fn write_interior_cell_with_retry(
     page: &mut [u8; PAGE_SIZE],
     cell: &[u8],
@@ -241,6 +246,7 @@ fn write_interior_cell_with_retry(
     }
 }
 
+/// Reads a little-endian `u64` from `bytes` at `offset`.
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     let mut out = [0u8; 8];
     out.copy_from_slice(&bytes[offset..offset + 8]);

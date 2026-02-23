@@ -49,6 +49,7 @@ pub(super) fn page_type(page: &[u8; PAGE_SIZE]) -> u8 {
     page[PAGE_TYPE_OFFSET]
 }
 
+/// Initializes `page` as an empty instance of the page kind described by `spec`.
 pub(super) fn init_empty(page: &mut [u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<()> {
     validate_spec(spec)?;
 
@@ -58,6 +59,7 @@ pub(super) fn init_empty(page: &mut [u8; PAGE_SIZE], spec: PageSpec) -> TablePag
     set_content_start(page, PAGE_SIZE)
 }
 
+/// Validates that `page` matches `spec` and has internally consistent header bounds.
 pub(super) fn validate(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<()> {
     validate_spec(spec)?;
 
@@ -77,14 +79,17 @@ pub(super) fn validate(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResul
     Ok(())
 }
 
+/// Returns the number of slot entries currently stored in the page header.
 pub(super) fn cell_count(page: &[u8; PAGE_SIZE]) -> u16 {
     read_u16(page, CELL_COUNT_OFFSET)
 }
 
+/// Returns the offset where the cell-content region currently begins.
 pub(super) fn content_start(page: &[u8; PAGE_SIZE]) -> u16 {
     read_u16(page, CONTENT_START_OFFSET)
 }
 
+/// Returns free bytes between the slot directory end and the cell-content start.
 pub(super) fn free_space(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<usize> {
     validate(page, spec)?;
 
@@ -93,6 +98,7 @@ pub(super) fn free_space(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageRes
     Ok(content_start - slot_dir_end)
 }
 
+/// Performs binary search for `row_id`, returning either the matching slot or insertion point.
 pub(super) fn find_row_id<F>(
     page: &[u8; PAGE_SIZE],
     spec: PageSpec,
@@ -128,6 +134,7 @@ where
     Ok(SearchResult::NotFound(insertion_index))
 }
 
+/// Returns the raw cell byte slice referenced by `slot_index`.
 pub(super) fn cell_bytes_at_slot(
     page: &[u8; PAGE_SIZE],
     spec: PageSpec,
@@ -188,6 +195,7 @@ where
     Ok(Ok(offset_u16))
 }
 
+/// Updates an existing slot to reference `cell_offset`.
 pub(super) fn set_slot_offset(
     page: &mut [u8; PAGE_SIZE],
     spec: PageSpec,
@@ -205,6 +213,7 @@ pub(super) fn set_slot_offset(
     write_slot_offset_raw(page, spec, slot_index_usize, cell_offset)
 }
 
+/// Inserts a new slot at `insert_index` pointing to `cell_offset`.
 pub(super) fn insert_slot(
     page: &mut [u8; PAGE_SIZE],
     spec: PageSpec,
@@ -240,6 +249,7 @@ pub(super) fn insert_slot(
     Ok(())
 }
 
+/// Removes the slot at `remove_index` and shifts following entries left.
 pub(super) fn remove_slot(
     page: &mut [u8; PAGE_SIZE],
     spec: PageSpec,
@@ -267,6 +277,7 @@ pub(super) fn remove_slot(
     Ok(())
 }
 
+/// Rewrites live cells contiguously near the page end and refreshes slot offsets.
 pub(super) fn defragment<F>(
     page: &mut [u8; PAGE_SIZE],
     spec: PageSpec,
@@ -315,16 +326,19 @@ where
     set_content_start(page, next_start)
 }
 
+/// Reads a little-endian `u64` from `page` at `offset`.
 pub(super) fn read_u64_at(page: &[u8; PAGE_SIZE], offset: usize) -> u64 {
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&page[offset..offset + 8]);
     u64::from_le_bytes(bytes)
 }
 
+/// Writes `value` as little-endian `u64` into `page` at `offset`.
 pub(super) fn write_u64_at(page: &mut [u8; PAGE_SIZE], offset: usize, value: u64) {
     page[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
+/// Validates static constraints for a `PageSpec`.
 fn validate_spec(spec: PageSpec) -> TablePageResult<()> {
     if spec.header_size < CONTENT_START_OFFSET + 2 || spec.header_size > PAGE_SIZE {
         return Err(TablePageError::CorruptPage("invalid page header size"));
@@ -333,10 +347,12 @@ fn validate_spec(spec: PageSpec) -> TablePageResult<()> {
     Ok(())
 }
 
+/// Writes the in-header slot count field.
 fn set_cell_count(page: &mut [u8; PAGE_SIZE], cell_count: u16) {
     write_u16(page, CELL_COUNT_OFFSET, cell_count);
 }
 
+/// Writes the in-header content-start field after checked narrowing to `u16`.
 fn set_content_start(page: &mut [u8; PAGE_SIZE], content_start: usize) -> TablePageResult<()> {
     let content_start = u16::try_from(content_start)
         .map_err(|_| TablePageError::CorruptPage("content start overflow"))?;
@@ -344,6 +360,7 @@ fn set_content_start(page: &mut [u8; PAGE_SIZE], content_start: usize) -> TableP
     Ok(())
 }
 
+/// Computes the byte offset where the slot directory ends for `cell_count` entries.
 fn slot_dir_end_for_count(spec: PageSpec, cell_count: usize) -> TablePageResult<usize> {
     let slots_bytes = cell_count
         .checked_mul(SLOT_WIDTH)
@@ -360,6 +377,7 @@ fn slot_dir_end_for_count(spec: PageSpec, cell_count: usize) -> TablePageResult<
     Ok(slot_dir_end)
 }
 
+/// Computes the byte position of one slot entry inside the slot directory.
 fn slot_position(spec: PageSpec, slot_index: usize) -> TablePageResult<usize> {
     let slot_bytes = slot_index
         .checked_mul(SLOT_WIDTH)
@@ -376,6 +394,7 @@ fn slot_position(spec: PageSpec, slot_index: usize) -> TablePageResult<usize> {
     Ok(position)
 }
 
+/// Reads the cell-content offset stored in `slot_index`.
 fn slot_offset(page: &[u8; PAGE_SIZE], spec: PageSpec, slot_index: u16) -> TablePageResult<u16> {
     let cell_count = usize::from(cell_count(page));
     let slot_index = usize::from(slot_index);
@@ -387,6 +406,7 @@ fn slot_offset(page: &[u8; PAGE_SIZE], spec: PageSpec, slot_index: u16) -> Table
     Ok(read_u16(page, position))
 }
 
+/// Writes `cell_offset` into `slot_index` without checking current slot count.
 fn write_slot_offset_raw(
     page: &mut [u8; PAGE_SIZE],
     spec: PageSpec,
@@ -398,6 +418,7 @@ fn write_slot_offset_raw(
     Ok(())
 }
 
+/// Returns the raw cell bytes for `slot_index` assuming caller already validated the page.
 fn cell_bytes_at_slot_impl(
     page: &[u8; PAGE_SIZE],
     spec: PageSpec,
@@ -413,12 +434,14 @@ fn cell_bytes_at_slot_impl(
     Ok(&page[cell_offset..])
 }
 
+/// Reads a little-endian `u16` from `page` at `offset`.
 fn read_u16(page: &[u8; PAGE_SIZE], offset: usize) -> u16 {
     let mut bytes = [0u8; 2];
     bytes.copy_from_slice(&page[offset..offset + 2]);
     u16::from_le_bytes(bytes)
 }
 
+/// Writes `value` as little-endian `u16` into `page` at `offset`.
 fn write_u16(page: &mut [u8; PAGE_SIZE], offset: usize, value: u16) {
     page[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
