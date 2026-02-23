@@ -149,11 +149,27 @@ pub(super) fn try_append_cell(
     page: &mut [u8; PAGE_SIZE],
     spec: PageSpec,
     cell: &[u8],
-    extra_slots: usize,
 ) -> TablePageResult<Result<u16, SpaceError>> {
-    try_append_cell_with_writer(page, spec, cell.len(), extra_slots, |dst| {
+    try_append_cell_with_writer(page, spec, cell.len(), |dst| {
         dst.copy_from_slice(cell);
     })
+}
+
+/// Attempts to append a pre-encoded cell while reserving one additional slot entry.
+pub(super) fn try_append_cell_for_insert(
+    page: &mut [u8; PAGE_SIZE],
+    spec: PageSpec,
+    cell: &[u8],
+) -> TablePageResult<Result<u16, SpaceError>> {
+    try_append_cell_with_writer_for_insert(page, spec, cell.len(), |dst| {
+        dst.copy_from_slice(cell);
+    })
+}
+
+/// Mode for cell append operations.
+enum CellAppendMode {
+    Insert,
+    Update,
 }
 
 /// Attempts to append a cell of `cell_len`, materializing bytes via `write_cell` on success.
@@ -161,7 +177,33 @@ pub(super) fn try_append_cell_with_writer<F>(
     page: &mut [u8; PAGE_SIZE],
     spec: PageSpec,
     cell_len: usize,
-    extra_slots: usize,
+    write_cell: F,
+) -> TablePageResult<Result<u16, SpaceError>>
+where
+    F: FnOnce(&mut [u8]),
+{
+    try_append_cell_with_writer_impl(page, spec, cell_len, CellAppendMode::Update, write_cell)
+}
+
+/// Attempts to append a cell while reserving one additional slot entry.
+pub(super) fn try_append_cell_with_writer_for_insert<F>(
+    page: &mut [u8; PAGE_SIZE],
+    spec: PageSpec,
+    cell_len: usize,
+    write_cell: F,
+) -> TablePageResult<Result<u16, SpaceError>>
+where
+    F: FnOnce(&mut [u8]),
+{
+    try_append_cell_with_writer_impl(page, spec, cell_len, CellAppendMode::Insert, write_cell)
+}
+
+/// Shared implementation for append operations with configurable slot reservation.
+fn try_append_cell_with_writer_impl<F>(
+    page: &mut [u8; PAGE_SIZE],
+    spec: PageSpec,
+    cell_len: usize,
+    cell_append_mode: CellAppendMode,
     write_cell: F,
 ) -> TablePageResult<Result<u16, SpaceError>>
 where
@@ -173,9 +215,16 @@ where
         return Err(TablePageError::CellTooLarge { len: cell_len });
     }
 
+    // For inserts, one slot array entry must be reserved.
+    // This is not required for updates.
+    let additional_slot_count = match cell_append_mode {
+        CellAppendMode::Insert => 1,
+        CellAppendMode::Update => 0,
+    };
+
     let current_count = usize::from(cell_count(page));
     let required_count = current_count
-        .checked_add(extra_slots)
+        .checked_add(additional_slot_count)
         .ok_or(TablePageError::CorruptPage("cell count overflow"))?;
 
     let slot_dir_end_after = slot_dir_end_for_count(spec, required_count)?;
