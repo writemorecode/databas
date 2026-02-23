@@ -149,9 +149,14 @@ impl<'a> TableInteriorPageMut<'a> {
                 SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
             };
 
+        let existing_cell = layout::cell_bytes_at_slot(self.page, INTERIOR_SPEC, slot_index)?;
+        interior_cell_len(existing_cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
+
+        let cell_offset = usize::from(layout::slot_offset(self.page, INTERIOR_SPEC, slot_index)?);
         let cell = encode_interior_cell(left_child, row_id);
-        let cell_offset = write_interior_cell_with_retry(self.page, &cell, 0)?;
-        layout::set_slot_offset(self.page, INTERIOR_SPEC, slot_index, cell_offset)
+        let cell_end = cell_offset + INTERIOR_CELL_SIZE;
+        self.page[cell_offset..cell_end].copy_from_slice(&cell);
+        Ok(())
     }
 
     /// Deletes the interior cell identified by `row_id`.
@@ -363,6 +368,26 @@ mod tests {
 
         let delete_err = interior.delete(1).unwrap_err();
         assert!(matches!(delete_err, TablePageError::RowIdNotFound(1)));
+    }
+
+    #[test]
+    fn update_on_full_page_overwrites_in_place() {
+        let mut page = initialized_interior_page(123);
+        let mut interior = TableInteriorPageMut::from_bytes(&mut page).unwrap();
+
+        let max_cells = max_cell_count();
+        for row_id in 0..max_cells {
+            interior.insert(row_id as RowId, row_id as PageId).unwrap();
+        }
+
+        let free_before = interior.as_ref().free_space();
+        assert!(free_before < INTERIOR_CELL_SIZE);
+
+        let target_row_id = (max_cells / 2) as RowId;
+        interior.update(target_row_id, 777_777).unwrap();
+
+        assert_eq!(interior.as_ref().free_space(), free_before);
+        assert_eq!(interior.search(target_row_id).unwrap().unwrap().left_child, 777_777);
     }
 
     #[test]

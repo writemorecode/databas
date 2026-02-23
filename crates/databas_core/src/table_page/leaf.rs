@@ -109,6 +109,23 @@ impl<'a> TableLeafPageMut<'a> {
                 SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
             };
 
+        let existing_cell = layout::cell_bytes_at_slot(self.page, LEAF_SPEC, slot_index)?;
+        let existing_len =
+            leaf_cell_len(existing_cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
+        let new_len = leaf_cell_encoded_len(payload)?;
+
+        if existing_len == new_len {
+            let cell_offset = usize::from(layout::slot_offset(self.page, LEAF_SPEC, slot_index)?);
+            let cell_end = cell_offset + existing_len;
+            let cell = &mut self.page[cell_offset..cell_end];
+            let payload_len = u16::try_from(payload.len()).expect("payload length must fit in u16");
+
+            cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
+            cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE].copy_from_slice(&row_id.to_le_bytes());
+            cell[LEAF_CELL_PREFIX_SIZE..].copy_from_slice(payload);
+            return Ok(());
+        }
+
         let cell_offset = write_leaf_cell_with_retry(self.page, row_id, payload, 0)?;
         layout::set_slot_offset(self.page, LEAF_SPEC, slot_index, cell_offset)
     }
@@ -375,6 +392,24 @@ mod tests {
 
         leaf.update(1, &payload(9, 1_000)).unwrap();
         assert_eq!(leaf.search(1).unwrap().unwrap().payload.len(), 1_000);
+    }
+
+    #[test]
+    fn same_size_update_on_full_page_overwrites_in_place() {
+        let mut page = initialized_leaf_page();
+        let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+
+        let max_payload = PAGE_SIZE - layout::LEAF_HEADER_SIZE - 2 - LEAF_CELL_PREFIX_SIZE;
+        leaf.insert(1, &payload(1, max_payload)).unwrap();
+
+        let free_before = leaf.as_ref().free_space();
+        assert_eq!(free_before, 0);
+
+        let updated_payload = payload(9, max_payload);
+        leaf.update(1, &updated_payload).unwrap();
+
+        assert_eq!(leaf.as_ref().free_space(), free_before);
+        assert_eq!(leaf.search(1).unwrap().unwrap().payload, updated_payload.as_slice());
     }
 
     #[test]
