@@ -137,16 +137,33 @@ pub(super) fn cell_bytes_at_slot(
     cell_bytes_at_slot_impl(page, spec, slot_index)
 }
 
+/// Attempts to append a pre-encoded cell into the cell-content region.
 pub(super) fn try_append_cell(
     page: &mut [u8; PAGE_SIZE],
     spec: PageSpec,
     cell: &[u8],
     extra_slots: usize,
 ) -> TablePageResult<Result<u16, SpaceError>> {
+    try_append_cell_with_writer(page, spec, cell.len(), extra_slots, |dst| {
+        dst.copy_from_slice(cell);
+    })
+}
+
+/// Attempts to append a cell of `cell_len`, materializing bytes via `write_cell` on success.
+pub(super) fn try_append_cell_with_writer<F>(
+    page: &mut [u8; PAGE_SIZE],
+    spec: PageSpec,
+    cell_len: usize,
+    extra_slots: usize,
+    write_cell: F,
+) -> TablePageResult<Result<u16, SpaceError>>
+where
+    F: FnOnce(&mut [u8]),
+{
     validate(page, spec)?;
 
-    if cell.len() > usize::from(u16::MAX) {
-        return Err(TablePageError::CellTooLarge { len: cell.len() });
+    if cell_len > usize::from(u16::MAX) {
+        return Err(TablePageError::CellTooLarge { len: cell_len });
     }
 
     let current_count = usize::from(cell_count(page));
@@ -158,12 +175,12 @@ pub(super) fn try_append_cell(
     let content_start = usize::from(content_start(page));
     let available = content_start.saturating_sub(slot_dir_end_after);
 
-    if cell.len() > available {
-        return Ok(Err(SpaceError { needed: cell.len(), available }));
+    if cell_len > available {
+        return Ok(Err(SpaceError { needed: cell_len, available }));
     }
 
-    let new_start = content_start - cell.len();
-    page[new_start..content_start].copy_from_slice(cell);
+    let new_start = content_start - cell_len;
+    write_cell(&mut page[new_start..content_start]);
     set_content_start(page, new_start)?;
 
     let offset_u16 = u16::try_from(new_start)

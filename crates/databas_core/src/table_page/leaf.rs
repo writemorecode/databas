@@ -95,8 +95,7 @@ impl<'a> TableLeafPageMut<'a> {
                 SearchResult::NotFound(insertion_index) => insertion_index,
             };
 
-        let cell = encode_leaf_cell(row_id, payload)?;
-        let cell_offset = write_leaf_cell_with_retry(self.page, &cell, 1)?;
+        let cell_offset = write_leaf_cell_with_retry(self.page, row_id, payload, 1)?;
         layout::insert_slot(self.page, LEAF_SPEC, insertion_index, cell_offset)
     }
 
@@ -110,8 +109,7 @@ impl<'a> TableLeafPageMut<'a> {
                 SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
             };
 
-        let cell = encode_leaf_cell(row_id, payload)?;
-        let cell_offset = write_leaf_cell_with_retry(self.page, &cell, 0)?;
+        let cell_offset = write_leaf_cell_with_retry(self.page, row_id, payload, 0)?;
         layout::set_slot_offset(self.page, LEAF_SPEC, slot_index, cell_offset)
     }
 
@@ -176,31 +174,48 @@ fn leaf_row_id_from_cell(cell: &[u8]) -> TablePageResult<RowId> {
     Ok(read_u64(cell, PAYLOAD_LEN_SIZE))
 }
 
-fn encode_leaf_cell(row_id: RowId, payload: &[u8]) -> TablePageResult<Vec<u8>> {
+/// Computes the serialized cell length for a payload.
+fn leaf_cell_encoded_len(payload: &[u8]) -> TablePageResult<usize> {
     if payload.len() > usize::from(u16::MAX) {
         return Err(TablePageError::CellTooLarge { len: payload.len() });
     }
 
-    let payload_len = u16::try_from(payload.len()).expect("payload length must fit in u16");
-    let mut cell = Vec::with_capacity(LEAF_CELL_PREFIX_SIZE + payload.len());
-    cell.extend_from_slice(&payload_len.to_le_bytes());
-    cell.extend_from_slice(&row_id.to_le_bytes());
-    cell.extend_from_slice(payload);
-    Ok(cell)
+    LEAF_CELL_PREFIX_SIZE
+        .checked_add(payload.len())
+        .ok_or(TablePageError::CorruptPage("leaf cell length overflow"))
 }
 
+/// Attempts to append a leaf cell without defragmenting.
+fn try_append_leaf_cell(
+    page: &mut [u8; PAGE_SIZE],
+    row_id: RowId,
+    payload: &[u8],
+    extra_slots: usize,
+) -> TablePageResult<Result<u16, SpaceError>> {
+    let cell_len = leaf_cell_encoded_len(payload)?;
+    let payload_len = u16::try_from(payload.len()).expect("payload length must fit in u16");
+
+    layout::try_append_cell_with_writer(page, LEAF_SPEC, cell_len, extra_slots, |cell| {
+        cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
+        cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE].copy_from_slice(&row_id.to_le_bytes());
+        cell[LEAF_CELL_PREFIX_SIZE..].copy_from_slice(payload);
+    })
+}
+
+/// Appends a leaf cell, defragmenting once before reporting page-full.
 fn write_leaf_cell_with_retry(
     page: &mut [u8; PAGE_SIZE],
-    cell: &[u8],
+    row_id: RowId,
+    payload: &[u8],
     extra_slots: usize,
 ) -> TablePageResult<u16> {
-    if let Ok(offset) = layout::try_append_cell(page, LEAF_SPEC, cell, extra_slots)? {
+    if let Ok(offset) = try_append_leaf_cell(page, row_id, payload, extra_slots)? {
         return Ok(offset);
     }
 
     layout::defragment(page, LEAF_SPEC, leaf_cell_len)?;
 
-    match layout::try_append_cell(page, LEAF_SPEC, cell, extra_slots)? {
+    match try_append_leaf_cell(page, row_id, payload, extra_slots)? {
         Ok(offset) => Ok(offset),
         Err(SpaceError { needed, available }) => {
             Err(TablePageError::PageFull { needed, available })
