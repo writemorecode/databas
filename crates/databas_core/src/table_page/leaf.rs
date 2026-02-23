@@ -132,6 +132,7 @@ impl<'a> TableLeafPageMut<'a> {
     }
 }
 
+/// Decodes and validates the leaf cell referenced by `slot_index`.
 fn decode_leaf_cell_at_slot<'a>(
     page: &'a [u8; PAGE_SIZE],
     slot_index: u16,
@@ -149,6 +150,7 @@ fn decode_leaf_cell_at_slot<'a>(
     Ok(LeafCellRef { row_id, payload: &cell[payload_start..payload_end] })
 }
 
+/// Returns the encoded byte length of a leaf cell.
 fn leaf_cell_len(cell: &[u8]) -> TablePageResult<usize> {
     if cell.len() < LEAF_CELL_PREFIX_SIZE {
         return Err(TablePageError::CorruptPage("leaf cell too short"));
@@ -166,6 +168,7 @@ fn leaf_cell_len(cell: &[u8]) -> TablePageResult<usize> {
     Ok(cell_len)
 }
 
+/// Extracts the row id key from an encoded leaf cell.
 fn leaf_row_id_from_cell(cell: &[u8]) -> TablePageResult<RowId> {
     if cell.len() < LEAF_CELL_PREFIX_SIZE {
         return Err(TablePageError::CorruptPage("leaf cell too short"));
@@ -223,12 +226,14 @@ fn write_leaf_cell_with_retry(
     }
 }
 
+/// Reads a little-endian `u16` from `bytes` at `offset`.
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     let mut out = [0u8; 2];
     out.copy_from_slice(&bytes[offset..offset + 2]);
     u16::from_le_bytes(out)
 }
 
+/// Reads a little-endian `u64` from `bytes` at `offset`.
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     let mut out = [0u8; 8];
     out.copy_from_slice(&bytes[offset..offset + 8]);
