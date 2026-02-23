@@ -395,7 +395,11 @@ fn slot_position(spec: PageSpec, slot_index: usize) -> TablePageResult<usize> {
 }
 
 /// Reads the cell-content offset stored in `slot_index`.
-fn slot_offset(page: &[u8; PAGE_SIZE], spec: PageSpec, slot_index: u16) -> TablePageResult<u16> {
+pub(super) fn slot_offset(
+    page: &[u8; PAGE_SIZE],
+    spec: PageSpec,
+    slot_index: u16,
+) -> TablePageResult<u16> {
     let cell_count = usize::from(cell_count(page));
     let slot_index = usize::from(slot_index);
     if slot_index >= cell_count {
