@@ -95,7 +95,7 @@ impl<'a> TableLeafPageMut<'a> {
                 SearchResult::NotFound(insertion_index) => insertion_index,
             };
 
-        let cell_offset = write_leaf_cell_with_retry(self.page, row_id, payload, 1)?;
+        let cell_offset = write_leaf_cell_for_insert_with_retry(self.page, row_id, payload)?;
         layout::insert_slot(self.page, LEAF_SPEC, insertion_index, cell_offset)
     }
 
@@ -126,7 +126,7 @@ impl<'a> TableLeafPageMut<'a> {
             return Ok(());
         }
 
-        let cell_offset = write_leaf_cell_with_retry(self.page, row_id, payload, 0)?;
+        let cell_offset = write_leaf_cell_for_update_with_retry(self.page, row_id, payload)?;
         layout::set_slot_offset(self.page, LEAF_SPEC, slot_index, cell_offset)
     }
 
@@ -210,32 +210,68 @@ fn try_append_leaf_cell(
     page: &mut [u8; PAGE_SIZE],
     row_id: RowId,
     payload: &[u8],
-    extra_slots: usize,
 ) -> TablePageResult<Result<u16, SpaceError>> {
     let cell_len = leaf_cell_encoded_len(payload)?;
     let payload_len = u16::try_from(payload.len()).expect("payload length must fit in u16");
 
-    layout::try_append_cell_with_writer(page, LEAF_SPEC, cell_len, extra_slots, |cell| {
+    layout::try_append_cell_with_writer(page, LEAF_SPEC, cell_len, |cell| {
         cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
         cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE].copy_from_slice(&row_id.to_le_bytes());
         cell[LEAF_CELL_PREFIX_SIZE..].copy_from_slice(payload);
     })
 }
 
-/// Appends a leaf cell, defragmenting once before reporting page-full.
-fn write_leaf_cell_with_retry(
+/// Attempts to append a leaf cell while reserving space for one new slot.
+fn try_append_leaf_cell_for_insert(
     page: &mut [u8; PAGE_SIZE],
     row_id: RowId,
     payload: &[u8],
-    extra_slots: usize,
+) -> TablePageResult<Result<u16, SpaceError>> {
+    let cell_len = leaf_cell_encoded_len(payload)?;
+    let payload_len = u16::try_from(payload.len()).expect("payload length must fit in u16");
+
+    layout::try_append_cell_with_writer_for_insert(page, LEAF_SPEC, cell_len, |cell| {
+        cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
+        cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE].copy_from_slice(&row_id.to_le_bytes());
+        cell[LEAF_CELL_PREFIX_SIZE..].copy_from_slice(payload);
+    })
+}
+
+/// Appends a replacement leaf cell, defragmenting once before reporting page-full.
+fn write_leaf_cell_for_update_with_retry(
+    page: &mut [u8; PAGE_SIZE],
+    row_id: RowId,
+    payload: &[u8],
 ) -> TablePageResult<u16> {
-    if let Ok(offset) = try_append_leaf_cell(page, row_id, payload, extra_slots)? {
+    write_leaf_cell_with_retry(page, row_id, payload, try_append_leaf_cell)
+}
+
+/// Appends a newly inserted leaf cell, defragmenting once before reporting page-full.
+fn write_leaf_cell_for_insert_with_retry(
+    page: &mut [u8; PAGE_SIZE],
+    row_id: RowId,
+    payload: &[u8],
+) -> TablePageResult<u16> {
+    write_leaf_cell_with_retry(page, row_id, payload, try_append_leaf_cell_for_insert)
+}
+
+/// Shared retry helper for leaf-cell appends.
+fn write_leaf_cell_with_retry<F>(
+    page: &mut [u8; PAGE_SIZE],
+    row_id: RowId,
+    payload: &[u8],
+    try_append: F,
+) -> TablePageResult<u16>
+where
+    F: Fn(&mut [u8; PAGE_SIZE], RowId, &[u8]) -> TablePageResult<Result<u16, SpaceError>>,
+{
+    if let Ok(offset) = try_append(page, row_id, payload)? {
         return Ok(offset);
     }
 
     layout::defragment(page, LEAF_SPEC, leaf_cell_len)?;
 
-    match try_append_leaf_cell(page, row_id, payload, extra_slots)? {
+    match try_append(page, row_id, payload)? {
         Ok(offset) => Ok(offset),
         Err(SpaceError { needed, available }) => {
             Err(TablePageError::PageFull { needed, available })
