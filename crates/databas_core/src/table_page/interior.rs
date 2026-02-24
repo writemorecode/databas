@@ -42,12 +42,10 @@ impl<'a> TableInteriorPageRef<'a> {
 
     /// Looks up an interior cell by row id without mutable access.
     pub(crate) fn search(&self, row_id: RowId) -> TablePageResult<Option<InteriorCell>> {
-        let slot_index =
-            match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
-            {
-                SearchResult::Found(slot_index) => slot_index,
-                SearchResult::NotFound(_) => return Ok(None),
-            };
+        let slot_index = match find_interior_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::NotFound(_) => return Ok(None),
+        };
 
         decode_interior_cell_at_slot(self.page, slot_index).map(Some)
     }
@@ -58,14 +56,12 @@ impl<'a> TableInteriorPageRef<'a> {
     /// If no such separator exists, the page header's rightmost child is returned.
     pub(crate) fn child_for_row_id(&self, row_id: RowId) -> TablePageResult<PageId> {
         let slot_count = usize::from(self.cell_count());
-        let slot_index =
-            match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
-            {
-                SearchResult::Found(slot_index) => Some(slot_index),
-                SearchResult::NotFound(insertion_index) => {
-                    (usize::from(insertion_index) < slot_count).then_some(insertion_index)
-                }
-            };
+        let slot_index = match find_interior_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => Some(slot_index),
+            SearchResult::NotFound(insertion_index) => {
+                (usize::from(insertion_index) < slot_count).then_some(insertion_index)
+            }
+        };
 
         if let Some(slot_index) = slot_index {
             return Ok(decode_interior_cell_at_slot(self.page, slot_index)?.left_child);
@@ -126,12 +122,10 @@ impl<'a> TableInteriorPageMut<'a> {
     ///
     /// Fails with [`TablePageError::DuplicateRowId`] if `row_id` already exists.
     pub(crate) fn insert(&mut self, row_id: RowId, left_child: PageId) -> TablePageResult<()> {
-        let insertion_index =
-            match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
-            {
-                SearchResult::Found(_) => return Err(TablePageError::DuplicateRowId(row_id)),
-                SearchResult::NotFound(insertion_index) => insertion_index,
-            };
+        let insertion_index = match find_interior_row_id(self.page, row_id)? {
+            SearchResult::Found(_) => return Err(TablePageError::DuplicateRowId(row_id)),
+            SearchResult::NotFound(insertion_index) => insertion_index,
+        };
 
         let cell = encode_interior_cell(left_child, row_id);
         let cell_offset = write_interior_cell_for_insert_with_retry(self.page, &cell)?;
@@ -142,12 +136,10 @@ impl<'a> TableInteriorPageMut<'a> {
     ///
     /// Fails with [`TablePageError::RowIdNotFound`] when `row_id` is absent.
     pub(crate) fn update(&mut self, row_id: RowId, left_child: PageId) -> TablePageResult<()> {
-        let slot_index =
-            match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
-            {
-                SearchResult::Found(slot_index) => slot_index,
-                SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
-            };
+        let slot_index = match find_interior_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
+        };
 
         let existing_cell = layout::cell_bytes_at_slot(self.page, INTERIOR_SPEC, slot_index)?;
         interior_cell_len(existing_cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
@@ -163,12 +155,10 @@ impl<'a> TableInteriorPageMut<'a> {
     ///
     /// Fails with [`TablePageError::RowIdNotFound`] when `row_id` is absent.
     pub(crate) fn delete(&mut self, row_id: RowId) -> TablePageResult<()> {
-        let slot_index =
-            match layout::find_row_id(self.page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)?
-            {
-                SearchResult::Found(slot_index) => slot_index,
-                SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
-            };
+        let slot_index = match find_interior_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
+        };
 
         layout::remove_slot(self.page, INTERIOR_SPEC, slot_index)
     }
@@ -221,6 +211,11 @@ fn interior_row_id_from_cell(cell: &[u8]) -> TablePageResult<RowId> {
     }
 
     Ok(read_u64(cell, LEFT_CHILD_SIZE))
+}
+
+/// Performs row-id lookup on interior pages with interior-specific spec and decoder.
+fn find_interior_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<SearchResult> {
+    layout::find_row_id(page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)
 }
 
 /// Encodes `(left_child, row_id)` into the fixed-width interior cell format.
