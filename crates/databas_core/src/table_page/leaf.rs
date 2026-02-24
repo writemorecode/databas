@@ -42,11 +42,10 @@ impl<'a> TableLeafPageRef<'a> {
 
     /// Looks up a cell by row id without requiring mutable access.
     pub(crate) fn search(&self, row_id: RowId) -> TablePageResult<Option<LeafCellRef<'a>>> {
-        let slot_index =
-            match layout::find_row_id(self.page, LEAF_SPEC, row_id, leaf_row_id_from_cell)? {
-                SearchResult::Found(slot_index) => slot_index,
-                SearchResult::NotFound(_) => return Ok(None),
-            };
+        let slot_index = match find_leaf_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::NotFound(_) => return Ok(None),
+        };
 
         decode_leaf_cell_at_slot(self.page, slot_index).map(Some)
     }
@@ -89,11 +88,10 @@ impl<'a> TableLeafPageMut<'a> {
     ///
     /// Fails with [`TablePageError::DuplicateRowId`] if the key already exists.
     pub(crate) fn insert(&mut self, row_id: RowId, payload: &[u8]) -> TablePageResult<()> {
-        let insertion_index =
-            match layout::find_row_id(self.page, LEAF_SPEC, row_id, leaf_row_id_from_cell)? {
-                SearchResult::Found(_) => return Err(TablePageError::DuplicateRowId(row_id)),
-                SearchResult::NotFound(insertion_index) => insertion_index,
-            };
+        let insertion_index = match find_leaf_row_id(self.page, row_id)? {
+            SearchResult::Found(_) => return Err(TablePageError::DuplicateRowId(row_id)),
+            SearchResult::NotFound(insertion_index) => insertion_index,
+        };
 
         let cell_offset = write_leaf_cell_for_insert_with_retry(self.page, row_id, payload)?;
         layout::insert_slot(self.page, LEAF_SPEC, insertion_index, cell_offset)
@@ -103,11 +101,10 @@ impl<'a> TableLeafPageMut<'a> {
     ///
     /// Fails with [`TablePageError::RowIdNotFound`] when the key is absent.
     pub(crate) fn update(&mut self, row_id: RowId, payload: &[u8]) -> TablePageResult<()> {
-        let slot_index =
-            match layout::find_row_id(self.page, LEAF_SPEC, row_id, leaf_row_id_from_cell)? {
-                SearchResult::Found(slot_index) => slot_index,
-                SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
-            };
+        let slot_index = match find_leaf_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
+        };
 
         let existing_cell = layout::cell_bytes_at_slot(self.page, LEAF_SPEC, slot_index)?;
         let existing_len =
@@ -134,11 +131,10 @@ impl<'a> TableLeafPageMut<'a> {
     ///
     /// Fails with [`TablePageError::RowIdNotFound`] when the key is absent.
     pub(crate) fn delete(&mut self, row_id: RowId) -> TablePageResult<()> {
-        let slot_index =
-            match layout::find_row_id(self.page, LEAF_SPEC, row_id, leaf_row_id_from_cell)? {
-                SearchResult::Found(slot_index) => slot_index,
-                SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
-            };
+        let slot_index = match find_leaf_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
+        };
 
         layout::remove_slot(self.page, LEAF_SPEC, slot_index)
     }
@@ -192,6 +188,11 @@ fn leaf_row_id_from_cell(cell: &[u8]) -> TablePageResult<RowId> {
     }
 
     Ok(read_u64(cell, PAYLOAD_LEN_SIZE))
+}
+
+/// Performs row-id lookup on leaf pages with leaf-specific spec and decoder.
+fn find_leaf_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<SearchResult> {
+    layout::find_row_id(page, LEAF_SPEC, row_id, leaf_row_id_from_cell)
 }
 
 /// Computes the serialized cell length for a payload.
