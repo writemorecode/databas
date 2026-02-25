@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use crate::{
     error::{TablePageError, TablePageResult},
     types::{PAGE_SIZE, RowId},
@@ -74,14 +76,24 @@ impl<'a> TableLeafPageMut<'a> {
         Ok(Self { page })
     }
 
-    /// Returns an immutable view over the same underlying page bytes.
-    pub(crate) fn as_ref(&self) -> TableLeafPageRef<'_> {
-        TableLeafPageRef { page: self.page }
-    }
-
     /// Immutable row-id lookup convenience method for mutable wrappers.
     pub(crate) fn search(&self, row_id: RowId) -> TablePageResult<Option<LeafCellRef<'_>>> {
-        self.as_ref().search(row_id)
+        let slot_index = match find_leaf_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::NotFound(_) => return Ok(None),
+        };
+
+        decode_leaf_cell_at_slot(self.page, slot_index).map(Some)
+    }
+
+    /// Returns the number of slot entries currently stored on the page.
+    pub(crate) fn cell_count(&self) -> u16 {
+        layout::cell_count(self.page)
+    }
+
+    /// Returns free bytes between the slot directory and cell-content region.
+    pub(crate) fn free_space(&self) -> usize {
+        layout::free_space(self.page, LEAF_SPEC).expect("leaf page must remain valid")
     }
 
     /// Inserts a new cell keyed by `row_id`, preserving sorted slot order.
@@ -141,7 +153,7 @@ impl<'a> TableLeafPageMut<'a> {
 
     /// Compacts live cells toward the page end and rewrites slot offsets.
     pub(crate) fn defragment(&mut self) -> TablePageResult<()> {
-        layout::defragment(self.page, LEAF_SPEC, leaf_cell_len)
+        defragment_leaf_page(self.page)
     }
 }
 
@@ -192,7 +204,30 @@ fn leaf_row_id_from_cell(cell: &[u8]) -> TablePageResult<RowId> {
 
 /// Performs row-id lookup on leaf pages with leaf-specific spec and decoder.
 fn find_leaf_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<SearchResult> {
-    layout::find_row_id(page, LEAF_SPEC, row_id, leaf_row_id_from_cell)
+    layout::validate(page, LEAF_SPEC)?;
+
+    let cell_count = usize::from(layout::cell_count(page));
+    let mut left = 0usize;
+    let mut right = cell_count;
+
+    while left < right {
+        let mid = left + ((right - left) / 2);
+        let mid_u16 =
+            u16::try_from(mid).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+        let cell = layout::cell_bytes_at_slot(page, LEAF_SPEC, mid_u16)?;
+        let current_row_id = leaf_row_id_from_cell(cell)
+            .map_err(|_| TablePageError::CorruptCell { slot_index: mid_u16 })?;
+
+        match current_row_id.cmp(&row_id) {
+            Ordering::Less => left = mid + 1,
+            Ordering::Greater => right = mid,
+            Ordering::Equal => return Ok(SearchResult::Found(mid_u16)),
+        }
+    }
+
+    let insertion_index =
+        u16::try_from(left).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+    Ok(SearchResult::NotFound(insertion_index))
 }
 
 /// Computes the serialized cell length for a payload.
@@ -206,36 +241,16 @@ fn leaf_cell_encoded_len(payload: &[u8]) -> TablePageResult<usize> {
         .ok_or(TablePageError::CorruptPage("leaf cell length overflow"))
 }
 
-/// Attempts to append a leaf cell without defragmenting.
-fn try_append_leaf_cell(
-    page: &mut [u8; PAGE_SIZE],
-    row_id: RowId,
-    payload: &[u8],
-) -> TablePageResult<Result<u16, SpaceError>> {
+/// Encodes one leaf cell into owned bytes.
+fn encode_leaf_cell(row_id: RowId, payload: &[u8]) -> TablePageResult<Vec<u8>> {
     let cell_len = leaf_cell_encoded_len(payload)?;
     let payload_len = u16::try_from(payload.len()).expect("payload length must fit in u16");
 
-    layout::try_append_cell_with_writer(page, LEAF_SPEC, cell_len, |cell| {
-        cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
-        cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE].copy_from_slice(&row_id.to_le_bytes());
-        cell[LEAF_CELL_PREFIX_SIZE..].copy_from_slice(payload);
-    })
-}
-
-/// Attempts to append a leaf cell while reserving space for one new slot.
-fn try_append_leaf_cell_for_insert(
-    page: &mut [u8; PAGE_SIZE],
-    row_id: RowId,
-    payload: &[u8],
-) -> TablePageResult<Result<u16, SpaceError>> {
-    let cell_len = leaf_cell_encoded_len(payload)?;
-    let payload_len = u16::try_from(payload.len()).expect("payload length must fit in u16");
-
-    layout::try_append_cell_with_writer_for_insert(page, LEAF_SPEC, cell_len, |cell| {
-        cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
-        cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE].copy_from_slice(&row_id.to_le_bytes());
-        cell[LEAF_CELL_PREFIX_SIZE..].copy_from_slice(payload);
-    })
+    let mut cell = vec![0u8; cell_len];
+    cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
+    cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE].copy_from_slice(&row_id.to_le_bytes());
+    cell[LEAF_CELL_PREFIX_SIZE..].copy_from_slice(payload);
+    Ok(cell)
 }
 
 /// Appends a replacement leaf cell, defragmenting once before reporting page-full.
@@ -244,7 +259,19 @@ fn write_leaf_cell_for_update_with_retry(
     row_id: RowId,
     payload: &[u8],
 ) -> TablePageResult<u16> {
-    write_leaf_cell_with_retry(page, row_id, payload, try_append_leaf_cell)
+    let cell = encode_leaf_cell(row_id, payload)?;
+    if let Ok(offset) = layout::try_append_cell(page, LEAF_SPEC, &cell)? {
+        return Ok(offset);
+    }
+
+    defragment_leaf_page(page)?;
+
+    match layout::try_append_cell(page, LEAF_SPEC, &cell)? {
+        Ok(offset) => Ok(offset),
+        Err(SpaceError { needed, available }) => {
+            Err(TablePageError::PageFull { needed, available })
+        }
+    }
 }
 
 /// Appends a newly inserted leaf cell, defragmenting once before reporting page-full.
@@ -253,31 +280,55 @@ fn write_leaf_cell_for_insert_with_retry(
     row_id: RowId,
     payload: &[u8],
 ) -> TablePageResult<u16> {
-    write_leaf_cell_with_retry(page, row_id, payload, try_append_leaf_cell_for_insert)
-}
-
-/// Shared retry helper for leaf-cell appends.
-fn write_leaf_cell_with_retry<F>(
-    page: &mut [u8; PAGE_SIZE],
-    row_id: RowId,
-    payload: &[u8],
-    try_append: F,
-) -> TablePageResult<u16>
-where
-    F: Fn(&mut [u8; PAGE_SIZE], RowId, &[u8]) -> TablePageResult<Result<u16, SpaceError>>,
-{
-    if let Ok(offset) = try_append(page, row_id, payload)? {
+    let cell = encode_leaf_cell(row_id, payload)?;
+    if let Ok(offset) = layout::try_append_cell_for_insert(page, LEAF_SPEC, &cell)? {
         return Ok(offset);
     }
 
-    layout::defragment(page, LEAF_SPEC, leaf_cell_len)?;
+    defragment_leaf_page(page)?;
 
-    match try_append(page, row_id, payload)? {
+    match layout::try_append_cell_for_insert(page, LEAF_SPEC, &cell)? {
         Ok(offset) => Ok(offset),
         Err(SpaceError { needed, available }) => {
             Err(TablePageError::PageFull { needed, available })
         }
     }
+}
+
+/// Rewrites live leaf cells contiguously and refreshes slot offsets.
+fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
+    layout::validate(page, LEAF_SPEC)?;
+
+    let cell_count = usize::from(layout::cell_count(page));
+    let mut cells = Vec::with_capacity(cell_count);
+
+    for slot in 0..cell_count {
+        let slot_u16 =
+            u16::try_from(slot).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+        let cell = layout::cell_bytes_at_slot(page, LEAF_SPEC, slot_u16)?;
+        let cell_len = leaf_cell_len(cell)
+            .map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
+
+        if cell_len == 0 || cell_len > cell.len() {
+            return Err(TablePageError::CorruptCell { slot_index: slot_u16 });
+        }
+
+        cells.push(cell[..cell_len].to_vec());
+    }
+
+    layout::init_empty(page, LEAF_SPEC)?;
+
+    for (slot, cell) in cells.into_iter().enumerate() {
+        let slot_u16 =
+            u16::try_from(slot).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+        let cell_offset = match layout::try_append_cell_for_insert(page, LEAF_SPEC, &cell)? {
+            Ok(offset) => offset,
+            Err(_) => return Err(TablePageError::CorruptPage("cell content underflow")),
+        };
+        layout::insert_slot(page, LEAF_SPEC, slot_u16, cell_offset)?;
+    }
+
+    Ok(())
 }
 
 /// Reads a little-endian `u16` from `bytes` at `offset`.
@@ -315,7 +366,7 @@ mod tests {
         let mut page = [0u8; PAGE_SIZE];
         {
             let leaf = TableLeafPageMut::init_empty(&mut page).unwrap();
-            assert_eq!(leaf.as_ref().cell_count(), 0);
+            assert_eq!(leaf.cell_count(), 0);
         }
 
         let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
@@ -439,13 +490,13 @@ mod tests {
         let max_payload = PAGE_SIZE - layout::LEAF_HEADER_SIZE - 2 - LEAF_CELL_PREFIX_SIZE;
         leaf.insert(1, &payload(1, max_payload)).unwrap();
 
-        let free_before = leaf.as_ref().free_space();
+        let free_before = leaf.free_space();
         assert_eq!(free_before, 0);
 
         let updated_payload = payload(9, max_payload);
         leaf.update(1, &updated_payload).unwrap();
 
-        assert_eq!(leaf.as_ref().free_space(), free_before);
+        assert_eq!(leaf.free_space(), free_before);
         assert_eq!(leaf.search(1).unwrap().unwrap().payload, updated_payload.as_slice());
     }
 
