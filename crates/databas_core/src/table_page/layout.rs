@@ -103,7 +103,12 @@ pub(super) fn cell_bytes_at_slot(
     slot_index: u16,
 ) -> TablePageResult<&[u8]> {
     validate(page, spec)?;
-    cell_bytes_at_slot_impl(page, spec, slot_index)
+    let content_start = usize::from(content_start(page));
+    let cell_offset = usize::from(slot_offset(page, spec, slot_index)?);
+    if cell_offset < content_start || cell_offset >= PAGE_SIZE {
+        return Err(TablePageError::CorruptCell { slot_index });
+    }
+    Ok(&page[cell_offset..])
 }
 
 /// Attempts to append a pre-encoded cell into the cell-content region.
@@ -349,22 +354,6 @@ fn write_slot_offset_raw(
     let position = slot_position(spec, slot_index)?;
     write_u16(page, position, cell_offset);
     Ok(())
-}
-
-/// Returns the raw cell bytes for `slot_index` assuming caller already validated the page.
-fn cell_bytes_at_slot_impl(
-    page: &[u8; PAGE_SIZE],
-    spec: PageSpec,
-    slot_index: u16,
-) -> TablePageResult<&[u8]> {
-    let content_start = usize::from(content_start(page));
-    let cell_offset = usize::from(slot_offset(page, spec, slot_index)?);
-
-    if cell_offset < content_start || cell_offset >= PAGE_SIZE {
-        return Err(TablePageError::CorruptCell { slot_index });
-    }
-
-    Ok(&page[cell_offset..])
 }
 
 /// Reads a little-endian `u16` from `page` at `offset`.
