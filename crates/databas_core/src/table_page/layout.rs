@@ -212,7 +212,9 @@ pub(super) fn insert_slot(
     }
 
     for slot in (insert_index_usize..cell_count).rev() {
-        let offset = slot_offset(page, spec, u16::try_from(slot).expect("slot index overflow"))?;
+        let slot_index =
+            u16::try_from(slot).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+        let offset = slot_offset(page, spec, slot_index)?;
         write_slot_offset_raw(page, spec, slot + 1, offset)?;
     }
 
@@ -239,8 +241,9 @@ pub(super) fn remove_slot(
     }
 
     for slot in remove_index_usize..(cell_count - 1) {
-        let next_offset =
-            slot_offset(page, spec, u16::try_from(slot + 1).expect("slot index overflow"))?;
+        let slot_index = u16::try_from(slot + 1)
+            .map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+        let next_offset = slot_offset(page, spec, slot_index)?;
         write_slot_offset_raw(page, spec, slot, next_offset)?;
     }
 

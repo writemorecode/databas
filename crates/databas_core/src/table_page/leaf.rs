@@ -58,8 +58,8 @@ impl<'a> TableLeafPageRef<'a> {
     }
 
     /// Returns free bytes between the slot directory and cell-content region.
-    pub(crate) fn free_space(&self) -> usize {
-        layout::free_space(self.page, LEAF_SPEC).expect("leaf page must remain valid")
+    pub(crate) fn free_space(&self) -> TablePageResult<usize> {
+        layout::free_space(self.page, LEAF_SPEC)
     }
 }
 
@@ -92,8 +92,8 @@ impl<'a> TableLeafPageMut<'a> {
     }
 
     /// Returns free bytes between the slot directory and cell-content region.
-    pub(crate) fn free_space(&self) -> usize {
-        layout::free_space(self.page, LEAF_SPEC).expect("leaf page must remain valid")
+    pub(crate) fn free_space(&self) -> TablePageResult<usize> {
+        layout::free_space(self.page, LEAF_SPEC)
     }
 
     /// Inserts a new cell keyed by `row_id`, preserving sorted slot order.
@@ -127,7 +127,8 @@ impl<'a> TableLeafPageMut<'a> {
             let cell_offset = usize::from(layout::slot_offset(self.page, LEAF_SPEC, slot_index)?);
             let cell_end = cell_offset + existing_len;
             let cell = &mut self.page[cell_offset..cell_end];
-            let payload_len = u16::try_from(payload.len()).expect("payload length must fit in u16");
+            let payload_len = u16::try_from(payload.len())
+                .map_err(|_| TablePageError::CellTooLarge { len: payload.len() })?;
 
             cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
             cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE].copy_from_slice(&row_id.to_le_bytes());
@@ -244,7 +245,8 @@ fn leaf_cell_encoded_len(payload: &[u8]) -> TablePageResult<usize> {
 /// Encodes one leaf cell into owned bytes.
 fn encode_leaf_cell(row_id: RowId, payload: &[u8]) -> TablePageResult<Vec<u8>> {
     let cell_len = leaf_cell_encoded_len(payload)?;
-    let payload_len = u16::try_from(payload.len()).expect("payload length must fit in u16");
+    let payload_len = u16::try_from(payload.len())
+        .map_err(|_| TablePageError::CellTooLarge { len: payload.len() })?;
 
     let mut cell = vec![0u8; cell_len];
     cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
@@ -490,13 +492,13 @@ mod tests {
         let max_payload = PAGE_SIZE - layout::LEAF_HEADER_SIZE - 2 - LEAF_CELL_PREFIX_SIZE;
         leaf.insert(1, &payload(1, max_payload)).unwrap();
 
-        let free_before = leaf.free_space();
+        let free_before = leaf.free_space().unwrap();
         assert_eq!(free_before, 0);
 
         let updated_payload = payload(9, max_payload);
         leaf.update(1, &updated_payload).unwrap();
 
-        assert_eq!(leaf.free_space(), free_before);
+        assert_eq!(leaf.free_space().unwrap(), free_before);
         assert_eq!(leaf.search(1).unwrap().unwrap().payload, updated_payload.as_slice());
     }
 
