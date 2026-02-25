@@ -83,8 +83,8 @@ impl<'a> TableInteriorPageRef<'a> {
     }
 
     /// Returns free bytes between the slot directory and cell-content region.
-    pub(crate) fn free_space(&self) -> usize {
-        layout::free_space(self.page, INTERIOR_SPEC).expect("interior page must remain valid")
+    pub(crate) fn free_space(&self) -> TablePageResult<usize> {
+        layout::free_space(self.page, INTERIOR_SPEC)
     }
 }
 
@@ -138,8 +138,8 @@ impl<'a> TableInteriorPageMut<'a> {
     }
 
     /// Returns free bytes between the slot directory and cell-content region.
-    pub(crate) fn free_space(&self) -> usize {
-        layout::free_space(self.page, INTERIOR_SPEC).expect("interior page must remain valid")
+    pub(crate) fn free_space(&self) -> TablePageResult<usize> {
+        layout::free_space(self.page, INTERIOR_SPEC)
     }
 
     /// Inserts a new `(left_child, row_id)` cell in sorted order.
@@ -459,13 +459,13 @@ mod tests {
             interior.insert(row_id as RowId, row_id as PageId).unwrap();
         }
 
-        let free_before = interior.free_space();
+        let free_before = interior.free_space().unwrap();
         assert!(free_before < INTERIOR_CELL_SIZE);
 
         let target_row_id = (max_cells / 2) as RowId;
         interior.update(target_row_id, 777_777).unwrap();
 
-        assert_eq!(interior.free_space(), free_before);
+        assert_eq!(interior.free_space().unwrap(), free_before);
         assert_eq!(interior.search(target_row_id).unwrap().unwrap().left_child, 777_777);
     }
 
@@ -494,7 +494,7 @@ mod tests {
         }
 
         interior.delete(100).unwrap();
-        assert!(interior.free_space() < INTERIOR_CELL_SIZE + 2);
+        assert!(interior.free_space().unwrap() < INTERIOR_CELL_SIZE + 2);
 
         interior.insert(max_cells as RowId, 99_999).unwrap();
         assert_eq!(interior.search(max_cells as RowId).unwrap().unwrap().left_child, 99_999);
