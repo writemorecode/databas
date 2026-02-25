@@ -1,8 +1,6 @@
-use std::cmp::Ordering;
-
 use crate::{
     error::{TablePageError, TablePageResult},
-    types::{PAGE_SIZE, RowId},
+    types::PAGE_SIZE,
 };
 
 pub(super) const LEAF_PAGE_TYPE: u8 = 1;
@@ -98,42 +96,6 @@ pub(super) fn free_space(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageRes
     Ok(content_start - slot_dir_end)
 }
 
-/// Performs binary search for `row_id`, returning either the matching slot or insertion point.
-pub(super) fn find_row_id<F>(
-    page: &[u8; PAGE_SIZE],
-    spec: PageSpec,
-    row_id: RowId,
-    row_id_from_cell: F,
-) -> TablePageResult<SearchResult>
-where
-    F: Fn(&[u8]) -> TablePageResult<RowId>,
-{
-    validate(page, spec)?;
-
-    let cell_count = usize::from(cell_count(page));
-    let mut left = 0usize;
-    let mut right = cell_count;
-
-    while left < right {
-        let mid = left + ((right - left) / 2);
-        let mid_u16 =
-            u16::try_from(mid).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
-        let cell = cell_bytes_at_slot_impl(page, spec, mid_u16)?;
-        let current_row_id = row_id_from_cell(cell)
-            .map_err(|_| TablePageError::CorruptCell { slot_index: mid_u16 })?;
-
-        match current_row_id.cmp(&row_id) {
-            Ordering::Less => left = mid + 1,
-            Ordering::Greater => right = mid,
-            Ordering::Equal => return Ok(SearchResult::Found(mid_u16)),
-        }
-    }
-
-    let insertion_index =
-        u16::try_from(left).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
-    Ok(SearchResult::NotFound(insertion_index))
-}
-
 /// Returns the raw cell byte slice referenced by `slot_index`.
 pub(super) fn cell_bytes_at_slot(
     page: &[u8; PAGE_SIZE],
@@ -150,9 +112,29 @@ pub(super) fn try_append_cell(
     spec: PageSpec,
     cell: &[u8],
 ) -> TablePageResult<Result<u16, SpaceError>> {
-    try_append_cell_with_writer(page, spec, cell.len(), |dst| {
-        dst.copy_from_slice(cell);
-    })
+    validate(page, spec)?;
+
+    let cell_len = cell.len();
+    if cell_len > usize::from(u16::MAX) {
+        return Err(TablePageError::CellTooLarge { len: cell_len });
+    }
+
+    let current_count = usize::from(cell_count(page));
+    let slot_dir_end_after = slot_dir_end_for_count(spec, current_count)?;
+    let content_start = usize::from(content_start(page));
+    let available = content_start.saturating_sub(slot_dir_end_after);
+
+    if cell_len > available {
+        return Ok(Err(SpaceError { needed: cell_len, available }));
+    }
+
+    let new_start = content_start - cell_len;
+    page[new_start..content_start].copy_from_slice(cell);
+    set_content_start(page, new_start)?;
+
+    let offset_u16 = u16::try_from(new_start)
+        .map_err(|_| TablePageError::CorruptPage("cell offset overflow"))?;
+    Ok(Ok(offset_u16))
 }
 
 /// Attempts to append a pre-encoded cell while reserving one additional slot entry.
@@ -161,72 +143,16 @@ pub(super) fn try_append_cell_for_insert(
     spec: PageSpec,
     cell: &[u8],
 ) -> TablePageResult<Result<u16, SpaceError>> {
-    try_append_cell_with_writer_for_insert(page, spec, cell.len(), |dst| {
-        dst.copy_from_slice(cell);
-    })
-}
-
-/// Mode for cell append operations.
-enum CellAppendMode {
-    Insert,
-    Update,
-}
-
-/// Attempts to append a cell of `cell_len`, materializing bytes via `write_cell` on success.
-pub(super) fn try_append_cell_with_writer<F>(
-    page: &mut [u8; PAGE_SIZE],
-    spec: PageSpec,
-    cell_len: usize,
-    write_cell: F,
-) -> TablePageResult<Result<u16, SpaceError>>
-where
-    F: FnOnce(&mut [u8]),
-{
-    try_append_cell_with_writer_impl(page, spec, cell_len, CellAppendMode::Update, write_cell)
-}
-
-/// Attempts to append a cell while reserving one additional slot entry.
-pub(super) fn try_append_cell_with_writer_for_insert<F>(
-    page: &mut [u8; PAGE_SIZE],
-    spec: PageSpec,
-    cell_len: usize,
-    write_cell: F,
-) -> TablePageResult<Result<u16, SpaceError>>
-where
-    F: FnOnce(&mut [u8]),
-{
-    try_append_cell_with_writer_impl(page, spec, cell_len, CellAppendMode::Insert, write_cell)
-}
-
-/// Shared implementation for append operations with configurable slot reservation.
-fn try_append_cell_with_writer_impl<F>(
-    page: &mut [u8; PAGE_SIZE],
-    spec: PageSpec,
-    cell_len: usize,
-    cell_append_mode: CellAppendMode,
-    write_cell: F,
-) -> TablePageResult<Result<u16, SpaceError>>
-where
-    F: FnOnce(&mut [u8]),
-{
     validate(page, spec)?;
 
+    let cell_len = cell.len();
     if cell_len > usize::from(u16::MAX) {
         return Err(TablePageError::CellTooLarge { len: cell_len });
     }
 
-    // For inserts, one slot array entry must be reserved.
-    // This is not required for updates.
-    let additional_slot_count = match cell_append_mode {
-        CellAppendMode::Insert => 1,
-        CellAppendMode::Update => 0,
-    };
-
     let current_count = usize::from(cell_count(page));
-    let required_count = current_count
-        .checked_add(additional_slot_count)
-        .ok_or(TablePageError::CorruptPage("cell count overflow"))?;
-
+    let required_count =
+        current_count.checked_add(1).ok_or(TablePageError::CorruptPage("cell count overflow"))?;
     let slot_dir_end_after = slot_dir_end_for_count(spec, required_count)?;
     let content_start = usize::from(content_start(page));
     let available = content_start.saturating_sub(slot_dir_end_after);
@@ -236,7 +162,7 @@ where
     }
 
     let new_start = content_start - cell_len;
-    write_cell(&mut page[new_start..content_start]);
+    page[new_start..content_start].copy_from_slice(cell);
     set_content_start(page, new_start)?;
 
     let offset_u16 = u16::try_from(new_start)
@@ -324,55 +250,6 @@ pub(super) fn remove_slot(
         .map_err(|_| TablePageError::CorruptPage("cell count overflow"))?;
     set_cell_count(page, new_count);
     Ok(())
-}
-
-/// Rewrites live cells contiguously near the page end and refreshes slot offsets.
-pub(super) fn defragment<F>(
-    page: &mut [u8; PAGE_SIZE],
-    spec: PageSpec,
-    cell_len: F,
-) -> TablePageResult<()>
-where
-    F: Fn(&[u8]) -> TablePageResult<usize>,
-{
-    validate(page, spec)?;
-
-    let cell_count = usize::from(cell_count(page));
-    if cell_count == 0 {
-        set_content_start(page, PAGE_SIZE)?;
-        return Ok(());
-    }
-
-    let mut cells = Vec::with_capacity(cell_count);
-
-    for slot in 0..cell_count {
-        let slot_u16 =
-            u16::try_from(slot).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
-        let cell = cell_bytes_at_slot_impl(page, spec, slot_u16)?;
-        let len =
-            cell_len(cell).map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
-
-        if len == 0 || len > cell.len() {
-            return Err(TablePageError::CorruptCell { slot_index: slot_u16 });
-        }
-
-        cells.push(cell[..len].to_vec());
-    }
-
-    let mut next_start = PAGE_SIZE;
-    for (slot, cell) in cells.into_iter().enumerate() {
-        next_start = next_start
-            .checked_sub(cell.len())
-            .ok_or(TablePageError::CorruptPage("cell content underflow"))?;
-
-        let end = next_start + cell.len();
-        page[next_start..end].copy_from_slice(&cell);
-        let cell_offset = u16::try_from(next_start)
-            .map_err(|_| TablePageError::CorruptPage("offset overflow"))?;
-        write_slot_offset_raw(page, spec, slot, cell_offset)?;
-    }
-
-    set_content_start(page, next_start)
 }
 
 /// Reads a little-endian `u64` from `page` at `offset`.

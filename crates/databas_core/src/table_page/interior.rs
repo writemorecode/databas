@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use crate::{
     error::{TablePageError, TablePageResult},
     types::{PAGE_SIZE, PageId, RowId},
@@ -103,19 +105,41 @@ impl<'a> TableInteriorPageMut<'a> {
         Ok(Self { page })
     }
 
-    /// Returns an immutable view over the same underlying page bytes.
-    pub(crate) fn as_ref(&self) -> TableInteriorPageRef<'_> {
-        TableInteriorPageRef { page: self.page }
-    }
-
     /// Immutable row-id lookup convenience method for mutable wrappers.
     pub(crate) fn search(&self, row_id: RowId) -> TablePageResult<Option<InteriorCell>> {
-        self.as_ref().search(row_id)
+        let slot_index = match find_interior_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::NotFound(_) => return Ok(None),
+        };
+
+        decode_interior_cell_at_slot(self.page, slot_index).map(Some)
     }
 
     /// Returns the child page id to descend into for `row_id`.
     pub(crate) fn child_for_row_id(&self, row_id: RowId) -> TablePageResult<PageId> {
-        self.as_ref().child_for_row_id(row_id)
+        let slot_count = usize::from(self.cell_count());
+        let slot_index = match find_interior_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => Some(slot_index),
+            SearchResult::NotFound(insertion_index) => {
+                (usize::from(insertion_index) < slot_count).then_some(insertion_index)
+            }
+        };
+
+        if let Some(slot_index) = slot_index {
+            return Ok(decode_interior_cell_at_slot(self.page, slot_index)?.left_child);
+        }
+
+        Ok(self.rightmost_child())
+    }
+
+    /// Returns the number of slot entries currently stored on the page.
+    pub(crate) fn cell_count(&self) -> u16 {
+        layout::cell_count(self.page)
+    }
+
+    /// Returns free bytes between the slot directory and cell-content region.
+    pub(crate) fn free_space(&self) -> usize {
+        layout::free_space(self.page, INTERIOR_SPEC).expect("interior page must remain valid")
     }
 
     /// Inserts a new `(left_child, row_id)` cell in sorted order.
@@ -165,7 +189,7 @@ impl<'a> TableInteriorPageMut<'a> {
 
     /// Returns the current rightmost child pointer from the page header.
     pub(crate) fn rightmost_child(&self) -> PageId {
-        self.as_ref().rightmost_child()
+        layout::read_u64_at(self.page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET)
     }
 
     /// Updates the page header's rightmost child pointer.
@@ -177,7 +201,7 @@ impl<'a> TableInteriorPageMut<'a> {
 
     /// Compacts live cells toward the page end and rewrites slot offsets.
     pub(crate) fn defragment(&mut self) -> TablePageResult<()> {
-        layout::defragment(self.page, INTERIOR_SPEC, interior_cell_len)
+        defragment_interior_page(self.page)
     }
 }
 
@@ -215,7 +239,30 @@ fn interior_row_id_from_cell(cell: &[u8]) -> TablePageResult<RowId> {
 
 /// Performs row-id lookup on interior pages with interior-specific spec and decoder.
 fn find_interior_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<SearchResult> {
-    layout::find_row_id(page, INTERIOR_SPEC, row_id, interior_row_id_from_cell)
+    layout::validate(page, INTERIOR_SPEC)?;
+
+    let cell_count = usize::from(layout::cell_count(page));
+    let mut left = 0usize;
+    let mut right = cell_count;
+
+    while left < right {
+        let mid = left + ((right - left) / 2);
+        let mid_u16 =
+            u16::try_from(mid).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+        let cell = layout::cell_bytes_at_slot(page, INTERIOR_SPEC, mid_u16)?;
+        let current_row_id = interior_row_id_from_cell(cell)
+            .map_err(|_| TablePageError::CorruptCell { slot_index: mid_u16 })?;
+
+        match current_row_id.cmp(&row_id) {
+            Ordering::Less => left = mid + 1,
+            Ordering::Greater => right = mid,
+            Ordering::Equal => return Ok(SearchResult::Found(mid_u16)),
+        }
+    }
+
+    let insertion_index =
+        u16::try_from(left).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+    Ok(SearchResult::NotFound(insertion_index))
 }
 
 /// Encodes `(left_child, row_id)` into the fixed-width interior cell format.
@@ -235,7 +282,7 @@ fn write_interior_cell_for_insert_with_retry(
         return Ok(offset);
     }
 
-    layout::defragment(page, INTERIOR_SPEC, interior_cell_len)?;
+    defragment_interior_page(page)?;
 
     match layout::try_append_cell_for_insert(page, INTERIOR_SPEC, cell)? {
         Ok(offset) => Ok(offset),
@@ -243,6 +290,44 @@ fn write_interior_cell_for_insert_with_retry(
             Err(TablePageError::PageFull { needed, available })
         }
     }
+}
+
+/// Rewrites live interior cells contiguously and refreshes slot offsets.
+fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
+    layout::validate(page, INTERIOR_SPEC)?;
+
+    let rightmost_child = layout::read_u64_at(page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET);
+    let cell_count = usize::from(layout::cell_count(page));
+    let mut cells = Vec::with_capacity(cell_count);
+
+    for slot in 0..cell_count {
+        let slot_u16 =
+            u16::try_from(slot).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+        let cell = layout::cell_bytes_at_slot(page, INTERIOR_SPEC, slot_u16)?;
+        let cell_len = interior_cell_len(cell)
+            .map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
+
+        if cell_len == 0 || cell_len > cell.len() {
+            return Err(TablePageError::CorruptCell { slot_index: slot_u16 });
+        }
+
+        cells.push(cell[..cell_len].to_vec());
+    }
+
+    layout::init_empty(page, INTERIOR_SPEC)?;
+    layout::write_u64_at(page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET, rightmost_child);
+
+    for (slot, cell) in cells.into_iter().enumerate() {
+        let slot_u16 =
+            u16::try_from(slot).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+        let cell_offset = match layout::try_append_cell_for_insert(page, INTERIOR_SPEC, &cell)? {
+            Ok(offset) => offset,
+            Err(_) => return Err(TablePageError::CorruptPage("cell content underflow")),
+        };
+        layout::insert_slot(page, INTERIOR_SPEC, slot_u16, cell_offset)?;
+    }
+
+    Ok(())
 }
 
 /// Reads a little-endian `u64` from `bytes` at `offset`.
@@ -273,8 +358,8 @@ mod tests {
         let mut page = [0u8; PAGE_SIZE];
         {
             let interior = TableInteriorPageMut::init_empty(&mut page, 77).unwrap();
-            assert_eq!(interior.as_ref().cell_count(), 0);
-            assert_eq!(interior.as_ref().rightmost_child(), 77);
+            assert_eq!(interior.cell_count(), 0);
+            assert_eq!(interior.rightmost_child(), 77);
         }
 
         let interior_ref = TableInteriorPageRef::from_bytes(&page).unwrap();
@@ -374,13 +459,13 @@ mod tests {
             interior.insert(row_id as RowId, row_id as PageId).unwrap();
         }
 
-        let free_before = interior.as_ref().free_space();
+        let free_before = interior.free_space();
         assert!(free_before < INTERIOR_CELL_SIZE);
 
         let target_row_id = (max_cells / 2) as RowId;
         interior.update(target_row_id, 777_777).unwrap();
 
-        assert_eq!(interior.as_ref().free_space(), free_before);
+        assert_eq!(interior.free_space(), free_before);
         assert_eq!(interior.search(target_row_id).unwrap().unwrap().left_child, 777_777);
     }
 
@@ -409,7 +494,7 @@ mod tests {
         }
 
         interior.delete(100).unwrap();
-        assert!(interior.as_ref().free_space() < INTERIOR_CELL_SIZE + 2);
+        assert!(interior.free_space() < INTERIOR_CELL_SIZE + 2);
 
         interior.insert(max_cells as RowId, 99_999).unwrap();
         assert_eq!(interior.search(max_cells as RowId).unwrap().unwrap().left_child, 99_999);

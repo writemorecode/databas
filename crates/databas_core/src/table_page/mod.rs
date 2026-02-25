@@ -10,15 +10,6 @@ use crate::{
 pub(crate) use interior::{InteriorCell, TableInteriorPageMut, TableInteriorPageRef};
 pub(crate) use leaf::{LeafCellRef, TableLeafPageMut, TableLeafPageRef};
 
-/// Logical kind for a table page used by unknown-type deserialization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TablePageKind {
-    /// Leaf page containing payload bytes.
-    Leaf,
-    /// Interior page containing child pointers and separator keys.
-    Interior,
-}
-
 /// Immutable wrapper for a table page whose concrete kind is discovered at runtime.
 #[derive(Debug)]
 pub(crate) enum TablePageRef<'a> {
@@ -37,14 +28,6 @@ impl<'a> TablePageRef<'a> {
                 Ok(Self::Interior(TableInteriorPageRef::from_bytes(page)?))
             }
             page_type => Err(TablePageError::InvalidPageType(page_type)),
-        }
-    }
-
-    /// Returns the logical page kind for this wrapper.
-    pub(crate) fn kind(&self) -> TablePageKind {
-        match self {
-            Self::Leaf(_) => TablePageKind::Leaf,
-            Self::Interior(_) => TablePageKind::Interior,
         }
     }
 }
@@ -67,14 +50,6 @@ impl<'a> TablePageMut<'a> {
                 Ok(Self::Interior(TableInteriorPageMut::from_bytes(page)?))
             }
             page_type => Err(TablePageError::InvalidPageType(page_type)),
-        }
-    }
-
-    /// Returns the logical page kind for this wrapper.
-    pub(crate) fn kind(&self) -> TablePageKind {
-        match self {
-            Self::Leaf(_) => TablePageKind::Leaf,
-            Self::Interior(_) => TablePageKind::Interior,
         }
     }
 }
@@ -108,7 +83,6 @@ mod tests {
         }
 
         let page_ref = TablePageRef::from_bytes(&page).unwrap();
-        assert_eq!(page_ref.kind(), TablePageKind::Leaf);
         match page_ref {
             TablePageRef::Leaf(leaf) => {
                 let cell = leaf.search(7).unwrap().unwrap();
@@ -123,7 +97,6 @@ mod tests {
         let page = initialized_interior_page(99);
 
         let page_ref = TablePageRef::from_bytes(&page).unwrap();
-        assert_eq!(page_ref.kind(), TablePageKind::Interior);
         match page_ref {
             TablePageRef::Interior(interior) => assert_eq!(interior.rightmost_child(), 99),
             TablePageRef::Leaf(_) => panic!("expected interior page"),
@@ -134,7 +107,6 @@ mod tests {
     fn mutable_unknown_deserialization_detects_leaf_and_kind() {
         let mut page = initialized_leaf_page();
         let page_mut = TablePageMut::from_bytes(&mut page).unwrap();
-        assert_eq!(page_mut.kind(), TablePageKind::Leaf);
         match page_mut {
             TablePageMut::Leaf(_) => {}
             TablePageMut::Interior(_) => panic!("expected leaf page"),
@@ -145,7 +117,6 @@ mod tests {
     fn mutable_unknown_deserialization_detects_interior_and_kind() {
         let mut page = initialized_interior_page(123);
         let page_mut = TablePageMut::from_bytes(&mut page).unwrap();
-        assert_eq!(page_mut.kind(), TablePageKind::Interior);
         match page_mut {
             TablePageMut::Interior(_) => {}
             TablePageMut::Leaf(_) => panic!("expected interior page"),
