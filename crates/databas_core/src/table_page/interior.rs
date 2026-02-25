@@ -152,7 +152,7 @@ impl<'a> TableInteriorPageMut<'a> {
         };
 
         let cell = encode_interior_cell(left_child, row_id);
-        let cell_offset = write_interior_cell_for_insert_with_retry(self.page, &cell)?;
+        let cell_offset = insert_interior_cell(self.page, &cell)?;
         layout::insert_slot(self.page, INTERIOR_SPEC, insertion_index, cell_offset)
     }
 
@@ -273,11 +273,8 @@ fn encode_interior_cell(left_child: PageId, row_id: RowId) -> [u8; INTERIOR_CELL
     cell
 }
 
-/// Appends an interior cell for insertion, defragmenting once before returning page-full.
-fn write_interior_cell_for_insert_with_retry(
-    page: &mut [u8; PAGE_SIZE],
-    cell: &[u8],
-) -> TablePageResult<u16> {
+/// Inserts an interior cell, defragmenting once before returning page-full.
+fn insert_interior_cell(page: &mut [u8; PAGE_SIZE], cell: &[u8]) -> TablePageResult<u16> {
     if let Ok(offset) = layout::try_append_cell_for_insert(page, INTERIOR_SPEC, cell)? {
         return Ok(offset);
     }

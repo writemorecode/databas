@@ -105,7 +105,7 @@ impl<'a> TableLeafPageMut<'a> {
             SearchResult::NotFound(insertion_index) => insertion_index,
         };
 
-        let cell_offset = write_leaf_cell_for_insert_with_retry(self.page, row_id, payload)?;
+        let cell_offset = insert_leaf_cell(self.page, row_id, payload)?;
         layout::insert_slot(self.page, LEAF_SPEC, insertion_index, cell_offset)
     }
 
@@ -136,7 +136,7 @@ impl<'a> TableLeafPageMut<'a> {
             return Ok(());
         }
 
-        let cell_offset = write_leaf_cell_for_update_with_retry(self.page, row_id, payload)?;
+        let cell_offset = update_leaf_cell(self.page, row_id, payload)?;
         layout::set_slot_offset(self.page, LEAF_SPEC, slot_index, cell_offset)
     }
 
@@ -255,8 +255,8 @@ fn encode_leaf_cell(row_id: RowId, payload: &[u8]) -> TablePageResult<Vec<u8>> {
     Ok(cell)
 }
 
-/// Appends a replacement leaf cell, defragmenting once before reporting page-full.
-fn write_leaf_cell_for_update_with_retry(
+/// Updates a leaf cell value, defragmenting once before reporting page-full.
+fn update_leaf_cell(
     page: &mut [u8; PAGE_SIZE],
     row_id: RowId,
     payload: &[u8],
@@ -276,8 +276,8 @@ fn write_leaf_cell_for_update_with_retry(
     }
 }
 
-/// Appends a newly inserted leaf cell, defragmenting once before reporting page-full.
-fn write_leaf_cell_for_insert_with_retry(
+/// Inserts a leaf cell, defragmenting once before reporting page-full.
+fn insert_leaf_cell(
     page: &mut [u8; PAGE_SIZE],
     row_id: RowId,
     payload: &[u8],
