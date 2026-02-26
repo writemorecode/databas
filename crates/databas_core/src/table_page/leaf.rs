@@ -26,6 +26,27 @@ pub(crate) struct LeafCellRef<'a> {
     pub(crate) payload: &'a [u8],
 }
 
+impl<'a> LeafCellRef<'a> {
+    /// Deserializes and validates the leaf cell referenced by `slot_index`.
+    pub(crate) fn try_deserialize_at_slot(
+        page: &'a [u8; PAGE_SIZE],
+        slot_index: u16,
+    ) -> TablePageResult<Self> {
+        let cell = layout::cell_bytes_at_slot(page, LEAF_SPEC, slot_index)?;
+        let cell_len =
+            leaf_cell_len(cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
+
+        let payload_len = usize::from(read_u16(cell, 0));
+        let row_id = read_u64(cell, PAYLOAD_LEN_SIZE);
+        let payload_start = LEAF_CELL_PREFIX_SIZE;
+        let payload_end = payload_start + payload_len;
+
+        debug_assert!(payload_end <= cell_len);
+
+        Ok(Self { row_id, payload: &cell[payload_start..payload_end] })
+    }
+}
+
 /// Immutable wrapper over a validated table-leaf page.
 #[derive(Debug)]
 pub(crate) struct TableLeafPageRef<'a> {
@@ -52,7 +73,7 @@ impl<'a> TableLeafPageRef<'a> {
             SearchResult::NotFound(_) => return Ok(None),
         };
 
-        decode_leaf_cell_at_slot(self.page, slot_index).map(Some)
+        LeafCellRef::try_deserialize_at_slot(self.page, slot_index).map(Some)
     }
 
     /// Returns the number of slot entries currently stored on the page.
@@ -86,7 +107,7 @@ impl<'a> TableLeafPageMut<'a> {
             SearchResult::NotFound(_) => return Ok(None),
         };
 
-        decode_leaf_cell_at_slot(self.page, slot_index).map(Some)
+        LeafCellRef::try_deserialize_at_slot(self.page, slot_index).map(Some)
     }
 
     /// Returns the number of slot entries currently stored on the page.
@@ -158,24 +179,6 @@ impl<'a> TableLeafPageMut<'a> {
     pub(crate) fn defragment(&mut self) -> TablePageResult<()> {
         defragment_leaf_page(self.page)
     }
-}
-
-/// Decodes and validates the leaf cell referenced by `slot_index`.
-fn decode_leaf_cell_at_slot<'a>(
-    page: &'a [u8; PAGE_SIZE],
-    slot_index: u16,
-) -> TablePageResult<LeafCellRef<'a>> {
-    let cell = layout::cell_bytes_at_slot(page, LEAF_SPEC, slot_index)?;
-    let cell_len = leaf_cell_len(cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
-
-    let payload_len = usize::from(read_u16(cell, 0));
-    let row_id = read_u64(cell, PAYLOAD_LEN_SIZE);
-    let payload_start = LEAF_CELL_PREFIX_SIZE;
-    let payload_end = payload_start + payload_len;
-
-    debug_assert!(payload_end <= cell_len);
-
-    Ok(LeafCellRef { row_id, payload: &cell[payload_start..payload_end] })
 }
 
 /// Returns the encoded byte length of a leaf cell.
