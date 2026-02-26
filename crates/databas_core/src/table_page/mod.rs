@@ -10,6 +10,13 @@ use crate::{
 pub(crate) use interior::{InteriorCell, TableInteriorPageMut, TableInteriorPageRef};
 pub(crate) use leaf::{LeafCellRef, TableLeafPageMut, TableLeafPageRef};
 
+/// Reads a little-endian `u64` from `bytes` at `offset`.
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&bytes[offset..offset + 8]);
+    u64::from_le_bytes(out)
+}
+
 /// Immutable wrapper for a table page whose concrete kind is discovered at runtime.
 #[derive(Debug)]
 pub(crate) enum TablePageRef<'a> {

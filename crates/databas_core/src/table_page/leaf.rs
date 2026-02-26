@@ -5,7 +5,10 @@ use crate::{
     types::{PAGE_SIZE, RowId},
 };
 
-use super::layout::{self, PageSpec, SearchResult, SpaceError};
+use super::{
+    layout::{self, PageSpec, SearchResult, SpaceError},
+    read_u64,
+};
 
 const LEAF_SPEC: PageSpec =
     PageSpec { page_type: layout::LEAF_PAGE_TYPE, header_size: layout::LEAF_HEADER_SIZE };
@@ -325,13 +328,6 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     let mut out = [0u8; 2];
     out.copy_from_slice(&bytes[offset..offset + 2]);
     u16::from_le_bytes(out)
-}
-
-/// Reads a little-endian `u64` from `bytes` at `offset`.
-fn read_u64(bytes: &[u8], offset: usize) -> u64 {
-    let mut out = [0u8; 8];
-    out.copy_from_slice(&bytes[offset..offset + 8]);
-    u64::from_le_bytes(out)
 }
 
 #[cfg(test)]
