@@ -335,6 +335,8 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use crate::page_checksum::PAGE_DATA_END;
+
     use super::*;
 
     fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
@@ -475,7 +477,7 @@ mod tests {
         let mut page = initialized_leaf_page();
         let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
 
-        let max_payload = PAGE_SIZE - layout::LEAF_HEADER_SIZE - 2 - LEAF_CELL_PREFIX_SIZE;
+        let max_payload = PAGE_DATA_END - layout::LEAF_HEADER_SIZE - 2 - LEAF_CELL_PREFIX_SIZE;
         leaf.insert(1, &payload(1, max_payload)).unwrap();
 
         let free_before = leaf.free_space().unwrap();
@@ -493,7 +495,7 @@ mod tests {
         let mut page = initialized_leaf_page();
         let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
 
-        let max_payload = PAGE_SIZE - layout::LEAF_HEADER_SIZE - 2 - LEAF_CELL_PREFIX_SIZE;
+        let max_payload = PAGE_DATA_END - layout::LEAF_HEADER_SIZE - 2 - LEAF_CELL_PREFIX_SIZE;
         leaf.insert(1, &payload(1, max_payload)).unwrap();
 
         let insert_err = leaf.insert(2, &[1]).unwrap_err();
@@ -513,7 +515,7 @@ mod tests {
         let mut page = initialized_leaf_page();
         let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
 
-        let max_payload = PAGE_SIZE - layout::LEAF_HEADER_SIZE - 2 - LEAF_CELL_PREFIX_SIZE;
+        let max_payload = PAGE_DATA_END - layout::LEAF_HEADER_SIZE - 2 - LEAF_CELL_PREFIX_SIZE;
         leaf.insert(1, &payload(5, max_payload)).unwrap();
         assert_eq!(leaf.search(1).unwrap().unwrap().payload.len(), max_payload);
 

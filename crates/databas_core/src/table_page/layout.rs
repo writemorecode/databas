@@ -1,5 +1,6 @@
 use crate::{
     error::{TablePageError, TablePageResult},
+    page_checksum::PAGE_DATA_END,
     types::PAGE_SIZE,
 };
 
@@ -19,11 +20,11 @@ const _: () = {
     assert!(PAGE_SIZE <= u16::MAX as usize, "PAGE_SIZE must fit in u16");
     assert!(LEAF_PAGE_TYPE != INTERIOR_PAGE_TYPE, "table page types must be distinct");
     assert!(
-        LEAF_HEADER_SIZE >= CONTENT_START_OFFSET + 2 && LEAF_HEADER_SIZE <= PAGE_SIZE,
+        LEAF_HEADER_SIZE >= CONTENT_START_OFFSET + 2 && LEAF_HEADER_SIZE <= PAGE_DATA_END,
         "leaf header layout is invalid"
     );
     assert!(
-        INTERIOR_HEADER_SIZE >= CONTENT_START_OFFSET + 2 && INTERIOR_HEADER_SIZE <= PAGE_SIZE,
+        INTERIOR_HEADER_SIZE >= CONTENT_START_OFFSET + 2 && INTERIOR_HEADER_SIZE <= PAGE_DATA_END,
         "interior header layout is invalid"
     );
     assert!(
@@ -69,7 +70,7 @@ pub(super) fn init_empty(page: &mut [u8; PAGE_SIZE], spec: PageSpec) -> TablePag
     page.fill(0);
     page[PAGE_TYPE_OFFSET] = spec.page_type;
     set_cell_count(page, 0);
-    set_content_start(page, PAGE_SIZE);
+    set_content_start(page, PAGE_DATA_END);
     Ok(())
 }
 
@@ -84,7 +85,7 @@ pub(super) fn validate(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResul
     let slot_dir_end = slot_dir_end_for_count(spec, cell_count)?;
     let content_start = usize::from(content_start(page));
 
-    if content_start < slot_dir_end || content_start > PAGE_SIZE {
+    if content_start < slot_dir_end || content_start > PAGE_DATA_END {
         return Err(TablePageError::CorruptPage("invalid cell content start"));
     }
 
@@ -128,10 +129,10 @@ pub(super) fn cell_bytes_at_slot_on_valid_page(
 ) -> TablePageResult<&[u8]> {
     let content_start = usize::from(content_start(page));
     let cell_offset = usize::from(slot_offset(page, spec, slot_index)?);
-    if cell_offset < content_start || cell_offset >= PAGE_SIZE {
+    if cell_offset < content_start || cell_offset >= PAGE_DATA_END {
         return Err(TablePageError::CorruptCell { slot_index });
     }
-    Ok(&page[cell_offset..])
+    Ok(&page[cell_offset..PAGE_DATA_END])
 }
 
 /// Attempts to append a pre-encoded cell into the cell-content region.
@@ -294,7 +295,7 @@ fn set_content_start(page: &mut [u8; PAGE_SIZE], content_start: usize) {
 fn slot_dir_end_for_count(spec: PageSpec, cell_count: usize) -> TablePageResult<usize> {
     let slot_dir_end = spec.header_size + (cell_count * SLOT_WIDTH);
 
-    if slot_dir_end > PAGE_SIZE {
+    if slot_dir_end > PAGE_DATA_END {
         return Err(TablePageError::CorruptPage("slot directory exceeds page size"));
     }
 
@@ -305,7 +306,7 @@ fn slot_dir_end_for_count(spec: PageSpec, cell_count: usize) -> TablePageResult<
 fn slot_position(spec: PageSpec, slot_index: usize) -> TablePageResult<usize> {
     let position = spec.header_size + (slot_index * SLOT_WIDTH);
 
-    if position + SLOT_WIDTH > PAGE_SIZE {
+    if position + SLOT_WIDTH > PAGE_DATA_END {
         return Err(TablePageError::CorruptPage("slot directory exceeds page size"));
     }
 
