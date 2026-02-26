@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use crate::{
     error::{TablePageError, TablePageResult},
-    types::{PAGE_SIZE, PageId, RowId},
+    types::{PageId, RowId, PAGE_SIZE},
 };
 
 use super::{
@@ -33,7 +33,9 @@ impl InteriorCell {
         slot_index: u16,
     ) -> TablePageResult<Self> {
         let cell = layout::cell_bytes_at_slot(page, INTERIOR_SPEC, slot_index)?;
-        interior_cell_len(cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
+        if cell.len() < INTERIOR_CELL_SIZE {
+            return Err(TablePageError::CorruptCell { slot_index });
+        }
 
         let left_child = read_u64(cell, 0);
         let row_id = read_u64(cell, LEFT_CHILD_SIZE);
@@ -185,7 +187,9 @@ impl<'a> TableInteriorPageMut<'a> {
         };
 
         let existing_cell = layout::cell_bytes_at_slot(self.page, INTERIOR_SPEC, slot_index)?;
-        interior_cell_len(existing_cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
+        if existing_cell.len() < INTERIOR_CELL_SIZE {
+            return Err(TablePageError::CorruptCell { slot_index });
+        }
 
         let cell_offset = usize::from(layout::slot_offset(self.page, INTERIOR_SPEC, slot_index)?);
         let cell = encode_interior_cell(left_child, row_id);
@@ -224,24 +228,6 @@ impl<'a> TableInteriorPageMut<'a> {
     }
 }
 
-/// Returns the encoded byte length of one interior cell.
-fn interior_cell_len(cell: &[u8]) -> TablePageResult<usize> {
-    if cell.len() < INTERIOR_CELL_SIZE {
-        return Err(TablePageError::CorruptPage("interior cell too short"));
-    }
-
-    Ok(INTERIOR_CELL_SIZE)
-}
-
-/// Extracts the separator row id from an encoded interior cell.
-fn interior_row_id_from_cell(cell: &[u8]) -> TablePageResult<RowId> {
-    if cell.len() < INTERIOR_CELL_SIZE {
-        return Err(TablePageError::CorruptPage("interior cell too short"));
-    }
-
-    Ok(read_u64(cell, LEFT_CHILD_SIZE))
-}
-
 /// Performs row-id lookup on interior pages with interior-specific spec and decoder.
 fn find_interior_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<SearchResult> {
     layout::validate(page, INTERIOR_SPEC)?;
@@ -254,8 +240,10 @@ fn find_interior_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResul
         let mid = left + ((right - left) / 2);
         let mid_u16 = mid as u16;
         let cell = layout::cell_bytes_at_slot_on_valid_page(page, INTERIOR_SPEC, mid_u16)?;
-        let current_row_id = interior_row_id_from_cell(cell)
-            .map_err(|_| TablePageError::CorruptCell { slot_index: mid_u16 })?;
+        if cell.len() < INTERIOR_CELL_SIZE {
+            return Err(TablePageError::CorruptCell { slot_index: mid_u16 });
+        }
+        let current_row_id = read_u64(cell, LEFT_CHILD_SIZE);
 
         match current_row_id.cmp(&row_id) {
             Ordering::Less => left = mid + 1,
@@ -303,9 +291,11 @@ fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     for slot in 0..cell_count {
         let slot_u16 = slot as u16;
         let cell = layout::cell_bytes_at_slot_on_valid_page(page, INTERIOR_SPEC, slot_u16)?;
-        let cell_len = interior_cell_len(cell)
-            .map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
 
+        if cell.len() < INTERIOR_CELL_SIZE {
+            return Err(TablePageError::CorruptCell { slot_index: slot_u16 });
+        }
+        let cell_len = INTERIOR_CELL_SIZE;
         cells.push(cell[..cell_len].to_vec());
     }
 
