@@ -247,9 +247,8 @@ fn find_interior_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResul
 
     while left < right {
         let mid = left + ((right - left) / 2);
-        let mid_u16 =
-            u16::try_from(mid).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
-        let cell = layout::cell_bytes_at_slot(page, INTERIOR_SPEC, mid_u16)?;
+        let mid_u16 = mid as u16;
+        let cell = layout::cell_bytes_at_slot_on_valid_page(page, INTERIOR_SPEC, mid_u16)?;
         let current_row_id = interior_row_id_from_cell(cell)
             .map_err(|_| TablePageError::CorruptCell { slot_index: mid_u16 })?;
 
@@ -260,8 +259,7 @@ fn find_interior_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResul
         }
     }
 
-    let insertion_index =
-        u16::try_from(left).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+    let insertion_index = left as u16;
     Ok(SearchResult::NotFound(insertion_index))
 }
 
@@ -298,15 +296,10 @@ fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     let mut cells = Vec::with_capacity(cell_count);
 
     for slot in 0..cell_count {
-        let slot_u16 =
-            u16::try_from(slot).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
-        let cell = layout::cell_bytes_at_slot(page, INTERIOR_SPEC, slot_u16)?;
+        let slot_u16 = slot as u16;
+        let cell = layout::cell_bytes_at_slot_on_valid_page(page, INTERIOR_SPEC, slot_u16)?;
         let cell_len = interior_cell_len(cell)
             .map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
-
-        if cell_len == 0 || cell_len > cell.len() {
-            return Err(TablePageError::CorruptCell { slot_index: slot_u16 });
-        }
 
         cells.push(cell[..cell_len].to_vec());
     }
@@ -315,8 +308,7 @@ fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     layout::write_u64_at(page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET, rightmost_child);
 
     for (slot, cell) in cells.into_iter().enumerate() {
-        let slot_u16 =
-            u16::try_from(slot).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+        let slot_u16 = slot as u16;
         let cell_offset = match layout::try_append_cell_for_insert(page, INTERIOR_SPEC, &cell)? {
             Ok(offset) => offset,
             Err(_) => return Err(TablePageError::CorruptPage("cell content underflow")),
