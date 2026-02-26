@@ -26,6 +26,22 @@ pub(crate) struct InteriorCell {
     pub(crate) row_id: RowId,
 }
 
+impl InteriorCell {
+    /// Deserializes and validates the interior cell referenced by `slot_index`.
+    pub(crate) fn try_deserialize_at_slot(
+        page: &[u8; PAGE_SIZE],
+        slot_index: u16,
+    ) -> TablePageResult<Self> {
+        let cell = layout::cell_bytes_at_slot(page, INTERIOR_SPEC, slot_index)?;
+        interior_cell_len(cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
+
+        let left_child = read_u64(cell, 0);
+        let row_id = read_u64(cell, LEFT_CHILD_SIZE);
+
+        Ok(Self { left_child, row_id })
+    }
+}
+
 /// Immutable wrapper over a validated table-interior page.
 #[derive(Debug)]
 pub(crate) struct TableInteriorPageRef<'a> {
@@ -52,7 +68,7 @@ impl<'a> TableInteriorPageRef<'a> {
             SearchResult::NotFound(_) => return Ok(None),
         };
 
-        decode_interior_cell_at_slot(self.page, slot_index).map(Some)
+        InteriorCell::try_deserialize_at_slot(self.page, slot_index).map(Some)
     }
 
     /// Returns the child page id to descend into for `row_id`.
@@ -69,7 +85,7 @@ impl<'a> TableInteriorPageRef<'a> {
         };
 
         if let Some(slot_index) = slot_index {
-            return Ok(decode_interior_cell_at_slot(self.page, slot_index)?.left_child);
+            return Ok(InteriorCell::try_deserialize_at_slot(self.page, slot_index)?.left_child);
         }
 
         Ok(self.rightmost_child())
@@ -115,7 +131,7 @@ impl<'a> TableInteriorPageMut<'a> {
             SearchResult::NotFound(_) => return Ok(None),
         };
 
-        decode_interior_cell_at_slot(self.page, slot_index).map(Some)
+        InteriorCell::try_deserialize_at_slot(self.page, slot_index).map(Some)
     }
 
     /// Returns the child page id to descend into for `row_id`.
@@ -129,7 +145,7 @@ impl<'a> TableInteriorPageMut<'a> {
         };
 
         if let Some(slot_index) = slot_index {
-            return Ok(decode_interior_cell_at_slot(self.page, slot_index)?.left_child);
+            return Ok(InteriorCell::try_deserialize_at_slot(self.page, slot_index)?.left_child);
         }
 
         Ok(self.rightmost_child())
@@ -206,20 +222,6 @@ impl<'a> TableInteriorPageMut<'a> {
     pub(crate) fn defragment(&mut self) -> TablePageResult<()> {
         defragment_interior_page(self.page)
     }
-}
-
-/// Decodes and validates the interior cell referenced by `slot_index`.
-fn decode_interior_cell_at_slot(
-    page: &[u8; PAGE_SIZE],
-    slot_index: u16,
-) -> TablePageResult<InteriorCell> {
-    let cell = layout::cell_bytes_at_slot(page, INTERIOR_SPEC, slot_index)?;
-    interior_cell_len(cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
-
-    let left_child = read_u64(cell, 0);
-    let row_id = read_u64(cell, LEFT_CHILD_SIZE);
-
-    Ok(InteriorCell { left_child, row_id })
 }
 
 /// Returns the encoded byte length of one interior cell.
