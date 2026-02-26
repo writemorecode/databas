@@ -5,7 +5,10 @@ use crate::{
     types::{PAGE_SIZE, PageId, RowId},
 };
 
-use super::layout::{self, PageSpec, SearchResult, SpaceError};
+use super::{
+    layout::{self, PageSpec, SearchResult, SpaceError},
+    read_u64,
+};
 
 const INTERIOR_SPEC: PageSpec =
     PageSpec { page_type: layout::INTERIOR_PAGE_TYPE, header_size: layout::INTERIOR_HEADER_SIZE };
@@ -317,13 +320,6 @@ fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     }
 
     Ok(())
-}
-
-/// Reads a little-endian `u64` from `bytes` at `offset`.
-fn read_u64(bytes: &[u8], offset: usize) -> u64 {
-    let mut out = [0u8; 8];
-    out.copy_from_slice(&bytes[offset..offset + 8]);
-    u64::from_le_bytes(out)
 }
 
 #[cfg(test)]
