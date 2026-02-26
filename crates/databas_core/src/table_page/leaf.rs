@@ -127,8 +127,7 @@ impl<'a> TableLeafPageMut<'a> {
             let cell_offset = usize::from(layout::slot_offset(self.page, LEAF_SPEC, slot_index)?);
             let cell_end = cell_offset + existing_len;
             let cell = &mut self.page[cell_offset..cell_end];
-            let payload_len = u16::try_from(payload.len())
-                .map_err(|_| TablePageError::CellTooLarge { len: payload.len() })?;
+            let payload_len = payload.len() as u16;
 
             cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
             cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE].copy_from_slice(&row_id.to_le_bytes());
@@ -183,9 +182,7 @@ fn leaf_cell_len(cell: &[u8]) -> TablePageResult<usize> {
     }
 
     let payload_len = usize::from(read_u16(cell, 0));
-    let cell_len = LEAF_CELL_PREFIX_SIZE
-        .checked_add(payload_len)
-        .ok_or(TablePageError::CorruptPage("leaf cell length overflow"))?;
+    let cell_len = LEAF_CELL_PREFIX_SIZE + payload_len;
 
     if cell_len > cell.len() {
         return Err(TablePageError::CorruptPage("leaf cell payload out of bounds"));
@@ -213,9 +210,8 @@ fn find_leaf_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<Se
 
     while left < right {
         let mid = left + ((right - left) / 2);
-        let mid_u16 =
-            u16::try_from(mid).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
-        let cell = layout::cell_bytes_at_slot(page, LEAF_SPEC, mid_u16)?;
+        let mid_u16 = mid as u16;
+        let cell = layout::cell_bytes_at_slot_on_valid_page(page, LEAF_SPEC, mid_u16)?;
         let current_row_id = leaf_row_id_from_cell(cell)
             .map_err(|_| TablePageError::CorruptCell { slot_index: mid_u16 })?;
 
@@ -226,8 +222,7 @@ fn find_leaf_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<Se
         }
     }
 
-    let insertion_index =
-        u16::try_from(left).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+    let insertion_index = left as u16;
     Ok(SearchResult::NotFound(insertion_index))
 }
 
@@ -237,9 +232,7 @@ fn leaf_cell_encoded_len(payload: &[u8]) -> TablePageResult<usize> {
         return Err(TablePageError::CellTooLarge { len: payload.len() });
     }
 
-    LEAF_CELL_PREFIX_SIZE
-        .checked_add(payload.len())
-        .ok_or(TablePageError::CorruptPage("leaf cell length overflow"))
+    Ok(LEAF_CELL_PREFIX_SIZE + payload.len())
 }
 
 /// Encodes one leaf cell into owned bytes.
@@ -305,15 +298,10 @@ fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     let mut cells = Vec::with_capacity(cell_count);
 
     for slot in 0..cell_count {
-        let slot_u16 =
-            u16::try_from(slot).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
-        let cell = layout::cell_bytes_at_slot(page, LEAF_SPEC, slot_u16)?;
+        let slot_u16 = slot as u16;
+        let cell = layout::cell_bytes_at_slot_on_valid_page(page, LEAF_SPEC, slot_u16)?;
         let cell_len = leaf_cell_len(cell)
             .map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
-
-        if cell_len == 0 || cell_len > cell.len() {
-            return Err(TablePageError::CorruptCell { slot_index: slot_u16 });
-        }
 
         cells.push(cell[..cell_len].to_vec());
     }
@@ -321,8 +309,7 @@ fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     layout::init_empty(page, LEAF_SPEC)?;
 
     for (slot, cell) in cells.into_iter().enumerate() {
-        let slot_u16 =
-            u16::try_from(slot).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+        let slot_u16 = slot as u16;
         let cell_offset = match layout::try_append_cell_for_insert(page, LEAF_SPEC, &cell)? {
             Ok(offset) => offset,
             Err(_) => return Err(TablePageError::CorruptPage("cell content underflow")),

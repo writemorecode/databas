@@ -15,6 +15,23 @@ const CELL_COUNT_OFFSET: usize = 2;
 const CONTENT_START_OFFSET: usize = 4;
 const SLOT_WIDTH: usize = 2;
 
+const _: () = {
+    assert!(PAGE_SIZE <= u16::MAX as usize, "PAGE_SIZE must fit in u16");
+    assert!(LEAF_PAGE_TYPE != INTERIOR_PAGE_TYPE, "table page types must be distinct");
+    assert!(
+        LEAF_HEADER_SIZE >= CONTENT_START_OFFSET + 2 && LEAF_HEADER_SIZE <= PAGE_SIZE,
+        "leaf header layout is invalid"
+    );
+    assert!(
+        INTERIOR_HEADER_SIZE >= CONTENT_START_OFFSET + 2 && INTERIOR_HEADER_SIZE <= PAGE_SIZE,
+        "interior header layout is invalid"
+    );
+    assert!(
+        INTERIOR_RIGHTMOST_CHILD_OFFSET + 8 <= INTERIOR_HEADER_SIZE,
+        "interior rightmost-child pointer must fit in the fixed header"
+    );
+};
+
 /// Static properties for one table-page kind used by shared layout helpers.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PageSpec {
@@ -49,18 +66,15 @@ pub(super) fn page_type(page: &[u8; PAGE_SIZE]) -> u8 {
 
 /// Initializes `page` as an empty instance of the page kind described by `spec`.
 pub(super) fn init_empty(page: &mut [u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<()> {
-    validate_spec(spec)?;
-
     page.fill(0);
     page[PAGE_TYPE_OFFSET] = spec.page_type;
     set_cell_count(page, 0);
-    set_content_start(page, PAGE_SIZE)
+    set_content_start(page, PAGE_SIZE);
+    Ok(())
 }
 
 /// Validates that `page` matches `spec` and has internally consistent header bounds.
 pub(super) fn validate(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<()> {
-    validate_spec(spec)?;
-
     let page_type = page[PAGE_TYPE_OFFSET];
     if page_type != spec.page_type {
         return Err(TablePageError::InvalidPageType(page_type));
@@ -103,6 +117,15 @@ pub(super) fn cell_bytes_at_slot(
     slot_index: u16,
 ) -> TablePageResult<&[u8]> {
     validate(page, spec)?;
+    cell_bytes_at_slot_on_valid_page(page, spec, slot_index)
+}
+
+/// Returns the raw cell bytes for `slot_index` on a page that already passed [`validate`].
+pub(super) fn cell_bytes_at_slot_on_valid_page<'a>(
+    page: &'a [u8; PAGE_SIZE],
+    spec: PageSpec,
+    slot_index: u16,
+) -> TablePageResult<&'a [u8]> {
     let content_start = usize::from(content_start(page));
     let cell_offset = usize::from(slot_offset(page, spec, slot_index)?);
     if cell_offset < content_start || cell_offset >= PAGE_SIZE {
@@ -135,11 +158,8 @@ pub(super) fn try_append_cell(
 
     let new_start = content_start - cell_len;
     page[new_start..content_start].copy_from_slice(cell);
-    set_content_start(page, new_start)?;
-
-    let offset_u16 = u16::try_from(new_start)
-        .map_err(|_| TablePageError::CorruptPage("cell offset overflow"))?;
-    Ok(Ok(offset_u16))
+    set_content_start(page, new_start);
+    Ok(Ok(new_start as u16))
 }
 
 /// Attempts to append a pre-encoded cell while reserving one additional slot entry.
@@ -156,8 +176,7 @@ pub(super) fn try_append_cell_for_insert(
     }
 
     let current_count = usize::from(cell_count(page));
-    let required_count =
-        current_count.checked_add(1).ok_or(TablePageError::CorruptPage("cell count overflow"))?;
+    let required_count = current_count + 1;
     let slot_dir_end_after = slot_dir_end_for_count(spec, required_count)?;
     let content_start = usize::from(content_start(page));
     let available = content_start.saturating_sub(slot_dir_end_after);
@@ -168,11 +187,8 @@ pub(super) fn try_append_cell_for_insert(
 
     let new_start = content_start - cell_len;
     page[new_start..content_start].copy_from_slice(cell);
-    set_content_start(page, new_start)?;
-
-    let offset_u16 = u16::try_from(new_start)
-        .map_err(|_| TablePageError::CorruptPage("cell offset overflow"))?;
-    Ok(Ok(offset_u16))
+    set_content_start(page, new_start);
+    Ok(Ok(new_start as u16))
 }
 
 /// Updates an existing slot to reference `cell_offset`.
@@ -208,8 +224,7 @@ pub(super) fn insert_slot(
         return Err(TablePageError::CorruptPage("slot index out of bounds"));
     }
 
-    let new_count =
-        cell_count.checked_add(1).ok_or(TablePageError::CorruptPage("cell count overflow"))?;
+    let new_count = cell_count + 1;
     let slot_dir_end_after = slot_dir_end_for_count(spec, new_count)?;
     let content_start = usize::from(content_start(page));
     if slot_dir_end_after > content_start {
@@ -217,17 +232,13 @@ pub(super) fn insert_slot(
     }
 
     for slot in (insert_index_usize..cell_count).rev() {
-        let slot_index =
-            u16::try_from(slot).map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
-        let offset = slot_offset(page, spec, slot_index)?;
+        let offset = slot_offset(page, spec, slot as u16)?;
         write_slot_offset_raw(page, spec, slot + 1, offset)?;
     }
 
     write_slot_offset_raw(page, spec, insert_index_usize, cell_offset)?;
 
-    let new_count_u16 =
-        u16::try_from(new_count).map_err(|_| TablePageError::CorruptPage("cell count overflow"))?;
-    set_cell_count(page, new_count_u16);
+    set_cell_count(page, new_count as u16);
     Ok(())
 }
 
@@ -246,17 +257,14 @@ pub(super) fn remove_slot(
     }
 
     for slot in remove_index_usize..(cell_count - 1) {
-        let slot_index = u16::try_from(slot + 1)
-            .map_err(|_| TablePageError::CorruptPage("slot index overflow"))?;
+        let slot_index = (slot + 1) as u16;
         let next_offset = slot_offset(page, spec, slot_index)?;
         write_slot_offset_raw(page, spec, slot, next_offset)?;
     }
 
     write_slot_offset_raw(page, spec, cell_count - 1, 0)?;
 
-    let new_count = u16::try_from(cell_count - 1)
-        .map_err(|_| TablePageError::CorruptPage("cell count overflow"))?;
-    set_cell_count(page, new_count);
+    set_cell_count(page, (cell_count - 1) as u16);
     Ok(())
 }
 
@@ -272,37 +280,19 @@ pub(super) fn write_u64_at(page: &mut [u8; PAGE_SIZE], offset: usize, value: u64
     page[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
-/// Validates static constraints for a `PageSpec`.
-fn validate_spec(spec: PageSpec) -> TablePageResult<()> {
-    if spec.header_size < CONTENT_START_OFFSET + 2 || spec.header_size > PAGE_SIZE {
-        return Err(TablePageError::CorruptPage("invalid page header size"));
-    }
-
-    Ok(())
-}
-
 /// Writes the in-header slot count field.
 fn set_cell_count(page: &mut [u8; PAGE_SIZE], cell_count: u16) {
     write_u16(page, CELL_COUNT_OFFSET, cell_count);
 }
 
-/// Writes the in-header content-start field after checked narrowing to `u16`.
-fn set_content_start(page: &mut [u8; PAGE_SIZE], content_start: usize) -> TablePageResult<()> {
-    let content_start = u16::try_from(content_start)
-        .map_err(|_| TablePageError::CorruptPage("content start overflow"))?;
-    write_u16(page, CONTENT_START_OFFSET, content_start);
-    Ok(())
+/// Writes the in-header content-start field.
+fn set_content_start(page: &mut [u8; PAGE_SIZE], content_start: usize) {
+    write_u16(page, CONTENT_START_OFFSET, content_start as u16);
 }
 
 /// Computes the byte offset where the slot directory ends for `cell_count` entries.
 fn slot_dir_end_for_count(spec: PageSpec, cell_count: usize) -> TablePageResult<usize> {
-    let slots_bytes = cell_count
-        .checked_mul(SLOT_WIDTH)
-        .ok_or(TablePageError::CorruptPage("slot directory overflow"))?;
-    let slot_dir_end = spec
-        .header_size
-        .checked_add(slots_bytes)
-        .ok_or(TablePageError::CorruptPage("slot directory overflow"))?;
+    let slot_dir_end = spec.header_size + (cell_count * SLOT_WIDTH);
 
     if slot_dir_end > PAGE_SIZE {
         return Err(TablePageError::CorruptPage("slot directory exceeds page size"));
@@ -313,13 +303,7 @@ fn slot_dir_end_for_count(spec: PageSpec, cell_count: usize) -> TablePageResult<
 
 /// Computes the byte position of one slot entry inside the slot directory.
 fn slot_position(spec: PageSpec, slot_index: usize) -> TablePageResult<usize> {
-    let slot_bytes = slot_index
-        .checked_mul(SLOT_WIDTH)
-        .ok_or(TablePageError::CorruptPage("slot directory overflow"))?;
-    let position = spec
-        .header_size
-        .checked_add(slot_bytes)
-        .ok_or(TablePageError::CorruptPage("slot directory overflow"))?;
+    let position = spec.header_size + (slot_index * SLOT_WIDTH);
 
     if position + SLOT_WIDTH > PAGE_SIZE {
         return Err(TablePageError::CorruptPage("slot directory exceeds page size"));
