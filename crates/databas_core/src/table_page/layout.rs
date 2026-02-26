@@ -121,11 +121,11 @@ pub(super) fn cell_bytes_at_slot(
 }
 
 /// Returns the raw cell bytes for `slot_index` on a page that already passed [`validate`].
-pub(super) fn cell_bytes_at_slot_on_valid_page<'a>(
-    page: &'a [u8; PAGE_SIZE],
+pub(super) fn cell_bytes_at_slot_on_valid_page(
+    page: &[u8; PAGE_SIZE],
     spec: PageSpec,
     slot_index: u16,
-) -> TablePageResult<&'a [u8]> {
+) -> TablePageResult<&[u8]> {
     let content_start = usize::from(content_start(page));
     let cell_offset = usize::from(slot_offset(page, spec, slot_index)?);
     if cell_offset < content_start || cell_offset >= PAGE_SIZE {
