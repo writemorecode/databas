@@ -256,14 +256,17 @@ mod tests {
 
     use tempfile::NamedTempFile;
 
+    use crate::page_checksum::{PAGE_DATA_END, write_page_checksum};
+
     use super::*;
 
     /// Generates a deterministic page payload from a seed byte.
     fn page_with_pattern(seed: u8) -> [u8; PAGE_SIZE] {
         let mut page = [0u8; PAGE_SIZE];
-        for (index, byte) in page.iter_mut().enumerate() {
+        for (index, byte) in page[..PAGE_DATA_END].iter_mut().enumerate() {
             *byte = seed.wrapping_add(index as u8);
         }
+        write_page_checksum(&mut page);
         page
     }
 
@@ -582,7 +585,9 @@ mod tests {
 
         let (page_id, guard) = cache.new_page().unwrap();
         assert_eq!(page_id, 0);
-        assert_eq!(guard.page(), &[0u8; PAGE_SIZE]);
+        let mut expected = [0u8; PAGE_SIZE];
+        write_page_checksum(&mut expected);
+        assert_eq!(guard.page(), &expected);
     }
 
     #[test]
@@ -633,7 +638,7 @@ mod tests {
             let (page_id, mut guard) = cache.new_page().unwrap();
             let page = guard.page_mut();
             page[0] = 61;
-            page[PAGE_SIZE - 1] = 142;
+            page[PAGE_DATA_END - 1] = 142;
             drop(guard);
             cache.flush_page(page_id).unwrap();
             page_id
@@ -644,7 +649,26 @@ mod tests {
         reopened_disk_manager.read_page(page_id, &mut page).unwrap();
 
         assert_eq!(page[0], 61);
-        assert_eq!(page[PAGE_SIZE - 1], 142);
+        assert_eq!(page[PAGE_DATA_END - 1], 142);
+    }
+
+    #[test]
+    fn new_page_is_immediately_readable_after_reopen() {
+        let file = NamedTempFile::new().unwrap();
+        let page_id = {
+            let disk_manager = DiskManager::new(file.path()).unwrap();
+            let mut cache = PageCache::new(disk_manager, 1).unwrap();
+            let (page_id, guard) = cache.new_page().unwrap();
+            drop(guard);
+            page_id
+        };
+
+        let mut reopened_disk_manager = DiskManager::new(file.path()).unwrap();
+        let mut page = [1u8; PAGE_SIZE];
+        reopened_disk_manager.read_page(page_id, &mut page).unwrap();
+        let mut expected = [0u8; PAGE_SIZE];
+        write_page_checksum(&mut expected);
+        assert_eq!(page, expected);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use crate::{
     error::{TablePageError, TablePageResult},
-    types::{PageId, RowId, PAGE_SIZE},
+    types::{PAGE_SIZE, PageId, RowId},
 };
 
 use super::{
@@ -316,6 +316,8 @@ fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::page_checksum::PAGE_DATA_END;
+
     use super::*;
 
     fn initialized_interior_page(rightmost_child: PageId) -> [u8; PAGE_SIZE] {
@@ -327,7 +329,7 @@ mod tests {
     }
 
     fn max_cell_count() -> usize {
-        (PAGE_SIZE - layout::INTERIOR_HEADER_SIZE) / (INTERIOR_CELL_SIZE + 2)
+        (PAGE_DATA_END - layout::INTERIOR_HEADER_SIZE) / (INTERIOR_CELL_SIZE + 2)
     }
 
     #[test]

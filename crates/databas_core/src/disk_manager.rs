@@ -6,6 +6,7 @@ use std::{
 
 use crate::{
     error::{StorageError, StorageResult},
+    page_checksum::{checksum_matches, write_page_checksum},
     types::{PAGE_SIZE, PageId},
 };
 
@@ -45,6 +46,11 @@ impl DiskManager {
         let new_page_id = page_id + 1;
         let new_file_size = Self::page_offset(new_page_id);
         self.file.set_len(new_file_size)?;
+        let mut buf = [0u8; PAGE_SIZE];
+        write_page_checksum(&mut buf);
+        let offset = Self::page_offset(page_id);
+        self.file.seek(std::io::SeekFrom::Start(offset))?;
+        self.file.write_all(&buf)?;
         self.file.sync_all()?;
         self.page_count = self.page_count + 1;
         Ok(page_id)
@@ -62,6 +68,9 @@ impl DiskManager {
         let offset = Self::page_offset(page_id);
         self.file.seek(std::io::SeekFrom::Start(offset))?;
         self.file.read_exact(buf)?;
+        if !checksum_matches(buf) {
+            return Err(StorageError::InvalidPageChecksum(page_id));
+        }
         Ok(())
     }
 
@@ -74,9 +83,11 @@ impl DiskManager {
         if page_id >= self.page_count {
             return Err(StorageError::InvalidPageId(page_id));
         }
+        let mut canonical_buf = *buf;
+        write_page_checksum(&mut canonical_buf);
         let offset = Self::page_offset(page_id);
         self.file.seek(std::io::SeekFrom::Start(offset))?;
-        self.file.write_all(buf)?;
+        self.file.write_all(&canonical_buf)?;
         self.file.sync_all()?;
         Ok(())
     }
@@ -90,14 +101,20 @@ impl DiskManager {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::page_checksum::{PAGE_DATA_END, write_page_checksum};
     use fastrand::Rng;
+    use std::{
+        fs::OpenOptions,
+        io::{Seek, Write},
+    };
     use tempfile::NamedTempFile;
 
     fn random_page_buffer(rng: &mut Rng) -> [u8; PAGE_SIZE] {
         let mut buf = [0u8; PAGE_SIZE];
-        for c in buf.iter_mut() {
+        for c in &mut buf[..PAGE_DATA_END] {
             *c = rng.u8(..);
         }
+        write_page_checksum(&mut buf);
         buf
     }
 
@@ -168,9 +185,11 @@ mod test {
         assert_eq!(dm.page_count, 3);
 
         let mut buf = [0u8; PAGE_SIZE];
+        let mut expected = [0u8; PAGE_SIZE];
+        write_page_checksum(&mut expected);
         for page_id in 0..dm.page_count {
             dm.read_page(page_id, &mut buf).unwrap();
-            assert_eq!(buf, [0u8; PAGE_SIZE]);
+            assert_eq!(buf, expected);
         }
     }
 
@@ -253,6 +272,45 @@ mod test {
 
         let mut read_buf = [1u8; PAGE_SIZE];
         dm.read_page(page_id, &mut read_buf).unwrap();
-        assert_eq!(read_buf, [0u8; PAGE_SIZE]);
+        let mut expected = [0u8; PAGE_SIZE];
+        write_page_checksum(&mut expected);
+        assert_eq!(read_buf, expected);
+    }
+
+    #[test]
+    fn read_page_fails_when_checksum_is_invalid() {
+        let file = NamedTempFile::new().unwrap();
+        let page_id = {
+            let mut dm = DiskManager::new(file.path()).unwrap();
+            let page_id = dm.new_page().unwrap();
+            dm.write_page(page_id, &random_page_buffer(&mut Rng::new())).unwrap();
+            page_id
+        };
+
+        let mut handle = OpenOptions::new().read(true).write(true).open(file.path()).unwrap();
+        handle.seek(std::io::SeekFrom::Start(page_id * PAGE_SIZE as u64)).unwrap();
+        handle.write_all(&[0xAA]).unwrap();
+        handle.sync_all().unwrap();
+
+        let mut dm = DiskManager::new(file.path()).unwrap();
+        let mut read_buf = [0u8; PAGE_SIZE];
+        let err = dm.read_page(page_id, &mut read_buf).unwrap_err();
+        assert!(matches!(err, StorageError::InvalidPageChecksum(id) if id == page_id));
+    }
+
+    #[test]
+    fn write_page_overwrites_trailing_checksum_bytes() {
+        let file = NamedTempFile::new().unwrap();
+        let mut dm = DiskManager::new(file.path()).unwrap();
+        let page_id = dm.new_page().unwrap();
+        let mut write_buf = [9u8; PAGE_SIZE];
+        write_buf[PAGE_DATA_END..].fill(0xEE);
+
+        dm.write_page(page_id, &write_buf).unwrap();
+
+        let mut read_buf = [0u8; PAGE_SIZE];
+        dm.read_page(page_id, &mut read_buf).unwrap();
+        assert_eq!(&read_buf[..PAGE_DATA_END], &write_buf[..PAGE_DATA_END]);
+        assert_ne!(&read_buf[PAGE_DATA_END..], &write_buf[PAGE_DATA_END..]);
     }
 }

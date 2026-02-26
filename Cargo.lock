@@ -21,6 +21,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "crc32-v2"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f546fcecc3490696c3bea070d8949208279bbc220a5a7738573a10f584cda51"
+
+[[package]]
 name = "databas_cli"
 version = "0.1.0"
 dependencies = [
@@ -31,6 +37,7 @@ dependencies = [
 name = "databas_core"
 version = "0.1.0"
 dependencies = [
+ "crc32-v2",
  "fastrand",
  "tempfile",
 ]
