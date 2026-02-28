@@ -301,7 +301,8 @@ fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     layout::validate(page, LEAF_SPEC)?;
 
     let cell_count = usize::from(layout::cell_count(page));
-    let mut cells = Vec::with_capacity(cell_count);
+    let mut scratch = [0u8; PAGE_SIZE];
+    let mut scratch_len = 0usize;
 
     for slot in 0..cell_count {
         let slot_u16 = slot as u16;
@@ -309,18 +310,33 @@ fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
         let cell_len = leaf_cell_len(cell)
             .map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
 
-        cells.push(cell[..cell_len].to_vec());
+        let next = scratch_len + cell_len;
+        if next > scratch.len() {
+            return Err(TablePageError::CorruptPage("cell content underflow"));
+        }
+        scratch[scratch_len..next].copy_from_slice(&cell[..cell_len]);
+        scratch_len = next;
     }
 
     layout::init_empty(page, LEAF_SPEC)?;
 
-    for (slot, cell) in cells.into_iter().enumerate() {
+    let mut scratch_offset = 0usize;
+    for slot in 0..cell_count {
         let slot_u16 = slot as u16;
-        let cell_offset = match layout::try_append_cell_for_insert(page, LEAF_SPEC, &cell)? {
+        let cell = &scratch[scratch_offset..scratch_len];
+        let cell_len = leaf_cell_len(cell)
+            .map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
+        let next = scratch_offset + cell_len;
+        let cell_offset = match layout::try_append_cell_for_insert(
+            page,
+            LEAF_SPEC,
+            &scratch[scratch_offset..next],
+        )? {
             Ok(offset) => offset,
             Err(_) => return Err(TablePageError::CorruptPage("cell content underflow")),
         };
         layout::insert_slot(page, LEAF_SPEC, slot_u16, cell_offset)?;
+        scratch_offset = next;
     }
 
     Ok(())
