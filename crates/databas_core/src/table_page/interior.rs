@@ -286,7 +286,8 @@ fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
 
     let rightmost_child = layout::read_u64_at(page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET);
     let cell_count = usize::from(layout::cell_count(page));
-    let mut cells = Vec::with_capacity(cell_count);
+    let mut scratch = [0u8; PAGE_SIZE];
+    let mut scratch_len = 0usize;
 
     for slot in 0..cell_count {
         let slot_u16 = slot as u16;
@@ -295,20 +296,28 @@ fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
         if cell.len() < INTERIOR_CELL_SIZE {
             return Err(TablePageError::CorruptCell { slot_index: slot_u16 });
         }
-        let cell_len = INTERIOR_CELL_SIZE;
-        cells.push(cell[..cell_len].to_vec());
+        let next = scratch_len + INTERIOR_CELL_SIZE;
+        if next > scratch.len() {
+            return Err(TablePageError::CorruptPage("cell content underflow"));
+        }
+        scratch[scratch_len..next].copy_from_slice(&cell[..INTERIOR_CELL_SIZE]);
+        scratch_len = next;
     }
 
     layout::init_empty(page, INTERIOR_SPEC)?;
     layout::write_u64_at(page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET, rightmost_child);
 
-    for (slot, cell) in cells.into_iter().enumerate() {
+    let mut scratch_offset = 0usize;
+    for slot in 0..cell_count {
         let slot_u16 = slot as u16;
-        let cell_offset = match layout::try_append_cell_for_insert(page, INTERIOR_SPEC, &cell)? {
+        let next = scratch_offset + INTERIOR_CELL_SIZE;
+        let cell = &scratch[scratch_offset..next];
+        let cell_offset = match layout::try_append_cell_for_insert(page, INTERIOR_SPEC, cell)? {
             Ok(offset) => offset,
             Err(_) => return Err(TablePageError::CorruptPage("cell content underflow")),
         };
         layout::insert_slot(page, INTERIOR_SPEC, slot_u16, cell_offset)?;
+        scratch_offset = next;
     }
 
     Ok(())
