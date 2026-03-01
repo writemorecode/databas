@@ -7,6 +7,7 @@ pub enum StorageError {
     InvalidPageId(u64),
     InvalidFileSize(u64),
     InvalidPageChecksum(u64),
+    InvalidDatabaseHeader(&'static str),
 }
 
 pub(crate) type StorageResult<T> = Result<T, StorageError>;
@@ -64,6 +65,7 @@ impl fmt::Display for StorageError {
                 write!(f, "invalid file size (not multiple of page size): {size}")
             }
             Self::InvalidPageChecksum(page_id) => write!(f, "invalid page checksum: {page_id}"),
+            Self::InvalidDatabaseHeader(reason) => write!(f, "invalid database header: {reason}"),
         }
     }
 }
@@ -72,9 +74,10 @@ impl StdError for StorageError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Self::IO(err) => Some(err),
-            Self::InvalidPageId(_) | Self::InvalidFileSize(_) | Self::InvalidPageChecksum(_) => {
-                None
-            }
+            Self::InvalidPageId(_)
+            | Self::InvalidFileSize(_)
+            | Self::InvalidPageChecksum(_)
+            | Self::InvalidDatabaseHeader(_) => None,
         }
     }
 }
