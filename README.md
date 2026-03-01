@@ -1,3 +1,2 @@
-Some experiments with lexing and parsing SQL in Rust.
-May eventually turn into some sort of (R)DBMS.
-Inspired by [jonhoo/lox](https://github.com/jonhoo/lox).
+A toy SQLite-like database system implemented in Rust for educational purposes.
+Work-in-progress.
