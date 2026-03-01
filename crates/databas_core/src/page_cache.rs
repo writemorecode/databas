@@ -256,7 +256,10 @@ mod tests {
 
     use tempfile::NamedTempFile;
 
-    use crate::page_checksum::{PAGE_DATA_END, write_page_checksum};
+    use crate::{
+        database_header::{FIRST_DATA_PAGE_ID, HEADER_PAGE_ID},
+        page_checksum::{PAGE_DATA_END, write_page_checksum},
+    };
 
     use super::*;
 
@@ -320,7 +323,7 @@ mod tests {
         let (_file, disk_manager) = create_disk_with_pages(&pages);
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
-        let guard = cache.fetch_page(0).unwrap();
+        let guard = cache.fetch_page(FIRST_DATA_PAGE_ID).unwrap();
         assert_eq!(guard.page(), &page);
         drop(guard);
 
@@ -336,7 +339,7 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
         {
-            let _guard = cache.fetch_page(0).unwrap();
+            let _guard = cache.fetch_page(FIRST_DATA_PAGE_ID).unwrap();
         }
 
         assert_eq!(cache.frames[0].pin_count, 0);
@@ -350,13 +353,13 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
         {
-            let guard = cache.fetch_page(0).unwrap();
+            let guard = cache.fetch_page(FIRST_DATA_PAGE_ID).unwrap();
             assert_eq!(guard.page()[0], page[0]);
         }
         assert!(!cache.frames[0].dirty);
 
         {
-            let mut guard = cache.fetch_page(0).unwrap();
+            let mut guard = cache.fetch_page(FIRST_DATA_PAGE_ID).unwrap();
             let page = guard.page_mut();
             page[0] = 99;
         }
@@ -373,15 +376,15 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
         {
-            let mut guard = cache.fetch_page(0).unwrap();
+            let mut guard = cache.fetch_page(1).unwrap();
             guard.page_mut()[0] = 222;
         }
 
         {
-            let _guard = cache.fetch_page(1).unwrap();
+            let _guard = cache.fetch_page(2).unwrap();
         }
 
-        let flushed_page0 = read_disk_page(file.path(), 0);
+        let flushed_page0 = read_disk_page(file.path(), 1);
         assert_eq!(flushed_page0[0], 222);
     }
 
@@ -392,18 +395,18 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 2).unwrap();
 
         {
-            let _guard = cache.fetch_page(0).unwrap();
-        }
-        {
             let _guard = cache.fetch_page(1).unwrap();
         }
         {
             let _guard = cache.fetch_page(2).unwrap();
         }
+        {
+            let _guard = cache.fetch_page(3).unwrap();
+        }
 
-        assert!(!cache.page_table.contains_key(&0));
-        assert!(cache.page_table.contains_key(&1));
         assert!(cache.page_table.contains_key(&2));
+        assert!(cache.page_table.contains_key(&3));
+        assert!(!cache.page_table.contains_key(&1));
     }
 
     #[test]
@@ -413,31 +416,31 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 2).unwrap();
 
         cache.frames[0] = Frame {
-            page_id: Some(0),
+            page_id: Some(1),
             data: pages[0],
             reference: false,
             dirty: false,
             pin_count: 1,
         };
         cache.frames[1] = Frame {
-            page_id: Some(1),
+            page_id: Some(2),
             data: pages[1],
             reference: false,
             dirty: false,
             pin_count: 0,
         };
-        cache.page_table.insert(0, 0);
-        cache.page_table.insert(1, 1);
+        cache.page_table.insert(1, 0);
+        cache.page_table.insert(2, 1);
         cache.clock_hand = 0;
 
         {
-            let _guard = cache.fetch_page(2).unwrap();
+            let _guard = cache.fetch_page(3).unwrap();
         }
 
-        assert_eq!(cache.frames[0].page_id, Some(0));
-        assert!(cache.page_table.contains_key(&0));
-        assert!(!cache.page_table.contains_key(&1));
-        assert!(cache.page_table.contains_key(&2));
+        assert_eq!(cache.frames[0].page_id, Some(1));
+        assert!(cache.page_table.contains_key(&1));
+        assert!(!cache.page_table.contains_key(&2));
+        assert!(cache.page_table.contains_key(&3));
     }
 
     #[test]
@@ -447,24 +450,24 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 2).unwrap();
 
         cache.frames[0] = Frame {
-            page_id: Some(0),
+            page_id: Some(1),
             data: pages[0],
             reference: false,
             dirty: false,
             pin_count: 1,
         };
         cache.frames[1] = Frame {
-            page_id: Some(1),
+            page_id: Some(2),
             data: pages[1],
             reference: false,
             dirty: false,
             pin_count: 1,
         };
-        cache.page_table.insert(0, 0);
-        cache.page_table.insert(1, 1);
+        cache.page_table.insert(1, 0);
+        cache.page_table.insert(2, 1);
         cache.clock_hand = 0;
 
-        let result = cache.fetch_page(2);
+        let result = cache.fetch_page(3);
         assert!(matches!(result, Err(PageCacheError::NoEvictableFrame)));
     }
 
@@ -476,15 +479,15 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
         {
-            let mut guard = cache.fetch_page(0).unwrap();
+            let mut guard = cache.fetch_page(FIRST_DATA_PAGE_ID).unwrap();
             guard.page_mut()[0] = 177;
         }
         assert!(cache.frames[0].dirty);
 
-        cache.flush_page(0).unwrap();
+        cache.flush_page(FIRST_DATA_PAGE_ID).unwrap();
 
         assert!(!cache.frames[0].dirty);
-        let flushed_page = read_disk_page(file.path(), 0);
+        let flushed_page = read_disk_page(file.path(), FIRST_DATA_PAGE_ID);
         assert_eq!(flushed_page[0], 177);
     }
 
@@ -496,11 +499,11 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
         cache.frames[0] =
-            Frame { page_id: Some(0), data: page, reference: true, dirty: true, pin_count: 1 };
-        cache.page_table.insert(0, 0);
+            Frame { page_id: Some(1), data: page, reference: true, dirty: true, pin_count: 1 };
+        cache.page_table.insert(1, 0);
 
-        let result = cache.flush_page(0);
-        assert!(matches!(result, Err(PageCacheError::PinnedPage(0))));
+        let result = cache.flush_page(1);
+        assert!(matches!(result, Err(PageCacheError::PinnedPage(1))));
     }
 
     #[test]
@@ -510,10 +513,10 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
         {
-            let _guard = cache.fetch_page(0).unwrap();
+            let _guard = cache.fetch_page(1).unwrap();
         }
 
-        assert!(cache.flush_page(1).is_ok());
+        assert!(cache.flush_page(2).is_ok());
     }
 
     #[test]
@@ -523,11 +526,11 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 2).unwrap();
 
         {
-            let mut guard = cache.fetch_page(0).unwrap();
+            let mut guard = cache.fetch_page(1).unwrap();
             guard.page_mut()[0] = 10;
         }
         {
-            let mut guard = cache.fetch_page(1).unwrap();
+            let mut guard = cache.fetch_page(2).unwrap();
             guard.page_mut()[0] = 20;
         }
 
@@ -537,8 +540,8 @@ mod tests {
             assert!(!frame.dirty);
         }
 
-        let page0 = read_disk_page(file.path(), 0);
-        let page1 = read_disk_page(file.path(), 1);
+        let page0 = read_disk_page(file.path(), 1);
+        let page1 = read_disk_page(file.path(), 2);
         assert_eq!(page0[0], 10);
         assert_eq!(page1[0], 20);
     }
@@ -551,11 +554,11 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
         cache.frames[0] =
-            Frame { page_id: Some(0), data: page, reference: true, dirty: true, pin_count: 1 };
-        cache.page_table.insert(0, 0);
+            Frame { page_id: Some(1), data: page, reference: true, dirty: true, pin_count: 1 };
+        cache.page_table.insert(1, 0);
 
         let result = cache.flush_all();
-        assert!(matches!(result, Err(PageCacheError::PinnedPage(0))));
+        assert!(matches!(result, Err(PageCacheError::PinnedPage(1))));
     }
 
     #[test]
@@ -567,13 +570,13 @@ mod tests {
         {
             let mut cache = PageCache::new(disk_manager, 1).unwrap();
             {
-                let mut guard = cache.fetch_page(0).unwrap();
+                let mut guard = cache.fetch_page(FIRST_DATA_PAGE_ID).unwrap();
                 guard.page_mut()[0] = 144;
             }
             assert!(cache.frames[0].dirty);
         }
 
-        let page_on_disk = read_disk_page(file.path(), 0);
+        let page_on_disk = read_disk_page(file.path(), FIRST_DATA_PAGE_ID);
         assert_eq!(page_on_disk[0], 144);
     }
 
@@ -584,7 +587,7 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
         let (page_id, guard) = cache.new_page().unwrap();
-        assert_eq!(page_id, 0);
+        assert_eq!(page_id, FIRST_DATA_PAGE_ID);
         let mut expected = [0u8; PAGE_SIZE];
         write_page_checksum(&mut expected);
         assert_eq!(guard.page(), &expected);
@@ -597,11 +600,11 @@ mod tests {
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
         let (first_page_id, first_guard) = cache.new_page().unwrap();
-        assert_eq!(first_page_id, 0);
+        assert_eq!(first_page_id, FIRST_DATA_PAGE_ID);
         drop(first_guard);
 
         let (second_page_id, second_guard) = cache.new_page().unwrap();
-        assert_eq!(second_page_id, 1);
+        assert_eq!(second_page_id, FIRST_DATA_PAGE_ID + 1);
         drop(second_guard);
     }
 
@@ -624,8 +627,11 @@ mod tests {
 
         let mut disk_manager = DiskManager::new(file.path()).unwrap();
         let mut page = [0u8; PAGE_SIZE];
-        let read_result = disk_manager.read_page(0, &mut page);
-        assert!(matches!(read_result, Err(crate::error::StorageError::InvalidPageId(0))));
+        let read_result = disk_manager.read_page(FIRST_DATA_PAGE_ID, &mut page);
+        assert!(matches!(
+            read_result,
+            Err(crate::error::StorageError::InvalidPageId(id)) if id == FIRST_DATA_PAGE_ID
+        ));
     }
 
     #[test]
@@ -703,5 +709,15 @@ mod tests {
                 frame_count: 1
             })
         ));
+    }
+
+    #[test]
+    fn header_page_remains_fetchable() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let mut cache = PageCache::new(disk_manager, 1).unwrap();
+
+        let guard = cache.fetch_page(HEADER_PAGE_ID).unwrap();
+        assert_ne!(guard.page(), &[0u8; PAGE_SIZE]);
     }
 }

@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::{
+    database_header::{DatabaseHeader, HEADER_PAGE_ID},
     error::{StorageError, StorageResult},
     page_checksum::{checksum_matches, write_page_checksum},
     types::{PAGE_SIZE, PageId},
@@ -19,7 +20,7 @@ pub(crate) struct DiskManager {
 impl DiskManager {
     /// Create a new `DiskManager` from a path to a file.
     pub(crate) fn new(path: &Path) -> Result<Self, StorageError> {
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
@@ -30,11 +31,29 @@ impl DiskManager {
         let file_metadata = file.metadata()?;
         let file_size = file_metadata.len();
 
+        if file_size == 0 {
+            let mut header_page = [0u8; PAGE_SIZE];
+            DatabaseHeader::init_new(&mut header_page);
+            file.set_len(PAGE_SIZE as u64)?;
+            file.seek(std::io::SeekFrom::Start(0))?;
+            file.write_all(&header_page)?;
+            file.sync_all()?;
+            return Ok(Self { file, page_count: 1 });
+        }
+
         if !file_size.is_multiple_of(PAGE_SIZE as u64) {
             return Err(StorageError::InvalidFileSize(file_size));
         }
 
         let page_count = file_size / (PAGE_SIZE as u64);
+        let mut header_page = [0u8; PAGE_SIZE];
+        file.seek(std::io::SeekFrom::Start(Self::page_offset(HEADER_PAGE_ID)))?;
+        file.read_exact(&mut header_page)?;
+        if !checksum_matches(&header_page) {
+            return Err(StorageError::InvalidPageChecksum(HEADER_PAGE_ID));
+        }
+        let header = DatabaseHeader::read(&header_page)?;
+        header.validate(page_count)?;
 
         Ok(Self { file, page_count })
     }
@@ -51,8 +70,8 @@ impl DiskManager {
         let offset = Self::page_offset(page_id);
         self.file.seek(std::io::SeekFrom::Start(offset))?;
         self.file.write_all(&buf)?;
-        self.file.sync_all()?;
         self.page_count += 1;
+        self.write_header_page()?;
         Ok(page_id)
     }
 
@@ -96,12 +115,24 @@ impl DiskManager {
     fn page_offset(page_id: PageId) -> u64 {
         page_id * (PAGE_SIZE as u64)
     }
+
+    fn write_header_page(&mut self) -> StorageResult<()> {
+        let mut header_page = [0u8; PAGE_SIZE];
+        DatabaseHeader::new(self.page_count).write(&mut header_page);
+        self.file.seek(std::io::SeekFrom::Start(Self::page_offset(HEADER_PAGE_ID)))?;
+        self.file.write_all(&header_page)?;
+        self.file.sync_all()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::page_checksum::{PAGE_DATA_END, write_page_checksum};
+    use crate::{
+        database_header::{DatabaseHeader, FIRST_DATA_PAGE_ID, HEADER_PAGE_ID},
+        page_checksum::{PAGE_DATA_END, write_page_checksum},
+    };
     use fastrand::Rng;
     use std::{
         fs::OpenOptions,
@@ -134,7 +165,7 @@ mod test {
         let mut read_buf = [0u8; PAGE_SIZE];
         dm.read_page(page_id, &mut read_buf).unwrap();
         assert_eq!(read_buf, write_buf);
-        assert_eq!(dm.page_count, 1);
+        assert_eq!(dm.page_count, 2);
     }
 
     #[test]
@@ -175,19 +206,24 @@ mod test {
         let file = NamedTempFile::new().unwrap();
         {
             let mut dm = DiskManager::new(file.path()).unwrap();
-            assert_eq!(dm.new_page().unwrap(), 0);
             assert_eq!(dm.new_page().unwrap(), 1);
             assert_eq!(dm.new_page().unwrap(), 2);
-            assert_eq!(dm.page_count, 3);
+            assert_eq!(dm.new_page().unwrap(), 3);
+            assert_eq!(dm.page_count, 4);
         }
 
         let mut dm = DiskManager::new(file.path()).unwrap();
-        assert_eq!(dm.page_count, 3);
+        assert_eq!(dm.page_count, 4);
+
+        let mut header_page = [0u8; PAGE_SIZE];
+        dm.read_page(HEADER_PAGE_ID, &mut header_page).unwrap();
+        let header = DatabaseHeader::read(&header_page).unwrap();
+        assert_eq!(header.page_count, 4);
 
         let mut buf = [0u8; PAGE_SIZE];
         let mut expected = [0u8; PAGE_SIZE];
         write_page_checksum(&mut expected);
-        for page_id in 0..dm.page_count {
+        for page_id in FIRST_DATA_PAGE_ID..dm.page_count {
             dm.read_page(page_id, &mut buf).unwrap();
             assert_eq!(buf, expected);
         }
@@ -198,7 +234,7 @@ mod test {
         let file = NamedTempFile::new().unwrap();
         let mut dm = DiskManager::new(file.path()).unwrap();
         let page_id = dm.new_page().unwrap();
-        assert_eq!(page_id, 0);
+        assert_eq!(page_id, FIRST_DATA_PAGE_ID);
 
         let invalid_page_id = dm.page_count;
         let mut read_buf = [0u8; PAGE_SIZE];
@@ -224,7 +260,7 @@ mod test {
         let mut dm = DiskManager::new(file.path()).unwrap();
 
         let page_count = 4_u64;
-        for expected_page_id in 0..page_count {
+        for expected_page_id in FIRST_DATA_PAGE_ID..(FIRST_DATA_PAGE_ID + page_count) {
             assert_eq!(dm.new_page().unwrap(), expected_page_id);
         }
 
@@ -232,12 +268,12 @@ mod test {
             (0..page_count).map(|_| random_page_buffer(&mut rng)).collect();
 
         for (index, buf) in write_bufs.iter().enumerate() {
-            dm.write_page(index as PageId, buf).unwrap();
+            dm.write_page((index as PageId) + FIRST_DATA_PAGE_ID, buf).unwrap();
         }
 
         for (index, expected_buf) in write_bufs.iter().enumerate() {
             let mut read_buf = [0u8; PAGE_SIZE];
-            dm.read_page(index as PageId, &mut read_buf).unwrap();
+            dm.read_page((index as PageId) + FIRST_DATA_PAGE_ID, &mut read_buf).unwrap();
             assert_eq!(&read_buf, expected_buf);
         }
     }
@@ -269,12 +305,102 @@ mod test {
         let file = NamedTempFile::new().unwrap();
         let mut dm = DiskManager::new(file.path()).unwrap();
         let page_id = dm.new_page().unwrap();
+        assert_eq!(page_id, FIRST_DATA_PAGE_ID);
 
         let mut read_buf = [1u8; PAGE_SIZE];
         dm.read_page(page_id, &mut read_buf).unwrap();
         let mut expected = [0u8; PAGE_SIZE];
         write_page_checksum(&mut expected);
         assert_eq!(read_buf, expected);
+    }
+
+    #[test]
+    fn new_initializes_database_header_page() {
+        let file = NamedTempFile::new().unwrap();
+        let mut dm = DiskManager::new(file.path()).unwrap();
+        assert_eq!(dm.page_count, 1);
+
+        let mut header_page = [0u8; PAGE_SIZE];
+        dm.read_page(HEADER_PAGE_ID, &mut header_page).unwrap();
+        let header = DatabaseHeader::read(&header_page).unwrap();
+        assert_eq!(header.page_count, 1);
+        assert_eq!(header.page_size, PAGE_SIZE as u16);
+    }
+
+    #[test]
+    fn open_rejects_invalid_database_magic() {
+        let file = NamedTempFile::new().unwrap();
+        let mut page = [0u8; PAGE_SIZE];
+        {
+            let mut dm = DiskManager::new(file.path()).unwrap();
+            dm.read_page(HEADER_PAGE_ID, &mut page).unwrap();
+        }
+
+        page[0] ^= 0xFF;
+        write_page_checksum(&mut page);
+
+        let mut handle = OpenOptions::new().read(true).write(true).open(file.path()).unwrap();
+        handle.seek(std::io::SeekFrom::Start(0)).unwrap();
+        handle.write_all(&page).unwrap();
+        handle.sync_all().unwrap();
+
+        let err = match DiskManager::new(file.path()) {
+            Ok(_) => panic!("expected invalid database magic"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, StorageError::InvalidDatabaseHeader("invalid magic")));
+    }
+
+    #[test]
+    fn open_rejects_mismatched_header_page_size() {
+        let file = NamedTempFile::new().unwrap();
+        let mut page = [0u8; PAGE_SIZE];
+        {
+            let mut dm = DiskManager::new(file.path()).unwrap();
+            dm.read_page(HEADER_PAGE_ID, &mut page).unwrap();
+        }
+
+        page[16..18].copy_from_slice(&0u16.to_le_bytes());
+        write_page_checksum(&mut page);
+
+        let mut handle = OpenOptions::new().read(true).write(true).open(file.path()).unwrap();
+        handle.seek(std::io::SeekFrom::Start(0)).unwrap();
+        handle.write_all(&page).unwrap();
+        handle.sync_all().unwrap();
+
+        let err = match DiskManager::new(file.path()) {
+            Ok(_) => panic!("expected mismatched header page size"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, StorageError::InvalidDatabaseHeader("invalid page size")));
+    }
+
+    #[test]
+    fn open_rejects_mismatched_header_page_count() {
+        let file = NamedTempFile::new().unwrap();
+        let mut page = [0u8; PAGE_SIZE];
+        {
+            let mut dm = DiskManager::new(file.path()).unwrap();
+            dm.new_page().unwrap();
+            dm.read_page(HEADER_PAGE_ID, &mut page).unwrap();
+        }
+
+        page[18..26].copy_from_slice(&999u64.to_le_bytes());
+        write_page_checksum(&mut page);
+
+        let mut handle = OpenOptions::new().read(true).write(true).open(file.path()).unwrap();
+        handle.seek(std::io::SeekFrom::Start(0)).unwrap();
+        handle.write_all(&page).unwrap();
+        handle.sync_all().unwrap();
+
+        let err = match DiskManager::new(file.path()) {
+            Ok(_) => panic!("expected mismatched header page count"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            StorageError::InvalidDatabaseHeader("page count does not match file size")
+        ));
     }
 
     #[test]
