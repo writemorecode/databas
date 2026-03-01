@@ -7,8 +7,8 @@ use crate::{
     types::PAGE_SIZE,
 };
 
-pub(crate) use interior::{InteriorCell, TableInteriorPageMut, TableInteriorPageRef};
-pub(crate) use leaf::{LeafCellRef, TableLeafPageMut, TableLeafPageRef};
+pub(crate) use interior::{TableInteriorPageMut, TableInteriorPageRef};
+pub(crate) use leaf::{TableLeafPageMut, TableLeafPageRef};
 
 /// Reads a little-endian `u64` from `bytes` at `offset`.
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {

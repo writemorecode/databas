@@ -52,7 +52,7 @@ impl DiskManager {
         self.file.seek(std::io::SeekFrom::Start(offset))?;
         self.file.write_all(&buf)?;
         self.file.sync_all()?;
-        self.page_count = self.page_count + 1;
+        self.page_count += 1;
         Ok(page_id)
     }
 
@@ -94,7 +94,7 @@ impl DiskManager {
 
     /// Calculate disk offset for page `page_id`.
     fn page_offset(page_id: PageId) -> u64 {
-        u64::from(page_id) * (PAGE_SIZE as u64)
+        page_id * (PAGE_SIZE as u64)
     }
 }
 
