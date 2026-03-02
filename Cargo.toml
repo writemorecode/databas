@@ -10,3 +10,6 @@ version = '0.1.0'
 authors = ['writemorecode']
 edition = '2024'
 repository = 'https://github.com/writemorecode/databas'
+
+[workspace.dependencies]
+proptest = "1.6.0"
