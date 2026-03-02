@@ -574,3 +574,110 @@ mod tests {
         assert!(matches!(err, TablePageError::CorruptCell { slot_index: 0 }));
     }
 }
+
+#[cfg(test)]
+mod test_prop {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use proptest::prelude::*;
+
+    use crate::page_checksum::PAGE_DATA_END;
+
+    use super::*;
+
+    const SLOT_ENTRY_SIZE: usize = 2;
+    const MAX_GENERATED_PAYLOAD_LEN: usize = 96;
+    const MAX_GENERATED_ENTRY_COUNT: usize = 48;
+    const EMPTY_ORACLE_MISS_PROBE_LOW: RowId = 0;
+    const EMPTY_ORACLE_MISS_PROBE_NEXT: RowId = 1;
+    const ORACLE_MISS_SENTINEL: RowId = u64::MAX;
+
+    fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
+        let mut page = [0u8; PAGE_SIZE];
+        {
+            let _leaf = TableLeafPageMut::init_empty(&mut page).unwrap();
+        }
+        page
+    }
+
+    fn compact_leaf_usage(entries: &[(RowId, Vec<u8>)]) -> usize {
+        layout::LEAF_HEADER_SIZE
+            + entries
+                .iter()
+                .map(|(_, payload)| payload.len() + LEAF_CELL_PREFIX_SIZE + SLOT_ENTRY_SIZE)
+                .sum::<usize>()
+    }
+
+    fn compact_leaf_fits(entries: &[(RowId, Vec<u8>)]) -> bool {
+        compact_leaf_usage(entries) <= PAGE_DATA_END
+    }
+
+    fn unique_row_ids(entries: &[(RowId, Vec<u8>)]) -> bool {
+        let mut seen = BTreeSet::new();
+        entries.iter().all(|(row_id, _)| seen.insert(*row_id))
+    }
+
+    fn leaf_entries_strategy() -> impl Strategy<Value = Vec<(RowId, Vec<u8>)>> {
+        let payloads = prop::collection::vec(any::<u8>(), 0..=MAX_GENERATED_PAYLOAD_LEN);
+        let entries = (any::<RowId>(), payloads);
+        prop::collection::vec(entries, 0..=MAX_GENERATED_ENTRY_COUNT).prop_filter(
+            "entries must have unique row ids and fit on one compact leaf page",
+            |entries| unique_row_ids(entries) && compact_leaf_fits(entries),
+        )
+    }
+
+    proptest! {
+        // This checks the core leaf-page lookup invariant: any generated set of unique entries
+        // that fits on one compact page should round-trip through insert/search exactly as the
+        // BTreeMap oracle predicts, regardless of insertion order.
+        #[test]
+        fn prop_insert_and_search_match_btreemap_oracle(entries in leaf_entries_strategy()) {
+            let oracle: BTreeMap<RowId, Vec<u8>> = entries.iter().cloned().collect();
+            let mut page = initialized_leaf_page();
+
+            {
+                let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+
+                for (row_id, payload) in &entries {
+                    leaf.insert(*row_id, payload).unwrap();
+                }
+
+                prop_assert_eq!(leaf.cell_count() as usize, oracle.len());
+
+                for (row_id, payload) in &oracle {
+                    let cell = leaf.search(*row_id).unwrap().unwrap();
+                    prop_assert_eq!(cell.row_id, *row_id);
+                    prop_assert_eq!(cell.payload, payload.as_slice());
+                }
+
+                let miss_probes = if let Some((&first_key, _)) = oracle.first_key_value() {
+                    let last_key = *oracle.last_key_value().unwrap().0;
+                    [
+                        first_key.saturating_sub(1),
+                        last_key.saturating_add(1),
+                        ORACLE_MISS_SENTINEL,
+                    ]
+                } else {
+                    [
+                        EMPTY_ORACLE_MISS_PROBE_LOW,
+                        EMPTY_ORACLE_MISS_PROBE_NEXT,
+                        ORACLE_MISS_SENTINEL,
+                    ]
+                };
+
+                for probe in miss_probes {
+                    if !oracle.contains_key(&probe) {
+                        prop_assert_eq!(leaf.search(probe).unwrap(), None);
+                    }
+                }
+            }
+
+            let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
+            for (row_id, payload) in &oracle {
+                let cell = leaf_ref.search(*row_id).unwrap().unwrap();
+                prop_assert_eq!(cell.row_id, *row_id);
+                prop_assert_eq!(cell.payload, payload.as_slice());
+            }
+        }
+    }
+}
