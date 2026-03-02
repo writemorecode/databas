@@ -350,18 +350,19 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
 }
 
 #[cfg(test)]
+fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
+    let mut page = [0u8; PAGE_SIZE];
+    {
+        let _leaf = TableLeafPageMut::init_empty(&mut page).unwrap();
+    }
+    page
+}
+
+#[cfg(test)]
 mod tests {
     use crate::page_checksum::PAGE_DATA_END;
 
     use super::*;
-
-    fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
-        let mut page = [0u8; PAGE_SIZE];
-        {
-            let _leaf = TableLeafPageMut::init_empty(&mut page).unwrap();
-        }
-        page
-    }
 
     fn payload(byte: u8, len: usize) -> Vec<u8> {
         vec![byte; len]
@@ -594,14 +595,6 @@ mod test_prop {
     type LeafEntry = (RowId, Vec<u8>);
     type LeafEntries = Vec<LeafEntry>;
     type LeafInsertThenUpdateCase = (LeafEntries, LeafEntries);
-
-    fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
-        let mut page = [0u8; PAGE_SIZE];
-        {
-            let _leaf = TableLeafPageMut::init_empty(&mut page).unwrap();
-        }
-        page
-    }
 
     fn compact_leaf_usage(entries: &[LeafEntry]) -> usize {
         layout::LEAF_HEADER_SIZE
