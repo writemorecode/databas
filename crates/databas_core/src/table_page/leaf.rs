@@ -350,18 +350,19 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
 }
 
 #[cfg(test)]
+fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
+    let mut page = [0u8; PAGE_SIZE];
+    {
+        let _leaf = TableLeafPageMut::init_empty(&mut page).unwrap();
+    }
+    page
+}
+
+#[cfg(test)]
 mod tests {
     use crate::page_checksum::PAGE_DATA_END;
 
     use super::*;
-
-    fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
-        let mut page = [0u8; PAGE_SIZE];
-        {
-            let _leaf = TableLeafPageMut::init_empty(&mut page).unwrap();
-        }
-        page
-    }
 
     fn payload(byte: u8, len: usize) -> Vec<u8> {
         vec![byte; len]
@@ -590,17 +591,12 @@ mod test_prop {
     const MAX_GENERATED_ENTRY_COUNT: usize = 48;
     const EMPTY_ORACLE_MISS_PROBE_LOW: RowId = 0;
     const EMPTY_ORACLE_MISS_PROBE_NEXT: RowId = 1;
-    const ORACLE_MISS_SENTINEL: RowId = u64::MAX;
+    const ORACLE_MISS_SENTINEL: RowId = RowId::MAX;
+    type LeafEntry = (RowId, Vec<u8>);
+    type LeafEntries = Vec<LeafEntry>;
+    type LeafInsertThenUpdateCase = (LeafEntries, LeafEntries);
 
-    fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
-        let mut page = [0u8; PAGE_SIZE];
-        {
-            let _leaf = TableLeafPageMut::init_empty(&mut page).unwrap();
-        }
-        page
-    }
-
-    fn compact_leaf_usage(entries: &[(RowId, Vec<u8>)]) -> usize {
+    fn compact_leaf_usage(entries: &[LeafEntry]) -> usize {
         layout::LEAF_HEADER_SIZE
             + entries
                 .iter()
@@ -608,22 +604,102 @@ mod test_prop {
                 .sum::<usize>()
     }
 
-    fn compact_leaf_fits(entries: &[(RowId, Vec<u8>)]) -> bool {
+    fn compact_leaf_fits(entries: &[LeafEntry]) -> bool {
         compact_leaf_usage(entries) <= PAGE_DATA_END
     }
 
-    fn unique_row_ids(entries: &[(RowId, Vec<u8>)]) -> bool {
+    fn unique_row_ids(entries: &[LeafEntry]) -> bool {
         let mut seen = BTreeSet::new();
         entries.iter().all(|(row_id, _)| seen.insert(*row_id))
     }
 
-    fn leaf_entries_strategy() -> impl Strategy<Value = Vec<(RowId, Vec<u8>)>> {
-        let payloads = prop::collection::vec(any::<u8>(), 0..=MAX_GENERATED_PAYLOAD_LEN);
+    fn leaf_payload_strategy() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(any::<u8>(), 0..=MAX_GENERATED_PAYLOAD_LEN)
+    }
+
+    fn leaf_entries_strategy() -> impl Strategy<Value = LeafEntries> {
+        let payloads = leaf_payload_strategy();
         let entries = (any::<RowId>(), payloads);
         prop::collection::vec(entries, 0..=MAX_GENERATED_ENTRY_COUNT).prop_filter(
             "entries must have unique row ids and fit on one compact leaf page",
             |entries| unique_row_ids(entries) && compact_leaf_fits(entries),
         )
+    }
+
+    fn non_empty_leaf_entries_strategy() -> impl Strategy<Value = LeafEntries> {
+        let payloads = leaf_payload_strategy();
+        let entries = (any::<RowId>(), payloads);
+        prop::collection::vec(entries, 1..=MAX_GENERATED_ENTRY_COUNT).prop_filter(
+            "entries must have unique row ids and fit on one compact leaf page",
+            |entries| unique_row_ids(entries) && compact_leaf_fits(entries),
+        )
+    }
+
+    fn update_sequence_succeeds(entries: &[LeafEntry], updates: &[LeafEntry]) -> bool {
+        let mut current: BTreeMap<RowId, Vec<u8>> = entries.iter().cloned().collect();
+        let mut live_usage = compact_leaf_usage(entries);
+        let mut dead_bytes = 0usize;
+
+        for (row_id, new_payload) in updates {
+            let old_payload = match current.get(row_id) {
+                Some(payload) => payload.clone(),
+                None => return false,
+            };
+
+            if old_payload == *new_payload {
+                return false;
+            }
+
+            let old_cell_len = LEAF_CELL_PREFIX_SIZE + old_payload.len();
+            let new_cell_len = LEAF_CELL_PREFIX_SIZE + new_payload.len();
+
+            if new_cell_len != old_cell_len {
+                let available_without_defrag =
+                    PAGE_DATA_END.saturating_sub(live_usage.saturating_add(dead_bytes));
+
+                if new_cell_len <= available_without_defrag {
+                    dead_bytes += old_cell_len;
+                } else {
+                    let available_after_defrag = PAGE_DATA_END.saturating_sub(live_usage);
+                    if new_cell_len > available_after_defrag {
+                        return false;
+                    }
+
+                    dead_bytes = old_cell_len;
+                }
+
+                live_usage = live_usage - old_cell_len + new_cell_len;
+            }
+
+            current.insert(*row_id, new_payload.clone());
+        }
+
+        true
+    }
+
+    fn leaf_insert_then_update_strategy() -> impl Strategy<Value = LeafInsertThenUpdateCase> {
+        non_empty_leaf_entries_strategy()
+            .prop_flat_map(|entries| {
+                let entry_count = entries.len();
+                prop::sample::subsequence(entries.clone(), 1..=entry_count).prop_flat_map(
+                    move |selected_entries| {
+                        let entries = entries.clone();
+                        prop::collection::vec(leaf_payload_strategy(), selected_entries.len())
+                            .prop_map(move |replacement_payloads| {
+                                let updates: LeafEntries = selected_entries
+                                    .iter()
+                                    .zip(replacement_payloads)
+                                    .map(|((row_id, _), payload)| (*row_id, payload))
+                                    .collect();
+                                (entries.clone(), updates)
+                            })
+                    },
+                )
+            })
+            .prop_filter(
+                "updates must be executable under the current leaf-page update algorithm",
+                |(entries, updates)| update_sequence_succeeds(entries, updates),
+            )
     }
 
     proptest! {
@@ -643,6 +719,69 @@ mod test_prop {
                 }
 
                 prop_assert_eq!(leaf.cell_count() as usize, oracle.len());
+
+                for (row_id, payload) in &oracle {
+                    let cell = leaf.search(*row_id).unwrap().unwrap();
+                    prop_assert_eq!(cell.row_id, *row_id);
+                    prop_assert_eq!(cell.payload, payload.as_slice());
+                }
+
+                let miss_probes = if let Some((&first_key, _)) = oracle.first_key_value() {
+                    let last_key = *oracle.last_key_value().unwrap().0;
+                    [
+                        first_key.saturating_sub(1),
+                        last_key.saturating_add(1),
+                        ORACLE_MISS_SENTINEL,
+                    ]
+                } else {
+                    [
+                        EMPTY_ORACLE_MISS_PROBE_LOW,
+                        EMPTY_ORACLE_MISS_PROBE_NEXT,
+                        ORACLE_MISS_SENTINEL,
+                    ]
+                };
+
+                for probe in miss_probes {
+                    if !oracle.contains_key(&probe) {
+                        prop_assert_eq!(leaf.search(probe).unwrap(), None);
+                    }
+                }
+            }
+
+            let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
+            for (row_id, payload) in &oracle {
+                let cell = leaf_ref.search(*row_id).unwrap().unwrap();
+                prop_assert_eq!(cell.row_id, *row_id);
+                prop_assert_eq!(cell.payload, payload.as_slice());
+            }
+        }
+
+        // This checks the update path against the same BTreeMap oracle used by insert/search:
+        // rows are inserted once, a subset is updated in place by row id, and the final page
+        // state must match the oracle even when updates rely on defragmentation to succeed.
+        #[test]
+        fn prop_insert_then_update_match_btreemap_oracle(
+            (entries, updates) in leaf_insert_then_update_strategy()
+        ) {
+            let mut oracle: BTreeMap<RowId, Vec<u8>> = entries.iter().cloned().collect();
+            let original_row_count = oracle.len();
+            let mut page = initialized_leaf_page();
+
+            {
+                let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+
+                for (row_id, payload) in &entries {
+                    leaf.insert(*row_id, payload).unwrap();
+                }
+
+                prop_assert_eq!(leaf.cell_count() as usize, original_row_count);
+
+                for (row_id, payload) in &updates {
+                    leaf.update(*row_id, payload).unwrap();
+                    oracle.insert(*row_id, payload.clone());
+                }
+
+                prop_assert_eq!(leaf.cell_count() as usize, original_row_count);
 
                 for (row_id, payload) in &oracle {
                     let cell = leaf.search(*row_id).unwrap().unwrap();
