@@ -590,7 +590,7 @@ mod test_prop {
     const MAX_GENERATED_ENTRY_COUNT: usize = 48;
     const EMPTY_ORACLE_MISS_PROBE_LOW: RowId = 0;
     const EMPTY_ORACLE_MISS_PROBE_NEXT: RowId = 1;
-    const ORACLE_MISS_SENTINEL: RowId = u64::MAX;
+    const ORACLE_MISS_SENTINEL: RowId = RowId::MAX;
     type LeafEntry = (RowId, Vec<u8>);
     type LeafEntries = Vec<LeafEntry>;
     type LeafInsertThenUpdateCase = (LeafEntries, LeafEntries);
