@@ -197,15 +197,6 @@ fn leaf_cell_len(cell: &[u8]) -> TablePageResult<usize> {
     Ok(cell_len)
 }
 
-/// Extracts the row id key from an encoded leaf cell.
-fn leaf_row_id_from_cell(cell: &[u8]) -> TablePageResult<RowId> {
-    if cell.len() < LEAF_CELL_PREFIX_SIZE {
-        return Err(TablePageError::CorruptPage("leaf cell too short"));
-    }
-
-    Ok(read_u64(cell, PAYLOAD_LEN_SIZE))
-}
-
 /// Performs row-id lookup on leaf pages with leaf-specific spec and decoder.
 fn find_leaf_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<SearchResult> {
     layout::validate(page, LEAF_SPEC)?;
@@ -218,8 +209,10 @@ fn find_leaf_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<Se
         let mid = left + ((right - left) / 2);
         let mid_u16 = mid as u16;
         let cell = layout::cell_bytes_at_slot_on_valid_page(page, LEAF_SPEC, mid_u16)?;
-        let current_row_id = leaf_row_id_from_cell(cell)
-            .map_err(|_| TablePageError::CorruptCell { slot_index: mid_u16 })?;
+        if cell.len() < LEAF_CELL_PREFIX_SIZE {
+            return Err(TablePageError::CorruptCell { slot_index: mid_u16 });
+        }
+        let current_row_id = read_u64(cell, PAYLOAD_LEN_SIZE);
 
         match current_row_id.cmp(&row_id) {
             Ordering::Less => left = mid + 1,
