@@ -1,7 +1,7 @@
 use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
 use std::cmp::Ordering;
 
-use crate::types::{PAGE_SIZE, RowId};
+use crate::types::{RowId, PAGE_SIZE};
 
 use super::{
     layout::{self, PageSpec, SearchResult, SpaceError},
@@ -216,8 +216,10 @@ fn find_leaf_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<Se
         let mid = left + ((right - left) / 2);
         let mid_u16 = mid as u16;
         let cell = layout::cell_bytes_at_slot_on_valid_page(page, LEAF_SPEC, mid_u16)?;
-        let current_row_id = leaf_row_id_from_cell(cell)
-            .map_err(|_| TablePageError::CorruptCell { slot_index: mid_u16 })?;
+        if cell.len() < LEAF_CELL_PREFIX_SIZE {
+            return Err(TablePageError::CorruptCell { slot_index: mid_u16 });
+        }
+        let current_row_id = read_u64(cell, PAYLOAD_LEN_SIZE);
 
         match current_row_id.cmp(&row_id) {
             Ordering::Less => left = mid + 1,
