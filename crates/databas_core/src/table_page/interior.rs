@@ -1,9 +1,7 @@
 use std::cmp::Ordering;
 
-use crate::{
-    error::{TablePageError, TablePageResult},
-    types::{PAGE_SIZE, PageId, RowId},
-};
+use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
+use crate::types::{PAGE_SIZE, PageId, RowId};
 
 use super::{
     layout::{self, PageSpec, SearchResult, SpaceError},
@@ -168,7 +166,7 @@ impl<'a> TableInteriorPageMut<'a> {
     /// Fails with [`TablePageError::DuplicateRowId`] if `row_id` already exists.
     pub(crate) fn insert(&mut self, row_id: RowId, left_child: PageId) -> TablePageResult<()> {
         let insertion_index = match find_interior_row_id(self.page, row_id)? {
-            SearchResult::Found(_) => return Err(TablePageError::DuplicateRowId(row_id)),
+            SearchResult::Found(_) => return Err(TablePageError::DuplicateRowId { row_id }),
             SearchResult::NotFound(insertion_index) => insertion_index,
         };
 
@@ -183,7 +181,7 @@ impl<'a> TableInteriorPageMut<'a> {
     pub(crate) fn update(&mut self, row_id: RowId, left_child: PageId) -> TablePageResult<()> {
         let slot_index = match find_interior_row_id(self.page, row_id)? {
             SearchResult::Found(slot_index) => slot_index,
-            SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
+            SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound { row_id }),
         };
 
         let existing_cell = layout::cell_bytes_at_slot(self.page, INTERIOR_SPEC, slot_index)?;
@@ -204,7 +202,7 @@ impl<'a> TableInteriorPageMut<'a> {
     pub(crate) fn delete(&mut self, row_id: RowId) -> TablePageResult<()> {
         let slot_index = match find_interior_row_id(self.page, row_id)? {
             SearchResult::Found(slot_index) => slot_index,
-            SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
+            SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound { row_id }),
         };
 
         layout::remove_slot(self.page, INTERIOR_SPEC, slot_index)
@@ -298,7 +296,7 @@ fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
         }
         let next = scratch_len + INTERIOR_CELL_SIZE;
         if next > scratch.len() {
-            return Err(TablePageError::CorruptPage("cell content underflow"));
+            return Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellContentUnderflow));
         }
         scratch[scratch_len..next].copy_from_slice(&cell[..INTERIOR_CELL_SIZE]);
         scratch_len = next;
@@ -314,7 +312,11 @@ fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
         let cell = &scratch[scratch_offset..next];
         let cell_offset = match layout::try_append_cell_for_insert(page, INTERIOR_SPEC, cell)? {
             Ok(offset) => offset,
-            Err(_) => return Err(TablePageError::CorruptPage("cell content underflow")),
+            Err(_) => {
+                return Err(TablePageError::CorruptPage(
+                    TablePageCorruptionKind::CellContentUnderflow,
+                ));
+            }
         };
         layout::insert_slot(page, INTERIOR_SPEC, slot_u16, cell_offset)?;
         scratch_offset = next;
@@ -355,7 +357,7 @@ mod tests {
 
         page[0] = 99;
         let err = TableInteriorPageRef::from_bytes(&page).unwrap_err();
-        assert!(matches!(err, TablePageError::InvalidPageType(99)));
+        assert!(matches!(err, TablePageError::InvalidPageType { page_type: 99 }));
     }
 
     #[test]
@@ -413,7 +415,7 @@ mod tests {
         }
 
         let err = interior.insert(20, 1).unwrap_err();
-        assert!(matches!(err, TablePageError::DuplicateRowId(20)));
+        assert!(matches!(err, TablePageError::DuplicateRowId { row_id: 20 }));
     }
 
     #[test]
@@ -428,13 +430,13 @@ mod tests {
         assert_eq!(interior.search(2).unwrap().unwrap().left_child, 222);
 
         let update_err = interior.update(99, 999).unwrap_err();
-        assert!(matches!(update_err, TablePageError::RowIdNotFound(99)));
+        assert!(matches!(update_err, TablePageError::RowIdNotFound { row_id: 99 }));
 
         interior.delete(1).unwrap();
         assert_eq!(interior.search(1).unwrap(), None);
 
         let delete_err = interior.delete(1).unwrap_err();
-        assert!(matches!(delete_err, TablePageError::RowIdNotFound(1)));
+        assert!(matches!(delete_err, TablePageError::RowIdNotFound { row_id: 1 }));
     }
 
     #[test]
