@@ -195,15 +195,6 @@ fn leaf_cell_len(cell: &[u8]) -> TablePageResult<usize> {
     Ok(cell_len)
 }
 
-/// Extracts the row id key from an encoded leaf cell.
-fn leaf_row_id_from_cell(cell: &[u8]) -> TablePageResult<RowId> {
-    if cell.len() < LEAF_CELL_PREFIX_SIZE {
-        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellTooShort));
-    }
-
-    Ok(read_u64(cell, PAYLOAD_LEN_SIZE))
-}
-
 /// Performs row-id lookup on leaf pages with leaf-specific spec and decoder.
 fn find_leaf_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<SearchResult> {
     layout::validate(page, LEAF_SPEC)?;
