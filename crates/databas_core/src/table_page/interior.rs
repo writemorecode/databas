@@ -18,7 +18,10 @@ const INTERIOR_CELL_SIZE: usize = LEFT_CHILD_SIZE + ROW_ID_SIZE;
 /// Decoded interior cell mapping a separator key to its left child page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct InteriorCell {
-    /// Child page id for keys less than `row_id` in this separator cell.
+    /// Child page id for keys in the half-open range `[prev_row_id, row_id)`.
+    ///
+    /// For the first separator cell on the page, this child covers all keys
+    /// strictly less than `row_id`.
     pub(crate) left_child: PageId,
     /// Separator row id for this interior cell.
     pub(crate) row_id: RowId,
@@ -73,16 +76,16 @@ impl<'a> TableInteriorPageRef<'a> {
 
     /// Returns the child page id to descend into for `row_id`.
     ///
-    /// This uses the first separator key that is greater than or equal to `row_id`.
-    /// If no such separator exists, the page header's rightmost child is returned.
+    /// Descent follows the first separator key strictly greater than `row_id`.
+    /// Exact matches descend to the subtree on the separator's right. If no such
+    /// separator exists, the page header's rightmost child is returned.
     pub(crate) fn child_for_row_id(&self, row_id: RowId) -> TablePageResult<PageId> {
         let slot_count = usize::from(self.cell_count());
         let slot_index = match find_interior_row_id(self.page, row_id)? {
-            SearchResult::Found(slot_index) => Some(slot_index),
-            SearchResult::NotFound(insertion_index) => {
-                (usize::from(insertion_index) < slot_count).then_some(insertion_index)
-            }
-        };
+            SearchResult::Found(slot_index) => slot_index.checked_add(1),
+            SearchResult::NotFound(insertion_index) => Some(insertion_index),
+        }
+        .filter(|slot_index| usize::from(*slot_index) < slot_count);
 
         if let Some(slot_index) = slot_index {
             return Ok(InteriorCell::try_deserialize_at_slot(self.page, slot_index)?.left_child);
@@ -135,14 +138,17 @@ impl<'a> TableInteriorPageMut<'a> {
     }
 
     /// Returns the child page id to descend into for `row_id`.
+    ///
+    /// Descent follows the first separator key strictly greater than `row_id`.
+    /// Exact matches descend to the subtree on the separator's right. If no such
+    /// separator exists, the page header's rightmost child is returned.
     pub(crate) fn child_for_row_id(&self, row_id: RowId) -> TablePageResult<PageId> {
         let slot_count = usize::from(self.cell_count());
         let slot_index = match find_interior_row_id(self.page, row_id)? {
-            SearchResult::Found(slot_index) => Some(slot_index),
-            SearchResult::NotFound(insertion_index) => {
-                (usize::from(insertion_index) < slot_count).then_some(insertion_index)
-            }
-        };
+            SearchResult::Found(slot_index) => slot_index.checked_add(1),
+            SearchResult::NotFound(insertion_index) => Some(insertion_index),
+        }
+        .filter(|slot_index| usize::from(*slot_index) < slot_count);
 
         if let Some(slot_index) = slot_index {
             return Ok(InteriorCell::try_deserialize_at_slot(self.page, slot_index)?.left_child);
@@ -379,11 +385,11 @@ mod tests {
 
         let interior_ref = TableInteriorPageRef::from_bytes(&page).unwrap();
         assert_eq!(interior_ref.child_for_row_id(5).unwrap(), 100);
-        assert_eq!(interior_ref.child_for_row_id(10).unwrap(), 100);
+        assert_eq!(interior_ref.child_for_row_id(10).unwrap(), 200);
         assert_eq!(interior_ref.child_for_row_id(15).unwrap(), 200);
-        assert_eq!(interior_ref.child_for_row_id(20).unwrap(), 200);
+        assert_eq!(interior_ref.child_for_row_id(20).unwrap(), 300);
         assert_eq!(interior_ref.child_for_row_id(29).unwrap(), 300);
-        assert_eq!(interior_ref.child_for_row_id(30).unwrap(), 300);
+        assert_eq!(interior_ref.child_for_row_id(30).unwrap(), 400);
         assert_eq!(interior_ref.child_for_row_id(31).unwrap(), 400);
     }
 
@@ -395,7 +401,9 @@ mod tests {
         interior.insert(100, 600).unwrap();
 
         assert_eq!(interior.child_for_row_id(10).unwrap(), 500);
+        assert_eq!(interior.child_for_row_id(50).unwrap(), 600);
         assert_eq!(interior.child_for_row_id(75).unwrap(), 600);
+        assert_eq!(interior.child_for_row_id(100).unwrap(), 999);
         assert_eq!(interior.child_for_row_id(101).unwrap(), 999);
     }
 
