@@ -2,10 +2,7 @@ mod interior;
 mod layout;
 mod leaf;
 
-use crate::{
-    error::{TablePageError, TablePageResult},
-    types::PAGE_SIZE,
-};
+use crate::types::{PAGE_SIZE, RowId};
 
 pub(crate) use interior::{TableInteriorPageMut, TableInteriorPageRef};
 pub(crate) use leaf::{TableLeafPageMut, TableLeafPageRef};
@@ -34,7 +31,7 @@ impl<'a> TablePageRef<'a> {
             layout::INTERIOR_PAGE_TYPE => {
                 Ok(Self::Interior(TableInteriorPageRef::from_bytes(page)?))
             }
-            page_type => Err(TablePageError::InvalidPageType(page_type)),
+            page_type => Err(TablePageError::InvalidPageType { page_type }),
         }
     }
 }
@@ -56,14 +53,53 @@ impl<'a> TablePageMut<'a> {
             layout::INTERIOR_PAGE_TYPE => {
                 Ok(Self::Interior(TableInteriorPageMut::from_bytes(page)?))
             }
-            page_type => Err(TablePageError::InvalidPageType(page_type)),
+            page_type => Err(TablePageError::InvalidPageType { page_type }),
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TablePageError {
+    #[error("invalid page type: {page_type}")]
+    InvalidPageType { page_type: u8 },
+    #[error("corrupt page: {0}")]
+    CorruptPage(TablePageCorruptionKind),
+    #[error("corrupt cell at slot index {slot_index}")]
+    CorruptCell { slot_index: u16 },
+    #[error("duplicate row id: {row_id}")]
+    DuplicateRowId { row_id: RowId },
+    #[error("row id not found: {row_id}")]
+    RowIdNotFound { row_id: RowId },
+    #[error("cell too large: {len} bytes (max {max})")]
+    CellTooLarge { len: usize, max: usize },
+    #[error("page full: need {needed} bytes, only {available} bytes available")]
+    PageFull { needed: usize, available: usize },
+}
+
+pub(crate) type TablePageResult<T> = Result<T, TablePageError>;
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TablePageCorruptionKind {
+    #[error("invalid cell content start")]
+    InvalidCellContentStart,
+    #[error("slot index out of bounds")]
+    SlotIndexOutOfBounds,
+    #[error("slot directory overlaps cell content")]
+    SlotDirectoryOverlapsCellContent,
+    #[error("slot directory exceeds page size")]
+    SlotDirectoryExceedsPageSize,
+    #[error("cell too short")]
+    CellTooShort,
+    #[error("cell payload out of bounds")]
+    CellPayloadOutOfBounds,
+    #[error("cell content underflow")]
+    CellContentUnderflow,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::table_page::TablePageCorruptionKind;
 
     fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
         let mut page = [0u8; PAGE_SIZE];
@@ -136,11 +172,11 @@ mod tests {
         page[0] = 255;
 
         let immutable_err = TablePageRef::from_bytes(&page).unwrap_err();
-        assert!(matches!(immutable_err, TablePageError::InvalidPageType(255)));
+        assert!(matches!(immutable_err, TablePageError::InvalidPageType { page_type: 255 }));
 
         let mut mutable_page = page;
         let mutable_err = TablePageMut::from_bytes(&mut mutable_page).unwrap_err();
-        assert!(matches!(mutable_err, TablePageError::InvalidPageType(255)));
+        assert!(matches!(mutable_err, TablePageError::InvalidPageType { page_type: 255 }));
     }
 
     #[test]
@@ -149,10 +185,16 @@ mod tests {
         page[4..6].copy_from_slice(&0u16.to_le_bytes());
 
         let immutable_err = TablePageRef::from_bytes(&page).unwrap_err();
-        assert!(matches!(immutable_err, TablePageError::CorruptPage("invalid cell content start")));
+        assert!(matches!(
+            immutable_err,
+            TablePageError::CorruptPage(TablePageCorruptionKind::InvalidCellContentStart)
+        ));
 
         let mut mutable_page = page;
         let mutable_err = TablePageMut::from_bytes(&mut mutable_page).unwrap_err();
-        assert!(matches!(mutable_err, TablePageError::CorruptPage("invalid cell content start")));
+        assert!(matches!(
+            mutable_err,
+            TablePageError::CorruptPage(TablePageCorruptionKind::InvalidCellContentStart)
+        ));
     }
 }

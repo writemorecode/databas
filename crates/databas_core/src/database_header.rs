@@ -1,5 +1,4 @@
 use crate::{
-    error::{StorageError, StorageResult},
     page_checksum::write_page_checksum,
     types::{PAGE_SIZE, PageId},
 };
@@ -30,14 +29,17 @@ impl DatabaseHeader {
         Self::new(FIRST_DATA_PAGE_ID).write(page);
     }
 
-    pub(crate) fn read(page: &[u8; PAGE_SIZE]) -> StorageResult<Self> {
+    pub(crate) fn read(page: &[u8; PAGE_SIZE]) -> Result<Self, DatabaseHeaderError> {
         if page[MAGIC_OFFSET..MAGIC_OFFSET + MAGIC_SIZE] != DATABASE_MAGIC {
-            return Err(StorageError::InvalidDatabaseHeader("invalid magic"));
+            return Err(DatabaseHeaderError::InvalidMagic);
         }
 
         let page_size = read_u16(page, PAGE_SIZE_OFFSET);
         if page_size != PAGE_SIZE as u16 {
-            return Err(StorageError::InvalidDatabaseHeader("invalid page size"));
+            return Err(DatabaseHeaderError::InvalidPageSize {
+                actual: page_size,
+                expected: PAGE_SIZE,
+            });
         }
 
         Ok(Self { page_size, page_count: read_u64(page, PAGE_COUNT_OFFSET) })
@@ -52,17 +54,32 @@ impl DatabaseHeader {
         write_page_checksum(page);
     }
 
-    pub(crate) fn validate(&self, actual_page_count: u64) -> StorageResult<()> {
+    pub(crate) fn validate(&self, actual_page_count: u64) -> Result<(), DatabaseHeaderError> {
         if self.page_count == 0 {
-            return Err(StorageError::InvalidDatabaseHeader("page count must be at least one"));
+            return Err(DatabaseHeaderError::PageCountZero);
         }
 
         if self.page_count != actual_page_count {
-            return Err(StorageError::InvalidDatabaseHeader("page count does not match file size"));
+            return Err(DatabaseHeaderError::PageCountMismatch {
+                actual: self.page_count,
+                expected: actual_page_count,
+            });
         }
 
         Ok(())
     }
+}
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DatabaseHeaderError {
+    #[error("invalid magic")]
+    InvalidMagic,
+    #[error("invalid page size: expected {expected}, got {actual}")]
+    InvalidPageSize { actual: u16, expected: usize },
+    #[error("page count must be at least one")]
+    PageCountZero,
+    #[error("page count does not match file size: expected {expected}, got {actual}")]
+    PageCountMismatch { actual: u64, expected: u64 },
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {

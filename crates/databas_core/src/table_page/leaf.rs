@@ -1,9 +1,7 @@
+use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
 use std::cmp::Ordering;
 
-use crate::{
-    error::{TablePageError, TablePageResult},
-    types::{PAGE_SIZE, RowId},
-};
+use crate::types::{PAGE_SIZE, RowId};
 
 use super::{
     layout::{self, PageSpec, SearchResult, SpaceError},
@@ -125,7 +123,7 @@ impl<'a> TableLeafPageMut<'a> {
     /// Fails with [`TablePageError::DuplicateRowId`] if the key already exists.
     pub(crate) fn insert(&mut self, row_id: RowId, payload: &[u8]) -> TablePageResult<()> {
         let insertion_index = match find_leaf_row_id(self.page, row_id)? {
-            SearchResult::Found(_) => return Err(TablePageError::DuplicateRowId(row_id)),
+            SearchResult::Found(_) => return Err(TablePageError::DuplicateRowId { row_id }),
             SearchResult::NotFound(insertion_index) => insertion_index,
         };
 
@@ -139,7 +137,7 @@ impl<'a> TableLeafPageMut<'a> {
     pub(crate) fn update(&mut self, row_id: RowId, payload: &[u8]) -> TablePageResult<()> {
         let slot_index = match find_leaf_row_id(self.page, row_id)? {
             SearchResult::Found(slot_index) => slot_index,
-            SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
+            SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound { row_id }),
         };
 
         let existing_cell = layout::cell_bytes_at_slot(self.page, LEAF_SPEC, slot_index)?;
@@ -169,7 +167,7 @@ impl<'a> TableLeafPageMut<'a> {
     pub(crate) fn delete(&mut self, row_id: RowId) -> TablePageResult<()> {
         let slot_index = match find_leaf_row_id(self.page, row_id)? {
             SearchResult::Found(slot_index) => slot_index,
-            SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound(row_id)),
+            SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound { row_id }),
         };
 
         layout::remove_slot(self.page, LEAF_SPEC, slot_index)
@@ -184,14 +182,14 @@ impl<'a> TableLeafPageMut<'a> {
 /// Returns the encoded byte length of a leaf cell.
 fn leaf_cell_len(cell: &[u8]) -> TablePageResult<usize> {
     if cell.len() < LEAF_CELL_PREFIX_SIZE {
-        return Err(TablePageError::CorruptPage("leaf cell too short"));
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellTooShort));
     }
 
     let payload_len = usize::from(read_u16(cell, 0));
     let cell_len = LEAF_CELL_PREFIX_SIZE + payload_len;
 
     if cell_len > cell.len() {
-        return Err(TablePageError::CorruptPage("leaf cell payload out of bounds"));
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellPayloadOutOfBounds));
     }
 
     Ok(cell_len)
@@ -200,7 +198,7 @@ fn leaf_cell_len(cell: &[u8]) -> TablePageResult<usize> {
 /// Extracts the row id key from an encoded leaf cell.
 fn leaf_row_id_from_cell(cell: &[u8]) -> TablePageResult<RowId> {
     if cell.len() < LEAF_CELL_PREFIX_SIZE {
-        return Err(TablePageError::CorruptPage("leaf cell too short"));
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellTooShort));
     }
 
     Ok(read_u64(cell, PAYLOAD_LEN_SIZE))
@@ -235,7 +233,10 @@ fn find_leaf_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<Se
 /// Computes the serialized cell length for a payload.
 fn leaf_cell_encoded_len(payload: &[u8]) -> TablePageResult<usize> {
     if payload.len() > usize::from(u16::MAX) {
-        return Err(TablePageError::CellTooLarge { len: payload.len() });
+        return Err(TablePageError::CellTooLarge {
+            len: payload.len(),
+            max: usize::from(u16::MAX),
+        });
     }
 
     Ok(LEAF_CELL_PREFIX_SIZE + payload.len())
@@ -244,8 +245,10 @@ fn leaf_cell_encoded_len(payload: &[u8]) -> TablePageResult<usize> {
 /// Encodes one leaf cell into owned bytes.
 fn encode_leaf_cell(row_id: RowId, payload: &[u8]) -> TablePageResult<Vec<u8>> {
     let cell_len = leaf_cell_encoded_len(payload)?;
-    let payload_len = u16::try_from(payload.len())
-        .map_err(|_| TablePageError::CellTooLarge { len: payload.len() })?;
+    let payload_len = u16::try_from(payload.len()).map_err(|_| TablePageError::CellTooLarge {
+        len: payload.len(),
+        max: usize::from(u16::MAX),
+    })?;
 
     let mut cell = vec![0u8; cell_len];
     cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
@@ -312,7 +315,7 @@ fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
 
         let next = scratch_len + cell_len;
         if next > scratch.len() {
-            return Err(TablePageError::CorruptPage("cell content underflow"));
+            return Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellContentUnderflow));
         }
         scratch[scratch_len..next].copy_from_slice(&cell[..cell_len]);
         scratch_len = next;
@@ -333,7 +336,11 @@ fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
             &scratch[scratch_offset..next],
         )? {
             Ok(offset) => offset,
-            Err(_) => return Err(TablePageError::CorruptPage("cell content underflow")),
+            Err(_) => {
+                return Err(TablePageError::CorruptPage(
+                    TablePageCorruptionKind::CellContentUnderflow,
+                ));
+            }
         };
         layout::insert_slot(page, LEAF_SPEC, slot_u16, cell_offset)?;
         scratch_offset = next;
@@ -381,7 +388,7 @@ mod tests {
 
         page[0] = 99;
         let err = TableLeafPageRef::from_bytes(&page).unwrap_err();
-        assert!(matches!(err, TablePageError::InvalidPageType(99)));
+        assert!(matches!(err, TablePageError::InvalidPageType { page_type: 99 }));
     }
 
     #[test]
@@ -429,7 +436,7 @@ mod tests {
 
         leaf.insert(11, &[1]).unwrap();
         let err = leaf.insert(11, &[2]).unwrap_err();
-        assert!(matches!(err, TablePageError::DuplicateRowId(11)));
+        assert!(matches!(err, TablePageError::DuplicateRowId { row_id: 11 }));
     }
 
     #[test]
@@ -442,7 +449,7 @@ mod tests {
         assert_eq!(leaf.search(9).unwrap().unwrap().payload, &[8, 8, 8]);
 
         let err = leaf.update(99, &[1]).unwrap_err();
-        assert!(matches!(err, TablePageError::RowIdNotFound(99)));
+        assert!(matches!(err, TablePageError::RowIdNotFound { row_id: 99 }));
     }
 
     #[test]
@@ -457,7 +464,7 @@ mod tests {
         assert_eq!(leaf.search(1).unwrap(), None);
 
         let err = leaf.delete(1).unwrap_err();
-        assert!(matches!(err, TablePageError::RowIdNotFound(1)));
+        assert!(matches!(err, TablePageError::RowIdNotFound { row_id: 1 }));
     }
 
     #[test]
@@ -539,7 +546,7 @@ mod tests {
         let mut page = initialized_leaf_page();
         let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
         let err = leaf.insert(2, &payload(7, 70_000)).unwrap_err();
-        assert!(matches!(err, TablePageError::CellTooLarge { len: 70_000 }));
+        assert!(matches!(err, TablePageError::CellTooLarge { len: 70_000, .. }));
     }
 
     #[test]
