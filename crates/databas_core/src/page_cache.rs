@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    disk_manager::DiskManager,
-    error::{PageCacheError, PageCacheResult},
+    disk_manager::{DiskManager, DiskManagerError},
     types::{PAGE_SIZE, PageId},
 };
 
@@ -37,7 +36,7 @@ impl PageCache {
     /// Returns an error when `frame_count` is zero.
     pub(crate) fn new(disk_manager: DiskManager, frame_count: usize) -> PageCacheResult<Self> {
         if frame_count == 0 {
-            return Err(PageCacheError::InvalidFrameCount(frame_count));
+            return Err(PageCacheError::InvalidFrameCount { frame_count });
         }
 
         Ok(Self {
@@ -94,7 +93,7 @@ impl PageCache {
             frame_count: self.frames.len(),
         })?;
         if frame.pin_count > 0 {
-            return Err(PageCacheError::PinnedPage(page_id));
+            return Err(PageCacheError::PinnedPage { page_id });
         }
 
         self.flush_frame_if_dirty(frame_id)
@@ -119,7 +118,7 @@ impl PageCache {
             };
 
             if pin_count > 0 {
-                return Err(PageCacheError::PinnedPage(page_id));
+                return Err(PageCacheError::PinnedPage { page_id });
             }
 
             self.flush_frame_if_dirty(frame_id)?;
@@ -208,6 +207,30 @@ impl PageCache {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PageCacheError {
+    #[error("disk manager error: {0}")]
+    Disk(#[source] DiskManagerError),
+    #[error("no evictable frame available")]
+    NoEvictableFrame,
+    #[error("page {page_id} is pinned")]
+    PinnedPage { page_id: u64 },
+    #[error("invalid frame count: {frame_count}")]
+    InvalidFrameCount { frame_count: usize },
+    #[error(
+        "corrupt page table entry: page {page_id} maps to invalid frame {frame_id} (frame count: {frame_count})"
+    )]
+    CorruptPageTableEntry { page_id: u64, frame_id: usize, frame_count: usize },
+}
+
+pub(crate) type PageCacheResult<T> = Result<T, PageCacheError>;
+
+impl From<DiskManagerError> for PageCacheError {
+    fn from(err: DiskManagerError) -> Self {
+        Self::Disk(err)
+    }
+}
+
 impl Drop for PageCache {
     /// Performs best-effort flushing for dirty unpinned frames.
     fn drop(&mut self) {
@@ -258,6 +281,7 @@ mod tests {
 
     use crate::{
         database_header::{FIRST_DATA_PAGE_ID, HEADER_PAGE_ID},
+        disk_manager::DiskManagerError,
         page_checksum::{PAGE_DATA_END, write_page_checksum},
     };
 
@@ -297,7 +321,7 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let disk_manager = DiskManager::new(file.path()).unwrap();
         let result = PageCache::new(disk_manager, 0);
-        assert!(matches!(result, Err(PageCacheError::InvalidFrameCount(0))));
+        assert!(matches!(result, Err(PageCacheError::InvalidFrameCount { frame_count: 0 })));
     }
 
     #[test]
@@ -503,7 +527,7 @@ mod tests {
         cache.page_table.insert(1, 0);
 
         let result = cache.flush_page(1);
-        assert!(matches!(result, Err(PageCacheError::PinnedPage(1))));
+        assert!(matches!(result, Err(PageCacheError::PinnedPage { page_id: 1 })));
     }
 
     #[test]
@@ -558,7 +582,7 @@ mod tests {
         cache.page_table.insert(1, 0);
 
         let result = cache.flush_all();
-        assert!(matches!(result, Err(PageCacheError::PinnedPage(1))));
+        assert!(matches!(result, Err(PageCacheError::PinnedPage { page_id: 1 })));
     }
 
     #[test]
@@ -630,7 +654,8 @@ mod tests {
         let read_result = disk_manager.read_page(FIRST_DATA_PAGE_ID, &mut page);
         assert!(matches!(
             read_result,
-            Err(crate::error::StorageError::InvalidPageId(id)) if id == FIRST_DATA_PAGE_ID
+            Err(DiskManagerError::InvalidPageId { page_id: id })
+                if id == FIRST_DATA_PAGE_ID
         ));
     }
 

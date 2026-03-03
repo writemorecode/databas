@@ -5,10 +5,9 @@ use std::{
 };
 
 use crate::{
-    database_header::{DatabaseHeader, HEADER_PAGE_ID},
-    error::{StorageError, StorageResult},
+    database_header::{DatabaseHeader, DatabaseHeaderError, HEADER_PAGE_ID},
     page_checksum::{checksum_matches, write_page_checksum},
-    types::{PAGE_SIZE, PageId},
+    types::{PageId, PAGE_SIZE},
 };
 
 /// Reads and writes pages to and from a database file.
@@ -19,7 +18,7 @@ pub(crate) struct DiskManager {
 
 impl DiskManager {
     /// Create a new `DiskManager` from a path to a file.
-    pub(crate) fn new(path: &Path) -> Result<Self, StorageError> {
+    pub(crate) fn new(path: &Path) -> DiskManagerResult<Self> {
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -42,7 +41,7 @@ impl DiskManager {
         }
 
         if !file_size.is_multiple_of(PAGE_SIZE as u64) {
-            return Err(StorageError::InvalidFileSize(file_size));
+            return Err(DiskManagerError::InvalidFileSize { size: file_size });
         }
 
         let page_count = file_size / (PAGE_SIZE as u64);
@@ -50,17 +49,18 @@ impl DiskManager {
         file.seek(std::io::SeekFrom::Start(Self::page_offset(HEADER_PAGE_ID)))?;
         file.read_exact(&mut header_page)?;
         if !checksum_matches(&header_page) {
-            return Err(StorageError::InvalidPageChecksum(HEADER_PAGE_ID));
+            return Err(DiskManagerError::InvalidPageChecksum { page_id: HEADER_PAGE_ID });
         }
-        let header = DatabaseHeader::read(&header_page)?;
-        header.validate(page_count)?;
+        let header =
+            DatabaseHeader::read(&header_page).map_err(DiskManagerError::InvalidDatabaseHeader)?;
+        header.validate(page_count).map_err(DiskManagerError::InvalidDatabaseHeader)?;
 
         Ok(Self { file, page_count })
     }
 
     /// Extends the database file by one page.
     /// Returns page ID of the new page.
-    pub(crate) fn new_page(&mut self) -> StorageResult<PageId> {
+    pub(crate) fn new_page(&mut self) -> DiskManagerResult<PageId> {
         let page_id = self.page_count;
         let new_page_id = page_id + 1;
         let new_file_size = Self::page_offset(new_page_id);
@@ -80,15 +80,15 @@ impl DiskManager {
         &mut self,
         page_id: PageId,
         buf: &mut [u8; PAGE_SIZE],
-    ) -> StorageResult<()> {
+    ) -> DiskManagerResult<()> {
         if page_id >= self.page_count {
-            return Err(StorageError::InvalidPageId(page_id));
+            return Err(DiskManagerError::InvalidPageId { page_id });
         }
         let offset = Self::page_offset(page_id);
         self.file.seek(std::io::SeekFrom::Start(offset))?;
         self.file.read_exact(buf)?;
         if !checksum_matches(buf) {
-            return Err(StorageError::InvalidPageChecksum(page_id));
+            return Err(DiskManagerError::InvalidPageChecksum { page_id });
         }
         Ok(())
     }
@@ -98,9 +98,9 @@ impl DiskManager {
         &mut self,
         page_id: PageId,
         buf: &[u8; PAGE_SIZE],
-    ) -> StorageResult<()> {
+    ) -> DiskManagerResult<()> {
         if page_id >= self.page_count {
-            return Err(StorageError::InvalidPageId(page_id));
+            return Err(DiskManagerError::InvalidPageId { page_id });
         }
         let mut canonical_buf = *buf;
         write_page_checksum(&mut canonical_buf);
@@ -116,7 +116,7 @@ impl DiskManager {
         page_id * (PAGE_SIZE as u64)
     }
 
-    fn write_header_page(&mut self) -> StorageResult<()> {
+    fn write_header_page(&mut self) -> DiskManagerResult<()> {
         let mut header_page = [0u8; PAGE_SIZE];
         DatabaseHeader::new(self.page_count).write(&mut header_page);
         self.file.seek(std::io::SeekFrom::Start(Self::page_offset(HEADER_PAGE_ID)))?;
@@ -126,12 +126,35 @@ impl DiskManager {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DiskManagerError {
+    #[error("i/o error")]
+    Io(#[source] std::io::Error),
+    #[error("invalid page id: {page_id}")]
+    InvalidPageId { page_id: u64 },
+    #[error("invalid file size: {size}")]
+    InvalidFileSize { size: u64 },
+    #[error("invalid page checksum: {page_id}")]
+    InvalidPageChecksum { page_id: u64 },
+    #[error("invalid database header: {0}")]
+    InvalidDatabaseHeader(#[source] DatabaseHeaderError),
+}
+
+impl From<std::io::Error> for DiskManagerError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+pub(crate) type DiskManagerResult<T> = Result<T, DiskManagerError>;
+
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{
-        database_header::{DatabaseHeader, FIRST_DATA_PAGE_ID, HEADER_PAGE_ID},
-        page_checksum::{PAGE_DATA_END, write_page_checksum},
+        database_header::{
+            DatabaseHeader, DatabaseHeaderError, FIRST_DATA_PAGE_ID, HEADER_PAGE_ID,
+        },
+        page_checksum::{write_page_checksum, PAGE_DATA_END},
     };
     use fastrand::Rng;
     use std::{
@@ -175,7 +198,10 @@ mod test {
         let mut buf = [0u8; PAGE_SIZE];
         let page_id = 5000;
         let read = dm.read_page(page_id, &mut buf);
-        assert!(matches!(read, Err(StorageError::InvalidPageId(id)) if id == page_id));
+        assert!(matches!(
+            read,
+            Err(DiskManagerError::InvalidPageId { page_id: id }) if id == page_id
+        ));
     }
 
     #[test]
@@ -185,7 +211,10 @@ mod test {
         let buf = [0u8; PAGE_SIZE];
         let page_id = 5000;
         let write = dm.write_page(page_id, &buf);
-        assert!(matches!(write, Err(StorageError::InvalidPageId(id)) if id == page_id));
+        assert!(matches!(
+            write,
+            Err(DiskManagerError::InvalidPageId { page_id: id }) if id == page_id
+        ));
     }
 
     #[test]
@@ -197,7 +226,7 @@ mod test {
         let dm = DiskManager::new(file.path());
         assert!(matches!(
             dm,
-            Err(StorageError::InvalidFileSize(size)) if size == invalid_size
+            Err(DiskManagerError::InvalidFileSize { size }) if size == invalid_size
         ));
     }
 
@@ -243,13 +272,13 @@ mod test {
         let read = dm.read_page(invalid_page_id, &mut read_buf);
         assert!(matches!(
             read,
-            Err(StorageError::InvalidPageId(id)) if id == invalid_page_id
+            Err(DiskManagerError::InvalidPageId { page_id: id }) if id == invalid_page_id
         ));
 
         let write = dm.write_page(invalid_page_id, &write_buf);
         assert!(matches!(
             write,
-            Err(StorageError::InvalidPageId(id)) if id == invalid_page_id
+            Err(DiskManagerError::InvalidPageId { page_id: id }) if id == invalid_page_id
         ));
     }
 
@@ -348,7 +377,10 @@ mod test {
             Ok(_) => panic!("expected invalid database magic"),
             Err(err) => err,
         };
-        assert!(matches!(err, StorageError::InvalidDatabaseHeader("invalid magic")));
+        assert!(matches!(
+            err,
+            DiskManagerError::InvalidDatabaseHeader(DatabaseHeaderError::InvalidMagic)
+        ));
     }
 
     #[test]
@@ -372,7 +404,13 @@ mod test {
             Ok(_) => panic!("expected mismatched header page size"),
             Err(err) => err,
         };
-        assert!(matches!(err, StorageError::InvalidDatabaseHeader("invalid page size")));
+        assert!(matches!(
+            err,
+            DiskManagerError::InvalidDatabaseHeader(DatabaseHeaderError::InvalidPageSize {
+                actual: 0,
+                expected
+            }) if expected == PAGE_SIZE
+        ));
     }
 
     #[test]
@@ -399,7 +437,10 @@ mod test {
         };
         assert!(matches!(
             err,
-            StorageError::InvalidDatabaseHeader("page count does not match file size")
+            DiskManagerError::InvalidDatabaseHeader(DatabaseHeaderError::PageCountMismatch {
+                actual: 999,
+                expected: 2,
+            })
         ));
     }
 
@@ -421,7 +462,10 @@ mod test {
         let mut dm = DiskManager::new(file.path()).unwrap();
         let mut read_buf = [0u8; PAGE_SIZE];
         let err = dm.read_page(page_id, &mut read_buf).unwrap_err();
-        assert!(matches!(err, StorageError::InvalidPageChecksum(id) if id == page_id));
+        assert!(matches!(
+            err,
+            DiskManagerError::InvalidPageChecksum { page_id: id } if id == page_id
+        ));
     }
 
     #[test]

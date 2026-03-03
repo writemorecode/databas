@@ -1,9 +1,6 @@
-use crate::{
-    error::{TablePageError, TablePageResult},
-    page_checksum::PAGE_DATA_END,
-    types::PAGE_SIZE,
-};
+use crate::{page_checksum::PAGE_DATA_END, types::PAGE_SIZE};
 
+use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
 pub(super) const LEAF_PAGE_TYPE: u8 = 1;
 pub(super) const INTERIOR_PAGE_TYPE: u8 = 2;
 
@@ -78,7 +75,7 @@ pub(super) fn init_empty(page: &mut [u8; PAGE_SIZE], spec: PageSpec) -> TablePag
 pub(super) fn validate(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<()> {
     let page_type = page[PAGE_TYPE_OFFSET];
     if page_type != spec.page_type {
-        return Err(TablePageError::InvalidPageType(page_type));
+        return Err(TablePageError::InvalidPageType { page_type });
     }
 
     let cell_count = usize::from(cell_count(page));
@@ -86,7 +83,7 @@ pub(super) fn validate(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResul
     let content_start = usize::from(content_start(page));
 
     if content_start < slot_dir_end || content_start > PAGE_DATA_END {
-        return Err(TablePageError::CorruptPage("invalid cell content start"));
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::InvalidCellContentStart));
     }
 
     Ok(())
@@ -145,7 +142,7 @@ pub(super) fn try_append_cell(
 
     let cell_len = cell.len();
     if cell_len > usize::from(u16::MAX) {
-        return Err(TablePageError::CellTooLarge { len: cell_len });
+        return Err(TablePageError::CellTooLarge { len: cell_len, max: usize::from(u16::MAX) });
     }
 
     let current_count = usize::from(cell_count(page));
@@ -173,7 +170,7 @@ pub(super) fn try_append_cell_for_insert(
 
     let cell_len = cell.len();
     if cell_len > usize::from(u16::MAX) {
-        return Err(TablePageError::CellTooLarge { len: cell_len });
+        return Err(TablePageError::CellTooLarge { len: cell_len, max: usize::from(u16::MAX) });
     }
 
     let current_count = usize::from(cell_count(page));
@@ -204,7 +201,7 @@ pub(super) fn set_slot_offset(
     let cell_count = usize::from(cell_count(page));
     let slot_index_usize = usize::from(slot_index);
     if slot_index_usize >= cell_count {
-        return Err(TablePageError::CorruptPage("slot index out of bounds"));
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::SlotIndexOutOfBounds));
     }
 
     write_slot_offset_raw(page, spec, slot_index_usize, cell_offset)
@@ -222,14 +219,16 @@ pub(super) fn insert_slot(
     let cell_count = usize::from(cell_count(page));
     let insert_index_usize = usize::from(insert_index);
     if insert_index_usize > cell_count {
-        return Err(TablePageError::CorruptPage("slot index out of bounds"));
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::SlotIndexOutOfBounds));
     }
 
     let new_count = cell_count + 1;
     let slot_dir_end_after = slot_dir_end_for_count(spec, new_count)?;
     let content_start = usize::from(content_start(page));
     if slot_dir_end_after > content_start {
-        return Err(TablePageError::CorruptPage("slot directory overlaps cell content"));
+        return Err(TablePageError::CorruptPage(
+            TablePageCorruptionKind::SlotDirectoryOverlapsCellContent,
+        ));
     }
 
     for slot in (insert_index_usize..cell_count).rev() {
@@ -254,7 +253,7 @@ pub(super) fn remove_slot(
     let cell_count = usize::from(cell_count(page));
     let remove_index_usize = usize::from(remove_index);
     if remove_index_usize >= cell_count {
-        return Err(TablePageError::CorruptPage("slot index out of bounds"));
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::SlotIndexOutOfBounds));
     }
 
     for slot in remove_index_usize..(cell_count - 1) {
@@ -296,7 +295,9 @@ fn slot_dir_end_for_count(spec: PageSpec, cell_count: usize) -> TablePageResult<
     let slot_dir_end = spec.header_size + (cell_count * SLOT_WIDTH);
 
     if slot_dir_end > PAGE_DATA_END {
-        return Err(TablePageError::CorruptPage("slot directory exceeds page size"));
+        return Err(TablePageError::CorruptPage(
+            TablePageCorruptionKind::SlotDirectoryExceedsPageSize,
+        ));
     }
 
     Ok(slot_dir_end)
@@ -307,7 +308,9 @@ fn slot_position(spec: PageSpec, slot_index: usize) -> TablePageResult<usize> {
     let position = spec.header_size + (slot_index * SLOT_WIDTH);
 
     if position + SLOT_WIDTH > PAGE_DATA_END {
-        return Err(TablePageError::CorruptPage("slot directory exceeds page size"));
+        return Err(TablePageError::CorruptPage(
+            TablePageCorruptionKind::SlotDirectoryExceedsPageSize,
+        ));
     }
 
     Ok(position)
@@ -322,7 +325,7 @@ pub(super) fn slot_offset(
     let cell_count = usize::from(cell_count(page));
     let slot_index = usize::from(slot_index);
     if slot_index >= cell_count {
-        return Err(TablePageError::CorruptPage("slot index out of bounds"));
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::SlotIndexOutOfBounds));
     }
 
     let position = slot_position(spec, slot_index)?;
