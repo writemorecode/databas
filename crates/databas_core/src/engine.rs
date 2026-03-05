@@ -11,7 +11,9 @@ use crate::{
     types::PAGE_SIZE,
 };
 
+/// Identifier of an on-disk page managed by the storage engine.
 pub type PageId = u64;
+/// Primary key type used by B-tree records.
 pub type RowId = u64;
 
 const DEFAULT_PAGE_CACHE_SIZE: usize = 16;
@@ -47,41 +49,54 @@ struct ChildSplitEvent {
     right_child_page_id: PageId,
 }
 
+/// Entry point for opening and creating B-trees backed by a single database file.
 pub struct Engine {
     pub(crate) page_cache: PageCache,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Borrowed view of a record key/value pair.
 pub struct RecordRef<'a> {
+    /// Record key.
     pub key: RowId,
+    /// Record payload bytes.
     pub value: &'a [u8],
 }
 
+/// Pinned handle to a record on a page.
+///
+/// The guard keeps the underlying page pinned in the cache for as long as this
+/// value is alive.
 pub struct RecordGuard<'tree> {
     guard: PinGuard<'tree>,
     slot_id: u16,
 }
 
 impl<'tree> RecordGuard<'tree> {
+    /// Returns the record key.
     pub fn key(&self) -> Result<RowId, StorageError> {
         Ok(TableLeafPageRef::from_bytes(self.guard.page())?.cell_at_slot(self.slot_id)?.row_id)
     }
 
+    /// Returns the record value bytes.
     pub fn value(&self) -> Result<&[u8], StorageError> {
         Ok(TableLeafPageRef::from_bytes(self.guard.page())?.cell_at_slot(self.slot_id)?.payload)
     }
 
+    /// Returns both key and value as a borrowed [`RecordRef`].
     pub fn record(&self) -> Result<RecordRef<'_>, StorageError> {
         let cell = TableLeafPageRef::from_bytes(self.guard.page())?.cell_at_slot(self.slot_id)?;
         Ok(RecordRef { key: cell.row_id, value: cell.payload })
     }
 }
 
+/// Mutable handle to a specific B-tree root inside an [`Engine`].
 pub struct BTreeHandle<'engine> {
     engine: &'engine mut Engine,
     tree: BTree,
 }
 
+/// Position-based cursor for ordered traversal and in-place updates.
 pub struct BTreeCursor<'tree> {
     engine: &'tree mut Engine,
     tree: BTree,
@@ -89,17 +104,20 @@ pub struct BTreeCursor<'tree> {
 }
 
 impl Engine {
+    /// Opens an engine backed by `file`.
     pub fn new(file: &Path) -> Result<Self, StorageError> {
         let disk_manager = DiskManager::new(file)?;
         let page_cache = PageCache::new(disk_manager, DEFAULT_PAGE_CACHE_SIZE)?;
         Ok(Self { page_cache })
     }
 
+    /// Opens an existing B-tree by root page id.
     pub fn open_btree(&mut self, root_page_id: PageId) -> Result<BTreeHandle<'_>, StorageError> {
         let tree = BTree { root_page_id };
         Ok(BTreeHandle { engine: self, tree })
     }
 
+    /// Creates a new empty B-tree and returns its handle.
     pub fn create_btree(&mut self) -> Result<BTreeHandle<'_>, StorageError> {
         let root_page_id = {
             let (page_id, mut page_guard) = self.page_cache.new_page()?;
@@ -1277,74 +1295,93 @@ impl Engine {
 }
 
 impl<'engine> BTreeHandle<'engine> {
+    /// Returns the root page id for this B-tree.
     pub fn root_page_id(&self) -> PageId {
         self.tree.root_page_id
     }
 
+    /// Retrieves a record by exact key.
     pub fn get(&mut self, key: RowId) -> Result<Option<RecordGuard<'_>>, StorageError> {
         self.engine.btree_search(self.tree.root_page_id, key)
     }
 
+    /// Returns `true` if `key` exists.
     pub fn contains(&mut self, key: RowId) -> Result<bool, StorageError> {
         Ok(self.engine.btree_search(self.tree.root_page_id, key)?.is_some())
     }
 
+    /// Inserts a new record.
+    ///
+    /// Returns an error if `key` already exists.
     pub fn insert(&mut self, key: RowId, value: &[u8]) -> Result<(), StorageError> {
         self.engine.btree_insert(self.tree.root_page_id, key, value)
     }
 
+    /// Replaces the value of an existing record.
+    ///
+    /// Returns an error if `key` does not exist.
     pub fn update(&mut self, key: RowId, value: &[u8]) -> Result<(), StorageError> {
         self.engine.btree_update(self.tree.root_page_id, key, value)
     }
 
+    /// Inserts `key` if missing, otherwise updates it.
     pub fn upsert(&mut self, key: RowId, value: &[u8]) -> Result<(), StorageError> {
         if self.contains(key)? { self.update(key, value) } else { self.insert(key, value) }
     }
 
+    /// Deletes `key` and returns whether a record was removed.
     pub fn delete(&mut self, key: RowId) -> Result<bool, StorageError> {
         self.engine.btree_delete(self.tree.root_page_id, key)
     }
 
+    /// Creates a cursor positioned as invalid.
     pub fn cursor(&mut self) -> Result<BTreeCursor<'_>, StorageError> {
         Ok(BTreeCursor::new(self.engine, self.tree))
     }
 
+    /// Returns a cursor positioned at the smallest key.
     pub fn seek_first(&mut self) -> Result<BTreeCursor<'_>, StorageError> {
         let mut cursor = self.cursor()?;
         cursor.seek_first()?;
         Ok(cursor)
     }
 
+    /// Returns a cursor positioned at the largest key.
     pub fn seek_last(&mut self) -> Result<BTreeCursor<'_>, StorageError> {
         let mut cursor = self.cursor()?;
         cursor.seek_last()?;
         Ok(cursor)
     }
 
+    /// Returns a cursor positioned at `key` if it exists, otherwise invalid.
     pub fn seek(&mut self, key: RowId) -> Result<BTreeCursor<'_>, StorageError> {
         let mut cursor = self.cursor()?;
         cursor.seek(key)?;
         Ok(cursor)
     }
 
+    /// Returns a cursor positioned at the first key greater than or equal to `key`.
     pub fn seek_ge(&mut self, key: RowId) -> Result<BTreeCursor<'_>, StorageError> {
         let mut cursor = self.cursor()?;
         cursor.seek_ge(key)?;
         Ok(cursor)
     }
 
+    /// Returns a cursor positioned at the first key strictly greater than `key`.
     pub fn seek_gt(&mut self, key: RowId) -> Result<BTreeCursor<'_>, StorageError> {
         let mut cursor = self.cursor()?;
         cursor.seek_gt(key)?;
         Ok(cursor)
     }
 
+    /// Returns a cursor positioned at the last key less than or equal to `key`.
     pub fn seek_le(&mut self, key: RowId) -> Result<BTreeCursor<'_>, StorageError> {
         let mut cursor = self.cursor()?;
         cursor.seek_le(key)?;
         Ok(cursor)
     }
 
+    /// Returns a cursor positioned at the last key strictly less than `key`.
     pub fn seek_lt(&mut self, key: RowId) -> Result<BTreeCursor<'_>, StorageError> {
         let mut cursor = self.cursor()?;
         cursor.seek_lt(key)?;
@@ -1357,14 +1394,17 @@ impl<'tree> BTreeCursor<'tree> {
         Self { engine, tree, position: None }
     }
 
+    /// Returns `true` when the cursor currently points at a record.
     pub fn is_valid(&self) -> bool {
         self.position.is_some()
     }
 
+    /// Returns the current key when the cursor is valid.
     pub fn key(&self) -> Result<Option<RowId>, StorageError> {
         Ok(self.position.map(|position| position.key))
     }
 
+    /// Returns the current record when the cursor is valid.
     pub fn record(&mut self) -> Result<Option<RecordGuard<'_>>, StorageError> {
         let Some(position) = self.position else {
             return Ok(None);
@@ -1374,16 +1414,19 @@ impl<'tree> BTreeCursor<'tree> {
         Ok(Some(RecordGuard { guard: page_guard, slot_id: position.slot_id }))
     }
 
+    /// Moves to the smallest key in the tree.
     pub fn seek_first(&mut self) -> Result<(), StorageError> {
         self.position = self.engine.btree_seek_first_location(self.tree.root_page_id)?;
         Ok(())
     }
 
+    /// Moves to the largest key in the tree.
     pub fn seek_last(&mut self) -> Result<(), StorageError> {
         self.position = self.engine.btree_seek_last_location(self.tree.root_page_id)?;
         Ok(())
     }
 
+    /// Moves to `key` if it exists, otherwise invalidates the cursor.
     pub fn seek(&mut self, key: RowId) -> Result<(), StorageError> {
         self.position = self.engine.btree_seek_ge_location(self.tree.root_page_id, key)?;
         if self.position.map(|position| position.key) != Some(key) {
@@ -1392,26 +1435,33 @@ impl<'tree> BTreeCursor<'tree> {
         Ok(())
     }
 
+    /// Moves to the first key greater than or equal to `key`.
     pub fn seek_ge(&mut self, key: RowId) -> Result<(), StorageError> {
         self.position = self.engine.btree_seek_ge_location(self.tree.root_page_id, key)?;
         Ok(())
     }
 
+    /// Moves to the first key strictly greater than `key`.
     pub fn seek_gt(&mut self, key: RowId) -> Result<(), StorageError> {
         self.position = self.engine.btree_seek_gt_location(self.tree.root_page_id, key)?;
         Ok(())
     }
 
+    /// Moves to the last key less than or equal to `key`.
     pub fn seek_le(&mut self, key: RowId) -> Result<(), StorageError> {
         self.position = self.engine.btree_seek_le_location(self.tree.root_page_id, key)?;
         Ok(())
     }
 
+    /// Moves to the last key strictly less than `key`.
     pub fn seek_lt(&mut self, key: RowId) -> Result<(), StorageError> {
         self.position = self.engine.btree_seek_lt_location(self.tree.root_page_id, key)?;
         Ok(())
     }
 
+    /// Advances to the next key.
+    ///
+    /// If the cursor is invalid, this is a no-op.
     pub fn next_position(&mut self) -> Result<(), StorageError> {
         let Some(position) = self.position else {
             return Ok(());
@@ -1421,6 +1471,9 @@ impl<'tree> BTreeCursor<'tree> {
         Ok(())
     }
 
+    /// Moves to the previous key.
+    ///
+    /// If the cursor is invalid, this is a no-op.
     pub fn prev_position(&mut self) -> Result<(), StorageError> {
         let Some(position) = self.position else {
             return Ok(());
@@ -1430,6 +1483,9 @@ impl<'tree> BTreeCursor<'tree> {
         Ok(())
     }
 
+    /// Deletes the current record and repositions to the next key.
+    ///
+    /// If the cursor is invalid, this is a no-op.
     pub fn delete_current(&mut self) -> Result<(), StorageError> {
         let Some(position) = self.position else {
             return Ok(());
@@ -1440,6 +1496,9 @@ impl<'tree> BTreeCursor<'tree> {
         Ok(())
     }
 
+    /// Updates the value at the current position.
+    ///
+    /// If the cursor is invalid, this is a no-op.
     pub fn update_current(&mut self, value: &[u8]) -> Result<(), StorageError> {
         let Some(position) = self.position else {
             return Ok(());
