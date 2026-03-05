@@ -584,61 +584,221 @@ impl Engine {
         }
     }
 
-    fn btree_collect_locations(
+    fn btree_leaf_location_at_slot(
         &mut self,
-        root_page_id: PageId,
-    ) -> Result<Vec<RecordLocation>, StorageError> {
-        let mut out = Vec::new();
-        self.btree_collect_locations_in_order(root_page_id, &mut out)?;
-        Ok(out)
+        leaf_page_id: PageId,
+        slot_id: u16,
+    ) -> Result<RecordLocation, StorageError> {
+        let page_guard = self.page_cache.fetch_page(leaf_page_id)?;
+        let leaf_page = TableLeafPageRef::from_bytes(page_guard.page())?;
+        let cell = leaf_page.cell_at_slot(slot_id)?;
+        Ok(RecordLocation { page_id: leaf_page_id, slot_id, key: cell.row_id })
     }
 
-    fn btree_collect_locations_in_order(
+    fn btree_first_location_in_leaf(
         &mut self,
-        page_id: PageId,
-        out: &mut Vec<RecordLocation>,
-    ) -> Result<(), StorageError> {
-        let child_page_ids = {
-            let page_guard = self.page_cache.fetch_page(page_id)?;
-            let page = TablePageRef::from_bytes(page_guard.page())?;
+        leaf_page_id: PageId,
+    ) -> Result<Option<RecordLocation>, StorageError> {
+        let page_guard = self.page_cache.fetch_page(leaf_page_id)?;
+        let leaf_page = TableLeafPageRef::from_bytes(page_guard.page())?;
+        if leaf_page.cell_count() == 0 {
+            return Ok(None);
+        }
+        let cell = leaf_page.cell_at_slot(0)?;
+        Ok(Some(RecordLocation { page_id: leaf_page_id, slot_id: 0, key: cell.row_id }))
+    }
 
-            match page {
-                TablePageRef::Leaf(leaf_page) => {
-                    for slot_id in 0..leaf_page.cell_count() {
-                        let cell = leaf_page.cell_at_slot(slot_id)?;
-                        out.push(RecordLocation { page_id, slot_id, key: cell.row_id });
-                    }
-                    return Ok(());
-                }
-                TablePageRef::Interior(interior_page) => {
-                    let mut page_ids = Vec::with_capacity(usize::from(interior_page.child_count()));
-                    for child_index in 0..interior_page.child_count() {
-                        page_ids.push(interior_page.child_at(child_index)?);
-                    }
-                    page_ids
+    fn btree_last_location_in_leaf(
+        &mut self,
+        leaf_page_id: PageId,
+    ) -> Result<Option<RecordLocation>, StorageError> {
+        let page_guard = self.page_cache.fetch_page(leaf_page_id)?;
+        let leaf_page = TableLeafPageRef::from_bytes(page_guard.page())?;
+        let Some(last_slot_id) = leaf_page.cell_count().checked_sub(1) else {
+            return Ok(None);
+        };
+        let cell = leaf_page.cell_at_slot(last_slot_id)?;
+        Ok(Some(RecordLocation { page_id: leaf_page_id, slot_id: last_slot_id, key: cell.row_id }))
+    }
+
+    fn btree_leftmost_leaf_page_and_path(
+        &mut self,
+        start_page_id: PageId,
+        mut path: Vec<BTreePathEntry>,
+    ) -> Result<(PageId, Vec<BTreePathEntry>), StorageError> {
+        let mut current_page_id = start_page_id;
+
+        loop {
+            let current_page_guard = self.page_cache.fetch_page(current_page_id)?;
+            let current_page = TablePageRef::from_bytes(current_page_guard.page())?;
+            match current_page {
+                TablePageRef::Leaf(_) => return Ok((current_page_id, path)),
+                TablePageRef::Interior(interior) => {
+                    let child_index = 0;
+                    let child_page_id = interior.child_at(child_index)?;
+                    path.push(BTreePathEntry { page_id: current_page_id, child_index });
+                    current_page_id = child_page_id;
                 }
             }
-        };
+        }
+    }
 
-        for child_page_id in child_page_ids {
-            self.btree_collect_locations_in_order(child_page_id, out)?;
+    fn btree_rightmost_leaf_page_and_path(
+        &mut self,
+        start_page_id: PageId,
+        mut path: Vec<BTreePathEntry>,
+    ) -> Result<(PageId, Vec<BTreePathEntry>), StorageError> {
+        let mut current_page_id = start_page_id;
+
+        loop {
+            let current_page_guard = self.page_cache.fetch_page(current_page_id)?;
+            let current_page = TablePageRef::from_bytes(current_page_guard.page())?;
+            match current_page {
+                TablePageRef::Leaf(_) => return Ok((current_page_id, path)),
+                TablePageRef::Interior(interior) => {
+                    let child_count = interior.child_count();
+                    let child_index = child_count.checked_sub(1).ok_or_else(|| {
+                        StorageError::from(TablePageError::CorruptPage(
+                            TablePageCorruptionKind::SlotIndexOutOfBounds,
+                        ))
+                    })?;
+                    let child_page_id = interior.child_at(child_index)?;
+                    path.push(BTreePathEntry { page_id: current_page_id, child_index });
+                    current_page_id = child_page_id;
+                }
+            }
+        }
+    }
+
+    fn btree_next_leaf_from_path(
+        &mut self,
+        path: &[BTreePathEntry],
+    ) -> Result<Option<(PageId, Vec<BTreePathEntry>)>, StorageError> {
+        for (path_index, entry) in path.iter().enumerate().rev() {
+            let maybe_next_sibling = {
+                let page_guard = self.page_cache.fetch_page(entry.page_id)?;
+                let page = TablePageRef::from_bytes(page_guard.page())?;
+                let interior = match page {
+                    TablePageRef::Interior(interior) => interior,
+                    TablePageRef::Leaf(_) => {
+                        return Err(TablePageError::CorruptPage(
+                            TablePageCorruptionKind::SlotIndexOutOfBounds,
+                        )
+                        .into());
+                    }
+                };
+                let child_count = interior.child_count();
+                if entry.child_index < child_count.saturating_sub(1) {
+                    let next_child_index = entry.child_index + 1;
+                    Some((next_child_index, interior.child_at(next_child_index)?))
+                } else {
+                    None
+                }
+            };
+
+            if let Some((next_child_index, sibling_page_id)) = maybe_next_sibling {
+                let mut sibling_path = path[..path_index].to_vec();
+                sibling_path
+                    .push(BTreePathEntry { page_id: entry.page_id, child_index: next_child_index });
+                let (leaf_page_id, leaf_path) =
+                    self.btree_leftmost_leaf_page_and_path(sibling_page_id, sibling_path)?;
+                return Ok(Some((leaf_page_id, leaf_path)));
+            }
         }
 
-        Ok(())
+        Ok(None)
+    }
+
+    fn btree_prev_leaf_from_path(
+        &mut self,
+        path: &[BTreePathEntry],
+    ) -> Result<Option<(PageId, Vec<BTreePathEntry>)>, StorageError> {
+        for (path_index, entry) in path.iter().enumerate().rev() {
+            let maybe_prev_sibling = {
+                let page_guard = self.page_cache.fetch_page(entry.page_id)?;
+                let page = TablePageRef::from_bytes(page_guard.page())?;
+                let interior = match page {
+                    TablePageRef::Interior(interior) => interior,
+                    TablePageRef::Leaf(_) => {
+                        return Err(TablePageError::CorruptPage(
+                            TablePageCorruptionKind::SlotIndexOutOfBounds,
+                        )
+                        .into());
+                    }
+                };
+                if entry.child_index > 0 {
+                    let prev_child_index = entry.child_index - 1;
+                    Some((prev_child_index, interior.child_at(prev_child_index)?))
+                } else {
+                    None
+                }
+            };
+
+            if let Some((prev_child_index, sibling_page_id)) = maybe_prev_sibling {
+                let mut sibling_path = path[..path_index].to_vec();
+                sibling_path
+                    .push(BTreePathEntry { page_id: entry.page_id, child_index: prev_child_index });
+                let (leaf_page_id, leaf_path) =
+                    self.btree_rightmost_leaf_page_and_path(sibling_page_id, sibling_path)?;
+                return Ok(Some((leaf_page_id, leaf_path)));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn btree_leftmost_location(
+        &mut self,
+        root_page_id: PageId,
+    ) -> Result<Option<RecordLocation>, StorageError> {
+        let (mut leaf_page_id, mut path) =
+            self.btree_leftmost_leaf_page_and_path(root_page_id, Vec::new())?;
+
+        loop {
+            if let Some(location) = self.btree_first_location_in_leaf(leaf_page_id)? {
+                return Ok(Some(location));
+            }
+            let Some((next_leaf_page_id, next_path)) = self.btree_next_leaf_from_path(&path)?
+            else {
+                return Ok(None);
+            };
+            leaf_page_id = next_leaf_page_id;
+            path = next_path;
+        }
+    }
+
+    fn btree_rightmost_location(
+        &mut self,
+        root_page_id: PageId,
+    ) -> Result<Option<RecordLocation>, StorageError> {
+        let (mut leaf_page_id, mut path) =
+            self.btree_rightmost_leaf_page_and_path(root_page_id, Vec::new())?;
+
+        loop {
+            if let Some(location) = self.btree_last_location_in_leaf(leaf_page_id)? {
+                return Ok(Some(location));
+            }
+            let Some((prev_leaf_page_id, prev_path)) = self.btree_prev_leaf_from_path(&path)?
+            else {
+                return Ok(None);
+            };
+            leaf_page_id = prev_leaf_page_id;
+            path = prev_path;
+        }
     }
 
     fn btree_seek_first_location(
         &mut self,
         root_page_id: PageId,
     ) -> Result<Option<RecordLocation>, StorageError> {
-        Ok(self.btree_collect_locations(root_page_id)?.into_iter().next())
+        self.btree_leftmost_location(root_page_id)
     }
 
     fn btree_seek_last_location(
         &mut self,
         root_page_id: PageId,
     ) -> Result<Option<RecordLocation>, StorageError> {
-        Ok(self.btree_collect_locations(root_page_id)?.into_iter().last())
+        self.btree_rightmost_location(root_page_id)
     }
 
     fn btree_seek_ge_location(
@@ -646,11 +806,28 @@ impl Engine {
         root_page_id: PageId,
         key: RowId,
     ) -> Result<Option<RecordLocation>, StorageError> {
-        let locations = self.btree_collect_locations(root_page_id)?;
-        let index = match locations.binary_search_by_key(&key, |location| location.key) {
-            Ok(index) | Err(index) => index,
-        };
-        Ok(locations.get(index).copied())
+        let (mut leaf_page_id, mut path) =
+            self.btree_find_leaf_page_and_path_for_row_id(root_page_id, key)?;
+
+        loop {
+            let maybe_slot_id = {
+                let page_guard = self.page_cache.fetch_page(leaf_page_id)?;
+                let leaf_page = TableLeafPageRef::from_bytes(page_guard.page())?;
+                let slot_id = leaf_page.lower_bound_slot(key)?;
+                (slot_id < leaf_page.cell_count()).then_some(slot_id)
+            };
+
+            if let Some(slot_id) = maybe_slot_id {
+                return Ok(Some(self.btree_leaf_location_at_slot(leaf_page_id, slot_id)?));
+            }
+
+            let Some((next_leaf_page_id, next_path)) = self.btree_next_leaf_from_path(&path)?
+            else {
+                return Ok(None);
+            };
+            leaf_page_id = next_leaf_page_id;
+            path = next_path;
+        }
     }
 
     fn btree_seek_gt_location(
@@ -658,15 +835,44 @@ impl Engine {
         root_page_id: PageId,
         key: RowId,
     ) -> Result<Option<RecordLocation>, StorageError> {
-        let locations = self.btree_collect_locations(root_page_id)?;
-        let mut index = match locations.binary_search_by_key(&key, |location| location.key) {
-            Ok(index) => index + 1,
-            Err(index) => index,
-        };
-        while index < locations.len() && locations[index].key <= key {
-            index += 1;
+        let (mut leaf_page_id, mut path) =
+            self.btree_find_leaf_page_and_path_for_row_id(root_page_id, key)?;
+
+        loop {
+            let maybe_slot_id = {
+                let page_guard = self.page_cache.fetch_page(leaf_page_id)?;
+                let leaf_page = TableLeafPageRef::from_bytes(page_guard.page())?;
+                let cell_count = usize::from(leaf_page.cell_count());
+                let lower_bound = usize::from(leaf_page.lower_bound_slot(key)?);
+
+                if lower_bound >= cell_count {
+                    None
+                } else {
+                    let lower_bound_slot =
+                        u16::try_from(lower_bound).expect("leaf lower-bound slot fits in u16");
+                    let cell = leaf_page.cell_at_slot(lower_bound_slot)?;
+                    if cell.row_id > key {
+                        Some(lower_bound_slot)
+                    } else {
+                        let next_slot = lower_bound + 1;
+                        (next_slot < cell_count).then(|| {
+                            u16::try_from(next_slot).expect("leaf successor slot fits in u16")
+                        })
+                    }
+                }
+            };
+
+            if let Some(slot_id) = maybe_slot_id {
+                return Ok(Some(self.btree_leaf_location_at_slot(leaf_page_id, slot_id)?));
+            }
+
+            let Some((next_leaf_page_id, next_path)) = self.btree_next_leaf_from_path(&path)?
+            else {
+                return Ok(None);
+            };
+            leaf_page_id = next_leaf_page_id;
+            path = next_path;
         }
-        Ok(locations.get(index).copied())
     }
 
     fn btree_seek_le_location(
@@ -674,13 +880,50 @@ impl Engine {
         root_page_id: PageId,
         key: RowId,
     ) -> Result<Option<RecordLocation>, StorageError> {
-        let locations = self.btree_collect_locations(root_page_id)?;
-        let index = match locations.binary_search_by_key(&key, |location| location.key) {
-            Ok(index) => Some(index),
-            Err(0) => None,
-            Err(index) => Some(index - 1),
-        };
-        Ok(index.and_then(|index| locations.get(index)).copied())
+        let (mut leaf_page_id, mut path) =
+            self.btree_find_leaf_page_and_path_for_row_id(root_page_id, key)?;
+
+        loop {
+            let maybe_slot_id = {
+                let page_guard = self.page_cache.fetch_page(leaf_page_id)?;
+                let leaf_page = TableLeafPageRef::from_bytes(page_guard.page())?;
+                let cell_count = usize::from(leaf_page.cell_count());
+
+                if cell_count == 0 {
+                    None
+                } else {
+                    let lower_bound = usize::from(leaf_page.lower_bound_slot(key)?);
+                    if lower_bound >= cell_count {
+                        Some(u16::try_from(cell_count - 1).expect("leaf last slot fits in u16"))
+                    } else {
+                        let lower_bound_slot =
+                            u16::try_from(lower_bound).expect("leaf lower-bound slot fits in u16");
+                        let cell = leaf_page.cell_at_slot(lower_bound_slot)?;
+                        if cell.row_id == key {
+                            Some(lower_bound_slot)
+                        } else if lower_bound > 0 {
+                            Some(
+                                u16::try_from(lower_bound - 1)
+                                    .expect("leaf predecessor slot fits in u16"),
+                            )
+                        } else {
+                            None
+                        }
+                    }
+                }
+            };
+
+            if let Some(slot_id) = maybe_slot_id {
+                return Ok(Some(self.btree_leaf_location_at_slot(leaf_page_id, slot_id)?));
+            }
+
+            let Some((prev_leaf_page_id, prev_path)) = self.btree_prev_leaf_from_path(&path)?
+            else {
+                return Ok(None);
+            };
+            leaf_page_id = prev_leaf_page_id;
+            path = prev_path;
+        }
     }
 
     fn btree_seek_lt_location(
@@ -688,12 +931,43 @@ impl Engine {
         root_page_id: PageId,
         key: RowId,
     ) -> Result<Option<RecordLocation>, StorageError> {
-        let locations = self.btree_collect_locations(root_page_id)?;
-        let index = match locations.binary_search_by_key(&key, |location| location.key) {
-            Ok(0) | Err(0) => None,
-            Ok(index) | Err(index) => Some(index - 1),
-        };
-        Ok(index.and_then(|index| locations.get(index)).copied())
+        let (mut leaf_page_id, mut path) =
+            self.btree_find_leaf_page_and_path_for_row_id(root_page_id, key)?;
+
+        loop {
+            let maybe_slot_id = {
+                let page_guard = self.page_cache.fetch_page(leaf_page_id)?;
+                let leaf_page = TableLeafPageRef::from_bytes(page_guard.page())?;
+                let cell_count = usize::from(leaf_page.cell_count());
+
+                if cell_count == 0 {
+                    None
+                } else {
+                    let lower_bound = usize::from(leaf_page.lower_bound_slot(key)?);
+                    if lower_bound == 0 {
+                        None
+                    } else if lower_bound <= cell_count {
+                        Some(
+                            u16::try_from(lower_bound - 1)
+                                .expect("leaf predecessor slot fits in u16"),
+                        )
+                    } else {
+                        Some(u16::try_from(cell_count - 1).expect("leaf last slot fits in u16"))
+                    }
+                }
+            };
+
+            if let Some(slot_id) = maybe_slot_id {
+                return Ok(Some(self.btree_leaf_location_at_slot(leaf_page_id, slot_id)?));
+            }
+
+            let Some((prev_leaf_page_id, prev_path)) = self.btree_prev_leaf_from_path(&path)?
+            else {
+                return Ok(None);
+            };
+            leaf_page_id = prev_leaf_page_id;
+            path = prev_path;
+        }
     }
 }
 
@@ -886,12 +1160,13 @@ impl Engine {
 #[cfg(test)]
 mod test {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::ops::Bound::{Excluded, Unbounded};
 
     use proptest::prelude::*;
     use tempfile::NamedTempFile;
 
     use crate::{
-        error::{InvalidArgumentError, StorageError},
+        error::{InvalidArgumentError, LimitExceededError, StorageError},
         table_page::TableInteriorPageMut,
         types::PAGE_SIZE,
     };
@@ -915,6 +1190,19 @@ mod test {
 
     fn fixed_payload(byte: u8, len: usize) -> Vec<u8> {
         vec![byte; len]
+    }
+
+    fn is_payload_limit_error(err: &StorageError) -> bool {
+        matches!(
+            err,
+            StorageError::LimitExceeded(
+                LimitExceededError::CellTooLarge { .. } | LimitExceededError::PageFull { .. }
+            )
+        )
+    }
+
+    fn is_row_id_not_found_error(err: &StorageError) -> bool {
+        matches!(err, StorageError::InvalidArgument(InvalidArgumentError::RowIdNotFound { .. }))
     }
 
     fn fill_leaf_until_page_full(
@@ -1076,6 +1364,49 @@ mod test {
     }
 
     #[test]
+    fn seek_variants_cross_leaf_boundaries() {
+        let mut engine = get_temp_engine();
+
+        let left_leaf = {
+            let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
+            let mut leaf = TableLeafPageMut::init_empty(page_guard.page_mut()).unwrap();
+            leaf.insert(1, &[1]).unwrap();
+            leaf.insert(2, &[2]).unwrap();
+            page_id
+        };
+
+        let right_leaf = {
+            let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
+            let mut leaf = TableLeafPageMut::init_empty(page_guard.page_mut()).unwrap();
+            leaf.insert(10, &[10]).unwrap();
+            leaf.insert(20, &[20]).unwrap();
+            page_id
+        };
+
+        let root_page_id = {
+            let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
+            let mut interior =
+                TableInteriorPageMut::init_empty(page_guard.page_mut(), right_leaf).unwrap();
+            interior.insert(10, left_leaf).unwrap();
+            page_id
+        };
+
+        let mut tree = engine.open_btree(root_page_id).unwrap();
+
+        let cursor = tree.seek_ge(3).unwrap();
+        assert_eq!(cursor.key().unwrap(), Some(10));
+
+        let cursor = tree.seek_le(9).unwrap();
+        assert_eq!(cursor.key().unwrap(), Some(2));
+
+        let cursor = tree.seek_gt(2).unwrap();
+        assert_eq!(cursor.key().unwrap(), Some(10));
+
+        let cursor = tree.seek_lt(10).unwrap();
+        assert_eq!(cursor.key().unwrap(), Some(2));
+    }
+
+    #[test]
     fn traversal_and_lookup_work_across_multiple_leaf_pages() {
         let mut engine = get_temp_engine();
 
@@ -1119,6 +1450,73 @@ mod test {
 
         tree.insert(15, &[15]).unwrap();
         expect_payload(tree.get(15).unwrap(), Some(&[15]));
+    }
+
+    #[test]
+    fn seek_matrix_matches_btreeset_oracle_on_multi_level_tree() {
+        let mut engine = get_temp_engine();
+        let mut tree = engine.create_btree().unwrap();
+        let payload = fixed_payload(17, 192);
+        let mut oracle = BTreeSet::new();
+
+        for key in (10u64..5_010).step_by(2) {
+            tree.insert(key, &payload).unwrap();
+            oracle.insert(key);
+        }
+
+        let root_page_id = tree.root_page_id();
+        let root_child_page_ids = {
+            let root_guard = tree.engine.page_cache.fetch_page(root_page_id).unwrap();
+            let root_page = TablePageRef::from_bytes(root_guard.page()).unwrap();
+            let interior = match root_page {
+                TablePageRef::Leaf(_) => panic!("expected interior root"),
+                TablePageRef::Interior(interior) => interior,
+            };
+            let mut child_page_ids = Vec::new();
+            for child_index in 0..interior.child_count() {
+                child_page_ids.push(interior.child_at(child_index).unwrap());
+            }
+            child_page_ids
+        };
+
+        let has_interior_child = root_child_page_ids.into_iter().any(|child_page_id| {
+            let child_guard = tree.engine.page_cache.fetch_page(child_page_id).unwrap();
+            matches!(
+                TablePageRef::from_bytes(child_guard.page()).unwrap(),
+                TablePageRef::Interior(_)
+            )
+        });
+        assert!(has_interior_child, "expected a multi-level b-tree");
+
+        let mut probe_keys = vec![0u64, 1, 9, 10, 11, 12, 13, 5_008, 5_009, 5_010, u64::MAX];
+        for key in (0u64..5_100).step_by(37) {
+            probe_keys.push(key);
+        }
+        probe_keys.sort_unstable();
+        probe_keys.dedup();
+
+        for probe in probe_keys {
+            let expected_seek = oracle.get(&probe).copied();
+            let expected_ge = oracle.range(probe..).next().copied();
+            let expected_gt = oracle.range((Excluded(probe), Unbounded)).next().copied();
+            let expected_le = oracle.range(..=probe).next_back().copied();
+            let expected_lt = oracle.range(..probe).next_back().copied();
+
+            let cursor = tree.seek(probe).unwrap();
+            assert_eq!(cursor.key().unwrap(), expected_seek);
+
+            let cursor = tree.seek_ge(probe).unwrap();
+            assert_eq!(cursor.key().unwrap(), expected_ge);
+
+            let cursor = tree.seek_gt(probe).unwrap();
+            assert_eq!(cursor.key().unwrap(), expected_gt);
+
+            let cursor = tree.seek_le(probe).unwrap();
+            assert_eq!(cursor.key().unwrap(), expected_le);
+
+            let cursor = tree.seek_lt(probe).unwrap();
+            assert_eq!(cursor.key().unwrap(), expected_lt);
+        }
     }
 
     #[test]
@@ -1340,26 +1738,48 @@ mod test {
                 match op {
                     Op::Insert(key, value) => {
                         let key = RowId::from(key);
-                        let expected_ok = !oracle.contains_key(&key);
-                        let actual_ok = tree.insert(key, &value).is_ok();
-                        if expected_ok {
-                            oracle.insert(key, value);
+                        let key_exists = oracle.contains_key(&key);
+                        match tree.insert(key, &value) {
+                            Ok(()) => {
+                                prop_assert!(!key_exists);
+                                oracle.insert(key, value);
+                            }
+                            Err(err) => {
+                                if key_exists {
+                                    prop_assert!(matches!(err, StorageError::Constraint(..)));
+                                } else {
+                                    prop_assert!(is_payload_limit_error(&err));
+                                }
+                            }
                         }
-                        prop_assert_eq!(actual_ok, expected_ok);
                     }
                     Op::Update(key, value) => {
                         let key = RowId::from(key);
-                        let expected_ok = oracle.contains_key(&key);
-                        let actual_ok = tree.update(key, &value).is_ok();
-                        if expected_ok {
-                            oracle.insert(key, value);
+                        let key_exists = oracle.contains_key(&key);
+                        match tree.update(key, &value) {
+                            Ok(()) => {
+                                prop_assert!(key_exists);
+                                oracle.insert(key, value);
+                            }
+                            Err(err) => {
+                                if key_exists {
+                                    prop_assert!(is_payload_limit_error(&err));
+                                } else {
+                                    prop_assert!(is_row_id_not_found_error(&err));
+                                }
+                            }
                         }
-                        prop_assert_eq!(actual_ok, expected_ok);
                     }
                     Op::Upsert(key, value) => {
                         let key = RowId::from(key);
-                        tree.upsert(key, &value).unwrap();
-                        oracle.insert(key, value);
+                        match tree.upsert(key, &value) {
+                            Ok(()) => {
+                                oracle.insert(key, value);
+                            }
+                            Err(err) => {
+                                prop_assert!(is_payload_limit_error(&err));
+                            }
+                        }
                     }
                     Op::Delete(key) => {
                         let key = RowId::from(key);
