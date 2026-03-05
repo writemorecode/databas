@@ -98,6 +98,8 @@ pub enum ConstraintError {
 pub enum InvalidArgumentError {
     #[error("invalid page id: {page_id}")]
     InvalidPageId { page_id: u64 },
+    #[error("row id not found: {row_id}")]
+    RowIdNotFound { row_id: u64 },
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -231,7 +233,7 @@ impl From<TablePageError> for StorageError {
                 Self::Constraint(ConstraintError::DuplicateRowId { row_id })
             }
             TablePageError::RowIdNotFound { row_id } => {
-                panic!("internal-only table-page error escaped public boundary: row id {row_id}")
+                Self::InvalidArgument(InvalidArgumentError::RowIdNotFound { row_id })
             }
             TablePageError::CellTooLarge { len, max } => {
                 Self::LimitExceeded(LimitExceededError::CellTooLarge { len, max })

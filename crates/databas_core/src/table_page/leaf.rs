@@ -1,7 +1,7 @@
 use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
 use std::cmp::Ordering;
 
-use crate::types::{RowId, PAGE_SIZE};
+use crate::types::{PAGE_SIZE, RowId};
 
 use super::{
     layout::{self, PageSpec, SearchResult, SpaceError},
@@ -74,6 +74,28 @@ impl<'a> TableLeafPageRef<'a> {
         LeafCellRef::try_deserialize_at_slot(self.page, slot_index).map(Some)
     }
 
+    /// Looks up a cell by row id and returns its slot index.
+    pub(crate) fn search_for_slot_id(&self, row_id: RowId) -> TablePageResult<Option<u16>> {
+        let slot_index = match find_leaf_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::NotFound(_) => return Ok(None),
+        };
+        Ok(Some(slot_index))
+    }
+
+    /// Returns the decoded cell at `slot_index`.
+    pub(crate) fn cell_at_slot(&self, slot_index: u16) -> TablePageResult<LeafCellRef<'a>> {
+        LeafCellRef::try_deserialize_at_slot(self.page, slot_index)
+    }
+
+    /// Returns the first slot index whose row id is greater than or equal to `row_id`.
+    pub(crate) fn lower_bound_slot(&self, row_id: RowId) -> TablePageResult<u16> {
+        match find_leaf_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => Ok(slot_index),
+            SearchResult::NotFound(insertion_index) => Ok(insertion_index),
+        }
+    }
+
     /// Returns the number of slot entries currently stored on the page.
     pub(crate) fn cell_count(&self) -> u16 {
         layout::cell_count(self.page)
@@ -106,6 +128,11 @@ impl<'a> TableLeafPageMut<'a> {
         };
 
         LeafCellRef::try_deserialize_at_slot(self.page, slot_index).map(Some)
+    }
+
+    /// Returns the decoded cell at `slot_index`.
+    pub(crate) fn cell_at_slot(&self, slot_index: u16) -> TablePageResult<LeafCellRef<'_>> {
+        LeafCellRef::try_deserialize_at_slot(self.page, slot_index)
     }
 
     /// Returns the number of slot entries currently stored on the page.

@@ -74,6 +74,40 @@ impl<'a> TableInteriorPageRef<'a> {
         InteriorCell::try_deserialize_at_slot(self.page, slot_index).map(Some)
     }
 
+    /// Returns the decoded interior cell at `slot_index`.
+    pub(crate) fn cell_at_slot(&self, slot_index: u16) -> TablePageResult<InteriorCell> {
+        InteriorCell::try_deserialize_at_slot(self.page, slot_index)
+    }
+
+    /// Returns the child-slot index selected for `row_id`.
+    ///
+    /// This index is in the range `0..=cell_count`.
+    pub(crate) fn child_index_for_row_id(&self, row_id: RowId) -> TablePageResult<u16> {
+        let cell_count = self.cell_count();
+        let slot_index = match find_interior_row_id(self.page, row_id)? {
+            SearchResult::Found(slot_index) => slot_index.saturating_add(1),
+            SearchResult::NotFound(insertion_index) => insertion_index,
+        };
+        Ok(slot_index.min(cell_count))
+    }
+
+    /// Returns the number of child pointers (`cell_count + 1`).
+    pub(crate) fn child_count(&self) -> u16 {
+        self.cell_count().saturating_add(1)
+    }
+
+    /// Returns the child page id at `child_index`.
+    pub(crate) fn child_at(&self, child_index: u16) -> TablePageResult<PageId> {
+        let cell_count = self.cell_count();
+        if child_index < cell_count {
+            return Ok(self.cell_at_slot(child_index)?.left_child);
+        }
+        if child_index == cell_count {
+            return Ok(self.rightmost_child());
+        }
+        Err(TablePageError::CorruptPage(TablePageCorruptionKind::SlotIndexOutOfBounds))
+    }
+
     /// Returns the child page id to descend into for `row_id`.
     ///
     /// Descent follows the first separator key strictly greater than `row_id`.
@@ -135,6 +169,11 @@ impl<'a> TableInteriorPageMut<'a> {
         };
 
         InteriorCell::try_deserialize_at_slot(self.page, slot_index).map(Some)
+    }
+
+    /// Returns the decoded interior cell at `slot_index`.
+    pub(crate) fn cell_at_slot(&self, slot_index: u16) -> TablePageResult<InteriorCell> {
+        InteriorCell::try_deserialize_at_slot(self.page, slot_index)
     }
 
     /// Returns the child page id to descend into for `row_id`.

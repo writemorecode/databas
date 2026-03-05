@@ -23,6 +23,7 @@ impl Frame {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct PageCache {
     disk_manager: DiskManager,
     frames: Vec<Frame>,
@@ -238,6 +239,7 @@ impl Drop for PageCache {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct PinGuard<'a> {
     page_cache: &'a mut PageCache,
     frame_id: FrameId,

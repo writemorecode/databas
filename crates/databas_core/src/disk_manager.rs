@@ -7,10 +7,11 @@ use std::{
 use crate::{
     database_header::{DatabaseHeader, DatabaseHeaderError, HEADER_PAGE_ID},
     page_checksum::{checksum_matches, write_page_checksum},
-    types::{PageId, PAGE_SIZE},
+    types::{PAGE_SIZE, PageId},
 };
 
 /// Reads and writes pages to and from a database file.
+#[derive(Debug)]
 pub(crate) struct DiskManager {
     file: File,
     page_count: u64,
@@ -154,7 +155,7 @@ mod test {
         database_header::{
             DatabaseHeader, DatabaseHeaderError, FIRST_DATA_PAGE_ID, HEADER_PAGE_ID,
         },
-        page_checksum::{write_page_checksum, PAGE_DATA_END},
+        page_checksum::{PAGE_DATA_END, write_page_checksum},
     };
     use fastrand::Rng;
     use std::{
