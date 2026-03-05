@@ -5,8 +5,8 @@ use crate::{
     error::{LimitExceededError, StorageError},
     page_cache::{PageCache, PinGuard},
     table_page::{
-        TableInteriorPageMut, TableLeafPageMut, TableLeafPageRef, TablePageCorruptionKind,
-        TablePageError, TablePageRef,
+        TableInteriorPageMut, TableInteriorPageRef, TableLeafPageMut, TableLeafPageRef,
+        TablePageCorruptionKind, TablePageError, TablePageRef,
     },
     types::PAGE_SIZE,
 };
@@ -34,22 +34,10 @@ struct BTreePathEntry {
     child_index: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LeafEntry {
-    row_id: RowId,
-    payload: Vec<u8>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InteriorEntry {
     row_id: RowId,
     left_child_page_id: PageId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct InteriorNode {
-    entries: Vec<InteriorEntry>,
-    rightmost_child_page_id: PageId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,67 +158,169 @@ impl Engine {
         Ok((leaf_page_id, path))
     }
 
-    fn read_leaf_entries_from_page(
-        &mut self,
-        leaf_page_id: PageId,
-    ) -> Result<Vec<LeafEntry>, StorageError> {
-        let page_guard = self.page_cache.fetch_page(leaf_page_id)?;
-        let leaf_page = TableLeafPageRef::from_bytes(page_guard.page())?;
-        let mut out = Vec::with_capacity(usize::from(leaf_page.cell_count()));
-
-        for slot_id in 0..leaf_page.cell_count() {
-            let cell = leaf_page.cell_at_slot(slot_id)?;
-            out.push(LeafEntry { row_id: cell.row_id, payload: cell.payload.to_vec() });
-        }
-
-        Ok(out)
-    }
-
-    fn insert_entry_into_leaf_entries(
-        entries: &mut Vec<LeafEntry>,
+    fn leaf_insert_slot(
+        leaf_page: &TableLeafPageRef<'_>,
         row_id: RowId,
-        payload: &[u8],
-    ) -> Result<(), StorageError> {
-        match entries.binary_search_by_key(&row_id, |entry| entry.row_id) {
-            Ok(_) => Err(TablePageError::DuplicateRowId { row_id }.into()),
-            Err(insert_index) => {
-                entries.insert(insert_index, LeafEntry { row_id, payload: payload.to_vec() });
-                Ok(())
+    ) -> Result<usize, StorageError> {
+        let insert_slot = usize::from(leaf_page.lower_bound_slot(row_id)?);
+        if insert_slot < usize::from(leaf_page.cell_count()) {
+            let existing = leaf_page.cell_at_slot(insert_slot as u16)?;
+            if existing.row_id == row_id {
+                return Err(TablePageError::DuplicateRowId { row_id }.into());
             }
         }
+        Ok(insert_slot)
     }
 
-    fn leaf_entries_fit_in_single_page(entries: &[LeafEntry]) -> Result<bool, StorageError> {
+    fn logical_leaf_row_id(
+        leaf_page: &TableLeafPageRef<'_>,
+        insert_slot: usize,
+        insert_row_id: RowId,
+        logical_index: usize,
+    ) -> Result<RowId, StorageError> {
+        if logical_index == insert_slot {
+            return Ok(insert_row_id);
+        }
+
+        let source_index = if logical_index < insert_slot {
+            logical_index
+        } else {
+            logical_index.checked_sub(1).ok_or_else(|| {
+                StorageError::from(TablePageError::CorruptPage(
+                    TablePageCorruptionKind::SlotIndexOutOfBounds,
+                ))
+            })?
+        };
+
+        Ok(leaf_page.cell_at_slot(source_index as u16)?.row_id)
+    }
+
+    fn insert_logical_leaf_entry(
+        destination: &mut TableLeafPageMut<'_>,
+        source_leaf_page: &TableLeafPageRef<'_>,
+        insert_slot: usize,
+        insert_row_id: RowId,
+        insert_payload: &[u8],
+        logical_index: usize,
+    ) -> Result<(), StorageError> {
+        if logical_index == insert_slot {
+            destination.insert(insert_row_id, insert_payload)?;
+            return Ok(());
+        }
+
+        let source_index = if logical_index < insert_slot {
+            logical_index
+        } else {
+            logical_index.checked_sub(1).ok_or_else(|| {
+                StorageError::from(TablePageError::CorruptPage(
+                    TablePageCorruptionKind::SlotIndexOutOfBounds,
+                ))
+            })?
+        };
+
+        let cell = source_leaf_page.cell_at_slot(source_index as u16)?;
+        destination.insert(cell.row_id, cell.payload)?;
+        Ok(())
+    }
+
+    fn logical_leaf_range_fits_single_page(
+        source_leaf_page: &TableLeafPageRef<'_>,
+        insert_slot: usize,
+        insert_row_id: RowId,
+        insert_payload: &[u8],
+        start: usize,
+        end: usize,
+    ) -> Result<bool, StorageError> {
         let mut page = [0u8; PAGE_SIZE];
         let mut leaf_page = TableLeafPageMut::init_empty(&mut page)?;
-        for entry in entries {
-            match leaf_page.insert(entry.row_id, &entry.payload) {
+        for logical_index in start..end {
+            match Self::insert_logical_leaf_entry(
+                &mut leaf_page,
+                source_leaf_page,
+                insert_slot,
+                insert_row_id,
+                insert_payload,
+                logical_index,
+            ) {
                 Ok(()) => {}
-                Err(TablePageError::PageFull { .. }) => return Ok(false),
-                Err(err) => return Err(err.into()),
+                Err(StorageError::LimitExceeded(LimitExceededError::PageFull { .. })) => {
+                    return Ok(false);
+                }
+                Err(err) => return Err(err),
             }
         }
         Ok(true)
     }
 
-    fn choose_leaf_split_index(entries: &[LeafEntry]) -> Result<Option<usize>, StorageError> {
-        if entries.len() < 2 {
+    fn choose_leaf_split_index(
+        source_leaf_page: &TableLeafPageRef<'_>,
+        insert_slot: usize,
+        insert_row_id: RowId,
+        insert_payload: &[u8],
+    ) -> Result<Option<usize>, StorageError> {
+        let total_entries = usize::from(source_leaf_page.cell_count()) + 1;
+        if total_entries < 2 {
             return Ok(None);
         }
 
-        let midpoint = entries.len() / 2;
-        let mut candidate_indices: Vec<usize> = (1..entries.len()).collect();
-        candidate_indices.sort_by_key(|index| {
-            let distance = if *index >= midpoint { *index - midpoint } else { midpoint - *index };
-            (distance, *index)
-        });
+        let midpoint = total_entries / 2;
+        for distance in 0..total_entries {
+            let left_candidate = midpoint.checked_sub(distance);
+            if let Some(split_index) = left_candidate
+                && (0..total_entries).contains(&split_index)
+            {
+                let left_fits = Self::logical_leaf_range_fits_single_page(
+                    source_leaf_page,
+                    insert_slot,
+                    insert_row_id,
+                    insert_payload,
+                    0,
+                    split_index,
+                )?;
+                if left_fits {
+                    let right_fits = Self::logical_leaf_range_fits_single_page(
+                        source_leaf_page,
+                        insert_slot,
+                        insert_row_id,
+                        insert_payload,
+                        split_index,
+                        total_entries,
+                    )?;
+                    if right_fits {
+                        return Ok(Some(split_index));
+                    }
+                }
+            }
 
-        for split_index in candidate_indices {
-            let left_fits = Self::leaf_entries_fit_in_single_page(&entries[..split_index])?;
+            if distance == 0 {
+                continue;
+            }
+
+            let split_index = midpoint + distance;
+            if split_index == 0 || split_index >= total_entries {
+                continue;
+            }
+
+            let left_fits = Self::logical_leaf_range_fits_single_page(
+                source_leaf_page,
+                insert_slot,
+                insert_row_id,
+                insert_payload,
+                0,
+                split_index,
+            )?;
             if !left_fits {
                 continue;
             }
-            let right_fits = Self::leaf_entries_fit_in_single_page(&entries[split_index..])?;
+
+            let right_fits = Self::logical_leaf_range_fits_single_page(
+                source_leaf_page,
+                insert_slot,
+                insert_row_id,
+                insert_payload,
+                split_index,
+                total_entries,
+            )?;
             if right_fits {
                 return Ok(Some(split_index));
             }
@@ -239,122 +329,223 @@ impl Engine {
         Ok(None)
     }
 
-    fn write_leaf_entries_to_page_bytes(
+    fn write_leaf_entry_range_to_page_bytes(
         page: &mut [u8; PAGE_SIZE],
-        entries: &[LeafEntry],
+        source_leaf_page: &TableLeafPageRef<'_>,
+        insert_slot: usize,
+        insert_row_id: RowId,
+        insert_payload: &[u8],
+        start: usize,
+        end: usize,
     ) -> Result<(), StorageError> {
         let mut leaf_page = TableLeafPageMut::init_empty(page)?;
-        for entry in entries {
-            leaf_page.insert(entry.row_id, &entry.payload)?;
+        for logical_index in start..end {
+            Self::insert_logical_leaf_entry(
+                &mut leaf_page,
+                source_leaf_page,
+                insert_slot,
+                insert_row_id,
+                insert_payload,
+                logical_index,
+            )?;
         }
         Ok(())
     }
 
-    fn read_interior_node_from_page(
-        &mut self,
-        interior_page_id: PageId,
-    ) -> Result<InteriorNode, StorageError> {
-        let page_guard = self.page_cache.fetch_page(interior_page_id)?;
-        let interior_page = crate::table_page::TableInteriorPageRef::from_bytes(page_guard.page())?;
-        let mut entries = Vec::with_capacity(usize::from(interior_page.cell_count()));
-        for slot_id in 0..interior_page.cell_count() {
-            let cell = interior_page.cell_at_slot(slot_id)?;
-            entries
-                .push(InteriorEntry { row_id: cell.row_id, left_child_page_id: cell.left_child });
+    fn interior_split_child_index(
+        source_interior_page: &TableInteriorPageRef<'_>,
+        child_index: u16,
+    ) -> Result<usize, StorageError> {
+        let child_index = usize::from(child_index);
+        if child_index > usize::from(source_interior_page.cell_count()) {
+            return Err(
+                TablePageError::CorruptPage(TablePageCorruptionKind::SlotIndexOutOfBounds).into()
+            );
         }
-
-        Ok(InteriorNode { entries, rightmost_child_page_id: interior_page.rightmost_child() })
+        Ok(child_index)
     }
 
-    fn apply_child_split_to_interior_node(
-        interior_node: &mut InteriorNode,
-        child_index: u16,
+    fn logical_interior_entry_at(
+        source_interior_page: &TableInteriorPageRef<'_>,
+        child_index: usize,
         split_event: ChildSplitEvent,
-    ) -> Result<(), StorageError> {
-        let child_index = usize::from(child_index);
-        if child_index > interior_node.entries.len() {
+        logical_index: usize,
+    ) -> Result<InteriorEntry, StorageError> {
+        let source_cell_count = usize::from(source_interior_page.cell_count());
+        if logical_index >= source_cell_count + 1 {
             return Err(
                 TablePageError::CorruptPage(TablePageCorruptionKind::SlotIndexOutOfBounds).into()
             );
         }
 
-        if child_index < interior_node.entries.len() {
-            interior_node.entries.insert(
-                child_index,
-                InteriorEntry {
-                    row_id: split_event.separator_key,
-                    left_child_page_id: split_event.left_child_page_id,
-                },
-            );
-            let next = interior_node.entries.get_mut(child_index + 1).ok_or_else(|| {
+        if logical_index == child_index {
+            return Ok(InteriorEntry {
+                row_id: split_event.separator_key,
+                left_child_page_id: split_event.left_child_page_id,
+            });
+        }
+
+        let source_index = if logical_index < child_index {
+            logical_index
+        } else {
+            logical_index.checked_sub(1).ok_or_else(|| {
                 StorageError::from(TablePageError::CorruptPage(
                     TablePageCorruptionKind::SlotIndexOutOfBounds,
                 ))
-            })?;
-            next.left_child_page_id = split_event.right_child_page_id;
-            return Ok(());
-        }
+            })?
+        };
 
-        interior_node.entries.push(InteriorEntry {
-            row_id: split_event.separator_key,
-            left_child_page_id: split_event.left_child_page_id,
-        });
-        interior_node.rightmost_child_page_id = split_event.right_child_page_id;
-        Ok(())
+        let source_cell = source_interior_page.cell_at_slot(source_index as u16)?;
+        let left_child_page_id =
+            if child_index < source_cell_count && logical_index == child_index + 1 {
+                split_event.right_child_page_id
+            } else {
+                source_cell.left_child
+            };
+
+        Ok(InteriorEntry { row_id: source_cell.row_id, left_child_page_id })
     }
 
-    fn write_interior_node_to_page_bytes(
-        page: &mut [u8; PAGE_SIZE],
-        interior_node: &InteriorNode,
+    fn logical_interior_rightmost_child(
+        source_interior_page: &TableInteriorPageRef<'_>,
+        child_index: usize,
+        split_event: ChildSplitEvent,
+    ) -> PageId {
+        if child_index == usize::from(source_interior_page.cell_count()) {
+            split_event.right_child_page_id
+        } else {
+            source_interior_page.rightmost_child()
+        }
+    }
+
+    fn insert_logical_interior_entry(
+        destination: &mut TableInteriorPageMut<'_>,
+        source_interior_page: &TableInteriorPageRef<'_>,
+        child_index: usize,
+        split_event: ChildSplitEvent,
+        logical_index: usize,
     ) -> Result<(), StorageError> {
-        let mut interior_page =
-            TableInteriorPageMut::init_empty(page, interior_node.rightmost_child_page_id)?;
-        for entry in &interior_node.entries {
-            interior_page.insert(entry.row_id, entry.left_child_page_id)?;
-        }
+        let entry = Self::logical_interior_entry_at(
+            source_interior_page,
+            child_index,
+            split_event,
+            logical_index,
+        )?;
+        destination.insert(entry.row_id, entry.left_child_page_id)?;
         Ok(())
     }
 
-    fn interior_node_fits_in_single_page(
-        interior_node: &InteriorNode,
+    fn logical_interior_range_fits_single_page(
+        source_interior_page: &TableInteriorPageRef<'_>,
+        child_index: usize,
+        split_event: ChildSplitEvent,
+        start: usize,
+        end: usize,
+        rightmost_child_page_id: PageId,
     ) -> Result<bool, StorageError> {
         let mut page = [0u8; PAGE_SIZE];
-        match Self::write_interior_node_to_page_bytes(&mut page, interior_node) {
-            Ok(()) => Ok(true),
-            Err(StorageError::LimitExceeded(LimitExceededError::PageFull { .. })) => Ok(false),
-            Err(err) => Err(err),
+        let mut interior_page =
+            TableInteriorPageMut::init_empty(&mut page, rightmost_child_page_id)?;
+        for logical_index in start..end {
+            match Self::insert_logical_interior_entry(
+                &mut interior_page,
+                source_interior_page,
+                child_index,
+                split_event,
+                logical_index,
+            ) {
+                Ok(()) => {}
+                Err(StorageError::LimitExceeded(LimitExceededError::PageFull { .. })) => {
+                    return Ok(false);
+                }
+                Err(err) => return Err(err),
+            }
         }
+        Ok(true)
+    }
+
+    fn interior_promotion_candidate_fits(
+        source_interior_page: &TableInteriorPageRef<'_>,
+        child_index: usize,
+        split_event: ChildSplitEvent,
+        promotion_index: usize,
+    ) -> Result<bool, StorageError> {
+        let total_entries = usize::from(source_interior_page.cell_count()) + 1;
+        if promotion_index >= total_entries {
+            return Ok(false);
+        }
+
+        let promoted_entry = Self::logical_interior_entry_at(
+            source_interior_page,
+            child_index,
+            split_event,
+            promotion_index,
+        )?;
+        let left_rightmost_child_page_id = promoted_entry.left_child_page_id;
+        let right_rightmost_child_page_id =
+            Self::logical_interior_rightmost_child(source_interior_page, child_index, split_event);
+
+        let left_fits = Self::logical_interior_range_fits_single_page(
+            source_interior_page,
+            child_index,
+            split_event,
+            0,
+            promotion_index,
+            left_rightmost_child_page_id,
+        )?;
+        if !left_fits {
+            return Ok(false);
+        }
+
+        let right_fits = Self::logical_interior_range_fits_single_page(
+            source_interior_page,
+            child_index,
+            split_event,
+            promotion_index + 1,
+            total_entries,
+            right_rightmost_child_page_id,
+        )?;
+        Ok(right_fits)
     }
 
     fn choose_interior_promotion_index(
-        interior_node: &InteriorNode,
+        source_interior_page: &TableInteriorPageRef<'_>,
+        child_index: usize,
+        split_event: ChildSplitEvent,
     ) -> Result<Option<usize>, StorageError> {
-        if interior_node.entries.is_empty() {
+        let total_entries = usize::from(source_interior_page.cell_count()) + 1;
+        if total_entries == 0 {
             return Ok(None);
         }
 
-        let midpoint = interior_node.entries.len() / 2;
-        let mut candidate_indices: Vec<usize> = (0..interior_node.entries.len()).collect();
-        candidate_indices.sort_by_key(|index| {
-            let distance = if *index >= midpoint { *index - midpoint } else { midpoint - *index };
-            (distance, *index)
-        });
+        let midpoint = total_entries / 2;
+        for distance in 0..total_entries {
+            if let Some(promotion_index) = midpoint.checked_sub(distance) {
+                if Self::interior_promotion_candidate_fits(
+                    source_interior_page,
+                    child_index,
+                    split_event,
+                    promotion_index,
+                )? {
+                    return Ok(Some(promotion_index));
+                }
+            }
 
-        for promotion_index in candidate_indices {
-            let promoted_entry = interior_node.entries[promotion_index];
-            let left_node = InteriorNode {
-                entries: interior_node.entries[..promotion_index].to_vec(),
-                rightmost_child_page_id: promoted_entry.left_child_page_id,
-            };
-            let right_node = InteriorNode {
-                entries: interior_node.entries[(promotion_index + 1)..].to_vec(),
-                rightmost_child_page_id: interior_node.rightmost_child_page_id,
-            };
-
-            if !Self::interior_node_fits_in_single_page(&left_node)? {
+            if distance == 0 {
                 continue;
             }
-            if Self::interior_node_fits_in_single_page(&right_node)? {
+
+            let promotion_index = midpoint + distance;
+            if promotion_index >= total_entries {
+                continue;
+            }
+
+            if Self::interior_promotion_candidate_fits(
+                source_interior_page,
+                child_index,
+                split_event,
+                promotion_index,
+            )? {
                 return Ok(Some(promotion_index));
             }
         }
@@ -362,24 +553,26 @@ impl Engine {
         Ok(None)
     }
 
-    fn split_interior_node(
-        interior_node: &InteriorNode,
-    ) -> Result<Option<(InteriorNode, RowId, InteriorNode)>, StorageError> {
-        let promotion_index = match Self::choose_interior_promotion_index(interior_node)? {
-            Some(promotion_index) => promotion_index,
-            None => return Ok(None),
-        };
-        let promoted_entry = interior_node.entries[promotion_index];
-        let left_node = InteriorNode {
-            entries: interior_node.entries[..promotion_index].to_vec(),
-            rightmost_child_page_id: promoted_entry.left_child_page_id,
-        };
-        let right_node = InteriorNode {
-            entries: interior_node.entries[(promotion_index + 1)..].to_vec(),
-            rightmost_child_page_id: interior_node.rightmost_child_page_id,
-        };
-
-        Ok(Some((left_node, promoted_entry.row_id, right_node)))
+    fn write_interior_entry_range_to_page_bytes(
+        page: &mut [u8; PAGE_SIZE],
+        source_interior_page: &TableInteriorPageRef<'_>,
+        child_index: usize,
+        split_event: ChildSplitEvent,
+        start: usize,
+        end: usize,
+        rightmost_child_page_id: PageId,
+    ) -> Result<(), StorageError> {
+        let mut interior_page = TableInteriorPageMut::init_empty(page, rightmost_child_page_id)?;
+        for logical_index in start..end {
+            Self::insert_logical_interior_entry(
+                &mut interior_page,
+                source_interior_page,
+                child_index,
+                split_event,
+                logical_index,
+            )?;
+        }
+        Ok(())
     }
 
     fn apply_child_split_to_interior_page(
@@ -389,21 +582,44 @@ impl Engine {
         split_event: ChildSplitEvent,
         is_root: bool,
     ) -> Result<Option<ChildSplitEvent>, StorageError> {
-        let mut parent_node = self.read_interior_node_from_page(parent_entry.page_id)?;
-        Self::apply_child_split_to_interior_node(
-            &mut parent_node,
-            parent_entry.child_index,
-            split_event,
-        )?;
+        let source_page_bytes = {
+            let page_guard = self.page_cache.fetch_page(parent_entry.page_id)?;
+            *page_guard.page()
+        };
+        let source_interior_page = TableInteriorPageRef::from_bytes(&source_page_bytes)?;
+        let child_index =
+            Self::interior_split_child_index(&source_interior_page, parent_entry.child_index)?;
+        let total_entries = usize::from(source_interior_page.cell_count()) + 1;
+        let updated_rightmost_child_page_id =
+            Self::logical_interior_rightmost_child(&source_interior_page, child_index, split_event);
 
-        if Self::interior_node_fits_in_single_page(&parent_node)? {
+        if Self::logical_interior_range_fits_single_page(
+            &source_interior_page,
+            child_index,
+            split_event,
+            0,
+            total_entries,
+            updated_rightmost_child_page_id,
+        )? {
             let mut parent_page_guard = self.page_cache.fetch_page(parent_entry.page_id)?;
-            Self::write_interior_node_to_page_bytes(parent_page_guard.page_mut(), &parent_node)?;
+            Self::write_interior_entry_range_to_page_bytes(
+                parent_page_guard.page_mut(),
+                &source_interior_page,
+                child_index,
+                split_event,
+                0,
+                total_entries,
+                updated_rightmost_child_page_id,
+            )?;
             return Ok(None);
         }
 
-        let (left_node, promoted_key, right_node) = match Self::split_interior_node(&parent_node)? {
-            Some(parts) => parts,
+        let promotion_index = match Self::choose_interior_promotion_index(
+            &source_interior_page,
+            child_index,
+            split_event,
+        )? {
+            Some(promotion_index) => promotion_index,
             None => {
                 return Err(TablePageError::CorruptPage(
                     TablePageCorruptionKind::CellContentUnderflow,
@@ -411,39 +627,79 @@ impl Engine {
                 .into());
             }
         };
+        let promoted_entry = Self::logical_interior_entry_at(
+            &source_interior_page,
+            child_index,
+            split_event,
+            promotion_index,
+        )?;
+        let left_rightmost_child_page_id = promoted_entry.left_child_page_id;
+        let right_rightmost_child_page_id = updated_rightmost_child_page_id;
 
         if is_root {
             let left_page_id = {
                 let (page_id, mut page_guard) = self.page_cache.new_page()?;
-                Self::write_interior_node_to_page_bytes(page_guard.page_mut(), &left_node)?;
+                Self::write_interior_entry_range_to_page_bytes(
+                    page_guard.page_mut(),
+                    &source_interior_page,
+                    child_index,
+                    split_event,
+                    0,
+                    promotion_index,
+                    left_rightmost_child_page_id,
+                )?;
                 page_id
             };
             let right_page_id = {
                 let (page_id, mut page_guard) = self.page_cache.new_page()?;
-                Self::write_interior_node_to_page_bytes(page_guard.page_mut(), &right_node)?;
+                Self::write_interior_entry_range_to_page_bytes(
+                    page_guard.page_mut(),
+                    &source_interior_page,
+                    child_index,
+                    split_event,
+                    promotion_index + 1,
+                    total_entries,
+                    right_rightmost_child_page_id,
+                )?;
                 page_id
             };
 
             let mut root_page_guard = self.page_cache.fetch_page(root_page_id)?;
             let mut root_page =
                 TableInteriorPageMut::init_empty(root_page_guard.page_mut(), right_page_id)?;
-            root_page.insert(promoted_key, left_page_id)?;
+            root_page.insert(promoted_entry.row_id, left_page_id)?;
             return Ok(None);
         }
 
         let right_page_id = {
             let (page_id, mut page_guard) = self.page_cache.new_page()?;
-            Self::write_interior_node_to_page_bytes(page_guard.page_mut(), &right_node)?;
+            Self::write_interior_entry_range_to_page_bytes(
+                page_guard.page_mut(),
+                &source_interior_page,
+                child_index,
+                split_event,
+                promotion_index + 1,
+                total_entries,
+                right_rightmost_child_page_id,
+            )?;
             page_id
         };
 
         {
             let mut left_page_guard = self.page_cache.fetch_page(parent_entry.page_id)?;
-            Self::write_interior_node_to_page_bytes(left_page_guard.page_mut(), &left_node)?;
+            Self::write_interior_entry_range_to_page_bytes(
+                left_page_guard.page_mut(),
+                &source_interior_page,
+                child_index,
+                split_event,
+                0,
+                promotion_index,
+                left_rightmost_child_page_id,
+            )?;
         }
 
         Ok(Some(ChildSplitEvent {
-            separator_key: promoted_key,
+            separator_key: promoted_entry.row_id,
             left_child_page_id: parent_entry.page_id,
             right_child_page_id: right_page_id,
         }))
@@ -479,28 +735,48 @@ impl Engine {
         value: &[u8],
         original_page_full_error: TablePageError,
     ) -> Result<(), StorageError> {
-        let mut entries = self.read_leaf_entries_from_page(leaf_page_id)?;
-        Self::insert_entry_into_leaf_entries(&mut entries, row_id, value)?;
-
-        let split_index = match Self::choose_leaf_split_index(&entries)? {
-            Some(split_index) => split_index,
-            None => return Err(original_page_full_error.into()),
+        let source_page_bytes = {
+            let page_guard = self.page_cache.fetch_page(leaf_page_id)?;
+            *page_guard.page()
         };
+        let source_leaf_page = TableLeafPageRef::from_bytes(&source_page_bytes)?;
+        let insert_slot = Self::leaf_insert_slot(&source_leaf_page, row_id)?;
 
-        let left_entries = &entries[..split_index];
-        let right_entries = &entries[split_index..];
-        let split_key = right_entries[0].row_id;
+        let split_index =
+            match Self::choose_leaf_split_index(&source_leaf_page, insert_slot, row_id, value)? {
+                Some(split_index) => split_index,
+                None => return Err(original_page_full_error.into()),
+            };
+        let total_entries = usize::from(source_leaf_page.cell_count()) + 1;
+        let split_key =
+            Self::logical_leaf_row_id(&source_leaf_page, insert_slot, row_id, split_index)?;
 
         if path.is_empty() {
             let left_page_id = {
                 let (page_id, mut page_guard) = self.page_cache.new_page()?;
-                Self::write_leaf_entries_to_page_bytes(page_guard.page_mut(), left_entries)?;
+                Self::write_leaf_entry_range_to_page_bytes(
+                    page_guard.page_mut(),
+                    &source_leaf_page,
+                    insert_slot,
+                    row_id,
+                    value,
+                    0,
+                    split_index,
+                )?;
                 page_id
             };
 
             let right_page_id = {
                 let (page_id, mut page_guard) = self.page_cache.new_page()?;
-                Self::write_leaf_entries_to_page_bytes(page_guard.page_mut(), right_entries)?;
+                Self::write_leaf_entry_range_to_page_bytes(
+                    page_guard.page_mut(),
+                    &source_leaf_page,
+                    insert_slot,
+                    row_id,
+                    value,
+                    split_index,
+                    total_entries,
+                )?;
                 page_id
             };
 
@@ -513,13 +789,29 @@ impl Engine {
 
         let right_page_id = {
             let (page_id, mut page_guard) = self.page_cache.new_page()?;
-            Self::write_leaf_entries_to_page_bytes(page_guard.page_mut(), right_entries)?;
+            Self::write_leaf_entry_range_to_page_bytes(
+                page_guard.page_mut(),
+                &source_leaf_page,
+                insert_slot,
+                row_id,
+                value,
+                split_index,
+                total_entries,
+            )?;
             page_id
         };
 
         {
             let mut left_page_guard = self.page_cache.fetch_page(leaf_page_id)?;
-            Self::write_leaf_entries_to_page_bytes(left_page_guard.page_mut(), left_entries)?;
+            Self::write_leaf_entry_range_to_page_bytes(
+                left_page_guard.page_mut(),
+                &source_leaf_page,
+                insert_slot,
+                row_id,
+                value,
+                0,
+                split_index,
+            )?;
         }
 
         let split_event = ChildSplitEvent {
