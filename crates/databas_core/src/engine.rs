@@ -127,8 +127,21 @@ impl Engine {
         root_page_id: PageId,
         row_id: RowId,
     ) -> Result<PageId, StorageError> {
-        let (leaf_page_id, _) =
-            self.btree_find_leaf_page_and_path_for_row_id(root_page_id, row_id)?;
+        let mut current_page_id = root_page_id;
+
+        let leaf_page_id = loop {
+            let current_page_guard = self.page_cache.fetch_page(current_page_id)?;
+            let current_page = TablePageRef::from_bytes(current_page_guard.page())?;
+            match current_page {
+                TablePageRef::Leaf(_) => break current_page_id,
+                TablePageRef::Interior(interior) => {
+                    let child_index = interior.child_index_for_row_id(row_id)?;
+                    let child_page_id = interior.child_at(child_index)?;
+                    current_page_id = child_page_id;
+                }
+            }
+        };
+
         Ok(leaf_page_id)
     }
 
