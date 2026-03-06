@@ -4,7 +4,9 @@ use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult
 pub(super) const LEAF_PAGE_TYPE: u8 = 1;
 pub(super) const INTERIOR_PAGE_TYPE: u8 = 2;
 
-pub(super) const LEAF_HEADER_SIZE: usize = 8;
+pub(super) const LEAF_HEADER_SIZE: usize = 24;
+pub(super) const LEAF_PREV_SIBLING_OFFSET: usize = 8;
+pub(super) const LEAF_NEXT_SIBLING_OFFSET: usize = 16;
 pub(super) const INTERIOR_HEADER_SIZE: usize = 16;
 pub(super) const INTERIOR_RIGHTMOST_CHILD_OFFSET: usize = 8;
 
@@ -19,6 +21,14 @@ const _: () = {
     assert!(
         LEAF_HEADER_SIZE >= CONTENT_START_OFFSET + 2 && LEAF_HEADER_SIZE <= PAGE_DATA_END,
         "leaf header layout is invalid"
+    );
+    assert!(
+        LEAF_PREV_SIBLING_OFFSET + 8 <= LEAF_HEADER_SIZE,
+        "leaf prev-sibling pointer must fit in the fixed header"
+    );
+    assert!(
+        LEAF_NEXT_SIBLING_OFFSET + 8 <= LEAF_HEADER_SIZE,
+        "leaf next-sibling pointer must fit in the fixed header"
     );
     assert!(
         INTERIOR_HEADER_SIZE >= CONTENT_START_OFFSET + 2 && INTERIOR_HEADER_SIZE <= PAGE_DATA_END,

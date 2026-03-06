@@ -1,7 +1,7 @@
 use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
 use std::cmp::Ordering;
 
-use crate::types::{PAGE_SIZE, RowId};
+use crate::types::{PAGE_SIZE, PageId, RowId};
 
 use super::{
     layout::{self, PageSpec, SearchResult, SpaceError},
@@ -14,6 +14,7 @@ const LEAF_SPEC: PageSpec =
 const PAYLOAD_LEN_SIZE: usize = 2;
 const ROW_ID_SIZE: usize = 8;
 const LEAF_CELL_PREFIX_SIZE: usize = PAYLOAD_LEN_SIZE + ROW_ID_SIZE;
+const NO_SIBLING_PAGE_ID: PageId = 0;
 
 /// Borrowed view of one leaf cell decoded from a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,12 +106,24 @@ impl<'a> TableLeafPageRef<'a> {
     pub(crate) fn free_space(&self) -> TablePageResult<usize> {
         layout::free_space(self.page, LEAF_SPEC)
     }
+
+    /// Returns the previous leaf sibling page id, if any.
+    pub(crate) fn prev_sibling(&self) -> Option<PageId> {
+        decode_sibling_page_id(layout::read_u64_at(self.page, layout::LEAF_PREV_SIBLING_OFFSET))
+    }
+
+    /// Returns the next leaf sibling page id, if any.
+    pub(crate) fn next_sibling(&self) -> Option<PageId> {
+        decode_sibling_page_id(layout::read_u64_at(self.page, layout::LEAF_NEXT_SIBLING_OFFSET))
+    }
 }
 
 impl<'a> TableLeafPageMut<'a> {
     /// Initializes an empty leaf page in-place and returns a mutable wrapper.
     pub(crate) fn init_empty(page: &'a mut [u8; PAGE_SIZE]) -> TablePageResult<Self> {
         layout::init_empty(page, LEAF_SPEC)?;
+        layout::write_u64_at(page, layout::LEAF_PREV_SIBLING_OFFSET, encode_sibling_page_id(None));
+        layout::write_u64_at(page, layout::LEAF_NEXT_SIBLING_OFFSET, encode_sibling_page_id(None));
         Ok(Self { page })
     }
 
@@ -143,6 +156,38 @@ impl<'a> TableLeafPageMut<'a> {
     /// Returns free bytes between the slot directory and cell-content region.
     pub(crate) fn free_space(&self) -> TablePageResult<usize> {
         layout::free_space(self.page, LEAF_SPEC)
+    }
+
+    /// Returns the previous leaf sibling page id, if any.
+    pub(crate) fn prev_sibling(&self) -> Option<PageId> {
+        decode_sibling_page_id(layout::read_u64_at(self.page, layout::LEAF_PREV_SIBLING_OFFSET))
+    }
+
+    /// Returns the next leaf sibling page id, if any.
+    pub(crate) fn next_sibling(&self) -> Option<PageId> {
+        decode_sibling_page_id(layout::read_u64_at(self.page, layout::LEAF_NEXT_SIBLING_OFFSET))
+    }
+
+    /// Updates the previous leaf sibling page id.
+    pub(crate) fn set_prev_sibling(&mut self, page_id: Option<PageId>) -> TablePageResult<()> {
+        layout::validate(self.page, LEAF_SPEC)?;
+        layout::write_u64_at(
+            self.page,
+            layout::LEAF_PREV_SIBLING_OFFSET,
+            encode_sibling_page_id(page_id),
+        );
+        Ok(())
+    }
+
+    /// Updates the next leaf sibling page id.
+    pub(crate) fn set_next_sibling(&mut self, page_id: Option<PageId>) -> TablePageResult<()> {
+        layout::validate(self.page, LEAF_SPEC)?;
+        layout::write_u64_at(
+            self.page,
+            layout::LEAF_NEXT_SIBLING_OFFSET,
+            encode_sibling_page_id(page_id),
+        );
+        Ok(())
     }
 
     /// Inserts a new cell keyed by `row_id`, preserving sorted slot order.
@@ -323,6 +368,10 @@ fn insert_leaf_cell(
 fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     layout::validate(page, LEAF_SPEC)?;
 
+    let prev_sibling =
+        decode_sibling_page_id(layout::read_u64_at(page, layout::LEAF_PREV_SIBLING_OFFSET));
+    let next_sibling =
+        decode_sibling_page_id(layout::read_u64_at(page, layout::LEAF_NEXT_SIBLING_OFFSET));
     let cell_count = usize::from(layout::cell_count(page));
     let mut scratch = [0u8; PAGE_SIZE];
     let mut scratch_len = 0usize;
@@ -342,6 +391,16 @@ fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     }
 
     layout::init_empty(page, LEAF_SPEC)?;
+    layout::write_u64_at(
+        page,
+        layout::LEAF_PREV_SIBLING_OFFSET,
+        encode_sibling_page_id(prev_sibling),
+    );
+    layout::write_u64_at(
+        page,
+        layout::LEAF_NEXT_SIBLING_OFFSET,
+        encode_sibling_page_id(next_sibling),
+    );
 
     let mut scratch_offset = 0usize;
     for slot in 0..cell_count {
@@ -374,6 +433,14 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     let mut out = [0u8; 2];
     out.copy_from_slice(&bytes[offset..offset + 2]);
     u16::from_le_bytes(out)
+}
+
+fn decode_sibling_page_id(page_id: PageId) -> Option<PageId> {
+    if page_id == NO_SIBLING_PAGE_ID { None } else { Some(page_id) }
+}
+
+fn encode_sibling_page_id(page_id: Option<PageId>) -> PageId {
+    page_id.unwrap_or(NO_SIBLING_PAGE_ID)
 }
 
 #[cfg(test)]
@@ -416,6 +483,25 @@ mod tests {
         let page = initialized_leaf_page();
         let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
         assert_eq!(leaf_ref.search(7).unwrap(), None);
+    }
+
+    #[test]
+    fn sibling_pointers_roundtrip() {
+        let mut page = initialized_leaf_page();
+        {
+            let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+            assert_eq!(leaf.prev_sibling(), None);
+            assert_eq!(leaf.next_sibling(), None);
+
+            leaf.set_prev_sibling(Some(11)).unwrap();
+            leaf.set_next_sibling(Some(22)).unwrap();
+            assert_eq!(leaf.prev_sibling(), Some(11));
+            assert_eq!(leaf.next_sibling(), Some(22));
+        }
+
+        let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
+        assert_eq!(leaf_ref.prev_sibling(), Some(11));
+        assert_eq!(leaf_ref.next_sibling(), Some(22));
     }
 
     #[test]
@@ -514,6 +600,23 @@ mod tests {
 
         leaf.update(1, &payload(9, 1_000)).unwrap();
         assert_eq!(leaf.search(1).unwrap().unwrap().payload.len(), 1_000);
+    }
+
+    #[test]
+    fn defragment_preserves_sibling_pointers() {
+        let mut page = initialized_leaf_page();
+        let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+        leaf.set_prev_sibling(Some(44)).unwrap();
+        leaf.set_next_sibling(Some(55)).unwrap();
+
+        leaf.insert(1, &payload(1, 1_200)).unwrap();
+        leaf.insert(2, &payload(2, 1_200)).unwrap();
+        leaf.insert(3, &payload(3, 1_200)).unwrap();
+        leaf.delete(2).unwrap();
+        leaf.defragment().unwrap();
+
+        assert_eq!(leaf.prev_sibling(), Some(44));
+        assert_eq!(leaf.next_sibling(), Some(55));
     }
 
     #[test]

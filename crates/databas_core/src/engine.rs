@@ -768,6 +768,8 @@ impl Engine {
         let total_entries = usize::from(source_leaf_page.cell_count()) + 1;
         let split_key =
             Self::logical_leaf_row_id(&source_leaf_page, insert_slot, row_id, split_index)?;
+        let source_left_prev_sibling = source_leaf_page.prev_sibling();
+        let source_left_next_sibling = source_leaf_page.next_sibling();
 
         if path.is_empty() {
             let left_page_id = {
@@ -784,6 +786,13 @@ impl Engine {
                 page_id
             };
 
+            {
+                let mut left_page_guard = self.page_cache.fetch_page(left_page_id)?;
+                let mut left_leaf_page = TableLeafPageMut::from_bytes(left_page_guard.page_mut())?;
+                left_leaf_page.set_prev_sibling(None)?;
+                left_leaf_page.set_next_sibling(None)?;
+            }
+
             let right_page_id = {
                 let (page_id, mut page_guard) = self.page_cache.new_page()?;
                 Self::write_leaf_entry_range_to_page_bytes(
@@ -795,8 +804,17 @@ impl Engine {
                     split_index,
                     total_entries,
                 )?;
+                let mut right_leaf_page = TableLeafPageMut::from_bytes(page_guard.page_mut())?;
+                right_leaf_page.set_prev_sibling(Some(left_page_id))?;
+                right_leaf_page.set_next_sibling(None)?;
                 page_id
             };
+
+            {
+                let mut left_page_guard = self.page_cache.fetch_page(left_page_id)?;
+                let mut left_leaf_page = TableLeafPageMut::from_bytes(left_page_guard.page_mut())?;
+                left_leaf_page.set_next_sibling(Some(right_page_id))?;
+            }
 
             let mut root_page_guard = self.page_cache.fetch_page(root_page_id)?;
             let mut root_page =
@@ -816,6 +834,9 @@ impl Engine {
                 split_index,
                 total_entries,
             )?;
+            let mut right_leaf_page = TableLeafPageMut::from_bytes(page_guard.page_mut())?;
+            right_leaf_page.set_prev_sibling(Some(leaf_page_id))?;
+            right_leaf_page.set_next_sibling(source_left_next_sibling)?;
             page_id
         };
 
@@ -830,6 +851,17 @@ impl Engine {
                 0,
                 split_index,
             )?;
+            let mut left_leaf_page = TableLeafPageMut::from_bytes(left_page_guard.page_mut())?;
+            left_leaf_page.set_prev_sibling(source_left_prev_sibling)?;
+            left_leaf_page.set_next_sibling(Some(right_page_id))?;
+        }
+
+        if let Some(source_next_sibling_page_id) = source_left_next_sibling {
+            let mut source_next_sibling_page_guard =
+                self.page_cache.fetch_page(source_next_sibling_page_id)?;
+            let mut source_next_sibling_page =
+                TableLeafPageMut::from_bytes(source_next_sibling_page_guard.page_mut())?;
+            source_next_sibling_page.set_prev_sibling(Some(right_page_id))?;
         }
 
         let split_event = ChildSplitEvent {
@@ -944,40 +976,29 @@ impl Engine {
         Ok(Some(RecordLocation { page_id: leaf_page_id, slot_id: last_slot_id, key: cell.row_id }))
     }
 
-    fn btree_leftmost_leaf_page_and_path(
-        &mut self,
-        start_page_id: PageId,
-        mut path: Vec<BTreePathEntry>,
-    ) -> Result<(PageId, Vec<BTreePathEntry>), StorageError> {
+    fn btree_leftmost_leaf_page(&mut self, start_page_id: PageId) -> Result<PageId, StorageError> {
         let mut current_page_id = start_page_id;
 
         loop {
             let current_page_guard = self.page_cache.fetch_page(current_page_id)?;
             let current_page = TablePageRef::from_bytes(current_page_guard.page())?;
             match current_page {
-                TablePageRef::Leaf(_) => return Ok((current_page_id, path)),
+                TablePageRef::Leaf(_) => return Ok(current_page_id),
                 TablePageRef::Interior(interior) => {
-                    let child_index = 0;
-                    let child_page_id = interior.child_at(child_index)?;
-                    path.push(BTreePathEntry { page_id: current_page_id, child_index });
-                    current_page_id = child_page_id;
+                    current_page_id = interior.child_at(0)?;
                 }
             }
         }
     }
 
-    fn btree_rightmost_leaf_page_and_path(
-        &mut self,
-        start_page_id: PageId,
-        mut path: Vec<BTreePathEntry>,
-    ) -> Result<(PageId, Vec<BTreePathEntry>), StorageError> {
+    fn btree_rightmost_leaf_page(&mut self, start_page_id: PageId) -> Result<PageId, StorageError> {
         let mut current_page_id = start_page_id;
 
         loop {
             let current_page_guard = self.page_cache.fetch_page(current_page_id)?;
             let current_page = TablePageRef::from_bytes(current_page_guard.page())?;
             match current_page {
-                TablePageRef::Leaf(_) => return Ok((current_page_id, path)),
+                TablePageRef::Leaf(_) => return Ok(current_page_id),
                 TablePageRef::Interior(interior) => {
                     let child_count = interior.child_count();
                     let child_index = child_count.checked_sub(1).ok_or_else(|| {
@@ -985,86 +1006,83 @@ impl Engine {
                             TablePageCorruptionKind::SlotIndexOutOfBounds,
                         ))
                     })?;
-                    let child_page_id = interior.child_at(child_index)?;
-                    path.push(BTreePathEntry { page_id: current_page_id, child_index });
-                    current_page_id = child_page_id;
+                    current_page_id = interior.child_at(child_index)?;
                 }
             }
         }
     }
 
-    fn btree_next_leaf_from_path(
+    fn btree_next_leaf_page(
         &mut self,
-        path: &[BTreePathEntry],
-    ) -> Result<Option<(PageId, Vec<BTreePathEntry>)>, StorageError> {
-        for (path_index, entry) in path.iter().enumerate().rev() {
-            let maybe_next_sibling = {
-                let page_guard = self.page_cache.fetch_page(entry.page_id)?;
-                let page = TablePageRef::from_bytes(page_guard.page())?;
-                let interior = match page {
-                    TablePageRef::Interior(interior) => interior,
-                    TablePageRef::Leaf(_) => {
-                        return Err(TablePageError::CorruptPage(
-                            TablePageCorruptionKind::SlotIndexOutOfBounds,
-                        )
-                        .into());
-                    }
-                };
-                let child_count = interior.child_count();
-                if entry.child_index < child_count.saturating_sub(1) {
-                    let next_child_index = entry.child_index + 1;
-                    Some((next_child_index, interior.child_at(next_child_index)?))
-                } else {
-                    None
-                }
-            };
+        leaf_page_id: PageId,
+    ) -> Result<Option<PageId>, StorageError> {
+        let page_guard = self.page_cache.fetch_page(leaf_page_id)?;
+        let leaf_page = TableLeafPageRef::from_bytes(page_guard.page())?;
+        Ok(leaf_page.next_sibling())
+    }
 
-            if let Some((next_child_index, sibling_page_id)) = maybe_next_sibling {
-                let mut sibling_path = path[..path_index].to_vec();
-                sibling_path
-                    .push(BTreePathEntry { page_id: entry.page_id, child_index: next_child_index });
-                let (leaf_page_id, leaf_path) =
-                    self.btree_leftmost_leaf_page_and_path(sibling_page_id, sibling_path)?;
-                return Ok(Some((leaf_page_id, leaf_path)));
+    fn btree_prev_leaf_page(
+        &mut self,
+        leaf_page_id: PageId,
+    ) -> Result<Option<PageId>, StorageError> {
+        let page_guard = self.page_cache.fetch_page(leaf_page_id)?;
+        let leaf_page = TableLeafPageRef::from_bytes(page_guard.page())?;
+        Ok(leaf_page.prev_sibling())
+    }
+
+    fn btree_next_location(
+        &mut self,
+        location: RecordLocation,
+    ) -> Result<Option<RecordLocation>, StorageError> {
+        let mut next_leaf_page_id = {
+            let page_guard = self.page_cache.fetch_page(location.page_id)?;
+            let leaf_page = TableLeafPageRef::from_bytes(page_guard.page())?;
+            if let Some(next_slot_id) = location.slot_id.checked_add(1)
+                && next_slot_id < leaf_page.cell_count()
+            {
+                let next_cell = leaf_page.cell_at_slot(next_slot_id)?;
+                return Ok(Some(RecordLocation {
+                    page_id: location.page_id,
+                    slot_id: next_slot_id,
+                    key: next_cell.row_id,
+                }));
             }
+            leaf_page.next_sibling()
+        };
+
+        while let Some(leaf_page_id) = next_leaf_page_id {
+            if let Some(next_location) = self.btree_first_location_in_leaf(leaf_page_id)? {
+                return Ok(Some(next_location));
+            }
+            next_leaf_page_id = self.btree_next_leaf_page(leaf_page_id)?;
         }
 
         Ok(None)
     }
 
-    fn btree_prev_leaf_from_path(
+    fn btree_prev_location(
         &mut self,
-        path: &[BTreePathEntry],
-    ) -> Result<Option<(PageId, Vec<BTreePathEntry>)>, StorageError> {
-        for (path_index, entry) in path.iter().enumerate().rev() {
-            let maybe_prev_sibling = {
-                let page_guard = self.page_cache.fetch_page(entry.page_id)?;
-                let page = TablePageRef::from_bytes(page_guard.page())?;
-                let interior = match page {
-                    TablePageRef::Interior(interior) => interior,
-                    TablePageRef::Leaf(_) => {
-                        return Err(TablePageError::CorruptPage(
-                            TablePageCorruptionKind::SlotIndexOutOfBounds,
-                        )
-                        .into());
-                    }
-                };
-                if entry.child_index > 0 {
-                    let prev_child_index = entry.child_index - 1;
-                    Some((prev_child_index, interior.child_at(prev_child_index)?))
-                } else {
-                    None
-                }
-            };
-
-            if let Some((prev_child_index, sibling_page_id)) = maybe_prev_sibling {
-                let mut sibling_path = path[..path_index].to_vec();
-                sibling_path
-                    .push(BTreePathEntry { page_id: entry.page_id, child_index: prev_child_index });
-                let (leaf_page_id, leaf_path) =
-                    self.btree_rightmost_leaf_page_and_path(sibling_page_id, sibling_path)?;
-                return Ok(Some((leaf_page_id, leaf_path)));
+        location: RecordLocation,
+    ) -> Result<Option<RecordLocation>, StorageError> {
+        let mut prev_leaf_page_id = {
+            let page_guard = self.page_cache.fetch_page(location.page_id)?;
+            let leaf_page = TableLeafPageRef::from_bytes(page_guard.page())?;
+            if let Some(prev_slot_id) = location.slot_id.checked_sub(1) {
+                let prev_cell = leaf_page.cell_at_slot(prev_slot_id)?;
+                return Ok(Some(RecordLocation {
+                    page_id: location.page_id,
+                    slot_id: prev_slot_id,
+                    key: prev_cell.row_id,
+                }));
             }
+            leaf_page.prev_sibling()
+        };
+
+        while let Some(leaf_page_id) = prev_leaf_page_id {
+            if let Some(prev_location) = self.btree_last_location_in_leaf(leaf_page_id)? {
+                return Ok(Some(prev_location));
+            }
+            prev_leaf_page_id = self.btree_prev_leaf_page(leaf_page_id)?;
         }
 
         Ok(None)
@@ -1074,19 +1092,16 @@ impl Engine {
         &mut self,
         root_page_id: PageId,
     ) -> Result<Option<RecordLocation>, StorageError> {
-        let (mut leaf_page_id, mut path) =
-            self.btree_leftmost_leaf_page_and_path(root_page_id, Vec::new())?;
+        let mut leaf_page_id = self.btree_leftmost_leaf_page(root_page_id)?;
 
         loop {
             if let Some(location) = self.btree_first_location_in_leaf(leaf_page_id)? {
                 return Ok(Some(location));
             }
-            let Some((next_leaf_page_id, next_path)) = self.btree_next_leaf_from_path(&path)?
-            else {
+            let Some(next_leaf_page_id) = self.btree_next_leaf_page(leaf_page_id)? else {
                 return Ok(None);
             };
             leaf_page_id = next_leaf_page_id;
-            path = next_path;
         }
     }
 
@@ -1094,19 +1109,16 @@ impl Engine {
         &mut self,
         root_page_id: PageId,
     ) -> Result<Option<RecordLocation>, StorageError> {
-        let (mut leaf_page_id, mut path) =
-            self.btree_rightmost_leaf_page_and_path(root_page_id, Vec::new())?;
+        let mut leaf_page_id = self.btree_rightmost_leaf_page(root_page_id)?;
 
         loop {
             if let Some(location) = self.btree_last_location_in_leaf(leaf_page_id)? {
                 return Ok(Some(location));
             }
-            let Some((prev_leaf_page_id, prev_path)) = self.btree_prev_leaf_from_path(&path)?
-            else {
+            let Some(prev_leaf_page_id) = self.btree_prev_leaf_page(leaf_page_id)? else {
                 return Ok(None);
             };
             leaf_page_id = prev_leaf_page_id;
-            path = prev_path;
         }
     }
 
@@ -1129,8 +1141,7 @@ impl Engine {
         root_page_id: PageId,
         key: RowId,
     ) -> Result<Option<RecordLocation>, StorageError> {
-        let (mut leaf_page_id, mut path) =
-            self.btree_find_leaf_page_and_path_for_row_id(root_page_id, key)?;
+        let mut leaf_page_id = self.btree_find_leaf_page_for_row_id(root_page_id, key)?;
 
         loop {
             let maybe_slot_id = {
@@ -1144,12 +1155,10 @@ impl Engine {
                 return Ok(Some(self.btree_leaf_location_at_slot(leaf_page_id, slot_id)?));
             }
 
-            let Some((next_leaf_page_id, next_path)) = self.btree_next_leaf_from_path(&path)?
-            else {
+            let Some(next_leaf_page_id) = self.btree_next_leaf_page(leaf_page_id)? else {
                 return Ok(None);
             };
             leaf_page_id = next_leaf_page_id;
-            path = next_path;
         }
     }
 
@@ -1158,8 +1167,7 @@ impl Engine {
         root_page_id: PageId,
         key: RowId,
     ) -> Result<Option<RecordLocation>, StorageError> {
-        let (mut leaf_page_id, mut path) =
-            self.btree_find_leaf_page_and_path_for_row_id(root_page_id, key)?;
+        let mut leaf_page_id = self.btree_find_leaf_page_for_row_id(root_page_id, key)?;
 
         loop {
             let maybe_slot_id = {
@@ -1189,12 +1197,10 @@ impl Engine {
                 return Ok(Some(self.btree_leaf_location_at_slot(leaf_page_id, slot_id)?));
             }
 
-            let Some((next_leaf_page_id, next_path)) = self.btree_next_leaf_from_path(&path)?
-            else {
+            let Some(next_leaf_page_id) = self.btree_next_leaf_page(leaf_page_id)? else {
                 return Ok(None);
             };
             leaf_page_id = next_leaf_page_id;
-            path = next_path;
         }
     }
 
@@ -1203,8 +1209,7 @@ impl Engine {
         root_page_id: PageId,
         key: RowId,
     ) -> Result<Option<RecordLocation>, StorageError> {
-        let (mut leaf_page_id, mut path) =
-            self.btree_find_leaf_page_and_path_for_row_id(root_page_id, key)?;
+        let mut leaf_page_id = self.btree_find_leaf_page_for_row_id(root_page_id, key)?;
 
         loop {
             let maybe_slot_id = {
@@ -1240,12 +1245,10 @@ impl Engine {
                 return Ok(Some(self.btree_leaf_location_at_slot(leaf_page_id, slot_id)?));
             }
 
-            let Some((prev_leaf_page_id, prev_path)) = self.btree_prev_leaf_from_path(&path)?
-            else {
+            let Some(prev_leaf_page_id) = self.btree_prev_leaf_page(leaf_page_id)? else {
                 return Ok(None);
             };
             leaf_page_id = prev_leaf_page_id;
-            path = prev_path;
         }
     }
 
@@ -1254,8 +1257,7 @@ impl Engine {
         root_page_id: PageId,
         key: RowId,
     ) -> Result<Option<RecordLocation>, StorageError> {
-        let (mut leaf_page_id, mut path) =
-            self.btree_find_leaf_page_and_path_for_row_id(root_page_id, key)?;
+        let mut leaf_page_id = self.btree_find_leaf_page_for_row_id(root_page_id, key)?;
 
         loop {
             let maybe_slot_id = {
@@ -1284,12 +1286,10 @@ impl Engine {
                 return Ok(Some(self.btree_leaf_location_at_slot(leaf_page_id, slot_id)?));
             }
 
-            let Some((prev_leaf_page_id, prev_path)) = self.btree_prev_leaf_from_path(&path)?
-            else {
+            let Some(prev_leaf_page_id) = self.btree_prev_leaf_page(leaf_page_id)? else {
                 return Ok(None);
             };
             leaf_page_id = prev_leaf_page_id;
-            path = prev_path;
         }
     }
 }
@@ -1467,7 +1467,7 @@ impl<'tree> BTreeCursor<'tree> {
             return Ok(());
         };
 
-        self.position = self.engine.btree_seek_gt_location(self.tree.root_page_id, position.key)?;
+        self.position = self.engine.btree_next_location(position)?;
         Ok(())
     }
 
@@ -1479,7 +1479,7 @@ impl<'tree> BTreeCursor<'tree> {
             return Ok(());
         };
 
-        self.position = self.engine.btree_seek_lt_location(self.tree.root_page_id, position.key)?;
+        self.position = self.engine.btree_prev_location(position)?;
         Ok(())
     }
 
@@ -1616,6 +1616,38 @@ mod test {
         }
     }
 
+    fn set_leaf_siblings(
+        engine: &mut Engine,
+        leaf_page_id: PageId,
+        prev_sibling: Option<PageId>,
+        next_sibling: Option<PageId>,
+    ) {
+        let mut page_guard = engine.page_cache.fetch_page(leaf_page_id).unwrap();
+        let mut leaf = TableLeafPageMut::from_bytes(page_guard.page_mut()).unwrap();
+        leaf.set_prev_sibling(prev_sibling).unwrap();
+        leaf.set_next_sibling(next_sibling).unwrap();
+    }
+
+    fn assert_leaf_siblings(
+        engine: &mut Engine,
+        leaf_page_id: PageId,
+        prev_sibling: Option<PageId>,
+        next_sibling: Option<PageId>,
+    ) {
+        let page_guard = engine.page_cache.fetch_page(leaf_page_id).unwrap();
+        let leaf = TableLeafPageRef::from_bytes(page_guard.page()).unwrap();
+        assert_eq!(leaf.prev_sibling(), prev_sibling);
+        assert_eq!(leaf.next_sibling(), next_sibling);
+    }
+
+    fn assert_leaf_chain(engine: &mut Engine, leaf_page_ids: &[PageId]) {
+        for (index, leaf_page_id) in leaf_page_ids.iter().enumerate() {
+            let prev_sibling = index.checked_sub(1).map(|prev_index| leaf_page_ids[prev_index]);
+            let next_sibling = leaf_page_ids.get(index + 1).copied();
+            assert_leaf_siblings(engine, *leaf_page_id, prev_sibling, next_sibling);
+        }
+    }
+
     #[test]
     fn point_ops_match_expected_semantics() {
         let mut engine = get_temp_engine();
@@ -1746,6 +1778,8 @@ mod test {
             leaf.insert(20, &[20]).unwrap();
             page_id
         };
+        set_leaf_siblings(&mut engine, left_leaf, None, Some(right_leaf));
+        set_leaf_siblings(&mut engine, right_leaf, Some(left_leaf), None);
 
         let root_page_id = {
             let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
@@ -1789,6 +1823,8 @@ mod test {
             leaf.insert(20, &[20]).unwrap();
             page_id
         };
+        set_leaf_siblings(&mut engine, left_leaf, None, Some(right_leaf));
+        set_leaf_siblings(&mut engine, right_leaf, Some(left_leaf), None);
 
         let root_page_id = {
             let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
@@ -1814,6 +1850,52 @@ mod test {
 
         tree.insert(15, &[15]).unwrap();
         expect_payload(tree.get(15).unwrap(), Some(&[15]));
+    }
+
+    #[test]
+    fn cursor_next_prev_skip_empty_leaf_siblings() {
+        let mut engine = get_temp_engine();
+
+        let left_leaf = {
+            let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
+            let mut leaf = TableLeafPageMut::init_empty(page_guard.page_mut()).unwrap();
+            leaf.insert(1, &[1]).unwrap();
+            page_id
+        };
+        let middle_empty_leaf = {
+            let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
+            TableLeafPageMut::init_empty(page_guard.page_mut()).unwrap();
+            page_id
+        };
+        let right_leaf = {
+            let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
+            let mut leaf = TableLeafPageMut::init_empty(page_guard.page_mut()).unwrap();
+            leaf.insert(30, &[30]).unwrap();
+            page_id
+        };
+
+        set_leaf_siblings(&mut engine, left_leaf, None, Some(middle_empty_leaf));
+        set_leaf_siblings(&mut engine, middle_empty_leaf, Some(left_leaf), Some(right_leaf));
+        set_leaf_siblings(&mut engine, right_leaf, Some(middle_empty_leaf), None);
+
+        let root_page_id = {
+            let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
+            let mut interior =
+                TableInteriorPageMut::init_empty(page_guard.page_mut(), right_leaf).unwrap();
+            interior.insert(10, left_leaf).unwrap();
+            interior.insert(20, middle_empty_leaf).unwrap();
+            page_id
+        };
+
+        let mut tree = engine.open_btree(root_page_id).unwrap();
+        let mut cursor = tree.seek_first().unwrap();
+        assert_eq!(cursor.key().unwrap(), Some(1));
+
+        cursor.next_position().unwrap();
+        assert_eq!(cursor.key().unwrap(), Some(30));
+
+        cursor.prev_position().unwrap();
+        assert_eq!(cursor.key().unwrap(), Some(1));
     }
 
     #[test]
@@ -1896,11 +1978,17 @@ mod test {
 
         let root_guard = tree.engine.page_cache.fetch_page(root_page_id).unwrap();
         let root_page = TablePageRef::from_bytes(root_guard.page()).unwrap();
-        match root_page {
+        let child_page_ids = match root_page {
             TablePageRef::Leaf(_) => panic!("expected root to become an interior page"),
-            TablePageRef::Interior(interior) => assert!(interior.cell_count() > 0),
-        }
+            TablePageRef::Interior(interior) => {
+                assert!(interior.cell_count() > 0);
+                (0..interior.child_count())
+                    .map(|child_index| interior.child_at(child_index).unwrap())
+                    .collect::<Vec<_>>()
+            }
+        };
         drop(root_guard);
+        assert_leaf_chain(tree.engine, &child_page_ids);
 
         for key in 0u64..14 {
             let expected = fixed_payload((key % 255) as u8, 512);
@@ -1921,12 +2009,15 @@ mod test {
 
         let root_guard = tree.engine.page_cache.fetch_page(root_page_id).unwrap();
         let root_page = TablePageRef::from_bytes(root_guard.page()).unwrap();
-        let child_count = match root_page {
+        let child_page_ids = match root_page {
             TablePageRef::Leaf(_) => panic!("expected interior root after repeated splits"),
-            TablePageRef::Interior(interior) => interior.child_count(),
+            TablePageRef::Interior(interior) => (0..interior.child_count())
+                .map(|child_index| interior.child_at(child_index).unwrap())
+                .collect::<Vec<_>>(),
         };
-        assert!(child_count > 2);
+        assert!(child_page_ids.len() > 2);
         drop(root_guard);
+        assert_leaf_chain(tree.engine, &child_page_ids);
 
         let mut cursor = tree.seek_first().unwrap();
         let mut seen = Vec::new();
@@ -2036,6 +2127,62 @@ mod test {
             TablePageRef::Leaf(_) => panic!("expected interior root"),
             TablePageRef::Interior(interior) => assert!(interior.cell_count() >= 2),
         }
+    }
+
+    #[test]
+    fn non_root_leaf_split_rewires_right_sibling_chain() {
+        let mut engine = get_temp_engine();
+
+        let left_leaf = {
+            let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
+            let mut leaf = TableLeafPageMut::init_empty(page_guard.page_mut()).unwrap();
+            leaf.insert(1, &[1]).unwrap();
+            page_id
+        };
+        let middle_leaf = {
+            let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
+            TableLeafPageMut::init_empty(page_guard.page_mut()).unwrap();
+            page_id
+        };
+        let right_leaf = {
+            let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
+            let mut leaf = TableLeafPageMut::init_empty(page_guard.page_mut()).unwrap();
+            leaf.insert(2_000, &[2]).unwrap();
+            page_id
+        };
+
+        set_leaf_siblings(&mut engine, left_leaf, None, Some(middle_leaf));
+        set_leaf_siblings(&mut engine, middle_leaf, Some(left_leaf), Some(right_leaf));
+        set_leaf_siblings(&mut engine, right_leaf, Some(middle_leaf), None);
+
+        let root_page_id = {
+            let (page_id, mut page_guard) = engine.page_cache.new_page().unwrap();
+            let mut root =
+                TableInteriorPageMut::init_empty(page_guard.page_mut(), right_leaf).unwrap();
+            root.insert(100, left_leaf).unwrap();
+            root.insert(1_000, middle_leaf).unwrap();
+            page_id
+        };
+
+        let split_payload = fixed_payload(7, 256);
+        let first_failing_key =
+            fill_leaf_until_page_full(&mut engine, middle_leaf, 100, &split_payload);
+
+        let mut tree = engine.open_btree(root_page_id).unwrap();
+        tree.insert(first_failing_key, &split_payload).unwrap();
+        expect_payload(tree.get(first_failing_key).unwrap(), Some(&split_payload));
+
+        let split_right_leaf = {
+            let page_guard = tree.engine.page_cache.fetch_page(middle_leaf).unwrap();
+            let leaf = TableLeafPageRef::from_bytes(page_guard.page()).unwrap();
+            leaf.next_sibling().expect("split middle leaf should point to new right sibling")
+        };
+
+        assert_ne!(split_right_leaf, right_leaf);
+        assert_leaf_siblings(tree.engine, left_leaf, None, Some(middle_leaf));
+        assert_leaf_siblings(tree.engine, middle_leaf, Some(left_leaf), Some(split_right_leaf));
+        assert_leaf_siblings(tree.engine, split_right_leaf, Some(middle_leaf), Some(right_leaf));
+        assert_leaf_siblings(tree.engine, right_leaf, Some(split_right_leaf), None);
     }
 
     #[test]
