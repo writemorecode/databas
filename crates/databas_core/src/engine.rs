@@ -19,11 +19,13 @@ pub type RowId = u64;
 const DEFAULT_PAGE_CACHE_SIZE: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Internal B-tree metadata stored in handles and cursors.
 struct BTree {
     root_page_id: PageId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Physical location of a record inside a leaf page.
 struct RecordLocation {
     page_id: PageId,
     slot_id: u16,
@@ -31,18 +33,21 @@ struct RecordLocation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Parent traversal state captured while descending to a leaf.
 struct BTreePathEntry {
     page_id: PageId,
     child_index: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Logical interior entry used while materializing split results.
 struct InteriorEntry {
     row_id: RowId,
     left_child_page_id: PageId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Description of a child split that must be propagated upward.
 struct ChildSplitEvent {
     separator_key: RowId,
     left_child_page_id: PageId,
@@ -128,6 +133,7 @@ impl Engine {
         self.open_btree(root_page_id)
     }
 
+    /// Descends from `root_page_id` to the leaf page that should contain `row_id`.
     fn btree_find_leaf_page_for_row_id(
         &mut self,
         root_page_id: PageId,
@@ -151,6 +157,7 @@ impl Engine {
         Ok(leaf_page_id)
     }
 
+    /// Descends to the target leaf and records the traversed interior path.
     fn btree_find_leaf_page_and_path_for_row_id(
         &mut self,
         root_page_id: PageId,
@@ -176,6 +183,7 @@ impl Engine {
         Ok((leaf_page_id, path))
     }
 
+    /// Returns the leaf insertion slot for `row_id` or a duplicate-key error.
     fn leaf_insert_slot(
         leaf_page: &TableLeafPageRef<'_>,
         row_id: RowId,
@@ -190,6 +198,7 @@ impl Engine {
         Ok(insert_slot)
     }
 
+    /// Resolves a row id at a logical index in a leaf with a pending insert applied.
     fn logical_leaf_row_id(
         leaf_page: &TableLeafPageRef<'_>,
         insert_slot: usize,
@@ -213,6 +222,7 @@ impl Engine {
         Ok(leaf_page.cell_at_slot(source_index as u16)?.row_id)
     }
 
+    /// Writes one logical leaf entry into `destination` for split simulation/rebuild.
     fn insert_logical_leaf_entry(
         destination: &mut TableLeafPageMut<'_>,
         source_leaf_page: &TableLeafPageRef<'_>,
@@ -241,6 +251,7 @@ impl Engine {
         Ok(())
     }
 
+    /// Returns whether the logical leaf entry range fits in a single page.
     fn logical_leaf_range_fits_single_page(
         source_leaf_page: &TableLeafPageRef<'_>,
         insert_slot: usize,
@@ -270,6 +281,7 @@ impl Engine {
         Ok(true)
     }
 
+    /// Picks a split index whose left and right logical ranges both fit a page.
     fn choose_leaf_split_index(
         source_leaf_page: &TableLeafPageRef<'_>,
         insert_slot: usize,
@@ -347,6 +359,7 @@ impl Engine {
         Ok(None)
     }
 
+    /// Rebuilds a leaf page with the logical entry range `[start, end)`.
     fn write_leaf_entry_range_to_page_bytes(
         page: &mut [u8; PAGE_SIZE],
         source_leaf_page: &TableLeafPageRef<'_>,
@@ -370,6 +383,7 @@ impl Engine {
         Ok(())
     }
 
+    /// Validates and normalizes the child index where a split is inserted.
     fn interior_split_child_index(
         source_interior_page: &TableInteriorPageRef<'_>,
         child_index: u16,
@@ -383,6 +397,7 @@ impl Engine {
         Ok(child_index)
     }
 
+    /// Returns the logical interior entry at `logical_index` after applying `split_event`.
     fn logical_interior_entry_at(
         source_interior_page: &TableInteriorPageRef<'_>,
         child_index: usize,
@@ -424,6 +439,7 @@ impl Engine {
         Ok(InteriorEntry { row_id: source_cell.row_id, left_child_page_id })
     }
 
+    /// Resolves the rightmost child pointer after a child split is applied logically.
     fn logical_interior_rightmost_child(
         source_interior_page: &TableInteriorPageRef<'_>,
         child_index: usize,
@@ -436,6 +452,7 @@ impl Engine {
         }
     }
 
+    /// Writes one logical interior entry into `destination`.
     fn insert_logical_interior_entry(
         destination: &mut TableInteriorPageMut<'_>,
         source_interior_page: &TableInteriorPageRef<'_>,
@@ -453,6 +470,7 @@ impl Engine {
         Ok(())
     }
 
+    /// Returns whether a logical interior entry range fits in a single page.
     fn logical_interior_range_fits_single_page(
         source_interior_page: &TableInteriorPageRef<'_>,
         child_index: usize,
@@ -482,6 +500,7 @@ impl Engine {
         Ok(true)
     }
 
+    /// Checks whether promoting `promotion_index` yields two interior pages that fit.
     fn interior_promotion_candidate_fits(
         source_interior_page: &TableInteriorPageRef<'_>,
         child_index: usize,
@@ -526,6 +545,7 @@ impl Engine {
         Ok(right_fits)
     }
 
+    /// Chooses the interior promotion index closest to the midpoint that fits.
     fn choose_interior_promotion_index(
         source_interior_page: &TableInteriorPageRef<'_>,
         child_index: usize,
@@ -571,6 +591,7 @@ impl Engine {
         Ok(None)
     }
 
+    /// Rebuilds an interior page from the logical entry range `[start, end)`.
     fn write_interior_entry_range_to_page_bytes(
         page: &mut [u8; PAGE_SIZE],
         source_interior_page: &TableInteriorPageRef<'_>,
@@ -593,6 +614,7 @@ impl Engine {
         Ok(())
     }
 
+    /// Applies `split_event` into a parent interior page, splitting parent if needed.
     fn apply_child_split_to_interior_page(
         &mut self,
         root_page_id: PageId,
@@ -723,6 +745,7 @@ impl Engine {
         }))
     }
 
+    /// Propagates a child split up the recorded parent path toward the root.
     fn propagate_child_split_event(
         &mut self,
         root_page_id: PageId,
@@ -744,6 +767,7 @@ impl Engine {
         Ok(())
     }
 
+    /// Handles insertions that overflow a leaf by splitting and propagating upward.
     fn btree_insert_with_leaf_split(
         &mut self,
         root_page_id: PageId,
@@ -873,6 +897,7 @@ impl Engine {
         self.propagate_child_split_event(root_page_id, &path, split_event)
     }
 
+    /// Looks up `row_id` and returns a pinned record guard when found.
     fn btree_search<'a>(
         &'a mut self,
         root_page_id: PageId,
@@ -887,6 +912,7 @@ impl Engine {
         }
     }
 
+    /// Inserts a new key/value pair into the tree rooted at `root_page_id`.
     fn btree_insert(
         &mut self,
         root_page_id: PageId,
@@ -915,6 +941,7 @@ impl Engine {
         }
     }
 
+    /// Updates an existing key/value pair in the tree rooted at `root_page_id`.
     fn btree_update(
         &mut self,
         root_page_id: PageId,
@@ -928,6 +955,7 @@ impl Engine {
         Ok(())
     }
 
+    /// Deletes `row_id` from the tree and reports whether a row was removed.
     fn btree_delete(&mut self, root_page_id: PageId, row_id: RowId) -> Result<bool, StorageError> {
         let leaf_page_id = self.btree_find_leaf_page_for_row_id(root_page_id, row_id)?;
         let mut page_guard = self.page_cache.fetch_page(leaf_page_id)?;
@@ -939,6 +967,7 @@ impl Engine {
         }
     }
 
+    /// Builds a [`RecordLocation`] for `slot_id` in `leaf_page_id`.
     fn btree_leaf_location_at_slot(
         &mut self,
         leaf_page_id: PageId,
@@ -950,6 +979,7 @@ impl Engine {
         Ok(RecordLocation { page_id: leaf_page_id, slot_id, key: cell.row_id })
     }
 
+    /// Returns the first record location in the leaf, if any.
     fn btree_first_location_in_leaf(
         &mut self,
         leaf_page_id: PageId,
@@ -963,6 +993,7 @@ impl Engine {
         Ok(Some(RecordLocation { page_id: leaf_page_id, slot_id: 0, key: cell.row_id }))
     }
 
+    /// Returns the last record location in the leaf, if any.
     fn btree_last_location_in_leaf(
         &mut self,
         leaf_page_id: PageId,
@@ -976,6 +1007,7 @@ impl Engine {
         Ok(Some(RecordLocation { page_id: leaf_page_id, slot_id: last_slot_id, key: cell.row_id }))
     }
 
+    /// Traverses down to the leftmost leaf reachable from `start_page_id`.
     fn btree_leftmost_leaf_page(&mut self, start_page_id: PageId) -> Result<PageId, StorageError> {
         let mut current_page_id = start_page_id;
 
@@ -991,6 +1023,7 @@ impl Engine {
         }
     }
 
+    /// Traverses down to the rightmost leaf reachable from `start_page_id`.
     fn btree_rightmost_leaf_page(&mut self, start_page_id: PageId) -> Result<PageId, StorageError> {
         let mut current_page_id = start_page_id;
 
@@ -1012,6 +1045,7 @@ impl Engine {
         }
     }
 
+    /// Returns the next leaf page in sibling order.
     fn btree_next_leaf_page(
         &mut self,
         leaf_page_id: PageId,
@@ -1021,6 +1055,7 @@ impl Engine {
         Ok(leaf_page.next_sibling())
     }
 
+    /// Returns the previous leaf page in sibling order.
     fn btree_prev_leaf_page(
         &mut self,
         leaf_page_id: PageId,
@@ -1030,6 +1065,7 @@ impl Engine {
         Ok(leaf_page.prev_sibling())
     }
 
+    /// Returns the next record location after `location`, if one exists.
     fn btree_next_location(
         &mut self,
         location: RecordLocation,
@@ -1060,6 +1096,7 @@ impl Engine {
         Ok(None)
     }
 
+    /// Returns the previous record location before `location`, if one exists.
     fn btree_prev_location(
         &mut self,
         location: RecordLocation,
@@ -1088,6 +1125,7 @@ impl Engine {
         Ok(None)
     }
 
+    /// Returns the smallest record location in the tree, if any.
     fn btree_leftmost_location(
         &mut self,
         root_page_id: PageId,
@@ -1105,6 +1143,7 @@ impl Engine {
         }
     }
 
+    /// Returns the largest record location in the tree, if any.
     fn btree_rightmost_location(
         &mut self,
         root_page_id: PageId,
@@ -1122,6 +1161,7 @@ impl Engine {
         }
     }
 
+    /// Returns the first location in key order.
     fn btree_seek_first_location(
         &mut self,
         root_page_id: PageId,
@@ -1129,6 +1169,7 @@ impl Engine {
         self.btree_leftmost_location(root_page_id)
     }
 
+    /// Returns the last location in key order.
     fn btree_seek_last_location(
         &mut self,
         root_page_id: PageId,
@@ -1136,6 +1177,7 @@ impl Engine {
         self.btree_rightmost_location(root_page_id)
     }
 
+    /// Returns the first location whose key is greater than or equal to `key`.
     fn btree_seek_ge_location(
         &mut self,
         root_page_id: PageId,
@@ -1162,6 +1204,7 @@ impl Engine {
         }
     }
 
+    /// Returns the first location whose key is strictly greater than `key`.
     fn btree_seek_gt_location(
         &mut self,
         root_page_id: PageId,
@@ -1204,6 +1247,7 @@ impl Engine {
         }
     }
 
+    /// Returns the last location whose key is less than or equal to `key`.
     fn btree_seek_le_location(
         &mut self,
         root_page_id: PageId,
@@ -1252,6 +1296,7 @@ impl Engine {
         }
     }
 
+    /// Returns the last location whose key is strictly less than `key`.
     fn btree_seek_lt_location(
         &mut self,
         root_page_id: PageId,
@@ -1390,6 +1435,7 @@ impl<'engine> BTreeHandle<'engine> {
 }
 
 impl<'tree> BTreeCursor<'tree> {
+    /// Creates an invalid cursor bound to `tree`.
     fn new(engine: &'tree mut Engine, tree: BTree) -> Self {
         Self { engine, tree, position: None }
     }
@@ -1511,6 +1557,7 @@ impl<'tree> BTreeCursor<'tree> {
 }
 
 impl Engine {
+    /// Returns the exact-key location for `key`, if it exists.
     fn btree_seek(
         &mut self,
         key: RowId,
