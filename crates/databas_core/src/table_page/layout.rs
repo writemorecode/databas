@@ -1,17 +1,22 @@
+use crate::types::PageId;
 use crate::{page_checksum::PAGE_DATA_END, types::PAGE_SIZE};
 
 use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
 pub(super) const LEAF_PAGE_TYPE: u8 = 1;
 pub(super) const INTERIOR_PAGE_TYPE: u8 = 2;
 
-pub(super) const LEAF_HEADER_SIZE: usize = 8;
-pub(super) const INTERIOR_HEADER_SIZE: usize = 16;
-pub(super) const INTERIOR_RIGHTMOST_CHILD_OFFSET: usize = 8;
+pub(super) const LEAF_HEADER_SIZE: usize = 24;
+pub(super) const INTERIOR_HEADER_SIZE: usize = 32;
+pub(super) const PREV_SIBLING_OFFSET: usize = 8;
+pub(super) const NEXT_SIBLING_OFFSET: usize = 16;
+pub(super) const INTERIOR_RIGHTMOST_CHILD_OFFSET: usize = 24;
 
 const PAGE_TYPE_OFFSET: usize = 0;
 const CELL_COUNT_OFFSET: usize = 2;
 const CONTENT_START_OFFSET: usize = 4;
 const SLOT_WIDTH: usize = 2;
+
+const NO_SIBLING_PAGE_ID: PageId = 0;
 
 const _: () = {
     assert!(PAGE_SIZE <= u16::MAX as usize, "PAGE_SIZE must fit in u16");
@@ -23,6 +28,16 @@ const _: () = {
     assert!(
         INTERIOR_HEADER_SIZE >= CONTENT_START_OFFSET + 2 && INTERIOR_HEADER_SIZE <= PAGE_DATA_END,
         "interior header layout is invalid"
+    );
+    assert!(
+        PREV_SIBLING_OFFSET + 8 <= LEAF_HEADER_SIZE
+            && PREV_SIBLING_OFFSET + 8 <= INTERIOR_HEADER_SIZE,
+        "previous-sibling pointer must fit in both fixed headers"
+    );
+    assert!(
+        NEXT_SIBLING_OFFSET + 8 <= LEAF_HEADER_SIZE
+            && NEXT_SIBLING_OFFSET + 8 <= INTERIOR_HEADER_SIZE,
+        "next-sibling pointer must fit in both fixed headers"
     );
     assert!(
         INTERIOR_RIGHTMOST_CHILD_OFFSET + 8 <= INTERIOR_HEADER_SIZE,
@@ -267,6 +282,26 @@ pub(super) fn write_u64_at(page: &mut [u8; PAGE_SIZE], offset: usize, value: u64
     page[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
+/// Returns the previous sibling page id from the shared page-header location.
+pub(super) fn prev_sibling(page: &[u8; PAGE_SIZE]) -> Option<PageId> {
+    decode_sibling_page_id(read_u64_at(page, PREV_SIBLING_OFFSET))
+}
+
+/// Returns the next sibling page id from the shared page-header location.
+pub(super) fn next_sibling(page: &[u8; PAGE_SIZE]) -> Option<PageId> {
+    decode_sibling_page_id(read_u64_at(page, NEXT_SIBLING_OFFSET))
+}
+
+/// Writes the previous sibling page id into the shared page-header location.
+pub(super) fn set_prev_sibling(page: &mut [u8; PAGE_SIZE], page_id: Option<PageId>) {
+    write_u64_at(page, PREV_SIBLING_OFFSET, encode_sibling_page_id(page_id));
+}
+
+/// Writes the next sibling page id into the shared page-header location.
+pub(super) fn set_next_sibling(page: &mut [u8; PAGE_SIZE], page_id: Option<PageId>) {
+    write_u64_at(page, NEXT_SIBLING_OFFSET, encode_sibling_page_id(page_id));
+}
+
 /// Writes the in-header slot count field.
 fn set_cell_count(page: &mut [u8; PAGE_SIZE], cell_count: u16) {
     write_u16(page, CELL_COUNT_OFFSET, cell_count);
@@ -341,4 +376,12 @@ fn read_u16(page: &[u8; PAGE_SIZE], offset: usize) -> u16 {
 /// Writes `value` as little-endian `u16` into `page` at `offset`.
 fn write_u16(page: &mut [u8; PAGE_SIZE], offset: usize, value: u16) {
     page[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn decode_sibling_page_id(page_id: PageId) -> Option<PageId> {
+    if page_id == NO_SIBLING_PAGE_ID { None } else { Some(page_id) }
+}
+
+fn encode_sibling_page_id(page_id: Option<PageId>) -> PageId {
+    page_id.unwrap_or(NO_SIBLING_PAGE_ID)
 }

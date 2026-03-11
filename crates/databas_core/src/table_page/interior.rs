@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
 
+use crate::table_page::layout::SpaceError;
 use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
 use crate::types::{PAGE_SIZE, PageId, RowId};
 
 use super::{
-    layout::{self, PageSpec, SearchResult, SpaceError},
+    layout::{self, PageSpec, SearchResult},
     read_u64,
 };
 
@@ -102,6 +103,16 @@ impl<'a> TableInteriorPageRef<'a> {
     /// Returns the page header's rightmost child pointer.
     pub(crate) fn rightmost_child(&self) -> PageId {
         layout::read_u64_at(self.page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET)
+    }
+
+    /// Returns the previous interior sibling page id, if any.
+    pub(crate) fn prev_sibling(&self) -> Option<PageId> {
+        layout::prev_sibling(self.page)
+    }
+
+    /// Returns the next interior sibling page id, if any.
+    pub(crate) fn next_sibling(&self) -> Option<PageId> {
+        layout::next_sibling(self.page)
     }
 
     /// Returns free bytes between the slot directory and cell-content region.
@@ -225,6 +236,16 @@ impl<'a> TableInteriorPageMut<'a> {
         Ok(())
     }
 
+    /// Returns the previous interior sibling page id, if any.
+    pub(crate) fn prev_sibling(&self) -> Option<PageId> {
+        layout::prev_sibling(self.page)
+    }
+
+    /// Returns the next interior sibling page id, if any.
+    pub(crate) fn next_sibling(&self) -> Option<PageId> {
+        layout::next_sibling(self.page)
+    }
+
     /// Compacts live cells toward the page end and rewrites slot offsets.
     pub(crate) fn defragment(&mut self) -> TablePageResult<()> {
         defragment_interior_page(self.page)
@@ -283,6 +304,8 @@ fn insert_interior_cell(page: &mut [u8; PAGE_SIZE], cell: &[u8]) -> TablePageRes
 
 /// Rewrites live interior cells contiguously and refreshes slot offsets.
 fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
+    let prev_sibling = layout::prev_sibling(page);
+    let next_sibling = layout::next_sibling(page);
     let rightmost_child = layout::read_u64_at(page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET);
     let cell_count = usize::from(layout::cell_count(page));
     let mut scratch = [0u8; PAGE_SIZE];
@@ -304,6 +327,8 @@ fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     }
 
     layout::init_empty(page, INTERIOR_SPEC)?;
+    layout::set_prev_sibling(page, prev_sibling);
+    layout::set_next_sibling(page, next_sibling);
     layout::write_u64_at(page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET, rightmost_child);
 
     let mut scratch_offset = 0usize;
@@ -470,15 +495,27 @@ mod tests {
             assert_eq!(interior.rightmost_child(), 9);
             interior.set_rightmost_child(42).unwrap();
             assert_eq!(interior.rightmost_child(), 42);
+            assert_eq!(interior.prev_sibling(), None);
+            assert_eq!(interior.next_sibling(), None);
+            layout::set_prev_sibling(interior.page, Some(7));
+            layout::set_next_sibling(interior.page, Some(8));
+            assert_eq!(interior.prev_sibling(), Some(7));
+            assert_eq!(interior.next_sibling(), Some(8));
+            layout::set_prev_sibling(interior.page, None);
+            layout::set_next_sibling(interior.page, None);
         }
 
         let interior_ref = TableInteriorPageRef::from_bytes(&page).unwrap();
         assert_eq!(interior_ref.rightmost_child(), 42);
+        assert_eq!(interior_ref.prev_sibling(), None);
+        assert_eq!(interior_ref.next_sibling(), None);
     }
 
     #[test]
     fn insert_defrag_retry_path_succeeds() {
         let mut page = initialized_interior_page(123);
+        layout::set_prev_sibling(&mut page, Some(900));
+        layout::set_next_sibling(&mut page, Some(901));
         let mut interior = TableInteriorPageMut::from_bytes(&mut page).unwrap();
 
         let max_cells = max_cell_count();
@@ -491,6 +528,8 @@ mod tests {
 
         interior.insert(max_cells as RowId, 99_999).unwrap();
         assert_eq!(interior.search(max_cells as RowId).unwrap().unwrap().left_child, 99_999);
+        assert_eq!(interior.prev_sibling(), Some(900));
+        assert_eq!(interior.next_sibling(), Some(901));
     }
 
     #[test]
