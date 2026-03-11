@@ -1,4 +1,7 @@
-use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
+use crate::{
+    table_page::{TablePageCorruptionKind, TablePageError, TablePageResult},
+    types::PageId,
+};
 use std::cmp::Ordering;
 
 use crate::types::{PAGE_SIZE, RowId};
@@ -82,6 +85,16 @@ impl<'a> TableLeafPageRef<'a> {
     /// Returns free bytes between the slot directory and cell-content region.
     pub(crate) fn free_space(&self) -> TablePageResult<usize> {
         layout::free_space(self.page, LEAF_SPEC)
+    }
+
+    /// Returns the previous leaf sibling page id, if any.
+    pub(crate) fn prev_sibling(&self) -> Option<PageId> {
+        layout::prev_sibling(self.page)
+    }
+
+    /// Returns the next leaf sibling page id, if any.
+    pub(crate) fn next_sibling(&self) -> Option<PageId> {
+        layout::next_sibling(self.page)
     }
 }
 
@@ -292,6 +305,8 @@ fn insert_leaf_cell(
 
 /// Rewrites live leaf cells contiguously and refreshes slot offsets.
 fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
+    let prev_sibling = layout::prev_sibling(page);
+    let next_sibling = layout::next_sibling(page);
     let cell_count = usize::from(layout::cell_count(page));
     let mut scratch = [0u8; PAGE_SIZE];
     let mut scratch_len = 0usize;
@@ -311,6 +326,8 @@ fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     }
 
     layout::init_empty(page, LEAF_SPEC)?;
+    layout::set_prev_sibling(page, prev_sibling);
+    layout::set_next_sibling(page, next_sibling);
 
     let mut scratch_offset = 0usize;
     for slot in 0..cell_count {
@@ -569,6 +586,48 @@ mod tests {
         let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
         let err = leaf_ref.search(1).unwrap_err();
         assert!(matches!(err, TablePageError::CorruptCell { slot_index: 0 }));
+    }
+
+    #[test]
+    fn sibling_pointers_roundtrip_and_allow_none() {
+        let mut page = initialized_leaf_page();
+        {
+            let leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+            assert_eq!(leaf.search(1).unwrap(), None);
+        }
+        layout::set_prev_sibling(&mut page, Some(7));
+        layout::set_next_sibling(&mut page, Some(13));
+
+        let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
+        assert_eq!(leaf_ref.prev_sibling(), Some(7));
+        assert_eq!(leaf_ref.next_sibling(), Some(13));
+
+        layout::set_prev_sibling(&mut page, None);
+        layout::set_next_sibling(&mut page, None);
+
+        let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
+        assert_eq!(leaf_ref.prev_sibling(), None);
+        assert_eq!(leaf_ref.next_sibling(), None);
+    }
+
+    #[test]
+    fn sibling_pointers_survive_defragmentation() {
+        let mut page = initialized_leaf_page();
+        layout::set_prev_sibling(&mut page, Some(111));
+        layout::set_next_sibling(&mut page, Some(222));
+        {
+            let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+            leaf.insert(1, &payload(1, 1_200)).unwrap();
+            leaf.insert(2, &payload(2, 1_200)).unwrap();
+            leaf.insert(3, &payload(3, 1_200)).unwrap();
+            leaf.delete(2).unwrap();
+
+            leaf.insert(4, &payload(4, 1_000)).unwrap();
+        }
+
+        let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
+        assert_eq!(leaf_ref.prev_sibling(), Some(111));
+        assert_eq!(leaf_ref.next_sibling(), Some(222));
     }
 }
 
