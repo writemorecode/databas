@@ -2,6 +2,23 @@ use crate::types::PageId;
 use crate::{page_checksum::PAGE_DATA_END, types::PAGE_SIZE};
 
 use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
+/// Current fixed header layout (all multi-byte fields are little-endian):
+///
+/// Shared prefix (both leaf and interior):
+/// - `0`: page type (`LEAF_PAGE_TYPE` or `INTERIOR_PAGE_TYPE`)
+/// - `1`: reserved/unused
+/// - `2..4`: `cell_count` (`u16`)
+/// - `4..6`: `content_start` (`u16`)
+/// - `6..8`: reserved/unused
+/// - `8..16`: previous sibling page id (`u64`, `0` means none)
+/// - `16..24`: next sibling page id (`u64`, `0` means none)
+///
+/// Interior-only extension:
+/// - `24..32`: rightmost child page id (`u64`)
+///
+/// Fixed header size is `24` for leaf pages and `32` for interior pages.
+/// The slot directory starts immediately after the fixed header; each slot is
+/// a `u16` cell offset.
 pub(super) const LEAF_PAGE_TYPE: u8 = 1;
 pub(super) const INTERIOR_PAGE_TYPE: u8 = 2;
 
