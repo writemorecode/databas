@@ -221,7 +221,6 @@ impl<'a> TableInteriorPageMut<'a> {
 
     /// Updates the page header's rightmost child pointer.
     pub(crate) fn set_rightmost_child(&mut self, page_id: PageId) -> TablePageResult<()> {
-        layout::validate(self.page, INTERIOR_SPEC)?;
         layout::write_u64_at(self.page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET, page_id);
         Ok(())
     }
@@ -234,8 +233,6 @@ impl<'a> TableInteriorPageMut<'a> {
 
 /// Performs row-id lookup on interior pages with interior-specific spec and decoder.
 fn find_interior_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<SearchResult> {
-    layout::validate(page, INTERIOR_SPEC)?;
-
     let cell_count = usize::from(layout::cell_count(page));
     let mut left = 0usize;
     let mut right = cell_count;
@@ -286,8 +283,6 @@ fn insert_interior_cell(page: &mut [u8; PAGE_SIZE], cell: &[u8]) -> TablePageRes
 
 /// Rewrites live interior cells contiguously and refreshes slot offsets.
 fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
-    layout::validate(page, INTERIOR_SPEC)?;
-
     let rightmost_child = layout::read_u64_at(page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET);
     let cell_count = usize::from(layout::cell_count(page));
     let mut scratch = [0u8; PAGE_SIZE];

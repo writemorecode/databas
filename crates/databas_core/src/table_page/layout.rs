@@ -101,8 +101,6 @@ pub(super) fn content_start(page: &[u8; PAGE_SIZE]) -> u16 {
 
 /// Returns free bytes between the slot directory end and the cell-content start.
 pub(super) fn free_space(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<usize> {
-    validate(page, spec)?;
-
     let slot_dir_end = slot_dir_end_for_count(spec, usize::from(cell_count(page)))?;
     let content_start = usize::from(content_start(page));
     Ok(content_start - slot_dir_end)
@@ -114,7 +112,6 @@ pub(super) fn cell_bytes_at_slot(
     spec: PageSpec,
     slot_index: u16,
 ) -> TablePageResult<&[u8]> {
-    validate(page, spec)?;
     cell_bytes_at_slot_on_valid_page(page, spec, slot_index)
 }
 
@@ -138,8 +135,6 @@ pub(super) fn try_append_cell(
     spec: PageSpec,
     cell: &[u8],
 ) -> TablePageResult<Result<u16, SpaceError>> {
-    validate(page, spec)?;
-
     let cell_len = cell.len();
     if cell_len > usize::from(u16::MAX) {
         return Err(TablePageError::CellTooLarge { len: cell_len, max: usize::from(u16::MAX) });
@@ -166,8 +161,6 @@ pub(super) fn try_append_cell_for_insert(
     spec: PageSpec,
     cell: &[u8],
 ) -> TablePageResult<Result<u16, SpaceError>> {
-    validate(page, spec)?;
-
     let cell_len = cell.len();
     if cell_len > usize::from(u16::MAX) {
         return Err(TablePageError::CellTooLarge { len: cell_len, max: usize::from(u16::MAX) });
@@ -196,8 +189,6 @@ pub(super) fn set_slot_offset(
     slot_index: u16,
     cell_offset: u16,
 ) -> TablePageResult<()> {
-    validate(page, spec)?;
-
     let cell_count = usize::from(cell_count(page));
     let slot_index_usize = usize::from(slot_index);
     if slot_index_usize >= cell_count {
@@ -214,8 +205,6 @@ pub(super) fn insert_slot(
     insert_index: u16,
     cell_offset: u16,
 ) -> TablePageResult<()> {
-    validate(page, spec)?;
-
     let cell_count = usize::from(cell_count(page));
     let insert_index_usize = usize::from(insert_index);
     if insert_index_usize > cell_count {
@@ -248,8 +237,6 @@ pub(super) fn remove_slot(
     spec: PageSpec,
     remove_index: u16,
 ) -> TablePageResult<()> {
-    validate(page, spec)?;
-
     let cell_count = usize::from(cell_count(page));
     let remove_index_usize = usize::from(remove_index);
     if remove_index_usize >= cell_count {

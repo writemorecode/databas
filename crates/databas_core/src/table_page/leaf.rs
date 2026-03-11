@@ -1,7 +1,7 @@
 use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
 use std::cmp::Ordering;
 
-use crate::types::{RowId, PAGE_SIZE};
+use crate::types::{PAGE_SIZE, RowId};
 
 use super::{
     layout::{self, PageSpec, SearchResult, SpaceError},
@@ -197,8 +197,6 @@ fn leaf_cell_len(cell: &[u8]) -> TablePageResult<usize> {
 
 /// Performs row-id lookup on leaf pages with leaf-specific spec and decoder.
 fn find_leaf_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<SearchResult> {
-    layout::validate(page, LEAF_SPEC)?;
-
     let cell_count = usize::from(layout::cell_count(page));
     let mut left = 0usize;
     let mut right = cell_count;
@@ -294,8 +292,6 @@ fn insert_leaf_cell(
 
 /// Rewrites live leaf cells contiguously and refreshes slot offsets.
 fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
-    layout::validate(page, LEAF_SPEC)?;
-
     let cell_count = usize::from(layout::cell_count(page));
     let mut scratch = [0u8; PAGE_SIZE];
     let mut scratch_len = 0usize;
