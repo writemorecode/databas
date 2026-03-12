@@ -208,24 +208,15 @@ pub(super) fn try_append_cell(
     spec: PageSpec,
     cell: &[u8],
 ) -> TablePageResult<Result<u16, SpaceError>> {
-    let cell_len = cell.len();
-    if cell_len > usize::from(u16::MAX) {
-        return Err(TablePageError::CellTooLarge { len: cell_len, max: usize::from(u16::MAX) });
+    match try_allocate_space(page, spec, cell.len(), 0)? {
+        Ok(offset) => {
+            let start = usize::from(offset);
+            let end = start + cell.len();
+            page[start..end].copy_from_slice(cell);
+            Ok(Ok(offset))
+        }
+        Err(space_error) => Ok(Err(space_error)),
     }
-
-    let current_count = usize::from(cell_count(page));
-    let slot_dir_end_after = slot_dir_end_for_count(spec, current_count)?;
-    let content_start = usize::from(content_start(page));
-    let available = content_start.saturating_sub(slot_dir_end_after);
-
-    if cell_len > available {
-        return Ok(Err(SpaceError { needed: cell_len, available }));
-    }
-
-    let new_start = content_start - cell_len;
-    page[new_start..content_start].copy_from_slice(cell);
-    set_content_start(page, new_start);
-    Ok(Ok(new_start as u16))
 }
 
 /// Attempts to append a pre-encoded cell while reserving one additional slot entry.
@@ -234,25 +225,170 @@ pub(super) fn try_append_cell_for_insert(
     spec: PageSpec,
     cell: &[u8],
 ) -> TablePageResult<Result<u16, SpaceError>> {
-    let cell_len = cell.len();
-    if cell_len > usize::from(u16::MAX) {
-        return Err(TablePageError::CellTooLarge { len: cell_len, max: usize::from(u16::MAX) });
+    match try_allocate_space(page, spec, cell.len(), 1)? {
+        Ok(offset) => {
+            let start = usize::from(offset);
+            let end = start + cell.len();
+            page[start..end].copy_from_slice(cell);
+            Ok(Ok(offset))
+        }
+        Err(space_error) => Ok(Err(space_error)),
+    }
+}
+
+/// Attempts to reserve `size` bytes from a freeblock or the gap.
+pub(super) fn try_allocate_space(
+    page: &mut [u8; PAGE_SIZE],
+    spec: PageSpec,
+    size: usize,
+    additional_slots: usize,
+) -> TablePageResult<Result<u16, SpaceError>> {
+    if size > usize::from(u16::MAX) {
+        return Err(TablePageError::CellTooLarge { len: size, max: usize::from(u16::MAX) });
     }
 
-    let current_count = usize::from(cell_count(page));
-    let required_count = current_count + 1;
-    let slot_dir_end_after = slot_dir_end_for_count(spec, required_count)?;
+    absorb_freeblocks_into_gap(page)?;
+    let slot_dir_end_after =
+        slot_dir_end_for_count(spec, usize::from(cell_count(page)) + additional_slots)?;
     let content_start = usize::from(content_start(page));
-    let available = content_start.saturating_sub(slot_dir_end_after);
-
-    if cell_len > available {
-        return Ok(Err(SpaceError { needed: cell_len, available }));
+    if slot_dir_end_after > content_start {
+        return Ok(Err(space_error(page, spec, size, additional_slots)?));
     }
 
-    let new_start = content_start - cell_len;
-    page[new_start..content_start].copy_from_slice(cell);
+    if let Some(offset) = allocate_from_freeblocks(page, size)? {
+        return Ok(Ok(offset));
+    }
+
+    let available_gap = content_start - slot_dir_end_after;
+    if size > available_gap {
+        return Ok(Err(space_error(page, spec, size, additional_slots)?));
+    }
+
+    let new_start = content_start - size;
     set_content_start(page, new_start);
     Ok(Ok(new_start as u16))
+}
+
+/// Releases a previously used byte range back into the free-space structure.
+pub(super) fn release_space(
+    page: &mut [u8; PAGE_SIZE],
+    spec: PageSpec,
+    offset: u16,
+    size: usize,
+) -> TablePageResult<()> {
+    if size == 0 {
+        return Ok(());
+    }
+
+    let offset = usize::from(offset);
+    let slot_dir_end = slot_dir_end_for_count(spec, usize::from(cell_count(page)))?;
+    if offset < usize::from(content_start(page))
+        || offset < slot_dir_end
+        || offset + size > PAGE_DATA_END
+    {
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::InvalidFreeblockOffset));
+    }
+
+    absorb_freeblocks_into_gap(page)?;
+    if offset == usize::from(content_start(page)) {
+        set_content_start(page, offset + size);
+        absorb_freeblocks_into_gap(page)?;
+        return Ok(());
+    }
+
+    let (prev_offset, next_offset) = locate_freeblock_neighbors(page, offset)?;
+    if let Some(prev_offset) = prev_offset {
+        let prev = read_freeblock(page, prev_offset)?;
+        if prev.offset + prev.size > offset {
+            return Err(TablePageError::CorruptPage(
+                TablePageCorruptionKind::FreeblockChainOutOfOrder,
+            ));
+        }
+    }
+
+    if next_offset != 0 {
+        let next = read_freeblock(page, usize::from(next_offset))?;
+        if offset + size > next.offset {
+            return Err(TablePageError::CorruptPage(
+                TablePageCorruptionKind::FreeblockChainOutOfOrder,
+            ));
+        }
+    }
+
+    let merges_prev = prev_offset
+        .map(|prev_offset| {
+            let prev = read_freeblock(page, prev_offset)?;
+            Ok(prev.offset + prev.size == offset)
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let merges_next = if next_offset == 0 {
+        false
+    } else {
+        let next = read_freeblock(page, usize::from(next_offset))?;
+        offset + size == next.offset
+    };
+
+    if merges_prev {
+        let prev_offset = prev_offset.expect("prev offset exists when merging predecessor");
+        let prev = read_freeblock(page, prev_offset)?;
+        let mut merged_size = prev.size + size;
+        let mut next = prev.next;
+
+        if merges_next {
+            let successor = read_freeblock(page, usize::from(next_offset))?;
+            merged_size += successor.size;
+            next = successor.next;
+        }
+
+        write_freeblock(page, prev.offset, next, merged_size)?;
+        absorb_freeblocks_into_gap(page)?;
+        return Ok(());
+    }
+
+    if merges_next {
+        let successor = read_freeblock(page, usize::from(next_offset))?;
+        let merged_size = size + successor.size;
+        if merged_size < FREEBLOCK_HEADER_SIZE {
+            return add_fragmented_bytes(page, merged_size as u8);
+        }
+
+        write_freeblock(page, offset, successor.next, merged_size)?;
+        set_link_target(page, prev_offset, offset as u16);
+        absorb_freeblocks_into_gap(page)?;
+        return Ok(());
+    }
+
+    if size < FREEBLOCK_HEADER_SIZE {
+        return add_fragmented_bytes(page, size as u8);
+    }
+
+    write_freeblock(page, offset, next_offset, size)?;
+    set_link_target(page, prev_offset, offset as u16);
+    absorb_freeblocks_into_gap(page)?;
+    Ok(())
+}
+
+/// Computes `PageFull` accounting for a new cell insert.
+pub(super) fn page_full_for_insert(
+    page: &[u8; PAGE_SIZE],
+    spec: PageSpec,
+    cell_len: usize,
+) -> TablePageResult<SpaceError> {
+    space_error(page, spec, cell_len, 1)
+}
+
+/// Computes `PageFull` accounting for updating an existing cell.
+pub(super) fn page_full_for_update(
+    page: &[u8; PAGE_SIZE],
+    spec: PageSpec,
+    new_cell_len: usize,
+    reclaimable_bytes: usize,
+) -> TablePageResult<SpaceError> {
+    Ok(SpaceError {
+        needed: new_cell_len,
+        available: free_space(page, spec)?.saturating_add(reclaimable_bytes),
+    })
 }
 
 /// Updates an existing slot to reference `cell_offset`.
@@ -504,6 +640,137 @@ fn read_freeblock(page: &[u8; PAGE_SIZE], offset: usize) -> TablePageResult<Free
     Ok(Freeblock { offset, next, size })
 }
 
+fn write_freeblock(
+    page: &mut [u8; PAGE_SIZE],
+    offset: usize,
+    next: u16,
+    size: usize,
+) -> TablePageResult<()> {
+    if size > usize::from(u16::MAX) {
+        return Err(TablePageError::CellTooLarge { len: size, max: usize::from(u16::MAX) });
+    }
+    if size < FREEBLOCK_HEADER_SIZE || offset + size > PAGE_DATA_END {
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::InvalidFreeblockOffset));
+    }
+
+    write_u16(page, offset, next);
+    write_u16(page, offset + 2, size as u16);
+    Ok(())
+}
+
+fn allocate_from_freeblocks(
+    page: &mut [u8; PAGE_SIZE],
+    size: usize,
+) -> TablePageResult<Option<u16>> {
+    let mut previous = None;
+    let mut current = first_freeblock(page);
+
+    while current != 0 {
+        let freeblock = read_freeblock(page, usize::from(current))?;
+        if freeblock.size >= size {
+            let remaining = freeblock.size - size;
+            if remaining == 0 {
+                set_link_target(page, previous, freeblock.next);
+                return Ok(Some(current));
+            }
+
+            if remaining >= FREEBLOCK_HEADER_SIZE {
+                let allocated_offset = freeblock.offset + remaining;
+                write_freeblock(page, freeblock.offset, freeblock.next, remaining)?;
+                return Ok(Some(allocated_offset as u16));
+            }
+
+            let remaining_u8 = remaining as u8;
+            let fragments = fragmented_free_bytes(page);
+            if fragments.saturating_add(remaining_u8) > MAX_FRAGMENTED_FREE_BYTES {
+                previous = Some(freeblock.offset);
+                current = freeblock.next;
+                continue;
+            }
+
+            let allocated_offset = freeblock.offset + remaining;
+            set_link_target(page, previous, freeblock.next);
+            add_fragmented_bytes(page, remaining_u8)?;
+            return Ok(Some(allocated_offset as u16));
+        }
+
+        previous = Some(freeblock.offset);
+        current = freeblock.next;
+    }
+
+    Ok(None)
+}
+
+fn locate_freeblock_neighbors(
+    page: &[u8; PAGE_SIZE],
+    offset: usize,
+) -> TablePageResult<(Option<usize>, u16)> {
+    let mut previous = None;
+    let mut current = first_freeblock(page);
+
+    while current != 0 && usize::from(current) < offset {
+        let freeblock = read_freeblock(page, usize::from(current))?;
+        previous = Some(freeblock.offset);
+        current = freeblock.next;
+    }
+
+    Ok((previous, current))
+}
+
+fn absorb_freeblocks_into_gap(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
+    loop {
+        let head = first_freeblock(page);
+        if head == 0 {
+            return Ok(());
+        }
+
+        let gap_start = usize::from(content_start(page));
+        if usize::from(head) != gap_start {
+            return Ok(());
+        }
+
+        let freeblock = read_freeblock(page, gap_start)?;
+        set_first_freeblock(page, freeblock.next);
+        set_content_start(page, gap_start + freeblock.size);
+    }
+}
+
+fn set_link_target(page: &mut [u8; PAGE_SIZE], previous: Option<usize>, next: u16) {
+    if let Some(previous) = previous {
+        write_u16(page, previous, next);
+    } else {
+        set_first_freeblock(page, next);
+    }
+}
+
+fn add_fragmented_bytes(page: &mut [u8; PAGE_SIZE], additional: u8) -> TablePageResult<()> {
+    let fragmented = fragmented_free_bytes(page);
+    let Some(next) = fragmented.checked_add(additional) else {
+        return Err(TablePageError::CorruptPage(
+            TablePageCorruptionKind::InvalidFragmentedFreeBytes,
+        ));
+    };
+    if next > MAX_FRAGMENTED_FREE_BYTES {
+        return Err(TablePageError::CorruptPage(
+            TablePageCorruptionKind::InvalidFragmentedFreeBytes,
+        ));
+    }
+    set_fragmented_free_bytes(page, next);
+    Ok(())
+}
+
+fn space_error(
+    page: &[u8; PAGE_SIZE],
+    spec: PageSpec,
+    needed_cell_bytes: usize,
+    additional_slots: usize,
+) -> TablePageResult<SpaceError> {
+    Ok(SpaceError {
+        needed: needed_cell_bytes + (additional_slots * SLOT_WIDTH),
+        available: free_space(page, spec)?,
+    })
+}
+
 /// Reads a little-endian `u16` from `page` at `offset`.
 fn read_u16(page: &[u8; PAGE_SIZE], offset: usize) -> u16 {
     let mut bytes = [0u8; 2];
@@ -522,4 +789,73 @@ fn decode_sibling_page_id(page_id: PageId) -> Option<PageId> {
 
 fn encode_sibling_page_id(page_id: Option<PageId>) -> PageId {
     page_id.unwrap_or(NO_SIBLING_PAGE_ID)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_SPEC: PageSpec =
+        PageSpec { page_type: LEAF_PAGE_TYPE, header_size: LEAF_HEADER_SIZE };
+
+    fn initialized_page() -> [u8; PAGE_SIZE] {
+        let mut page = [0u8; PAGE_SIZE];
+        init_empty(&mut page, TEST_SPEC).unwrap();
+        page
+    }
+
+    #[test]
+    fn released_space_is_reused_before_gap_space() {
+        let mut page = initialized_page();
+        let first_cell = [1u8; 12];
+        let second_cell = [2u8; 12];
+
+        let first_offset =
+            try_append_cell_for_insert(&mut page, TEST_SPEC, &first_cell).unwrap().unwrap();
+        insert_slot(&mut page, TEST_SPEC, 0, first_offset).unwrap();
+
+        let second_offset =
+            try_append_cell_for_insert(&mut page, TEST_SPEC, &second_cell).unwrap().unwrap();
+        insert_slot(&mut page, TEST_SPEC, 1, second_offset).unwrap();
+
+        release_space(&mut page, TEST_SPEC, first_offset, first_cell.len()).unwrap();
+        assert_eq!(first_freeblock(&page), first_offset);
+
+        let reused_offset = try_append_cell(&mut page, TEST_SPEC, &[9u8; 12]).unwrap().unwrap();
+        assert_eq!(reused_offset, first_offset);
+        assert_eq!(first_freeblock(&page), 0);
+    }
+
+    #[test]
+    fn allocating_from_freeblock_can_leave_fragment_bytes() {
+        let mut page = initialized_page();
+        let reusable_offset = try_append_cell(&mut page, TEST_SPEC, &[1u8; 12]).unwrap().unwrap();
+        let _live_offset = try_append_cell(&mut page, TEST_SPEC, &[2u8; 12]).unwrap().unwrap();
+
+        release_space(&mut page, TEST_SPEC, reusable_offset, 12).unwrap();
+        let allocated_offset = try_append_cell(&mut page, TEST_SPEC, &[2u8; 10]).unwrap().unwrap();
+
+        assert_eq!(allocated_offset, reusable_offset + 2);
+        assert_eq!(fragmented_free_bytes(&page), 2);
+        assert_eq!(first_freeblock(&page), 0);
+    }
+
+    #[test]
+    fn releasing_adjacent_ranges_coalesces_freeblocks() {
+        let mut page = initialized_page();
+        let higher = try_append_cell(&mut page, TEST_SPEC, &[1u8; 12]).unwrap().unwrap();
+        let middle = try_append_cell(&mut page, TEST_SPEC, &[2u8; 12]).unwrap().unwrap();
+        let lower = try_append_cell(&mut page, TEST_SPEC, &[3u8; 12]).unwrap().unwrap();
+
+        assert_eq!(usize::from(middle) + 12, usize::from(higher));
+        assert_eq!(usize::from(lower) + 12, usize::from(middle));
+
+        release_space(&mut page, TEST_SPEC, higher, 12).unwrap();
+        release_space(&mut page, TEST_SPEC, middle, 12).unwrap();
+
+        let freeblock = read_freeblock(&page, usize::from(first_freeblock(&page))).unwrap();
+        assert_eq!(freeblock.offset, usize::from(middle));
+        assert_eq!(freeblock.size, 24);
+        assert_eq!(freeblock.next, 0);
+    }
 }
