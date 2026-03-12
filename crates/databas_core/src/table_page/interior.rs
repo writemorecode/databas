@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 
-use crate::table_page::layout::SpaceError;
 use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
 use crate::types::{PAGE_SIZE, PageId, RowId};
 
@@ -224,7 +223,9 @@ impl<'a> TableInteriorPageMut<'a> {
             SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound { row_id }),
         };
 
-        layout::remove_slot(self.page, INTERIOR_SPEC, slot_index)
+        let cell_offset = layout::slot_offset(self.page, INTERIOR_SPEC, slot_index)?;
+        layout::remove_slot(self.page, INTERIOR_SPEC, slot_index)?;
+        layout::release_space(self.page, INTERIOR_SPEC, cell_offset, INTERIOR_CELL_SIZE)
     }
 
     /// Returns the current rightmost child pointer from the page header.
@@ -294,18 +295,28 @@ fn insert_interior_cell(page: &mut [u8; PAGE_SIZE], cell: &[u8]) -> TablePageRes
         return Ok(offset);
     }
 
+    let space_error = layout::page_full_for_insert(page, INTERIOR_SPEC, cell.len())?;
+    if space_error.needed > space_error.available {
+        return Err(TablePageError::PageFull {
+            needed: space_error.needed,
+            available: space_error.available,
+        });
+    }
+
     defragment_interior_page(page)?;
 
     match layout::try_append_cell_for_insert(page, INTERIOR_SPEC, cell)? {
         Ok(offset) => Ok(offset),
-        Err(SpaceError { needed, available }) => {
-            Err(TablePageError::PageFull { needed, available })
-        }
+        Err(_) => Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellContentUnderflow)),
     }
 }
 
 /// Rewrites live interior cells contiguously and refreshes slot offsets.
 fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
+    rewrite_interior_page(page)
+}
+
+fn rewrite_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     let prev_sibling = layout::prev_sibling(page);
     let next_sibling = layout::next_sibling(page);
     let rightmost_child = layout::read_u64_at(page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET);
@@ -526,7 +537,7 @@ mod tests {
         }
 
         interior.delete(100).unwrap();
-        assert!(interior.free_space().unwrap() < INTERIOR_CELL_SIZE + 2);
+        assert!(interior.free_space().unwrap() >= INTERIOR_CELL_SIZE);
 
         interior.insert(max_cells as RowId, 99_999).unwrap();
         assert_eq!(interior.search(max_cells as RowId).unwrap().unwrap().left_child, 99_999);
