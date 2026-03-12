@@ -18,6 +18,12 @@ const PAYLOAD_LEN_SIZE: usize = 2;
 const ROW_ID_SIZE: usize = 8;
 const LEAF_CELL_PREFIX_SIZE: usize = PAYLOAD_LEN_SIZE + ROW_ID_SIZE;
 
+#[derive(Debug, Clone, Copy)]
+struct LeafUpdateAllocation {
+    offset: u16,
+    old_cell_reclaimed: bool,
+}
+
 /// Borrowed view of one leaf cell decoded from a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LeafCellRef<'a> {
@@ -191,8 +197,11 @@ impl<'a> TableLeafPageMut<'a> {
             return Ok(());
         }
 
-        let replacement_offset = update_leaf_cell(self.page, slot_index, row_id, payload)?;
-        layout::set_slot_offset(self.page, LEAF_SPEC, slot_index, replacement_offset)?;
+        let replacement = update_leaf_cell(self.page, slot_index, row_id, payload)?;
+        layout::set_slot_offset(self.page, LEAF_SPEC, slot_index, replacement.offset)?;
+        if replacement.old_cell_reclaimed {
+            return Ok(());
+        }
         layout::release_space(self.page, LEAF_SPEC, cell_offset, existing_len)
     }
 
@@ -295,10 +304,10 @@ fn update_leaf_cell(
     slot_index: u16,
     row_id: RowId,
     payload: &[u8],
-) -> TablePageResult<u16> {
+) -> TablePageResult<LeafUpdateAllocation> {
     let cell = encode_leaf_cell(row_id, payload)?;
     if let Ok(offset) = layout::try_append_cell(page, LEAF_SPEC, &cell)? {
-        return Ok(offset);
+        return Ok(LeafUpdateAllocation { offset, old_cell_reclaimed: false });
     }
 
     let existing_cell = layout::cell_bytes_at_slot(page, LEAF_SPEC, slot_index)?;
@@ -313,7 +322,10 @@ fn update_leaf_cell(
     }
 
     rewrite_leaf_page(page, Some((slot_index, &cell)))?;
-    layout::slot_offset(page, LEAF_SPEC, slot_index)
+    Ok(LeafUpdateAllocation {
+        offset: layout::slot_offset(page, LEAF_SPEC, slot_index)?,
+        old_cell_reclaimed: true,
+    })
 }
 
 /// Inserts a leaf cell, defragmenting once before reporting page-full.
@@ -578,6 +590,82 @@ mod tests {
     }
 
     #[test]
+    fn insert_reuses_deleted_cell_space_before_defragmenting() {
+        let mut page = initialized_leaf_page();
+        let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+
+        leaf.insert(1, &payload(1, 256)).unwrap();
+        leaf.insert(2, &payload(2, 256)).unwrap();
+        leaf.insert(3, &payload(3, 256)).unwrap();
+
+        let deleted_slot = find_leaf_row_id(leaf.page, 2).unwrap();
+        let deleted_slot = match deleted_slot {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::NotFound(_) => panic!("row should exist"),
+        };
+        let deleted_offset = layout::slot_offset(leaf.page, LEAF_SPEC, deleted_slot).unwrap();
+
+        leaf.delete(2).unwrap();
+        leaf.insert(4, &payload(4, 256)).unwrap();
+
+        let inserted_slot = find_leaf_row_id(leaf.page, 4).unwrap();
+        let inserted_slot = match inserted_slot {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::NotFound(_) => panic!("row should exist"),
+        };
+        let inserted_offset = layout::slot_offset(leaf.page, LEAF_SPEC, inserted_slot).unwrap();
+
+        assert_eq!(inserted_offset, deleted_offset);
+    }
+
+    #[test]
+    fn shrinking_update_returns_tail_space() {
+        let mut page = initialized_leaf_page();
+        let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+
+        leaf.insert(7, &payload(1, 128)).unwrap();
+        let free_before = leaf.free_space().unwrap();
+
+        leaf.update(7, &payload(9, 80)).unwrap();
+
+        assert_eq!(leaf.search(7).unwrap().unwrap().payload, payload(9, 80).as_slice());
+        assert_eq!(leaf.free_space().unwrap(), free_before + 48);
+    }
+
+    #[test]
+    fn growing_update_can_succeed_by_reclaiming_old_cell_during_rewrite() {
+        let mut page = initialized_leaf_page();
+        let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+
+        leaf.insert(1, &payload(1, 1_200)).unwrap();
+        leaf.insert(2, &payload(2, 1_200)).unwrap();
+        leaf.insert(3, &payload(3, 1_200)).unwrap();
+
+        let free_before = leaf.free_space().unwrap();
+        assert!(free_before < leaf_cell_encoded_len(&payload(9, 1_400)).unwrap());
+
+        leaf.update(2, &payload(9, 1_400)).unwrap();
+
+        assert_eq!(leaf.search(2).unwrap().unwrap().payload, payload(9, 1_400).as_slice());
+        assert_eq!(leaf.search(1).unwrap().unwrap().payload, payload(1, 1_200).as_slice());
+        assert_eq!(leaf.search(3).unwrap().unwrap().payload, payload(3, 1_200).as_slice());
+    }
+
+    #[test]
+    fn failed_growing_update_leaves_old_cell_intact() {
+        let mut page = initialized_leaf_page();
+        let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+
+        leaf.insert(1, &payload(1, 1_200)).unwrap();
+        leaf.insert(2, &payload(2, 1_200)).unwrap();
+        leaf.insert(3, &payload(3, 1_200)).unwrap();
+
+        let err = leaf.update(2, &payload(9, 2_000)).unwrap_err();
+        assert!(matches!(err, TablePageError::PageFull { .. }));
+        assert_eq!(leaf.search(2).unwrap().unwrap().payload, payload(2, 1_200).as_slice());
+    }
+
+    #[test]
     fn insert_defrag_retry_path_succeeds() {
         let mut page = initialized_leaf_page();
         let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
@@ -781,6 +869,14 @@ mod test_prop {
     type LeafEntry = (RowId, Vec<u8>);
     type LeafEntries = Vec<LeafEntry>;
     type LeafInsertThenUpdateCase = (LeafEntries, LeafEntries);
+    type LeafOpSequence = Vec<LeafOp>;
+
+    #[derive(Debug, Clone)]
+    enum LeafOp {
+        Insert(RowId, Vec<u8>),
+        Update(RowId, Vec<u8>),
+        Delete(RowId),
+    }
 
     fn compact_leaf_usage(entries: &[LeafEntry]) -> usize {
         layout::LEAF_HEADER_SIZE
@@ -886,6 +982,20 @@ mod test_prop {
                 "updates must be executable under the current leaf-page update algorithm",
                 |(entries, updates)| update_sequence_succeeds(entries, updates),
             )
+    }
+
+    fn leaf_op_strategy() -> impl Strategy<Value = LeafOp> {
+        prop_oneof![
+            (any::<RowId>(), leaf_payload_strategy())
+                .prop_map(|(row_id, payload)| LeafOp::Insert(row_id, payload)),
+            (any::<RowId>(), leaf_payload_strategy())
+                .prop_map(|(row_id, payload)| LeafOp::Update(row_id, payload)),
+            any::<RowId>().prop_map(LeafOp::Delete),
+        ]
+    }
+
+    fn leaf_op_sequence_strategy() -> impl Strategy<Value = LeafOpSequence> {
+        prop::collection::vec(leaf_op_strategy(), 1..=96)
     }
 
     proptest! {
@@ -1000,6 +1110,65 @@ mod test_prop {
             let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
             for (row_id, payload) in &oracle {
                 let cell = leaf_ref.search(*row_id).unwrap().unwrap();
+                prop_assert_eq!(cell.row_id, *row_id);
+                prop_assert_eq!(cell.payload, payload.as_slice());
+            }
+        }
+
+        #[test]
+        fn prop_interleaved_mutations_preserve_search_oracle(ops in leaf_op_sequence_strategy()) {
+            let mut oracle: BTreeMap<RowId, Vec<u8>> = BTreeMap::new();
+            let mut page = initialized_leaf_page();
+            let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+
+            for op in ops {
+                match op {
+                    LeafOp::Insert(row_id, payload) => {
+                        match leaf.insert(row_id, &payload) {
+                            Ok(()) => {
+                                oracle.insert(row_id, payload);
+                            }
+                            Err(TablePageError::DuplicateRowId { .. }) => {
+                                prop_assert!(oracle.contains_key(&row_id));
+                            }
+                            Err(TablePageError::PageFull { .. }) => {}
+                            Err(err) => return Err(TestCaseError::fail(format!("unexpected insert error: {err}"))),
+                        }
+                    }
+                    LeafOp::Update(row_id, payload) => {
+                        match leaf.update(row_id, &payload) {
+                            Ok(()) => {
+                                prop_assert!(oracle.contains_key(&row_id));
+                                oracle.insert(row_id, payload);
+                            }
+                            Err(TablePageError::RowIdNotFound { .. }) => {
+                                prop_assert!(!oracle.contains_key(&row_id));
+                            }
+                            Err(TablePageError::PageFull { .. }) => {
+                                prop_assert!(oracle.contains_key(&row_id));
+                            }
+                            Err(err) => return Err(TestCaseError::fail(format!("unexpected update error: {err}"))),
+                        }
+                    }
+                    LeafOp::Delete(row_id) => {
+                        match leaf.delete(row_id) {
+                            Ok(()) => {
+                                prop_assert!(oracle.remove(&row_id).is_some());
+                            }
+                            Err(TablePageError::RowIdNotFound { .. }) => {
+                                prop_assert!(!oracle.contains_key(&row_id));
+                            }
+                            Err(err) => return Err(TestCaseError::fail(format!("unexpected delete error: {err}"))),
+                        }
+                    }
+                }
+            }
+
+            leaf.defragment().unwrap();
+            prop_assert_eq!(leaf.cell_count() as usize, oracle.len());
+
+            for (row_id, payload) in &oracle {
+                let cell = leaf.search(*row_id).unwrap().unwrap();
                 prop_assert_eq!(cell.row_id, *row_id);
                 prop_assert_eq!(cell.payload, payload.as_slice());
             }

@@ -858,4 +858,79 @@ mod tests {
         assert_eq!(freeblock.size, 24);
         assert_eq!(freeblock.next, 0);
     }
+
+    #[test]
+    fn validate_rejects_fragment_count_above_maximum() {
+        let mut page = initialized_page();
+        set_fragmented_free_bytes(&mut page, MAX_FRAGMENTED_FREE_BYTES + 1);
+
+        let err = validate(&page, TEST_SPEC).unwrap_err();
+        assert!(matches!(
+            err,
+            TablePageError::CorruptPage(TablePageCorruptionKind::InvalidFragmentedFreeBytes)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_out_of_bounds_freeblock() {
+        let mut page = initialized_page();
+        set_content_start(&mut page, PAGE_DATA_END - 32);
+        set_first_freeblock(&mut page, (PAGE_DATA_END - 2) as u16);
+
+        let err = validate(&page, TEST_SPEC).unwrap_err();
+        assert!(matches!(
+            err,
+            TablePageError::CorruptPage(TablePageCorruptionKind::InvalidFreeblockOffset)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_too_small_freeblock() {
+        let mut page = initialized_page();
+        let offset = PAGE_DATA_END - 24;
+        set_content_start(&mut page, PAGE_DATA_END - 32);
+        set_first_freeblock(&mut page, offset as u16);
+        write_u16(&mut page, offset, 0);
+        write_u16(&mut page, offset + 2, 3);
+
+        let err = validate(&page, TEST_SPEC).unwrap_err();
+        assert!(matches!(
+            err,
+            TablePageError::CorruptPage(TablePageCorruptionKind::FreeblockTooSmall)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_out_of_order_freeblock_chain() {
+        let mut page = initialized_page();
+        let first = PAGE_DATA_END - 24;
+        let second = PAGE_DATA_END - 40;
+        set_content_start(&mut page, PAGE_DATA_END - 48);
+        set_first_freeblock(&mut page, first as u16);
+        write_freeblock(&mut page, first, second as u16, 12).unwrap();
+        write_freeblock(&mut page, second, 0, 12).unwrap();
+
+        let err = validate(&page, TEST_SPEC).unwrap_err();
+        assert!(matches!(
+            err,
+            TablePageError::CorruptPage(TablePageCorruptionKind::FreeblockChainOutOfOrder)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_adjacent_freeblocks() {
+        let mut page = initialized_page();
+        let first = PAGE_DATA_END - 24;
+        let second = PAGE_DATA_END - 12;
+        set_content_start(&mut page, PAGE_DATA_END - 40);
+        set_first_freeblock(&mut page, first as u16);
+        write_freeblock(&mut page, first, second as u16, 12).unwrap();
+        write_freeblock(&mut page, second, 0, 12).unwrap();
+
+        let err = validate(&page, TEST_SPEC).unwrap_err();
+        assert!(matches!(
+            err,
+            TablePageError::CorruptPage(TablePageCorruptionKind::AdjacentFreeblocks)
+        ));
+    }
 }
