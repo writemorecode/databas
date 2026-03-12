@@ -115,7 +115,8 @@ impl<'a> TableInteriorPageRef<'a> {
         layout::next_sibling(self.page)
     }
 
-    /// Returns free bytes between the slot directory and cell-content region.
+    /// Returns total reusable space on the page, including the unallocated gap,
+    /// freeblocks, and fragmented bytes.
     pub(crate) fn free_space(&self) -> TablePageResult<usize> {
         layout::free_space(self.page, INTERIOR_SPEC)
     }
@@ -173,7 +174,8 @@ impl<'a> TableInteriorPageMut<'a> {
         layout::cell_count(self.page)
     }
 
-    /// Returns free bytes between the slot directory and cell-content region.
+    /// Returns total reusable space on the page, including the unallocated gap,
+    /// freeblocks, and fragmented bytes.
     pub(crate) fn free_space(&self) -> TablePageResult<usize> {
         layout::free_space(self.page, INTERIOR_SPEC)
     }

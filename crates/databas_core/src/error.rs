@@ -72,12 +72,22 @@ pub enum CorruptionKind {
     InvalidPageType { page_type: u8 },
     #[error("invalid cell content start")]
     InvalidCellContentStart,
+    #[error("fragmented free byte count exceeds maximum")]
+    InvalidFragmentedFreeBytes,
     #[error("slot index out of bounds")]
     SlotIndexOutOfBounds,
     #[error("slot directory overlaps cell content")]
     SlotDirectoryOverlapsCellContent,
     #[error("slot directory exceeds page size")]
     SlotDirectoryExceedsPageSize,
+    #[error("invalid freeblock offset")]
+    InvalidFreeblockOffset,
+    #[error("freeblock too small")]
+    FreeblockTooSmall,
+    #[error("freeblock chain out of order")]
+    FreeblockChainOutOfOrder,
+    #[error("adjacent freeblocks")]
+    AdjacentFreeblocks,
     #[error("cell too short")]
     CellTooShort,
     #[error("cell payload out of bounds")]
@@ -247,6 +257,7 @@ impl From<TablePageCorruptionKind> for CorruptionKind {
     fn from(kind: TablePageCorruptionKind) -> Self {
         match kind {
             TablePageCorruptionKind::InvalidCellContentStart => Self::InvalidCellContentStart,
+            TablePageCorruptionKind::InvalidFragmentedFreeBytes => Self::InvalidFragmentedFreeBytes,
             TablePageCorruptionKind::SlotIndexOutOfBounds => Self::SlotIndexOutOfBounds,
             TablePageCorruptionKind::SlotDirectoryOverlapsCellContent => {
                 Self::SlotDirectoryOverlapsCellContent
@@ -254,6 +265,10 @@ impl From<TablePageCorruptionKind> for CorruptionKind {
             TablePageCorruptionKind::SlotDirectoryExceedsPageSize => {
                 Self::SlotDirectoryExceedsPageSize
             }
+            TablePageCorruptionKind::InvalidFreeblockOffset => Self::InvalidFreeblockOffset,
+            TablePageCorruptionKind::FreeblockTooSmall => Self::FreeblockTooSmall,
+            TablePageCorruptionKind::FreeblockChainOutOfOrder => Self::FreeblockChainOutOfOrder,
+            TablePageCorruptionKind::AdjacentFreeblocks => Self::AdjacentFreeblocks,
             TablePageCorruptionKind::CellTooShort => Self::CellTooShort,
             TablePageCorruptionKind::CellPayloadOutOfBounds => Self::CellPayloadOutOfBounds,
             TablePageCorruptionKind::CellContentUnderflow => Self::CellContentUnderflow,

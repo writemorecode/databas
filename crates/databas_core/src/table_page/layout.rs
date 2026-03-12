@@ -6,10 +6,10 @@ use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult
 ///
 /// Shared prefix (both leaf and interior):
 /// - `0`: page type (`LEAF_PAGE_TYPE` or `INTERIOR_PAGE_TYPE`)
-/// - `1`: reserved/unused
+/// - `1`: fragmented free byte count (`u8`)
 /// - `2..4`: `cell_count` (`u16`)
 /// - `4..6`: `content_start` (`u16`)
-/// - `6..8`: reserved/unused
+/// - `6..8`: first freeblock offset (`u16`, `0` means none)
 /// - `8..16`: previous sibling page id (`u64`, `0` means none)
 /// - `16..24`: next sibling page id (`u64`, `0` means none)
 ///
@@ -29,9 +29,13 @@ pub(super) const NEXT_SIBLING_OFFSET: usize = 16;
 pub(super) const INTERIOR_RIGHTMOST_CHILD_OFFSET: usize = 24;
 
 const PAGE_TYPE_OFFSET: usize = 0;
+const FRAGMENTED_FREE_BYTES_OFFSET: usize = 1;
 const CELL_COUNT_OFFSET: usize = 2;
 const CONTENT_START_OFFSET: usize = 4;
+const FIRST_FREEBLOCK_OFFSET: usize = 6;
 const SLOT_WIDTH: usize = 2;
+const FREEBLOCK_HEADER_SIZE: usize = 4;
+const MAX_FRAGMENTED_FREE_BYTES: u8 = 60;
 
 const NO_SIBLING_PAGE_ID: PageId = 0;
 
@@ -80,6 +84,13 @@ pub(super) struct SpaceError {
     pub(super) available: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Freeblock {
+    offset: usize,
+    next: u16,
+    size: usize,
+}
+
 /// Row-id lookup result containing either the matching slot or insertion point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SearchResult {
@@ -98,8 +109,10 @@ pub(super) fn page_type(page: &[u8; PAGE_SIZE]) -> u8 {
 pub(super) fn init_empty(page: &mut [u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<()> {
     page.fill(0);
     page[PAGE_TYPE_OFFSET] = spec.page_type;
+    set_fragmented_free_bytes(page, 0);
     set_cell_count(page, 0);
     set_content_start(page, PAGE_DATA_END);
+    set_first_freeblock(page, 0);
     Ok(())
 }
 
@@ -110,6 +123,12 @@ pub(super) fn validate(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResul
         return Err(TablePageError::InvalidPageType { page_type });
     }
 
+    if fragmented_free_bytes(page) > MAX_FRAGMENTED_FREE_BYTES {
+        return Err(TablePageError::CorruptPage(
+            TablePageCorruptionKind::InvalidFragmentedFreeBytes,
+        ));
+    }
+
     let cell_count = usize::from(cell_count(page));
     let slot_dir_end = slot_dir_end_for_count(spec, cell_count)?;
     let content_start = usize::from(content_start(page));
@@ -118,7 +137,14 @@ pub(super) fn validate(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResul
         return Err(TablePageError::CorruptPage(TablePageCorruptionKind::InvalidCellContentStart));
     }
 
+    walk_freeblocks(page, spec, |_| Ok(()))?;
+
     Ok(())
+}
+
+/// Returns the number of fragmented free bytes recorded in the page header.
+pub(super) fn fragmented_free_bytes(page: &[u8; PAGE_SIZE]) -> u8 {
+    page[FRAGMENTED_FREE_BYTES_OFFSET]
 }
 
 /// Returns the number of slot entries currently stored in the page header.
@@ -131,11 +157,26 @@ pub(super) fn content_start(page: &[u8; PAGE_SIZE]) -> u16 {
     read_u16(page, CONTENT_START_OFFSET)
 }
 
+/// Returns the first freeblock offset recorded in the page header.
+pub(super) fn first_freeblock(page: &[u8; PAGE_SIZE]) -> u16 {
+    read_u16(page, FIRST_FREEBLOCK_OFFSET)
+}
+
 /// Returns free bytes between the slot directory end and the cell-content start.
-pub(super) fn free_space(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<usize> {
+pub(super) fn unallocated_gap(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<usize> {
     let slot_dir_end = slot_dir_end_for_count(spec, usize::from(cell_count(page)))?;
     let content_start = usize::from(content_start(page));
     Ok(content_start - slot_dir_end)
+}
+
+/// Returns total reusable space, including the gap, freeblocks, and fragments.
+pub(super) fn free_space(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<usize> {
+    let mut freeblock_bytes = 0usize;
+    walk_freeblocks(page, spec, |freeblock| {
+        freeblock_bytes += freeblock.size;
+        Ok(())
+    })?;
+    Ok(unallocated_gap(page, spec)? + freeblock_bytes + usize::from(fragmented_free_bytes(page)))
 }
 
 /// Returns the raw cell byte slice referenced by `slot_index`.
@@ -324,9 +365,19 @@ fn set_cell_count(page: &mut [u8; PAGE_SIZE], cell_count: u16) {
     write_u16(page, CELL_COUNT_OFFSET, cell_count);
 }
 
+/// Writes the fragmented free byte count field.
+pub(super) fn set_fragmented_free_bytes(page: &mut [u8; PAGE_SIZE], fragmented: u8) {
+    page[FRAGMENTED_FREE_BYTES_OFFSET] = fragmented;
+}
+
 /// Writes the in-header content-start field.
-fn set_content_start(page: &mut [u8; PAGE_SIZE], content_start: usize) {
+pub(super) fn set_content_start(page: &mut [u8; PAGE_SIZE], content_start: usize) {
     write_u16(page, CONTENT_START_OFFSET, content_start as u16);
+}
+
+/// Writes the first-freeblock offset field.
+pub(super) fn set_first_freeblock(page: &mut [u8; PAGE_SIZE], offset: u16) {
+    write_u16(page, FIRST_FREEBLOCK_OFFSET, offset);
 }
 
 /// Computes the byte offset where the slot directory ends for `cell_count` entries.
@@ -381,6 +432,76 @@ fn write_slot_offset_raw(
     let position = slot_position(spec, slot_index)?;
     write_u16(page, position, cell_offset);
     Ok(())
+}
+
+fn walk_freeblocks(
+    page: &[u8; PAGE_SIZE],
+    spec: PageSpec,
+    mut visitor: impl FnMut(Freeblock) -> TablePageResult<()>,
+) -> TablePageResult<()> {
+    let content_start = usize::from(content_start(page));
+    let mut current = usize::from(first_freeblock(page));
+    let mut previous_end = None;
+
+    while current != 0 {
+        let freeblock = read_freeblock(page, current)?;
+        if freeblock.offset < content_start {
+            return Err(TablePageError::CorruptPage(
+                TablePageCorruptionKind::InvalidFreeblockOffset,
+            ));
+        }
+        if freeblock.offset == content_start {
+            return Err(TablePageError::CorruptPage(TablePageCorruptionKind::AdjacentFreeblocks));
+        }
+        if let Some(previous_end) = previous_end {
+            if freeblock.offset < previous_end {
+                return Err(TablePageError::CorruptPage(
+                    TablePageCorruptionKind::FreeblockChainOutOfOrder,
+                ));
+            }
+            if freeblock.offset == previous_end {
+                return Err(TablePageError::CorruptPage(
+                    TablePageCorruptionKind::AdjacentFreeblocks,
+                ));
+            }
+        }
+        if freeblock.offset + freeblock.size > PAGE_DATA_END {
+            return Err(TablePageError::CorruptPage(
+                TablePageCorruptionKind::InvalidFreeblockOffset,
+            ));
+        }
+        if usize::from(freeblock.next) != 0 && usize::from(freeblock.next) <= freeblock.offset {
+            return Err(TablePageError::CorruptPage(
+                TablePageCorruptionKind::FreeblockChainOutOfOrder,
+            ));
+        }
+        let slot_dir_end = slot_dir_end_for_count(spec, usize::from(cell_count(page)))?;
+        if freeblock.offset < slot_dir_end {
+            return Err(TablePageError::CorruptPage(
+                TablePageCorruptionKind::InvalidFreeblockOffset,
+            ));
+        }
+
+        visitor(freeblock)?;
+        previous_end = Some(freeblock.offset + freeblock.size);
+        current = usize::from(freeblock.next);
+    }
+
+    Ok(())
+}
+
+fn read_freeblock(page: &[u8; PAGE_SIZE], offset: usize) -> TablePageResult<Freeblock> {
+    if offset + FREEBLOCK_HEADER_SIZE > PAGE_DATA_END {
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::InvalidFreeblockOffset));
+    }
+
+    let next = read_u16(page, offset);
+    let size = usize::from(read_u16(page, offset + 2));
+    if size < FREEBLOCK_HEADER_SIZE {
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::FreeblockTooSmall));
+    }
+
+    Ok(Freeblock { offset, next, size })
 }
 
 /// Reads a little-endian `u16` from `page` at `offset`.
