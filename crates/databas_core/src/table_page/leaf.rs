@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use crate::types::{PAGE_SIZE, RowId};
 
 use super::{
-    layout::{self, PageSpec, SearchResult, SpaceError},
+    layout::{self, PageSpec, SearchResult},
     read_u64,
 };
 
@@ -155,25 +155,45 @@ impl<'a> TableLeafPageMut<'a> {
             SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound { row_id }),
         };
 
-        let existing_cell = layout::cell_bytes_at_slot(self.page, LEAF_SPEC, slot_index)?;
-        let existing_len =
+        let mut existing_cell = layout::cell_bytes_at_slot(self.page, LEAF_SPEC, slot_index)?;
+        let mut existing_len =
             leaf_cell_len(existing_cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
         let new_len = leaf_cell_encoded_len(payload)?;
+        let mut cell_offset = layout::slot_offset(self.page, LEAF_SPEC, slot_index)?;
+
+        if new_len < existing_len {
+            let released_tail = existing_len - new_len;
+            if released_tail <= 3
+                && layout::fragmented_free_bytes(self.page) + (released_tail as u8) > 60
+            {
+                defragment_leaf_page(self.page)?;
+                existing_cell = layout::cell_bytes_at_slot(self.page, LEAF_SPEC, slot_index)?;
+                existing_len = leaf_cell_len(existing_cell)
+                    .map_err(|_| TablePageError::CorruptCell { slot_index })?;
+                cell_offset = layout::slot_offset(self.page, LEAF_SPEC, slot_index)?;
+            }
+        }
 
         if existing_len == new_len {
-            let cell_offset = usize::from(layout::slot_offset(self.page, LEAF_SPEC, slot_index)?);
-            let cell_end = cell_offset + existing_len;
-            let cell = &mut self.page[cell_offset..cell_end];
-            let payload_len = payload.len() as u16;
-
-            cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
-            cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE].copy_from_slice(&row_id.to_le_bytes());
-            cell[LEAF_CELL_PREFIX_SIZE..].copy_from_slice(payload);
+            write_leaf_cell_at(self.page, usize::from(cell_offset), row_id, payload)?;
             return Ok(());
         }
 
-        let cell_offset = update_leaf_cell(self.page, row_id, payload)?;
-        layout::set_slot_offset(self.page, LEAF_SPEC, slot_index, cell_offset)
+        if new_len < existing_len {
+            let cell_offset = usize::from(cell_offset);
+            write_leaf_cell_at(self.page, cell_offset, row_id, payload)?;
+            layout::release_space(
+                self.page,
+                LEAF_SPEC,
+                (cell_offset + new_len) as u16,
+                existing_len - new_len,
+            )?;
+            return Ok(());
+        }
+
+        let replacement_offset = update_leaf_cell(self.page, slot_index, row_id, payload)?;
+        layout::set_slot_offset(self.page, LEAF_SPEC, slot_index, replacement_offset)?;
+        layout::release_space(self.page, LEAF_SPEC, cell_offset, existing_len)
     }
 
     /// Deletes the cell for `row_id`.
@@ -185,7 +205,13 @@ impl<'a> TableLeafPageMut<'a> {
             SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound { row_id }),
         };
 
-        layout::remove_slot(self.page, LEAF_SPEC, slot_index)
+        let existing_cell = layout::cell_bytes_at_slot(self.page, LEAF_SPEC, slot_index)?;
+        let existing_len =
+            leaf_cell_len(existing_cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
+        let cell_offset = layout::slot_offset(self.page, LEAF_SPEC, slot_index)?;
+
+        layout::remove_slot(self.page, LEAF_SPEC, slot_index)?;
+        layout::release_space(self.page, LEAF_SPEC, cell_offset, existing_len)
     }
 
     /// Compacts live cells toward the page end and rewrites slot offsets.
@@ -266,6 +292,7 @@ fn encode_leaf_cell(row_id: RowId, payload: &[u8]) -> TablePageResult<Vec<u8>> {
 /// Updates a leaf cell value, defragmenting once before reporting page-full.
 fn update_leaf_cell(
     page: &mut [u8; PAGE_SIZE],
+    slot_index: u16,
     row_id: RowId,
     payload: &[u8],
 ) -> TablePageResult<u16> {
@@ -274,14 +301,19 @@ fn update_leaf_cell(
         return Ok(offset);
     }
 
-    defragment_leaf_page(page)?;
-
-    match layout::try_append_cell(page, LEAF_SPEC, &cell)? {
-        Ok(offset) => Ok(offset),
-        Err(SpaceError { needed, available }) => {
-            Err(TablePageError::PageFull { needed, available })
-        }
+    let existing_cell = layout::cell_bytes_at_slot(page, LEAF_SPEC, slot_index)?;
+    let existing_len =
+        leaf_cell_len(existing_cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
+    let space_error = layout::page_full_for_update(page, LEAF_SPEC, cell.len(), existing_len)?;
+    if space_error.needed > space_error.available {
+        return Err(TablePageError::PageFull {
+            needed: space_error.needed,
+            available: space_error.available,
+        });
     }
+
+    rewrite_leaf_page(page, Some((slot_index, &cell)))?;
+    layout::slot_offset(page, LEAF_SPEC, slot_index)
 }
 
 /// Inserts a leaf cell, defragmenting once before reporting page-full.
@@ -295,36 +327,87 @@ fn insert_leaf_cell(
         return Ok(offset);
     }
 
+    let space_error = layout::page_full_for_insert(page, LEAF_SPEC, cell.len())?;
+    if space_error.needed > space_error.available {
+        return Err(TablePageError::PageFull {
+            needed: space_error.needed,
+            available: space_error.available,
+        });
+    }
+
     defragment_leaf_page(page)?;
 
     match layout::try_append_cell_for_insert(page, LEAF_SPEC, &cell)? {
         Ok(offset) => Ok(offset),
-        Err(SpaceError { needed, available }) => {
-            Err(TablePageError::PageFull { needed, available })
-        }
+        Err(_) => Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellContentUnderflow)),
     }
 }
 
 /// Rewrites live leaf cells contiguously and refreshes slot offsets.
 fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
+    rewrite_leaf_page(page, None)
+}
+
+fn copy_leaf_cell_into_scratch(
+    cell: &[u8],
+    scratch: &mut [u8; PAGE_SIZE],
+    scratch_len: &mut usize,
+) -> TablePageResult<()> {
+    let next = *scratch_len + cell.len();
+    if next > scratch.len() {
+        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellContentUnderflow));
+    }
+
+    scratch[*scratch_len..next].copy_from_slice(cell);
+    *scratch_len = next;
+    Ok(())
+}
+
+fn copy_leaf_slot_into_scratch(
+    page: &[u8; PAGE_SIZE],
+    slot_index: u16,
+    scratch: &mut [u8; PAGE_SIZE],
+    scratch_len: &mut usize,
+) -> TablePageResult<()> {
+    let cell = layout::cell_bytes_at_slot_on_valid_page(page, LEAF_SPEC, slot_index)?;
+    let cell_len = leaf_cell_len(cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
+    copy_leaf_cell_into_scratch(&cell[..cell_len], scratch, scratch_len)
+}
+
+fn rewrite_leaf_page(
+    page: &mut [u8; PAGE_SIZE],
+    replacement: Option<(u16, &[u8])>,
+) -> TablePageResult<()> {
     let prev_sibling = layout::prev_sibling(page);
     let next_sibling = layout::next_sibling(page);
     let cell_count = usize::from(layout::cell_count(page));
     let mut scratch = [0u8; PAGE_SIZE];
     let mut scratch_len = 0usize;
 
-    for slot in 0..cell_count {
-        let slot_u16 = slot as u16;
-        let cell = layout::cell_bytes_at_slot_on_valid_page(page, LEAF_SPEC, slot_u16)?;
-        let cell_len = leaf_cell_len(cell)
-            .map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
-
-        let next = scratch_len + cell_len;
-        if next > scratch.len() {
-            return Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellContentUnderflow));
+    match replacement {
+        None => {
+            for slot in 0..cell_count {
+                copy_leaf_slot_into_scratch(page, slot as u16, &mut scratch, &mut scratch_len)?;
+            }
         }
-        scratch[scratch_len..next].copy_from_slice(&cell[..cell_len]);
-        scratch_len = next;
+        Some((replacement_slot_u16, replacement_cell)) => {
+            let replacement_slot = usize::from(replacement_slot_u16);
+            if replacement_slot >= cell_count {
+                for slot in 0..cell_count {
+                    copy_leaf_slot_into_scratch(page, slot as u16, &mut scratch, &mut scratch_len)?;
+                }
+            } else {
+                for slot in 0..replacement_slot {
+                    copy_leaf_slot_into_scratch(page, slot as u16, &mut scratch, &mut scratch_len)?;
+                }
+
+                copy_leaf_cell_into_scratch(replacement_cell, &mut scratch, &mut scratch_len)?;
+
+                for slot in (replacement_slot + 1)..cell_count {
+                    copy_leaf_slot_into_scratch(page, slot as u16, &mut scratch, &mut scratch_len)?;
+                }
+            }
+        }
     }
 
     layout::init_empty(page, LEAF_SPEC)?;
@@ -334,8 +417,7 @@ fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     let mut scratch_offset = 0usize;
     for slot in 0..cell_count {
         let slot_u16 = slot as u16;
-        let cell = &scratch[scratch_offset..scratch_len];
-        let cell_len = leaf_cell_len(cell)
+        let cell_len = leaf_cell_len(&scratch[scratch_offset..scratch_len])
             .map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
         let next = scratch_offset + cell_len;
         let cell_offset = match layout::try_append_cell_for_insert(
@@ -354,6 +436,26 @@ fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
         scratch_offset = next;
     }
 
+    debug_assert_eq!(scratch_offset, scratch_len);
+    Ok(())
+}
+
+fn write_leaf_cell_at(
+    page: &mut [u8; PAGE_SIZE],
+    cell_offset: usize,
+    row_id: RowId,
+    payload: &[u8],
+) -> TablePageResult<()> {
+    let payload_len = u16::try_from(payload.len()).map_err(|_| TablePageError::CellTooLarge {
+        len: payload.len(),
+        max: usize::from(u16::MAX),
+    })?;
+    let cell_end = cell_offset + LEAF_CELL_PREFIX_SIZE + payload.len();
+    let cell = &mut page[cell_offset..cell_end];
+
+    cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
+    cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE].copy_from_slice(&row_id.to_le_bytes());
+    cell[LEAF_CELL_PREFIX_SIZE..].copy_from_slice(payload);
     Ok(())
 }
 
@@ -630,6 +732,33 @@ mod tests {
         let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
         assert_eq!(leaf_ref.prev_sibling(), Some(111));
         assert_eq!(leaf_ref.next_sibling(), Some(222));
+    }
+
+    #[test]
+    fn rewrite_leaf_page_replacement_handles_first_and_last_slots() {
+        let mut page = initialized_leaf_page();
+        {
+            let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
+            leaf.insert(1, &[1]).unwrap();
+            leaf.insert(2, &[2]).unwrap();
+            leaf.insert(3, &[3]).unwrap();
+        }
+
+        let replacement_first = encode_leaf_cell(1, &[9, 9]).unwrap();
+        rewrite_leaf_page(&mut page, Some((0, &replacement_first))).unwrap();
+
+        let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
+        assert_eq!(leaf_ref.search(1).unwrap().unwrap().payload, &[9, 9]);
+        assert_eq!(leaf_ref.search(2).unwrap().unwrap().payload, &[2]);
+        assert_eq!(leaf_ref.search(3).unwrap().unwrap().payload, &[3]);
+
+        let replacement_last = encode_leaf_cell(3, &[7, 7, 7]).unwrap();
+        rewrite_leaf_page(&mut page, Some((2, &replacement_last))).unwrap();
+
+        let leaf_ref = TableLeafPageRef::from_bytes(&page).unwrap();
+        assert_eq!(leaf_ref.search(1).unwrap().unwrap().payload, &[9, 9]);
+        assert_eq!(leaf_ref.search(2).unwrap().unwrap().payload, &[2]);
+        assert_eq!(leaf_ref.search(3).unwrap().unwrap().payload, &[7, 7, 7]);
     }
 }
 
