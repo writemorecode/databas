@@ -34,8 +34,8 @@ const CELL_COUNT_OFFSET: usize = 2;
 const CONTENT_START_OFFSET: usize = 4;
 const FIRST_FREEBLOCK_OFFSET: usize = 6;
 const SLOT_WIDTH: usize = 2;
-const FREEBLOCK_HEADER_SIZE: usize = 4;
-const MAX_FRAGMENTED_FREE_BYTES: u8 = 60;
+pub(super) const FREEBLOCK_HEADER_SIZE: usize = 4;
+pub(super) const MAX_FRAGMENTED_FREE_BYTES: u8 = 60;
 
 const NO_SIBLING_PAGE_ID: PageId = 0;
 
