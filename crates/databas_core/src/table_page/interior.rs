@@ -189,7 +189,40 @@ impl<'a> TableInteriorPageMut<'a> {
         };
 
         let cell = encode_interior_cell(left_child, row_id);
-        let cell_offset = insert_interior_cell(self.page, &cell)?;
+        let cell_offset = match layout::try_allocate_and_write_cell(
+            self.page,
+            INTERIOR_SPEC,
+            cell.len(),
+            layout::CellWriteMode::Insert,
+            |dest| dest.copy_from_slice(&cell),
+        )? {
+            Ok(offset) => offset,
+            Err(space_error) => {
+                if space_error.needed > space_error.available {
+                    return Err(TablePageError::PageFull {
+                        needed: space_error.needed,
+                        available: space_error.available,
+                    });
+                }
+
+                rewrite_interior_page(self.page)?;
+
+                match layout::try_allocate_and_write_cell(
+                    self.page,
+                    INTERIOR_SPEC,
+                    cell.len(),
+                    layout::CellWriteMode::Insert,
+                    |dest| dest.copy_from_slice(&cell),
+                )? {
+                    Ok(offset) => offset,
+                    Err(_) => {
+                        return Err(TablePageError::CorruptPage(
+                            TablePageCorruptionKind::CellContentUnderflow,
+                        ));
+                    }
+                }
+            }
+        };
         layout::insert_slot(self.page, INTERIOR_SPEC, insertion_index, cell_offset)
     }
 
@@ -251,7 +284,7 @@ impl<'a> TableInteriorPageMut<'a> {
 
     /// Compacts live cells toward the page end and rewrites slot offsets.
     pub(crate) fn defragment(&mut self) -> TablePageResult<()> {
-        defragment_interior_page(self.page)
+        rewrite_interior_page(self.page)
     }
 }
 
@@ -289,33 +322,6 @@ fn encode_interior_cell(left_child: PageId, row_id: RowId) -> [u8; INTERIOR_CELL
     cell
 }
 
-/// Inserts an interior cell, defragmenting once before returning page-full.
-fn insert_interior_cell(page: &mut [u8; PAGE_SIZE], cell: &[u8]) -> TablePageResult<u16> {
-    if let Ok(offset) = layout::try_append_cell_for_insert(page, INTERIOR_SPEC, cell)? {
-        return Ok(offset);
-    }
-
-    let space_error = layout::page_full_for_insert(page, INTERIOR_SPEC, cell.len())?;
-    if space_error.needed > space_error.available {
-        return Err(TablePageError::PageFull {
-            needed: space_error.needed,
-            available: space_error.available,
-        });
-    }
-
-    defragment_interior_page(page)?;
-
-    match layout::try_append_cell_for_insert(page, INTERIOR_SPEC, cell)? {
-        Ok(offset) => Ok(offset),
-        Err(_) => Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellContentUnderflow)),
-    }
-}
-
-/// Rewrites live interior cells contiguously and refreshes slot offsets.
-fn defragment_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
-    rewrite_interior_page(page)
-}
-
 fn rewrite_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
     let prev_sibling = layout::prev_sibling(page);
     let next_sibling = layout::next_sibling(page);
@@ -349,7 +355,13 @@ fn rewrite_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
         let slot_u16 = slot as u16;
         let next = scratch_offset + INTERIOR_CELL_SIZE;
         let cell = &scratch[scratch_offset..next];
-        let cell_offset = match layout::try_append_cell_for_insert(page, INTERIOR_SPEC, cell)? {
+        let cell_offset = match layout::try_allocate_and_write_cell(
+            page,
+            INTERIOR_SPEC,
+            cell.len(),
+            layout::CellWriteMode::Insert,
+            |dest| dest.copy_from_slice(cell),
+        )? {
             Ok(offset) => offset,
             Err(_) => {
                 return Err(TablePageError::CorruptPage(

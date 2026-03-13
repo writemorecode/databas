@@ -143,7 +143,45 @@ impl<'a> TableLeafPageMut<'a> {
             SearchResult::NotFound(insertion_index) => insertion_index,
         };
 
-        let cell_offset = insert_leaf_cell(self.page, row_id, payload)?;
+        let cell_len = leaf_cell_encoded_len(payload)?;
+        let cell_offset = match layout::try_allocate_and_write_cell(
+            self.page,
+            LEAF_SPEC,
+            cell_len,
+            CellWriteMode::Insert,
+            |cell| {
+                write_leaf_cell(cell, row_id, payload);
+            },
+        )? {
+            Ok(offset) => offset,
+            Err(space_error) => {
+                if space_error.needed > space_error.available {
+                    return Err(TablePageError::PageFull {
+                        needed: space_error.needed,
+                        available: space_error.available,
+                    });
+                }
+
+                rewrite_leaf_page(self.page, None)?;
+
+                match layout::try_allocate_and_write_cell(
+                    self.page,
+                    LEAF_SPEC,
+                    cell_len,
+                    CellWriteMode::Insert,
+                    |cell| {
+                        write_leaf_cell(cell, row_id, payload);
+                    },
+                )? {
+                    Ok(offset) => offset,
+                    Err(_) => {
+                        return Err(TablePageError::CorruptPage(
+                            TablePageCorruptionKind::CellContentUnderflow,
+                        ));
+                    }
+                }
+            }
+        };
         layout::insert_slot(self.page, LEAF_SPEC, insertion_index, cell_offset)
     }
 
@@ -182,7 +220,7 @@ impl<'a> TableLeafPageMut<'a> {
 
     /// Compacts live cells toward the page end and rewrites slot offsets.
     pub(crate) fn defragment(&mut self) -> TablePageResult<()> {
-        defragment_leaf_page(self.page)
+        rewrite_leaf_page(self.page, None)
     }
 }
 
@@ -267,7 +305,7 @@ fn update_leaf_cell(
         if released_tail < FREEBLOCK_HEADER_SIZE
             && new_fragmented_free_bytes > MAX_FRAGMENTED_FREE_BYTES
         {
-            defragment_leaf_page(page)?;
+            rewrite_leaf_page(page, None)?;
             existing_cell = layout::cell_bytes_at_slot(page, LEAF_SPEC, slot_index)?;
             existing_len = leaf_cell_len(existing_cell)
                 .map_err(|_| TablePageError::CorruptCell { slot_index })?;
@@ -313,54 +351,6 @@ fn update_leaf_cell(
 
     rewrite_leaf_page(page, Some(LeafCellReplacement { slot_index, row_id, payload }))?;
     Ok(())
-}
-
-/// Inserts a leaf cell, defragmenting once before reporting page-full.
-fn insert_leaf_cell(
-    page: &mut [u8; PAGE_SIZE],
-    row_id: RowId,
-    payload: &[u8],
-) -> TablePageResult<u16> {
-    let cell_len = leaf_cell_encoded_len(payload)?;
-    if let Ok(offset) = layout::try_allocate_and_write_cell(
-        page,
-        LEAF_SPEC,
-        cell_len,
-        CellWriteMode::Insert,
-        |cell| {
-            write_leaf_cell(cell, row_id, payload);
-        },
-    )? {
-        return Ok(offset);
-    }
-
-    let space_error = layout::page_full_for_insert(page, LEAF_SPEC, cell_len)?;
-    if space_error.needed > space_error.available {
-        return Err(TablePageError::PageFull {
-            needed: space_error.needed,
-            available: space_error.available,
-        });
-    }
-
-    defragment_leaf_page(page)?;
-
-    match layout::try_allocate_and_write_cell(
-        page,
-        LEAF_SPEC,
-        cell_len,
-        CellWriteMode::Insert,
-        |cell| {
-            write_leaf_cell(cell, row_id, payload);
-        },
-    )? {
-        Ok(offset) => Ok(offset),
-        Err(_) => Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellContentUnderflow)),
-    }
-}
-
-/// Rewrites live leaf cells contiguously and refreshes slot offsets.
-fn defragment_leaf_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
-    rewrite_leaf_page(page, None)
 }
 
 fn copy_leaf_cell_into_scratch(
@@ -440,10 +430,12 @@ fn rewrite_leaf_page(
         let cell_len = leaf_cell_len(&scratch[scratch_offset..scratch_len])
             .map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
         let next = scratch_offset + cell_len;
-        let cell_offset = match layout::try_append_cell_for_insert(
+        let cell_offset = match layout::try_allocate_and_write_cell(
             page,
             LEAF_SPEC,
-            &scratch[scratch_offset..next],
+            cell_len,
+            CellWriteMode::Insert,
+            |dest| dest.copy_from_slice(&scratch[scratch_offset..next]),
         )? {
             Ok(offset) => offset,
             Err(_) => {
