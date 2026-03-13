@@ -208,15 +208,7 @@ pub(super) fn try_append_cell(
     spec: PageSpec,
     cell: &[u8],
 ) -> TablePageResult<Result<u16, SpaceError>> {
-    match try_allocate_space(page, spec, cell.len(), 0)? {
-        Ok(offset) => {
-            let start = usize::from(offset);
-            let end = start + cell.len();
-            page[start..end].copy_from_slice(cell);
-            Ok(Ok(offset))
-        }
-        Err(space_error) => Ok(Err(space_error)),
-    }
+    try_allocate_and_write_cell(page, spec, cell.len(), 0, |dest| dest.copy_from_slice(cell))
 }
 
 /// Attempts to append a pre-encoded cell while reserving one additional slot entry.
@@ -225,11 +217,22 @@ pub(super) fn try_append_cell_for_insert(
     spec: PageSpec,
     cell: &[u8],
 ) -> TablePageResult<Result<u16, SpaceError>> {
-    match try_allocate_space(page, spec, cell.len(), 1)? {
+    try_allocate_and_write_cell(page, spec, cell.len(), 1, |dest| dest.copy_from_slice(cell))
+}
+
+/// Attempts to reserve cell-content space and lets the caller encode directly into it.
+pub(super) fn try_allocate_and_write_cell(
+    page: &mut [u8; PAGE_SIZE],
+    spec: PageSpec,
+    cell_len: usize,
+    additional_slots: usize,
+    write_cell: impl FnOnce(&mut [u8]),
+) -> TablePageResult<Result<u16, SpaceError>> {
+    match try_allocate_space(page, spec, cell_len, additional_slots)? {
         Ok(offset) => {
             let start = usize::from(offset);
-            let end = start + cell.len();
-            page[start..end].copy_from_slice(cell);
+            let end = start + cell_len;
+            write_cell(&mut page[start..end]);
             Ok(Ok(offset))
         }
         Err(space_error) => Ok(Err(space_error)),
@@ -838,6 +841,19 @@ mod tests {
         assert_eq!(allocated_offset, reusable_offset + 2);
         assert_eq!(fragmented_free_bytes(&page), 2);
         assert_eq!(first_freeblock(&page), 0);
+    }
+
+    #[test]
+    fn allocate_and_write_cell_writes_directly_into_reserved_space() {
+        let mut page = initialized_page();
+
+        let offset = try_allocate_and_write_cell(&mut page, TEST_SPEC, 4, 0, |cell| {
+            cell.copy_from_slice(&[1, 2, 3, 4]);
+        })
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(&page[usize::from(offset)..usize::from(offset) + 4], &[1, 2, 3, 4]);
     }
 
     #[test]
