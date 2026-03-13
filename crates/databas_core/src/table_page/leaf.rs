@@ -1,7 +1,10 @@
 use crate::{
     table_page::{
         TablePageCorruptionKind, TablePageError, TablePageResult,
-        layout::{self, FREEBLOCK_HEADER_SIZE, MAX_FRAGMENTED_FREE_BYTES, PageSpec, SearchResult},
+        layout::{
+            self, CellWriteMode, FREEBLOCK_HEADER_SIZE, MAX_FRAGMENTED_FREE_BYTES, PageSpec,
+            SearchResult,
+        },
     },
     types::{PAGE_SIZE, PageId, RowId},
 };
@@ -287,9 +290,15 @@ fn update_leaf_cell(
         return Ok(());
     }
 
-    if let Ok(offset) = layout::try_allocate_and_write_cell(page, LEAF_SPEC, new_len, 0, |cell| {
-        write_leaf_cell(cell, row_id, payload);
-    })? {
+    if let Ok(offset) = layout::try_allocate_and_write_cell(
+        page,
+        LEAF_SPEC,
+        new_len,
+        CellWriteMode::Update,
+        |cell| {
+            write_leaf_cell(cell, row_id, payload);
+        },
+    )? {
         layout::set_slot_offset(page, LEAF_SPEC, slot_index, offset)?;
         layout::release_space(page, LEAF_SPEC, cell_offset, existing_len)?;
         return Ok(());
@@ -313,9 +322,15 @@ fn insert_leaf_cell(
     payload: &[u8],
 ) -> TablePageResult<u16> {
     let cell_len = leaf_cell_encoded_len(payload)?;
-    if let Ok(offset) = layout::try_allocate_and_write_cell(page, LEAF_SPEC, cell_len, 1, |cell| {
-        write_leaf_cell(cell, row_id, payload);
-    })? {
+    if let Ok(offset) = layout::try_allocate_and_write_cell(
+        page,
+        LEAF_SPEC,
+        cell_len,
+        CellWriteMode::Insert,
+        |cell| {
+            write_leaf_cell(cell, row_id, payload);
+        },
+    )? {
         return Ok(offset);
     }
 
@@ -329,9 +344,15 @@ fn insert_leaf_cell(
 
     defragment_leaf_page(page)?;
 
-    match layout::try_allocate_and_write_cell(page, LEAF_SPEC, cell_len, 1, |cell| {
-        write_leaf_cell(cell, row_id, payload);
-    })? {
+    match layout::try_allocate_and_write_cell(
+        page,
+        LEAF_SPEC,
+        cell_len,
+        CellWriteMode::Insert,
+        |cell| {
+            write_leaf_cell(cell, row_id, payload);
+        },
+    )? {
         Ok(offset) => Ok(offset),
         Err(_) => Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellContentUnderflow)),
     }

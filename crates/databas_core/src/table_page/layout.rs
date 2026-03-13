@@ -208,7 +208,9 @@ pub(super) fn try_append_cell(
     spec: PageSpec,
     cell: &[u8],
 ) -> TablePageResult<Result<u16, SpaceError>> {
-    try_allocate_and_write_cell(page, spec, cell.len(), 0, |dest| dest.copy_from_slice(cell))
+    try_allocate_and_write_cell(page, spec, cell.len(), CellWriteMode::Update, |dest| {
+        dest.copy_from_slice(cell)
+    })
 }
 
 /// Attempts to append a pre-encoded cell while reserving one additional slot entry.
@@ -217,7 +219,14 @@ pub(super) fn try_append_cell_for_insert(
     spec: PageSpec,
     cell: &[u8],
 ) -> TablePageResult<Result<u16, SpaceError>> {
-    try_allocate_and_write_cell(page, spec, cell.len(), 1, |dest| dest.copy_from_slice(cell))
+    try_allocate_and_write_cell(page, spec, cell.len(), CellWriteMode::Insert, |dest| {
+        dest.copy_from_slice(cell)
+    })
+}
+
+pub(super) enum CellWriteMode {
+    Insert,
+    Update,
 }
 
 /// Attempts to reserve cell-content space and lets the caller encode directly into it.
@@ -225,10 +234,10 @@ pub(super) fn try_allocate_and_write_cell(
     page: &mut [u8; PAGE_SIZE],
     spec: PageSpec,
     cell_len: usize,
-    additional_slots: usize,
+    mode: CellWriteMode,
     write_cell: impl FnOnce(&mut [u8]),
 ) -> TablePageResult<Result<u16, SpaceError>> {
-    match try_allocate_space(page, spec, cell_len, additional_slots)? {
+    match try_allocate_space(page, spec, cell_len, mode)? {
         Ok(offset) => {
             let start = usize::from(offset);
             let end = start + cell_len;
@@ -244,13 +253,17 @@ pub(super) fn try_allocate_space(
     page: &mut [u8; PAGE_SIZE],
     spec: PageSpec,
     size: usize,
-    additional_slots: usize,
+    mode: CellWriteMode,
 ) -> TablePageResult<Result<u16, SpaceError>> {
     if size > usize::from(u16::MAX) {
         return Err(TablePageError::CellTooLarge { len: size, max: usize::from(u16::MAX) });
     }
 
     absorb_freeblocks_into_gap(page)?;
+    let additional_slots = match mode {
+        CellWriteMode::Insert => 1,
+        CellWriteMode::Update => 0,
+    };
     let slot_dir_end_after =
         slot_dir_end_for_count(spec, usize::from(cell_count(page)) + additional_slots)?;
     let content_start = usize::from(content_start(page));
@@ -841,11 +854,12 @@ mod tests {
     fn allocate_and_write_cell_writes_directly_into_reserved_space() {
         let mut page = initialized_page();
 
-        let offset = try_allocate_and_write_cell(&mut page, TEST_SPEC, 4, 0, |cell| {
-            cell.copy_from_slice(&[1, 2, 3, 4]);
-        })
-        .unwrap()
-        .unwrap();
+        let offset =
+            try_allocate_and_write_cell(&mut page, TEST_SPEC, 4, CellWriteMode::Update, |cell| {
+                cell.copy_from_slice(&[1, 2, 3, 4]);
+            })
+            .unwrap()
+            .unwrap();
 
         assert_eq!(&page[usize::from(offset)..usize::from(offset) + 4], &[1, 2, 3, 4]);
     }
