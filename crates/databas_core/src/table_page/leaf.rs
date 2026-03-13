@@ -195,7 +195,74 @@ impl<'a> TableLeafPageMut<'a> {
         };
 
         let mut working_page = *self.page;
-        update_leaf_cell(&mut working_page, slot_index, row_id, payload)?;
+        let mut existing_cell = layout::cell_bytes_at_slot(&working_page, LEAF_SPEC, slot_index)?;
+        let mut existing_len =
+            leaf_cell_len(existing_cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
+        let new_len = leaf_cell_encoded_len(payload)?;
+        let mut cell_offset = layout::slot_offset(&working_page, LEAF_SPEC, slot_index)?;
+
+        if new_len < existing_len {
+            let released_tail = existing_len - new_len;
+            let new_fragmented_free_bytes =
+                layout::fragmented_free_bytes(&working_page) + (released_tail as u8);
+            if released_tail < FREEBLOCK_HEADER_SIZE
+                && new_fragmented_free_bytes > MAX_FRAGMENTED_FREE_BYTES
+            {
+                rewrite_leaf_page(&mut working_page, None)?;
+                existing_cell = layout::cell_bytes_at_slot(&working_page, LEAF_SPEC, slot_index)?;
+                existing_len = leaf_cell_len(existing_cell)
+                    .map_err(|_| TablePageError::CorruptCell { slot_index })?;
+                cell_offset = layout::slot_offset(&working_page, LEAF_SPEC, slot_index)?;
+            }
+        }
+
+        if existing_len == new_len {
+            write_leaf_cell_at(&mut working_page, usize::from(cell_offset), row_id, payload)?;
+            *self.page = working_page;
+            return Ok(());
+        }
+
+        if new_len < existing_len {
+            let cell_offset = usize::from(cell_offset);
+            write_leaf_cell_at(&mut working_page, cell_offset, row_id, payload)?;
+            layout::release_space(
+                &mut working_page,
+                LEAF_SPEC,
+                (cell_offset + new_len) as u16,
+                existing_len - new_len,
+            )?;
+            *self.page = working_page;
+            return Ok(());
+        }
+
+        if let Ok(offset) = layout::try_allocate_and_write_cell(
+            &mut working_page,
+            LEAF_SPEC,
+            new_len,
+            CellWriteMode::Update,
+            |cell| {
+                write_leaf_cell(cell, row_id, payload);
+            },
+        )? {
+            layout::set_slot_offset(&mut working_page, LEAF_SPEC, slot_index, offset)?;
+            layout::release_space(&mut working_page, LEAF_SPEC, cell_offset, existing_len)?;
+            *self.page = working_page;
+            return Ok(());
+        }
+
+        let space_error =
+            layout::page_full_for_update(&working_page, LEAF_SPEC, new_len, existing_len)?;
+        if space_error.needed > space_error.available {
+            return Err(TablePageError::PageFull {
+                needed: space_error.needed,
+                available: space_error.available,
+            });
+        }
+
+        rewrite_leaf_page(
+            &mut working_page,
+            Some(LeafCellReplacement { slot_index, row_id, payload }),
+        )?;
         *self.page = working_page;
         Ok(())
     }
@@ -283,74 +350,6 @@ struct LeafCellReplacement<'a> {
     slot_index: u16,
     row_id: RowId,
     payload: &'a [u8],
-}
-
-/// Updates a leaf cell value in place on `page`.
-fn update_leaf_cell(
-    page: &mut [u8; PAGE_SIZE],
-    slot_index: u16,
-    row_id: RowId,
-    payload: &[u8],
-) -> TablePageResult<()> {
-    let mut existing_cell = layout::cell_bytes_at_slot(page, LEAF_SPEC, slot_index)?;
-    let mut existing_len =
-        leaf_cell_len(existing_cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
-    let new_len = leaf_cell_encoded_len(payload)?;
-    let mut cell_offset = layout::slot_offset(page, LEAF_SPEC, slot_index)?;
-
-    if new_len < existing_len {
-        let released_tail = existing_len - new_len;
-
-        let new_fragmented_free_bytes = layout::fragmented_free_bytes(page) + (released_tail as u8);
-        if released_tail < FREEBLOCK_HEADER_SIZE
-            && new_fragmented_free_bytes > MAX_FRAGMENTED_FREE_BYTES
-        {
-            rewrite_leaf_page(page, None)?;
-            existing_cell = layout::cell_bytes_at_slot(page, LEAF_SPEC, slot_index)?;
-            existing_len = leaf_cell_len(existing_cell)
-                .map_err(|_| TablePageError::CorruptCell { slot_index })?;
-            cell_offset = layout::slot_offset(page, LEAF_SPEC, slot_index)?;
-        }
-    }
-    if existing_len == new_len {
-        write_leaf_cell_at(page, usize::from(cell_offset), row_id, payload)?;
-        return Ok(());
-    }
-    if new_len < existing_len {
-        let cell_offset = usize::from(cell_offset);
-        write_leaf_cell_at(page, cell_offset, row_id, payload)?;
-        layout::release_space(
-            page,
-            LEAF_SPEC,
-            (cell_offset + new_len) as u16,
-            existing_len - new_len,
-        )?;
-        return Ok(());
-    }
-
-    if let Ok(offset) = layout::try_allocate_and_write_cell(
-        page,
-        LEAF_SPEC,
-        new_len,
-        CellWriteMode::Update,
-        |cell| {
-            write_leaf_cell(cell, row_id, payload);
-        },
-    )? {
-        layout::set_slot_offset(page, LEAF_SPEC, slot_index, offset)?;
-        layout::release_space(page, LEAF_SPEC, cell_offset, existing_len)?;
-        return Ok(());
-    }
-    let space_error = layout::page_full_for_update(page, LEAF_SPEC, new_len, existing_len)?;
-    if space_error.needed > space_error.available {
-        return Err(TablePageError::PageFull {
-            needed: space_error.needed,
-            available: space_error.available,
-        });
-    }
-
-    rewrite_leaf_page(page, Some(LeafCellReplacement { slot_index, row_id, payload }))?;
-    Ok(())
 }
 
 fn copy_leaf_cell_into_scratch(
