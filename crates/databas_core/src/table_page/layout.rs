@@ -255,7 +255,10 @@ pub(super) fn try_allocate_space(
         slot_dir_end_for_count(spec, usize::from(cell_count(page)) + additional_slots)?;
     let content_start = usize::from(content_start(page));
     if slot_dir_end_after > content_start {
-        return Ok(Err(space_error(page, spec, size, additional_slots)?));
+        return Ok(Err(Ok(SpaceError {
+            needed: size + (additional_slots * SLOT_WIDTH),
+            available: free_space(page, spec)?,
+        })?));
     }
 
     if let Some(offset) = allocate_from_freeblocks(page, size)? {
@@ -264,7 +267,10 @@ pub(super) fn try_allocate_space(
 
     let available_gap = content_start - slot_dir_end_after;
     if size > available_gap {
-        return Ok(Err(space_error(page, spec, size, additional_slots)?));
+        return Ok(Err(Ok(SpaceError {
+            needed: size + (additional_slots * SLOT_WIDTH),
+            available: free_space(page, spec)?,
+        })?));
     }
 
     let new_start = content_start - size;
@@ -378,7 +384,7 @@ pub(super) fn page_full_for_insert(
     spec: PageSpec,
     cell_len: usize,
 ) -> TablePageResult<SpaceError> {
-    space_error(page, spec, cell_len, 1)
+    Ok(SpaceError { needed: cell_len + (1 * SLOT_WIDTH), available: free_space(page, spec)? })
 }
 
 /// Computes `PageFull` accounting for updating an existing cell.
@@ -760,18 +766,6 @@ fn add_fragmented_bytes(page: &mut [u8; PAGE_SIZE], additional: u8) -> TablePage
     }
     set_fragmented_free_bytes(page, next);
     Ok(())
-}
-
-fn space_error(
-    page: &[u8; PAGE_SIZE],
-    spec: PageSpec,
-    needed_cell_bytes: usize,
-    additional_slots: usize,
-) -> TablePageResult<SpaceError> {
-    Ok(SpaceError {
-        needed: needed_cell_bytes + (additional_slots * SLOT_WIDTH),
-        available: free_space(page, spec)?,
-    })
 }
 
 /// Reads a little-endian `u16` from `page` at `offset`.
