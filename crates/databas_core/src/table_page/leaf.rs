@@ -144,14 +144,11 @@ impl<'a> TableLeafPageMut<'a> {
         };
 
         let cell_len = leaf_cell_encoded_len(payload)?;
-        let cell_offset = match layout::try_allocate_and_write_cell(
+        let cell_offset = match layout::try_allocate_space(
             self.page,
             LEAF_SPEC,
             cell_len,
             CellWriteMode::Insert,
-            |cell| {
-                write_leaf_cell(cell, row_id, payload);
-            },
         )? {
             Ok(offset) => offset,
             Err(space_error) => {
@@ -164,14 +161,11 @@ impl<'a> TableLeafPageMut<'a> {
 
                 rewrite_leaf_page(self.page, None)?;
 
-                match layout::try_allocate_and_write_cell(
+                match layout::try_allocate_space(
                     self.page,
                     LEAF_SPEC,
                     cell_len,
                     CellWriteMode::Insert,
-                    |cell| {
-                        write_leaf_cell(cell, row_id, payload);
-                    },
                 )? {
                     Ok(offset) => offset,
                     Err(_) => {
@@ -182,6 +176,7 @@ impl<'a> TableLeafPageMut<'a> {
                 }
             }
         };
+        write_leaf_cell_at(self.page, usize::from(cell_offset), row_id, payload)?;
         layout::insert_slot(self.page, LEAF_SPEC, insertion_index, cell_offset)
     }
 
@@ -235,15 +230,13 @@ impl<'a> TableLeafPageMut<'a> {
             return Ok(());
         }
 
-        if let Ok(offset) = layout::try_allocate_and_write_cell(
+        if let Ok(offset) = layout::try_allocate_space(
             &mut working_page,
             LEAF_SPEC,
             new_len,
             CellWriteMode::Update,
-            |cell| {
-                write_leaf_cell(cell, row_id, payload);
-            },
         )? {
+            write_leaf_cell_at(&mut working_page, usize::from(offset), row_id, payload)?;
             layout::set_slot_offset(&mut working_page, LEAF_SPEC, slot_index, offset)?;
             layout::release_space(&mut working_page, LEAF_SPEC, cell_offset, existing_len)?;
             *self.page = working_page;
@@ -429,20 +422,17 @@ fn rewrite_leaf_page(
         let cell_len = leaf_cell_len(&scratch[scratch_offset..scratch_len])
             .map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
         let next = scratch_offset + cell_len;
-        let cell_offset = match layout::try_allocate_and_write_cell(
-            page,
-            LEAF_SPEC,
-            cell_len,
-            CellWriteMode::Insert,
-            |dest| dest.copy_from_slice(&scratch[scratch_offset..next]),
-        )? {
-            Ok(offset) => offset,
-            Err(_) => {
-                return Err(TablePageError::CorruptPage(
-                    TablePageCorruptionKind::CellContentUnderflow,
-                ));
-            }
-        };
+        let cell_offset =
+            match layout::try_allocate_space(page, LEAF_SPEC, cell_len, CellWriteMode::Insert)? {
+                Ok(offset) => offset,
+                Err(_) => {
+                    return Err(TablePageError::CorruptPage(
+                        TablePageCorruptionKind::CellContentUnderflow,
+                    ));
+                }
+            };
+        page[usize::from(cell_offset)..usize::from(cell_offset) + cell_len]
+            .copy_from_slice(&scratch[scratch_offset..next]);
         layout::insert_slot(page, LEAF_SPEC, slot_u16, cell_offset)?;
         scratch_offset = next;
     }

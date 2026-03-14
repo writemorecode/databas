@@ -207,25 +207,6 @@ pub(super) enum CellWriteMode {
     Update,
 }
 
-/// Attempts to reserve cell-content space and lets the caller encode directly into it.
-pub(super) fn try_allocate_and_write_cell(
-    page: &mut [u8; PAGE_SIZE],
-    spec: PageSpec,
-    cell_len: usize,
-    mode: CellWriteMode,
-    write_cell: impl FnOnce(&mut [u8]),
-) -> TablePageResult<Result<u16, SpaceError>> {
-    match try_allocate_space(page, spec, cell_len, mode)? {
-        Ok(offset) => {
-            let start = usize::from(offset);
-            let end = start + cell_len;
-            write_cell(&mut page[start..end]);
-            Ok(Ok(offset))
-        }
-        Err(space_error) => Ok(Err(space_error)),
-    }
-}
-
 /// Attempts to reserve `size` bytes from a freeblock or the gap.
 pub(super) fn try_allocate_space(
     page: &mut [u8; PAGE_SIZE],
@@ -789,37 +770,29 @@ mod tests {
         let first_cell = [1u8; 12];
         let second_cell = [2u8; 12];
 
-        let first_offset = try_allocate_and_write_cell(
-            &mut page,
-            TEST_SPEC,
-            first_cell.len(),
-            CellWriteMode::Insert,
-            |dest| dest.copy_from_slice(&first_cell),
-        )
-        .unwrap()
-        .unwrap();
+        let first_offset =
+            try_allocate_space(&mut page, TEST_SPEC, first_cell.len(), CellWriteMode::Insert)
+                .unwrap()
+                .unwrap();
+        page[usize::from(first_offset)..usize::from(first_offset) + first_cell.len()]
+            .copy_from_slice(&first_cell);
         insert_slot(&mut page, TEST_SPEC, 0, first_offset).unwrap();
 
-        let second_offset = try_allocate_and_write_cell(
-            &mut page,
-            TEST_SPEC,
-            second_cell.len(),
-            CellWriteMode::Insert,
-            |dest| dest.copy_from_slice(&second_cell),
-        )
-        .unwrap()
-        .unwrap();
+        let second_offset =
+            try_allocate_space(&mut page, TEST_SPEC, second_cell.len(), CellWriteMode::Insert)
+                .unwrap()
+                .unwrap();
+        page[usize::from(second_offset)..usize::from(second_offset) + second_cell.len()]
+            .copy_from_slice(&second_cell);
         insert_slot(&mut page, TEST_SPEC, 1, second_offset).unwrap();
 
         release_space(&mut page, TEST_SPEC, first_offset, first_cell.len()).unwrap();
         assert_eq!(first_freeblock(&page), first_offset);
 
         let reused_offset =
-            try_allocate_and_write_cell(&mut page, TEST_SPEC, 12, CellWriteMode::Update, |dest| {
-                dest.copy_from_slice(&[9u8; 12])
-            })
-            .unwrap()
-            .unwrap();
+            try_allocate_space(&mut page, TEST_SPEC, 12, CellWriteMode::Update).unwrap().unwrap();
+        page[usize::from(reused_offset)..usize::from(reused_offset) + 12]
+            .copy_from_slice(&[9u8; 12]);
         assert_eq!(reused_offset, first_offset);
         assert_eq!(first_freeblock(&page), 0);
     }
@@ -828,25 +801,18 @@ mod tests {
     fn allocating_from_freeblock_can_leave_fragment_bytes() {
         let mut page = initialized_page();
         let reusable_offset =
-            try_allocate_and_write_cell(&mut page, TEST_SPEC, 12, CellWriteMode::Update, |dest| {
-                dest.copy_from_slice(&[1u8; 12])
-            })
-            .unwrap()
-            .unwrap();
+            try_allocate_space(&mut page, TEST_SPEC, 12, CellWriteMode::Update).unwrap().unwrap();
+        page[usize::from(reusable_offset)..usize::from(reusable_offset) + 12]
+            .copy_from_slice(&[1u8; 12]);
         let _live_offset =
-            try_allocate_and_write_cell(&mut page, TEST_SPEC, 12, CellWriteMode::Update, |dest| {
-                dest.copy_from_slice(&[2u8; 12])
-            })
-            .unwrap()
-            .unwrap();
+            try_allocate_space(&mut page, TEST_SPEC, 12, CellWriteMode::Update).unwrap().unwrap();
+        page[usize::from(_live_offset)..usize::from(_live_offset) + 12].copy_from_slice(&[2u8; 12]);
 
         release_space(&mut page, TEST_SPEC, reusable_offset, 12).unwrap();
         let allocated_offset =
-            try_allocate_and_write_cell(&mut page, TEST_SPEC, 10, CellWriteMode::Update, |dest| {
-                dest.copy_from_slice(&[2u8; 10])
-            })
-            .unwrap()
-            .unwrap();
+            try_allocate_space(&mut page, TEST_SPEC, 10, CellWriteMode::Update).unwrap().unwrap();
+        page[usize::from(allocated_offset)..usize::from(allocated_offset) + 10]
+            .copy_from_slice(&[2u8; 10]);
 
         assert_eq!(allocated_offset, reusable_offset + 2);
         assert_eq!(fragmented_free_bytes(&page), 2);
@@ -854,15 +820,12 @@ mod tests {
     }
 
     #[test]
-    fn allocate_and_write_cell_writes_directly_into_reserved_space() {
+    fn allocated_space_can_be_written_after_reservation() {
         let mut page = initialized_page();
 
         let offset =
-            try_allocate_and_write_cell(&mut page, TEST_SPEC, 4, CellWriteMode::Update, |cell| {
-                cell.copy_from_slice(&[1, 2, 3, 4]);
-            })
-            .unwrap()
-            .unwrap();
+            try_allocate_space(&mut page, TEST_SPEC, 4, CellWriteMode::Update).unwrap().unwrap();
+        page[usize::from(offset)..usize::from(offset) + 4].copy_from_slice(&[1, 2, 3, 4]);
 
         assert_eq!(&page[usize::from(offset)..usize::from(offset) + 4], &[1, 2, 3, 4]);
     }
@@ -871,23 +834,14 @@ mod tests {
     fn releasing_adjacent_ranges_coalesces_freeblocks() {
         let mut page = initialized_page();
         let higher =
-            try_allocate_and_write_cell(&mut page, TEST_SPEC, 12, CellWriteMode::Update, |dest| {
-                dest.copy_from_slice(&[1u8; 12])
-            })
-            .unwrap()
-            .unwrap();
+            try_allocate_space(&mut page, TEST_SPEC, 12, CellWriteMode::Update).unwrap().unwrap();
+        page[usize::from(higher)..usize::from(higher) + 12].copy_from_slice(&[1u8; 12]);
         let middle =
-            try_allocate_and_write_cell(&mut page, TEST_SPEC, 12, CellWriteMode::Update, |dest| {
-                dest.copy_from_slice(&[2u8; 12])
-            })
-            .unwrap()
-            .unwrap();
+            try_allocate_space(&mut page, TEST_SPEC, 12, CellWriteMode::Update).unwrap().unwrap();
+        page[usize::from(middle)..usize::from(middle) + 12].copy_from_slice(&[2u8; 12]);
         let lower =
-            try_allocate_and_write_cell(&mut page, TEST_SPEC, 12, CellWriteMode::Update, |dest| {
-                dest.copy_from_slice(&[3u8; 12])
-            })
-            .unwrap()
-            .unwrap();
+            try_allocate_space(&mut page, TEST_SPEC, 12, CellWriteMode::Update).unwrap().unwrap();
+        page[usize::from(lower)..usize::from(lower) + 12].copy_from_slice(&[3u8; 12]);
 
         assert_eq!(usize::from(middle) + 12, usize::from(higher));
         assert_eq!(usize::from(lower) + 12, usize::from(middle));
