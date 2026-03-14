@@ -189,12 +189,11 @@ impl<'a> TableInteriorPageMut<'a> {
         };
 
         let cell = encode_interior_cell(left_child, row_id);
-        let cell_offset = match layout::try_allocate_and_write_cell(
+        let cell_offset = match layout::try_allocate_space(
             self.page,
             INTERIOR_SPEC,
             cell.len(),
             layout::CellWriteMode::Insert,
-            |dest| dest.copy_from_slice(&cell),
         )? {
             Ok(offset) => offset,
             Err(space_error) => {
@@ -207,12 +206,11 @@ impl<'a> TableInteriorPageMut<'a> {
 
                 rewrite_interior_page(self.page)?;
 
-                match layout::try_allocate_and_write_cell(
+                match layout::try_allocate_space(
                     self.page,
                     INTERIOR_SPEC,
                     cell.len(),
                     layout::CellWriteMode::Insert,
-                    |dest| dest.copy_from_slice(&cell),
                 )? {
                     Ok(offset) => offset,
                     Err(_) => {
@@ -223,6 +221,7 @@ impl<'a> TableInteriorPageMut<'a> {
                 }
             }
         };
+        write_interior_cell_at(self.page, usize::from(cell_offset), left_child, row_id);
         layout::insert_slot(self.page, INTERIOR_SPEC, insertion_index, cell_offset)
     }
 
@@ -241,9 +240,7 @@ impl<'a> TableInteriorPageMut<'a> {
         }
 
         let cell_offset = usize::from(layout::slot_offset(self.page, INTERIOR_SPEC, slot_index)?);
-        let cell = encode_interior_cell(left_child, row_id);
-        let cell_end = cell_offset + INTERIOR_CELL_SIZE;
-        self.page[cell_offset..cell_end].copy_from_slice(&cell);
+        write_interior_cell_at(self.page, cell_offset, left_child, row_id);
         Ok(())
     }
 
@@ -355,12 +352,11 @@ fn rewrite_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
         let slot_u16 = slot as u16;
         let next = scratch_offset + INTERIOR_CELL_SIZE;
         let cell = &scratch[scratch_offset..next];
-        let cell_offset = match layout::try_allocate_and_write_cell(
+        let cell_offset = match layout::try_allocate_space(
             page,
             INTERIOR_SPEC,
             cell.len(),
             layout::CellWriteMode::Insert,
-            |dest| dest.copy_from_slice(cell),
         )? {
             Ok(offset) => offset,
             Err(_) => {
@@ -369,11 +365,23 @@ fn rewrite_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
                 ));
             }
         };
+        page[usize::from(cell_offset)..usize::from(cell_offset) + cell.len()].copy_from_slice(cell);
         layout::insert_slot(page, INTERIOR_SPEC, slot_u16, cell_offset)?;
         scratch_offset = next;
     }
 
     Ok(())
+}
+
+fn write_interior_cell_at(
+    page: &mut [u8; PAGE_SIZE],
+    cell_offset: usize,
+    left_child: PageId,
+    row_id: RowId,
+) {
+    let cell = encode_interior_cell(left_child, row_id);
+    let cell_end = cell_offset + INTERIOR_CELL_SIZE;
+    page[cell_offset..cell_end].copy_from_slice(&cell);
 }
 
 #[cfg(test)]
