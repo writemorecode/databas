@@ -1,3 +1,37 @@
+//! Low-level primitives for reading and mutating B-tree table pages.
+//!
+//! This module owns the binary page format used by the table B-tree. A page is
+//! backed by a fixed-size `[u8; PAGE_SIZE]` buffer and is exposed through a
+//! typed [`Page`] wrapper:
+//!
+//! - `A` selects the access mode ([`Read`] or [`Write`]).
+//! - `F` selects the logical family ([`Table`] or [`Index`]).
+//! - `N` selects the node kind ([`Leaf`] or [`Interior`]).
+//!
+//! The type parameters let callers work with already-validated pages while
+//! keeping leaf/interior and table/index operations distinct at compile time.
+//! The current implementation fully supports table pages; index page tags are
+//! recognized during dispatch but still rejected as unsupported.
+//!
+//! The fixed header and slot-directory layout is defined in [`layout`]. Cell
+//! encoding for table leaf and interior nodes lives in [`table`]. Use
+//! [`AnyPage`] when the concrete page kind is only known from the header at
+//! runtime, or use `Page<_, Table, Leaf>` / `Page<_, Table, Interior>` when the
+//! caller already knows which kind it expects.
+//!
+//! # Invariants
+//!
+//! Pages validated by this module guarantee that:
+//!
+//! - the header tag matches the requested page kind,
+//! - the slot directory fits inside the fixed header/content gap,
+//! - `content_start` points to the start of the cell-content region, and
+//! - the freeblock chain is ordered and internally consistent.
+//!
+//! Cell payloads are validated on demand when individual slots are decoded.
+//! Structural failures are reported as [`TablePageError`] or
+//! [`TablePageCorruptionKind`].
+
 mod index;
 mod layout;
 mod table;
@@ -6,6 +40,7 @@ use core::marker::PhantomData;
 
 use crate::types::{PAGE_SIZE, RowId};
 
+/// Discriminant stored in the first byte of every table-page header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum PageTag {
@@ -31,18 +66,23 @@ impl PageTag {
     }
 }
 
+/// Marker type for the table B-tree page family.
 #[derive(Debug)]
 pub(crate) enum Table {}
 
+/// Marker type for the index B-tree page family.
 #[derive(Debug)]
 pub(crate) enum Index {}
 
+/// Marker type for leaf pages.
 #[derive(Debug)]
 pub(crate) enum Leaf {}
 
+/// Marker type for interior pages.
 #[derive(Debug)]
 pub(crate) enum Interior {}
 
+/// Maps a page family/node-kind pair to its header layout metadata.
 pub(crate) trait PageKind<F> {
     const PAGE_TAG: PageTag;
     const HEADER_SIZE: usize;
@@ -68,20 +108,24 @@ impl PageKind<Index> for Interior {
     const HEADER_SIZE: usize = layout::INTERIOR_HEADER_SIZE;
 }
 
+/// Read-only access to a page buffer.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Read<'a> {
     bytes: &'a [u8; PAGE_SIZE],
 }
 
+/// Mutable access to a page buffer.
 #[derive(Debug)]
 pub(crate) struct Write<'a> {
     bytes: &'a mut [u8; PAGE_SIZE],
 }
 
+/// Shared access abstraction over fixed-size page buffers.
 pub(crate) trait PageAccess {
     fn bytes(&self) -> &[u8; PAGE_SIZE];
 }
 
+/// Mutable access abstraction over fixed-size page buffers.
 pub(crate) trait PageAccessMut: PageAccess {
     fn bytes_mut(&mut self) -> &mut [u8; PAGE_SIZE];
 }
@@ -104,12 +148,17 @@ impl PageAccessMut for Write<'_> {
     }
 }
 
+/// Typed view over a validated page buffer.
+///
+/// `A` chooses read-only vs mutable access, `F` chooses the B-tree family, and
+/// `N` chooses the node kind.
 #[derive(Debug)]
 pub(crate) struct Page<A, F, N> {
     access: A,
     _marker: PhantomData<(F, N)>,
 }
 
+/// Runtime-dispatched page wrapper used when the page tag is read from bytes.
 #[derive(Debug)]
 pub(crate) enum AnyPage<A> {
     TableLeaf(Page<A, Table, Leaf>),
@@ -207,6 +256,7 @@ impl<'a> TryFrom<&'a mut [u8; PAGE_SIZE]> for AnyPage<Write<'a>> {
     }
 }
 
+/// Shared header fields available on all page kinds.
 #[derive(Debug)]
 pub(crate) struct HeaderView<'a> {
     page: &'a [u8; PAGE_SIZE],
@@ -241,6 +291,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(out)
 }
 
+/// Errors returned when decoding or mutating table pages.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TablePageError {
     #[error("invalid page type: {page_type}")]
@@ -261,8 +312,10 @@ pub(crate) enum TablePageError {
     PageFull { needed: usize, available: usize },
 }
 
+/// Convenient result alias for table-page operations.
 pub(crate) type TablePageResult<T> = Result<T, TablePageError>;
 
+/// Structural corruption reasons detected while validating a page.
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TablePageCorruptionKind {
     #[error("invalid cell content start")]
