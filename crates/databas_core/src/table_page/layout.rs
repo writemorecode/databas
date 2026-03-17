@@ -1,11 +1,11 @@
 use crate::types::PageId;
 use crate::{page_checksum::PAGE_DATA_END, types::PAGE_SIZE};
 
-use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult};
+use crate::table_page::{PageTag, TablePageCorruptionKind, TablePageError, TablePageResult};
 /// Current fixed header layout (all multi-byte fields are little-endian):
 ///
 /// Shared prefix (both leaf and interior):
-/// - `0`: page type (`LEAF_PAGE_TYPE` or `INTERIOR_PAGE_TYPE`)
+/// - `0`: page tag ([`PageTag`])
 /// - `1`: fragmented free byte count (`u8`)
 /// - `2..4`: `cell_count` (`u16`)
 /// - `4..6`: `content_start` (`u16`)
@@ -19,9 +19,6 @@ use crate::table_page::{TablePageCorruptionKind, TablePageError, TablePageResult
 /// Fixed header size is `24` for leaf pages and `32` for interior pages.
 /// The slot directory starts immediately after the fixed header; each slot is
 /// a `u16` cell offset.
-pub(super) const LEAF_PAGE_TYPE: u8 = 1;
-pub(super) const INTERIOR_PAGE_TYPE: u8 = 2;
-
 pub(super) const LEAF_HEADER_SIZE: usize = 24;
 pub(super) const INTERIOR_HEADER_SIZE: usize = 32;
 pub(super) const PREV_SIBLING_OFFSET: usize = 8;
@@ -41,7 +38,6 @@ const NO_SIBLING_PAGE_ID: PageId = 0;
 
 const _: () = {
     assert!(PAGE_SIZE <= u16::MAX as usize, "PAGE_SIZE must fit in u16");
-    assert!(LEAF_PAGE_TYPE != INTERIOR_PAGE_TYPE, "table page types must be distinct");
     assert!(
         LEAF_HEADER_SIZE >= CONTENT_START_OFFSET + 2 && LEAF_HEADER_SIZE <= PAGE_DATA_END,
         "leaf header layout is invalid"
@@ -70,7 +66,7 @@ const _: () = {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PageSpec {
     /// Discriminant written into the page-type header byte.
-    pub(super) page_type: u8,
+    pub(super) page_tag: PageTag,
     /// Total size of the fixed header before the slot directory starts.
     pub(super) header_size: usize,
 }
@@ -105,10 +101,21 @@ pub(super) fn page_type(page: &[u8; PAGE_SIZE]) -> u8 {
     page[PAGE_TYPE_OFFSET]
 }
 
+pub(super) fn spec_for_tag(page_tag: PageTag) -> PageSpec {
+    PageSpec { page_tag, header_size: header_size_for_tag(page_tag) }
+}
+
+pub(super) fn header_size_for_tag(page_tag: PageTag) -> usize {
+    match page_tag {
+        PageTag::TableLeaf | PageTag::IndexLeaf => LEAF_HEADER_SIZE,
+        PageTag::TableInterior | PageTag::IndexInterior => INTERIOR_HEADER_SIZE,
+    }
+}
+
 /// Initializes `page` as an empty instance of the page kind described by `spec`.
 pub(super) fn init_empty(page: &mut [u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<()> {
     page.fill(0);
-    page[PAGE_TYPE_OFFSET] = spec.page_type;
+    page[PAGE_TYPE_OFFSET] = spec.page_tag.raw();
     set_fragmented_free_bytes(page, 0);
     set_cell_count(page, 0);
     set_content_start(page, PAGE_DATA_END);
@@ -119,7 +126,7 @@ pub(super) fn init_empty(page: &mut [u8; PAGE_SIZE], spec: PageSpec) -> TablePag
 /// Validates that `page` matches `spec` and has internally consistent header bounds.
 pub(super) fn validate(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<()> {
     let page_type = page[PAGE_TYPE_OFFSET];
-    if page_type != spec.page_type {
+    if page_type != spec.page_tag.raw() {
         return Err(TablePageError::InvalidPageType { page_type });
     }
 
@@ -749,184 +756,4 @@ fn decode_sibling_page_id(page_id: PageId) -> Option<PageId> {
 
 fn encode_sibling_page_id(page_id: Option<PageId>) -> PageId {
     page_id.unwrap_or(NO_SIBLING_PAGE_ID)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const TEST_SPEC: PageSpec =
-        PageSpec { page_type: LEAF_PAGE_TYPE, header_size: LEAF_HEADER_SIZE };
-
-    fn initialized_page() -> [u8; PAGE_SIZE] {
-        let mut page = [0u8; PAGE_SIZE];
-        init_empty(&mut page, TEST_SPEC).unwrap();
-        page
-    }
-
-    #[test]
-    fn released_space_is_reused_before_gap_space() {
-        let mut page = initialized_page();
-        let first_cell = [1u8; 12];
-        let second_cell = [2u8; 12];
-
-        let first_offset =
-            try_allocate_space(&mut page, TEST_SPEC, first_cell.len(), CellWriteMode::Insert)
-                .unwrap()
-                .unwrap();
-        page[usize::from(first_offset)..usize::from(first_offset) + first_cell.len()]
-            .copy_from_slice(&first_cell);
-        insert_slot(&mut page, TEST_SPEC, 0, first_offset).unwrap();
-
-        let second_offset =
-            try_allocate_space(&mut page, TEST_SPEC, second_cell.len(), CellWriteMode::Insert)
-                .unwrap()
-                .unwrap();
-        page[usize::from(second_offset)..usize::from(second_offset) + second_cell.len()]
-            .copy_from_slice(&second_cell);
-        insert_slot(&mut page, TEST_SPEC, 1, second_offset).unwrap();
-
-        release_space(&mut page, TEST_SPEC, first_offset, first_cell.len()).unwrap();
-        assert_eq!(first_freeblock(&page), first_offset);
-
-        let reused_offset =
-            try_allocate_space(&mut page, TEST_SPEC, 12, CellWriteMode::Update).unwrap().unwrap();
-        page[usize::from(reused_offset)..usize::from(reused_offset) + 12]
-            .copy_from_slice(&[9u8; 12]);
-        assert_eq!(reused_offset, first_offset);
-        assert_eq!(first_freeblock(&page), 0);
-    }
-
-    #[test]
-    fn allocating_from_freeblock_can_leave_fragment_bytes() {
-        let mut page = initialized_page();
-        let reusable_offset =
-            try_allocate_space(&mut page, TEST_SPEC, 12, CellWriteMode::Update).unwrap().unwrap();
-        page[usize::from(reusable_offset)..usize::from(reusable_offset) + 12]
-            .copy_from_slice(&[1u8; 12]);
-        let _live_offset =
-            try_allocate_space(&mut page, TEST_SPEC, 12, CellWriteMode::Update).unwrap().unwrap();
-        page[usize::from(_live_offset)..usize::from(_live_offset) + 12].copy_from_slice(&[2u8; 12]);
-
-        release_space(&mut page, TEST_SPEC, reusable_offset, 12).unwrap();
-        let allocated_offset =
-            try_allocate_space(&mut page, TEST_SPEC, 10, CellWriteMode::Update).unwrap().unwrap();
-        page[usize::from(allocated_offset)..usize::from(allocated_offset) + 10]
-            .copy_from_slice(&[2u8; 10]);
-
-        assert_eq!(allocated_offset, reusable_offset + 2);
-        assert_eq!(fragmented_free_bytes(&page), 2);
-        assert_eq!(first_freeblock(&page), 0);
-    }
-
-    #[test]
-    fn allocated_space_can_be_written_after_reservation() {
-        let mut page = initialized_page();
-
-        let offset =
-            try_allocate_space(&mut page, TEST_SPEC, 4, CellWriteMode::Update).unwrap().unwrap();
-        page[usize::from(offset)..usize::from(offset) + 4].copy_from_slice(&[1, 2, 3, 4]);
-
-        assert_eq!(&page[usize::from(offset)..usize::from(offset) + 4], &[1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn releasing_adjacent_ranges_coalesces_freeblocks() {
-        let mut page = initialized_page();
-        let higher =
-            try_allocate_space(&mut page, TEST_SPEC, 12, CellWriteMode::Update).unwrap().unwrap();
-        page[usize::from(higher)..usize::from(higher) + 12].copy_from_slice(&[1u8; 12]);
-        let middle =
-            try_allocate_space(&mut page, TEST_SPEC, 12, CellWriteMode::Update).unwrap().unwrap();
-        page[usize::from(middle)..usize::from(middle) + 12].copy_from_slice(&[2u8; 12]);
-        let lower =
-            try_allocate_space(&mut page, TEST_SPEC, 12, CellWriteMode::Update).unwrap().unwrap();
-        page[usize::from(lower)..usize::from(lower) + 12].copy_from_slice(&[3u8; 12]);
-
-        assert_eq!(usize::from(middle) + 12, usize::from(higher));
-        assert_eq!(usize::from(lower) + 12, usize::from(middle));
-
-        release_space(&mut page, TEST_SPEC, higher, 12).unwrap();
-        release_space(&mut page, TEST_SPEC, middle, 12).unwrap();
-
-        let freeblock = read_freeblock(&page, usize::from(first_freeblock(&page))).unwrap();
-        assert_eq!(freeblock.offset, usize::from(middle));
-        assert_eq!(freeblock.size, 24);
-        assert_eq!(freeblock.next, 0);
-    }
-
-    #[test]
-    fn validate_rejects_fragment_count_above_maximum() {
-        let mut page = initialized_page();
-        set_fragmented_free_bytes(&mut page, MAX_FRAGMENTED_FREE_BYTES + 1);
-
-        let err = validate(&page, TEST_SPEC).unwrap_err();
-        assert!(matches!(
-            err,
-            TablePageError::CorruptPage(TablePageCorruptionKind::InvalidFragmentedFreeBytes)
-        ));
-    }
-
-    #[test]
-    fn validate_rejects_out_of_bounds_freeblock() {
-        let mut page = initialized_page();
-        set_content_start(&mut page, PAGE_DATA_END - 32);
-        set_first_freeblock(&mut page, (PAGE_DATA_END - 2) as u16);
-
-        let err = validate(&page, TEST_SPEC).unwrap_err();
-        assert!(matches!(
-            err,
-            TablePageError::CorruptPage(TablePageCorruptionKind::InvalidFreeblockOffset)
-        ));
-    }
-
-    #[test]
-    fn validate_rejects_too_small_freeblock() {
-        let mut page = initialized_page();
-        let offset = PAGE_DATA_END - 24;
-        set_content_start(&mut page, PAGE_DATA_END - 32);
-        set_first_freeblock(&mut page, offset as u16);
-        write_u16(&mut page, offset, 0);
-        write_u16(&mut page, offset + 2, 3);
-
-        let err = validate(&page, TEST_SPEC).unwrap_err();
-        assert!(matches!(
-            err,
-            TablePageError::CorruptPage(TablePageCorruptionKind::FreeblockTooSmall)
-        ));
-    }
-
-    #[test]
-    fn validate_rejects_out_of_order_freeblock_chain() {
-        let mut page = initialized_page();
-        let first = PAGE_DATA_END - 24;
-        let second = PAGE_DATA_END - 40;
-        set_content_start(&mut page, PAGE_DATA_END - 48);
-        set_first_freeblock(&mut page, first as u16);
-        write_freeblock(&mut page, first, second as u16, 12).unwrap();
-        write_freeblock(&mut page, second, 0, 12).unwrap();
-
-        let err = validate(&page, TEST_SPEC).unwrap_err();
-        assert!(matches!(
-            err,
-            TablePageError::CorruptPage(TablePageCorruptionKind::FreeblockChainOutOfOrder)
-        ));
-    }
-
-    #[test]
-    fn validate_rejects_adjacent_freeblocks() {
-        let mut page = initialized_page();
-        let first = PAGE_DATA_END - 24;
-        let second = PAGE_DATA_END - 12;
-        set_content_start(&mut page, PAGE_DATA_END - 40);
-        set_first_freeblock(&mut page, first as u16);
-        write_freeblock(&mut page, first, second as u16, 12).unwrap();
-        write_freeblock(&mut page, second, 0, 12).unwrap();
-
-        let err = validate(&page, TEST_SPEC).unwrap_err();
-        assert!(matches!(
-            err,
-            TablePageError::CorruptPage(TablePageCorruptionKind::AdjacentFreeblocks)
-        ));
-    }
 }

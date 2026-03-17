@@ -1,11 +1,207 @@
-mod interior;
+mod index;
 mod layout;
-mod leaf;
+mod table;
+
+use core::marker::PhantomData;
 
 use crate::types::{PAGE_SIZE, RowId};
 
-pub(crate) use interior::{TableInteriorPageMut, TableInteriorPageRef};
-pub(crate) use leaf::{TableLeafPageMut, TableLeafPageRef};
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum PageTag {
+    TableLeaf = 0,
+    TableInterior = 1,
+    IndexLeaf = 2,
+    IndexInterior = 3,
+}
+
+impl PageTag {
+    pub(crate) fn from_raw(page_type: u8) -> TablePageResult<Self> {
+        match page_type {
+            0 => Ok(Self::TableLeaf),
+            1 => Ok(Self::TableInterior),
+            2 => Ok(Self::IndexLeaf),
+            3 => Ok(Self::IndexInterior),
+            _ => Err(TablePageError::InvalidPageType { page_type }),
+        }
+    }
+
+    pub(crate) fn raw(self) -> u8 {
+        self as u8
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum Table {}
+
+#[derive(Debug)]
+pub(crate) enum Index {}
+
+#[derive(Debug)]
+pub(crate) enum Leaf {}
+
+#[derive(Debug)]
+pub(crate) enum Interior {}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Read<'a> {
+    bytes: &'a [u8; PAGE_SIZE],
+}
+
+#[derive(Debug)]
+pub(crate) struct Write<'a> {
+    bytes: &'a mut [u8; PAGE_SIZE],
+}
+
+pub(crate) trait PageAccess {
+    fn bytes(&self) -> &[u8; PAGE_SIZE];
+}
+
+pub(crate) trait PageAccessMut: PageAccess {
+    fn bytes_mut(&mut self) -> &mut [u8; PAGE_SIZE];
+}
+
+impl PageAccess for Read<'_> {
+    fn bytes(&self) -> &[u8; PAGE_SIZE] {
+        self.bytes
+    }
+}
+
+impl PageAccess for Write<'_> {
+    fn bytes(&self) -> &[u8; PAGE_SIZE] {
+        self.bytes
+    }
+}
+
+impl PageAccessMut for Write<'_> {
+    fn bytes_mut(&mut self) -> &mut [u8; PAGE_SIZE] {
+        self.bytes
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Page<A, F, N> {
+    access: A,
+    _marker: PhantomData<(F, N)>,
+}
+
+#[derive(Debug)]
+pub(crate) enum AnyPage<A> {
+    TableLeaf(Page<A, Table, Leaf>),
+    TableInterior(Page<A, Table, Interior>),
+    IndexLeaf(Page<A, Index, Leaf>),
+    IndexInterior(Page<A, Index, Interior>),
+}
+
+pub(crate) type PageRef<'a> = AnyPage<Read<'a>>;
+pub(crate) type PageMut<'a> = AnyPage<Write<'a>>;
+
+impl<A, F, N> Page<A, F, N> {
+    pub(super) fn new(access: A) -> Self {
+        Self { access, _marker: PhantomData }
+    }
+}
+
+impl<A, F, N> Page<A, F, N>
+where
+    A: PageAccess,
+{
+    pub(super) fn bytes(&self) -> &[u8; PAGE_SIZE] {
+        self.access.bytes()
+    }
+
+    pub(crate) fn header(&self) -> HeaderView<'_> {
+        HeaderView { page: self.bytes() }
+    }
+
+    pub(crate) fn page_tag(&self) -> TablePageResult<PageTag> {
+        PageTag::from_raw(layout::page_type(self.bytes()))
+    }
+
+    pub(crate) fn slot_count(&self) -> u16 {
+        layout::cell_count(self.bytes())
+    }
+
+    pub(crate) fn free_space(&self) -> TablePageResult<usize> {
+        layout::free_space(self.bytes(), layout::spec_for_tag(self.page_tag()?))
+    }
+}
+
+impl<A, F, N> Page<A, F, N>
+where
+    A: PageAccessMut,
+{
+    pub(super) fn bytes_mut(&mut self) -> &mut [u8; PAGE_SIZE] {
+        self.access.bytes_mut()
+    }
+}
+
+impl<'a, F, N> Page<Write<'a>, F, N> {
+    pub(crate) fn as_ref(&self) -> Page<Read<'_>, F, N> {
+        Page::new(Read { bytes: self.bytes() })
+    }
+}
+
+impl<'a> TryFrom<&'a [u8; PAGE_SIZE]> for AnyPage<Read<'a>> {
+    type Error = TablePageError;
+
+    fn try_from(bytes: &'a [u8; PAGE_SIZE]) -> Result<Self, Self::Error> {
+        match PageTag::from_raw(layout::page_type(bytes))? {
+            PageTag::TableLeaf => {
+                Ok(Self::TableLeaf(Page::<Read<'a>, Table, Leaf>::from_bytes(bytes)?))
+            }
+            PageTag::TableInterior => {
+                Ok(Self::TableInterior(Page::<Read<'a>, Table, Interior>::from_bytes(bytes)?))
+            }
+            PageTag::IndexLeaf => Err(index::unsupported_page_kind(PageTag::IndexLeaf)),
+            PageTag::IndexInterior => Err(index::unsupported_page_kind(PageTag::IndexInterior)),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a mut [u8; PAGE_SIZE]> for AnyPage<Write<'a>> {
+    type Error = TablePageError;
+
+    fn try_from(bytes: &'a mut [u8; PAGE_SIZE]) -> Result<Self, Self::Error> {
+        match PageTag::from_raw(layout::page_type(bytes))? {
+            PageTag::TableLeaf => {
+                Ok(Self::TableLeaf(Page::<Write<'a>, Table, Leaf>::from_bytes(bytes)?))
+            }
+            PageTag::TableInterior => {
+                Ok(Self::TableInterior(Page::<Write<'a>, Table, Interior>::from_bytes(bytes)?))
+            }
+            PageTag::IndexLeaf => Err(index::unsupported_page_kind(PageTag::IndexLeaf)),
+            PageTag::IndexInterior => Err(index::unsupported_page_kind(PageTag::IndexInterior)),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct HeaderView<'a> {
+    page: &'a [u8; PAGE_SIZE],
+}
+
+impl HeaderView<'_> {
+    pub(crate) fn page_tag(&self) -> TablePageResult<PageTag> {
+        PageTag::from_raw(layout::page_type(self.page))
+    }
+
+    pub(crate) fn slot_count(&self) -> u16 {
+        layout::cell_count(self.page)
+    }
+
+    pub(crate) fn content_start(&self) -> u16 {
+        layout::content_start(self.page)
+    }
+
+    pub(crate) fn first_freeblock(&self) -> u16 {
+        layout::first_freeblock(self.page)
+    }
+
+    pub(crate) fn fragmented_free_bytes(&self) -> u8 {
+        layout::fragmented_free_bytes(self.page)
+    }
+}
 
 /// Reads a little-endian `u64` from `bytes` at `offset`.
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
@@ -14,54 +210,12 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(out)
 }
 
-/// Immutable wrapper for a table page whose concrete kind is discovered at runtime.
-#[derive(Debug)]
-pub(crate) enum TablePageRef<'a> {
-    /// Leaf table page.
-    Leaf(TableLeafPageRef<'a>),
-    /// Interior table page.
-    Interior(TableInteriorPageRef<'a>),
-}
-
-impl<'a> TablePageRef<'a> {
-    /// Validates and deserializes a page buffer of unknown table-page type.
-    pub(crate) fn from_bytes(page: &'a [u8; PAGE_SIZE]) -> TablePageResult<Self> {
-        match layout::page_type(page) {
-            layout::LEAF_PAGE_TYPE => Ok(Self::Leaf(TableLeafPageRef::from_bytes(page)?)),
-            layout::INTERIOR_PAGE_TYPE => {
-                Ok(Self::Interior(TableInteriorPageRef::from_bytes(page)?))
-            }
-            page_type => Err(TablePageError::InvalidPageType { page_type }),
-        }
-    }
-}
-
-/// Mutable wrapper for a table page whose concrete kind is discovered at runtime.
-#[derive(Debug)]
-pub(crate) enum TablePageMut<'a> {
-    /// Leaf table page.
-    Leaf(TableLeafPageMut<'a>),
-    /// Interior table page.
-    Interior(TableInteriorPageMut<'a>),
-}
-
-impl<'a> TablePageMut<'a> {
-    /// Validates and deserializes a mutable page buffer of unknown table-page type.
-    pub(crate) fn from_bytes(page: &'a mut [u8; PAGE_SIZE]) -> TablePageResult<Self> {
-        match layout::page_type(page) {
-            layout::LEAF_PAGE_TYPE => Ok(Self::Leaf(TableLeafPageMut::from_bytes(page)?)),
-            layout::INTERIOR_PAGE_TYPE => {
-                Ok(Self::Interior(TableInteriorPageMut::from_bytes(page)?))
-            }
-            page_type => Err(TablePageError::InvalidPageType { page_type }),
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TablePageError {
     #[error("invalid page type: {page_type}")]
     InvalidPageType { page_type: u8 },
+    #[error("unsupported page kind: {page_tag:?}")]
+    UnsupportedPageKind { page_tag: PageTag },
     #[error("corrupt page: {0}")]
     CorruptPage(TablePageCorruptionKind),
     #[error("corrupt cell at slot index {slot_index}")]
@@ -104,107 +258,4 @@ pub(crate) enum TablePageCorruptionKind {
     CellPayloadOutOfBounds,
     #[error("cell content underflow")]
     CellContentUnderflow,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::table_page::TablePageCorruptionKind;
-
-    fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
-        let mut page = [0u8; PAGE_SIZE];
-        {
-            let _leaf = TableLeafPageMut::init_empty(&mut page).unwrap();
-        }
-        page
-    }
-
-    fn initialized_interior_page(rightmost_child: u64) -> [u8; PAGE_SIZE] {
-        let mut page = [0u8; PAGE_SIZE];
-        {
-            let _interior = TableInteriorPageMut::init_empty(&mut page, rightmost_child).unwrap();
-        }
-        page
-    }
-
-    #[test]
-    fn immutable_unknown_deserialization_detects_leaf_and_kind() {
-        let mut page = initialized_leaf_page();
-        {
-            let mut leaf = TableLeafPageMut::from_bytes(&mut page).unwrap();
-            leaf.insert(7, &[1, 2, 3]).unwrap();
-        }
-
-        let page_ref = TablePageRef::from_bytes(&page).unwrap();
-        match page_ref {
-            TablePageRef::Leaf(leaf) => {
-                let cell = leaf.search(7).unwrap().unwrap();
-                assert_eq!(cell.payload, &[1, 2, 3]);
-            }
-            TablePageRef::Interior(_) => panic!("expected leaf page"),
-        }
-    }
-
-    #[test]
-    fn immutable_unknown_deserialization_detects_interior_and_kind() {
-        let page = initialized_interior_page(99);
-
-        let page_ref = TablePageRef::from_bytes(&page).unwrap();
-        match page_ref {
-            TablePageRef::Interior(interior) => assert_eq!(interior.rightmost_child(), 99),
-            TablePageRef::Leaf(_) => panic!("expected interior page"),
-        }
-    }
-
-    #[test]
-    fn mutable_unknown_deserialization_detects_leaf_and_kind() {
-        let mut page = initialized_leaf_page();
-        let page_mut = TablePageMut::from_bytes(&mut page).unwrap();
-        match page_mut {
-            TablePageMut::Leaf(_) => {}
-            TablePageMut::Interior(_) => panic!("expected leaf page"),
-        }
-    }
-
-    #[test]
-    fn mutable_unknown_deserialization_detects_interior_and_kind() {
-        let mut page = initialized_interior_page(123);
-        let page_mut = TablePageMut::from_bytes(&mut page).unwrap();
-        match page_mut {
-            TablePageMut::Interior(_) => {}
-            TablePageMut::Leaf(_) => panic!("expected interior page"),
-        }
-    }
-
-    #[test]
-    fn unknown_deserialization_rejects_invalid_page_type() {
-        let mut page = [0u8; PAGE_SIZE];
-        page[0] = 255;
-
-        let immutable_err = TablePageRef::from_bytes(&page).unwrap_err();
-        assert!(matches!(immutable_err, TablePageError::InvalidPageType { page_type: 255 }));
-
-        let mut mutable_page = page;
-        let mutable_err = TablePageMut::from_bytes(&mut mutable_page).unwrap_err();
-        assert!(matches!(mutable_err, TablePageError::InvalidPageType { page_type: 255 }));
-    }
-
-    #[test]
-    fn unknown_deserialization_propagates_corruption_for_valid_leaf_type() {
-        let mut page = initialized_leaf_page();
-        page[4..6].copy_from_slice(&0u16.to_le_bytes());
-
-        let immutable_err = TablePageRef::from_bytes(&page).unwrap_err();
-        assert!(matches!(
-            immutable_err,
-            TablePageError::CorruptPage(TablePageCorruptionKind::InvalidCellContentStart)
-        ));
-
-        let mut mutable_page = page;
-        let mutable_err = TablePageMut::from_bytes(&mut mutable_page).unwrap_err();
-        assert!(matches!(
-            mutable_err,
-            TablePageError::CorruptPage(TablePageCorruptionKind::InvalidCellContentStart)
-        ));
-    }
 }

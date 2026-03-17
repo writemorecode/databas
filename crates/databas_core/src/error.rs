@@ -124,6 +124,8 @@ pub enum LimitExceededError {
 pub enum InternalError {
     #[error("{0}")]
     InvariantViolation(InvariantViolation),
+    #[error("unsupported page kind: {page_type}")]
+    UnsupportedPageKind { page_type: u8 },
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -232,6 +234,9 @@ impl From<TablePageError> for StorageError {
                 page_id: None,
                 kind: kind.into(),
             }),
+            TablePageError::UnsupportedPageKind { page_tag } => {
+                Self::Internal(InternalError::UnsupportedPageKind { page_type: page_tag.raw() })
+            }
             TablePageError::CorruptCell { slot_index } => Self::Corruption(CorruptionError {
                 component: CorruptionComponent::TablePage,
                 page_id: None,
