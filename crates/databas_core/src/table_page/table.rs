@@ -277,10 +277,6 @@ where
     pub(crate) fn defragment(&mut self) -> TablePageResult<()> {
         rewrite_leaf_page(self.bytes_mut(), None)
     }
-
-    pub(crate) fn compact(&mut self) -> TablePageResult<()> {
-        self.defragment()
-    }
 }
 
 impl<'a> Page<Read<'a>, Table, Interior> {
@@ -441,10 +437,6 @@ where
 
     pub(crate) fn defragment(&mut self) -> TablePageResult<()> {
         rewrite_interior_page(self.bytes_mut())
-    }
-
-    pub(crate) fn compact(&mut self) -> TablePageResult<()> {
-        self.defragment()
     }
 }
 
