@@ -1,7 +1,9 @@
 use crate::types::PageId;
 use crate::{page_checksum::PAGE_DATA_END, types::PAGE_SIZE};
 
-use crate::table_page::{PageTag, TablePageCorruptionKind, TablePageError, TablePageResult};
+use crate::table_page::{
+    PageKind, PageTag, TablePageCorruptionKind, TablePageError, TablePageResult,
+};
 /// Current fixed header layout (all multi-byte fields are little-endian):
 ///
 /// Shared prefix (both leaf and interior):
@@ -62,15 +64,6 @@ const _: () = {
     );
 };
 
-/// Static properties for one table-page kind used by shared layout helpers.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct PageSpec {
-    /// Discriminant written into the page-type header byte.
-    pub(super) page_tag: PageTag,
-    /// Total size of the fixed header before the slot directory starts.
-    pub(super) header_size: usize,
-}
-
 /// Space accounting returned when append-at-end allocation cannot fit a cell.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SpaceError {
@@ -101,21 +94,27 @@ pub(super) fn page_type(page: &[u8; PAGE_SIZE]) -> u8 {
     page[PAGE_TYPE_OFFSET]
 }
 
-pub(super) fn spec_for_tag(page_tag: PageTag) -> PageSpec {
-    PageSpec { page_tag, header_size: header_size_for_tag(page_tag) }
+fn header_size_for<F, N>() -> usize
+where
+    N: PageKind<F>,
+{
+    N::HEADER_SIZE
 }
 
-pub(super) fn header_size_for_tag(page_tag: PageTag) -> usize {
-    match page_tag {
-        PageTag::TableLeaf | PageTag::IndexLeaf => LEAF_HEADER_SIZE,
-        PageTag::TableInterior | PageTag::IndexInterior => INTERIOR_HEADER_SIZE,
-    }
+fn page_tag_for<F, N>() -> PageTag
+where
+    N: PageKind<F>,
+{
+    N::PAGE_TAG
 }
 
-/// Initializes `page` as an empty instance of the page kind described by `spec`.
-pub(super) fn init_empty(page: &mut [u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<()> {
+/// Initializes `page` as an empty instance of the page kind described by `F` and `N`.
+pub(super) fn init_empty<F, N>(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()>
+where
+    N: PageKind<F>,
+{
     page.fill(0);
-    page[PAGE_TYPE_OFFSET] = spec.page_tag.raw();
+    page[PAGE_TYPE_OFFSET] = page_tag_for::<F, N>().raw();
     set_fragmented_free_bytes(page, 0);
     set_cell_count(page, 0);
     set_content_start(page, PAGE_DATA_END);
@@ -123,10 +122,13 @@ pub(super) fn init_empty(page: &mut [u8; PAGE_SIZE], spec: PageSpec) -> TablePag
     Ok(())
 }
 
-/// Validates that `page` matches `spec` and has internally consistent header bounds.
-pub(super) fn validate(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<()> {
+/// Validates that `page` matches `F` and `N` and has internally consistent header bounds.
+pub(super) fn validate<F, N>(page: &[u8; PAGE_SIZE]) -> TablePageResult<()>
+where
+    N: PageKind<F>,
+{
     let page_type = page[PAGE_TYPE_OFFSET];
-    if page_type != spec.page_tag.raw() {
+    if page_type != page_tag_for::<F, N>().raw() {
         return Err(TablePageError::InvalidPageType { page_type });
     }
 
@@ -137,14 +139,14 @@ pub(super) fn validate(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResul
     }
 
     let cell_count = usize::from(cell_count(page));
-    let slot_dir_end = slot_dir_end_for_count(spec, cell_count)?;
+    let slot_dir_end = slot_dir_end_for_count::<F, N>(cell_count)?;
     let content_start = usize::from(content_start(page));
 
     if content_start < slot_dir_end || content_start > PAGE_DATA_END {
         return Err(TablePageError::CorruptPage(TablePageCorruptionKind::InvalidCellContentStart));
     }
 
-    walk_freeblocks(page, spec, |_| Ok(()))?;
+    walk_freeblocks::<F, N>(page, |_| Ok(()))?;
 
     Ok(())
 }
@@ -170,39 +172,49 @@ pub(super) fn first_freeblock(page: &[u8; PAGE_SIZE]) -> u16 {
 }
 
 /// Returns free bytes between the slot directory end and the cell-content start.
-pub(super) fn unallocated_gap(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<usize> {
-    let slot_dir_end = slot_dir_end_for_count(spec, usize::from(cell_count(page)))?;
+pub(super) fn unallocated_gap<F, N>(page: &[u8; PAGE_SIZE]) -> TablePageResult<usize>
+where
+    N: PageKind<F>,
+{
+    let slot_dir_end = slot_dir_end_for_count::<F, N>(usize::from(cell_count(page)))?;
     let content_start = usize::from(content_start(page));
     Ok(content_start - slot_dir_end)
 }
 
 /// Returns total reusable space, including the gap, freeblocks, and fragments.
-pub(super) fn free_space(page: &[u8; PAGE_SIZE], spec: PageSpec) -> TablePageResult<usize> {
+pub(super) fn free_space<F, N>(page: &[u8; PAGE_SIZE]) -> TablePageResult<usize>
+where
+    N: PageKind<F>,
+{
     let mut freeblock_bytes = 0usize;
-    walk_freeblocks(page, spec, |freeblock| {
+    walk_freeblocks::<F, N>(page, |freeblock| {
         freeblock_bytes += freeblock.size;
         Ok(())
     })?;
-    Ok(unallocated_gap(page, spec)? + freeblock_bytes + usize::from(fragmented_free_bytes(page)))
+    Ok(unallocated_gap::<F, N>(page)? + freeblock_bytes + usize::from(fragmented_free_bytes(page)))
 }
 
 /// Returns the raw cell byte slice referenced by `slot_index`.
-pub(super) fn cell_bytes_at_slot(
+pub(super) fn cell_bytes_at_slot<F, N>(
     page: &[u8; PAGE_SIZE],
-    spec: PageSpec,
     slot_index: u16,
-) -> TablePageResult<&[u8]> {
-    cell_bytes_at_slot_on_valid_page(page, spec, slot_index)
+) -> TablePageResult<&[u8]>
+where
+    N: PageKind<F>,
+{
+    cell_bytes_at_slot_on_valid_page::<F, N>(page, slot_index)
 }
 
 /// Returns the raw cell bytes for `slot_index` on a page that already passed [`validate`].
-pub(super) fn cell_bytes_at_slot_on_valid_page(
+pub(super) fn cell_bytes_at_slot_on_valid_page<F, N>(
     page: &[u8; PAGE_SIZE],
-    spec: PageSpec,
     slot_index: u16,
-) -> TablePageResult<&[u8]> {
+) -> TablePageResult<&[u8]>
+where
+    N: PageKind<F>,
+{
     let content_start = usize::from(content_start(page));
-    let cell_offset = usize::from(slot_offset(page, spec, slot_index)?);
+    let cell_offset = usize::from(slot_offset::<F, N>(page, slot_index)?);
     if cell_offset < content_start || cell_offset >= PAGE_DATA_END {
         return Err(TablePageError::CorruptCell { slot_index });
     }
@@ -215,12 +227,14 @@ pub(super) enum CellWriteMode {
 }
 
 /// Attempts to reserve `size` bytes from a freeblock or the gap.
-pub(super) fn try_allocate_space(
+pub(super) fn try_allocate_space<F, N>(
     page: &mut [u8; PAGE_SIZE],
-    spec: PageSpec,
     size: usize,
     mode: CellWriteMode,
-) -> TablePageResult<Result<u16, SpaceError>> {
+) -> TablePageResult<Result<u16, SpaceError>>
+where
+    N: PageKind<F>,
+{
     if size > usize::from(u16::MAX) {
         return Err(TablePageError::CellTooLarge { len: size, max: usize::from(u16::MAX) });
     }
@@ -231,12 +245,12 @@ pub(super) fn try_allocate_space(
         CellWriteMode::Update => 0,
     };
     let slot_dir_end_after =
-        slot_dir_end_for_count(spec, usize::from(cell_count(page)) + additional_slots)?;
+        slot_dir_end_for_count::<F, N>(usize::from(cell_count(page)) + additional_slots)?;
     let content_start = usize::from(content_start(page));
     if slot_dir_end_after > content_start {
         return Ok(Err(Ok(SpaceError {
             needed: size + (additional_slots * SLOT_WIDTH),
-            available: free_space(page, spec)?,
+            available: free_space::<F, N>(page)?,
         })?));
     }
 
@@ -248,7 +262,7 @@ pub(super) fn try_allocate_space(
     if size > available_gap {
         return Ok(Err(Ok(SpaceError {
             needed: size + (additional_slots * SLOT_WIDTH),
-            available: free_space(page, spec)?,
+            available: free_space::<F, N>(page)?,
         })?));
     }
 
@@ -258,18 +272,20 @@ pub(super) fn try_allocate_space(
 }
 
 /// Releases a previously used byte range back into the free-space structure.
-pub(super) fn release_space(
+pub(super) fn release_space<F, N>(
     page: &mut [u8; PAGE_SIZE],
-    spec: PageSpec,
     offset: u16,
     size: usize,
-) -> TablePageResult<()> {
+) -> TablePageResult<()>
+where
+    N: PageKind<F>,
+{
     if size == 0 {
         return Ok(());
     }
 
     let offset = usize::from(offset);
-    let slot_dir_end = slot_dir_end_for_count(spec, usize::from(cell_count(page)))?;
+    let slot_dir_end = slot_dir_end_for_count::<F, N>(usize::from(cell_count(page)))?;
     if offset < usize::from(content_start(page))
         || offset < slot_dir_end
         || offset + size > PAGE_DATA_END
@@ -358,41 +374,47 @@ pub(super) fn release_space(
 }
 
 /// Computes `PageFull` accounting for updating an existing cell.
-pub(super) fn page_full_for_update(
+pub(super) fn page_full_for_update<F, N>(
     page: &[u8; PAGE_SIZE],
-    spec: PageSpec,
     new_cell_len: usize,
     reclaimable_bytes: usize,
-) -> TablePageResult<SpaceError> {
+) -> TablePageResult<SpaceError>
+where
+    N: PageKind<F>,
+{
     Ok(SpaceError {
         needed: new_cell_len,
-        available: free_space(page, spec)?.saturating_add(reclaimable_bytes),
+        available: free_space::<F, N>(page)?.saturating_add(reclaimable_bytes),
     })
 }
 
 /// Updates an existing slot to reference `cell_offset`.
-pub(super) fn set_slot_offset(
+pub(super) fn set_slot_offset<F, N>(
     page: &mut [u8; PAGE_SIZE],
-    spec: PageSpec,
     slot_index: u16,
     cell_offset: u16,
-) -> TablePageResult<()> {
+) -> TablePageResult<()>
+where
+    N: PageKind<F>,
+{
     let cell_count = usize::from(cell_count(page));
     let slot_index_usize = usize::from(slot_index);
     if slot_index_usize >= cell_count {
         return Err(TablePageError::CorruptPage(TablePageCorruptionKind::SlotIndexOutOfBounds));
     }
 
-    write_slot_offset_raw(page, spec, slot_index_usize, cell_offset)
+    write_slot_offset_raw::<F, N>(page, slot_index_usize, cell_offset)
 }
 
 /// Inserts a new slot at `insert_index` pointing to `cell_offset`.
-pub(super) fn insert_slot(
+pub(super) fn insert_slot<F, N>(
     page: &mut [u8; PAGE_SIZE],
-    spec: PageSpec,
     insert_index: u16,
     cell_offset: u16,
-) -> TablePageResult<()> {
+) -> TablePageResult<()>
+where
+    N: PageKind<F>,
+{
     let cell_count = usize::from(cell_count(page));
     let insert_index_usize = usize::from(insert_index);
     if insert_index_usize > cell_count {
@@ -400,7 +422,7 @@ pub(super) fn insert_slot(
     }
 
     let new_count = cell_count + 1;
-    let slot_dir_end_after = slot_dir_end_for_count(spec, new_count)?;
+    let slot_dir_end_after = slot_dir_end_for_count::<F, N>(new_count)?;
     let content_start = usize::from(content_start(page));
     if slot_dir_end_after > content_start {
         return Err(TablePageError::CorruptPage(
@@ -409,22 +431,24 @@ pub(super) fn insert_slot(
     }
 
     for slot in (insert_index_usize..cell_count).rev() {
-        let offset = slot_offset(page, spec, slot as u16)?;
-        write_slot_offset_raw(page, spec, slot + 1, offset)?;
+        let offset = slot_offset::<F, N>(page, slot as u16)?;
+        write_slot_offset_raw::<F, N>(page, slot + 1, offset)?;
     }
 
-    write_slot_offset_raw(page, spec, insert_index_usize, cell_offset)?;
+    write_slot_offset_raw::<F, N>(page, insert_index_usize, cell_offset)?;
 
     set_cell_count(page, new_count as u16);
     Ok(())
 }
 
 /// Removes the slot at `remove_index` and shifts following entries left.
-pub(super) fn remove_slot(
+pub(super) fn remove_slot<F, N>(
     page: &mut [u8; PAGE_SIZE],
-    spec: PageSpec,
     remove_index: u16,
-) -> TablePageResult<()> {
+) -> TablePageResult<()>
+where
+    N: PageKind<F>,
+{
     let cell_count = usize::from(cell_count(page));
     let remove_index_usize = usize::from(remove_index);
     if remove_index_usize >= cell_count {
@@ -433,11 +457,11 @@ pub(super) fn remove_slot(
 
     for slot in remove_index_usize..(cell_count - 1) {
         let slot_index = (slot + 1) as u16;
-        let next_offset = slot_offset(page, spec, slot_index)?;
-        write_slot_offset_raw(page, spec, slot, next_offset)?;
+        let next_offset = slot_offset::<F, N>(page, slot_index)?;
+        write_slot_offset_raw::<F, N>(page, slot, next_offset)?;
     }
 
-    write_slot_offset_raw(page, spec, cell_count - 1, 0)?;
+    write_slot_offset_raw::<F, N>(page, cell_count - 1, 0)?;
 
     set_cell_count(page, (cell_count - 1) as u16);
     Ok(())
@@ -496,8 +520,11 @@ pub(super) fn set_first_freeblock(page: &mut [u8; PAGE_SIZE], offset: u16) {
 }
 
 /// Computes the byte offset where the slot directory ends for `cell_count` entries.
-fn slot_dir_end_for_count(spec: PageSpec, cell_count: usize) -> TablePageResult<usize> {
-    let slot_dir_end = spec.header_size + (cell_count * SLOT_WIDTH);
+fn slot_dir_end_for_count<F, N>(cell_count: usize) -> TablePageResult<usize>
+where
+    N: PageKind<F>,
+{
+    let slot_dir_end = header_size_for::<F, N>() + (cell_count * SLOT_WIDTH);
 
     if slot_dir_end > PAGE_DATA_END {
         return Err(TablePageError::CorruptPage(
@@ -509,8 +536,11 @@ fn slot_dir_end_for_count(spec: PageSpec, cell_count: usize) -> TablePageResult<
 }
 
 /// Computes the byte position of one slot entry inside the slot directory.
-fn slot_position(spec: PageSpec, slot_index: usize) -> TablePageResult<usize> {
-    let position = spec.header_size + (slot_index * SLOT_WIDTH);
+fn slot_position<F, N>(slot_index: usize) -> TablePageResult<usize>
+where
+    N: PageKind<F>,
+{
+    let position = header_size_for::<F, N>() + (slot_index * SLOT_WIDTH);
 
     if position + SLOT_WIDTH > PAGE_DATA_END {
         return Err(TablePageError::CorruptPage(
@@ -522,38 +552,41 @@ fn slot_position(spec: PageSpec, slot_index: usize) -> TablePageResult<usize> {
 }
 
 /// Reads the cell-content offset stored in `slot_index`.
-pub(super) fn slot_offset(
-    page: &[u8; PAGE_SIZE],
-    spec: PageSpec,
-    slot_index: u16,
-) -> TablePageResult<u16> {
+pub(super) fn slot_offset<F, N>(page: &[u8; PAGE_SIZE], slot_index: u16) -> TablePageResult<u16>
+where
+    N: PageKind<F>,
+{
     let cell_count = usize::from(cell_count(page));
     let slot_index = usize::from(slot_index);
     if slot_index >= cell_count {
         return Err(TablePageError::CorruptPage(TablePageCorruptionKind::SlotIndexOutOfBounds));
     }
 
-    let position = slot_position(spec, slot_index)?;
+    let position = slot_position::<F, N>(slot_index)?;
     Ok(read_u16(page, position))
 }
 
 /// Writes `cell_offset` into `slot_index` without checking current slot count.
-fn write_slot_offset_raw(
+fn write_slot_offset_raw<F, N>(
     page: &mut [u8; PAGE_SIZE],
-    spec: PageSpec,
     slot_index: usize,
     cell_offset: u16,
-) -> TablePageResult<()> {
-    let position = slot_position(spec, slot_index)?;
+) -> TablePageResult<()>
+where
+    N: PageKind<F>,
+{
+    let position = slot_position::<F, N>(slot_index)?;
     write_u16(page, position, cell_offset);
     Ok(())
 }
 
-fn walk_freeblocks(
+fn walk_freeblocks<F, N>(
     page: &[u8; PAGE_SIZE],
-    spec: PageSpec,
     mut visitor: impl FnMut(Freeblock) -> TablePageResult<()>,
-) -> TablePageResult<()> {
+) -> TablePageResult<()>
+where
+    N: PageKind<F>,
+{
     let content_start = usize::from(content_start(page));
     let mut current = usize::from(first_freeblock(page));
     let mut previous_end = None;
@@ -590,7 +623,7 @@ fn walk_freeblocks(
                 TablePageCorruptionKind::FreeblockChainOutOfOrder,
             ));
         }
-        let slot_dir_end = slot_dir_end_for_count(spec, usize::from(cell_count(page)))?;
+        let slot_dir_end = slot_dir_end_for_count::<F, N>(usize::from(cell_count(page)))?;
         if freeblock.offset < slot_dir_end {
             return Err(TablePageError::CorruptPage(
                 TablePageCorruptionKind::InvalidFreeblockOffset,
