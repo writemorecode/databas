@@ -2,22 +2,16 @@ use std::cmp::Ordering;
 
 use crate::{
     table_page::{
-        Interior, Leaf, Page, PageAccess, PageAccessMut, PageTag, Read, Table,
-        TablePageCorruptionKind, TablePageError, TablePageResult, Write,
+        Interior, Leaf, Page, PageAccess, PageAccessMut, Read, Table, TablePageCorruptionKind,
+        TablePageError, TablePageResult, Write,
         layout::{
-            self, CellWriteMode, FREEBLOCK_HEADER_SIZE, MAX_FRAGMENTED_FREE_BYTES, PageSpec,
-            SearchResult,
+            self, CellWriteMode, FREEBLOCK_HEADER_SIZE, MAX_FRAGMENTED_FREE_BYTES, SearchResult,
         },
     },
     types::{PAGE_SIZE, PageId, RowId},
 };
 
 use super::read_u64;
-
-const TABLE_LEAF_SPEC: PageSpec =
-    PageSpec { page_tag: PageTag::TableLeaf, header_size: layout::LEAF_HEADER_SIZE };
-const TABLE_INTERIOR_SPEC: PageSpec =
-    PageSpec { page_tag: PageTag::TableInterior, header_size: layout::INTERIOR_HEADER_SIZE };
 
 const PAYLOAD_LEN_SIZE: usize = 2;
 const ROW_ID_SIZE: usize = 8;
@@ -41,7 +35,7 @@ impl<'a> TableLeafCell<'a> {
         page: &'a [u8; PAGE_SIZE],
         slot_index: u16,
     ) -> TablePageResult<Self> {
-        let cell = layout::cell_bytes_at_slot(page, TABLE_LEAF_SPEC, slot_index)?;
+        let cell = layout::cell_bytes_at_slot::<Table, Leaf>(page, slot_index)?;
         let cell_len =
             leaf_cell_len(cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
 
@@ -74,7 +68,7 @@ impl TableInteriorCell {
         page: &[u8; PAGE_SIZE],
         slot_index: u16,
     ) -> TablePageResult<Self> {
-        let cell = layout::cell_bytes_at_slot(page, TABLE_INTERIOR_SPEC, slot_index)?;
+        let cell = layout::cell_bytes_at_slot::<Table, Interior>(page, slot_index)?;
         if cell.len() < INTERIOR_CELL_SIZE {
             return Err(TablePageError::CorruptCell { slot_index });
         }
@@ -88,19 +82,19 @@ impl TableInteriorCell {
 
 impl<'a> Page<Read<'a>, Table, Leaf> {
     pub(crate) fn from_bytes(page: &'a [u8; PAGE_SIZE]) -> TablePageResult<Self> {
-        layout::validate(page, TABLE_LEAF_SPEC)?;
+        layout::validate::<Table, Leaf>(page)?;
         Ok(Self::new(Read { bytes: page }))
     }
 }
 
 impl<'a> Page<Write<'a>, Table, Leaf> {
     pub(crate) fn init_empty(page: &'a mut [u8; PAGE_SIZE]) -> TablePageResult<Self> {
-        layout::init_empty(page, TABLE_LEAF_SPEC)?;
+        layout::init_empty::<Table, Leaf>(page)?;
         Ok(Self::new(Write { bytes: page }))
     }
 
     pub(crate) fn from_bytes(page: &'a mut [u8; PAGE_SIZE]) -> TablePageResult<Self> {
-        layout::validate(page, TABLE_LEAF_SPEC)?;
+        layout::validate::<Table, Leaf>(page)?;
         Ok(Self::new(Write { bytes: page }))
     }
 }
@@ -154,9 +148,8 @@ where
         };
 
         let cell_len = leaf_cell_encoded_len(payload)?;
-        let cell_offset = match layout::try_allocate_space(
+        let cell_offset = match layout::try_allocate_space::<Table, Leaf>(
             self.bytes_mut(),
-            TABLE_LEAF_SPEC,
             cell_len,
             CellWriteMode::Insert,
         )? {
@@ -171,9 +164,8 @@ where
 
                 rewrite_leaf_page(self.bytes_mut(), None)?;
 
-                match layout::try_allocate_space(
+                match layout::try_allocate_space::<Table, Leaf>(
                     self.bytes_mut(),
-                    TABLE_LEAF_SPEC,
                     cell_len,
                     CellWriteMode::Insert,
                 )? {
@@ -187,7 +179,7 @@ where
             }
         };
         write_leaf_cell_at(self.bytes_mut(), usize::from(cell_offset), row_id, payload)?;
-        layout::insert_slot(self.bytes_mut(), TABLE_LEAF_SPEC, insertion_index, cell_offset)
+        layout::insert_slot::<Table, Leaf>(self.bytes_mut(), insertion_index, cell_offset)
     }
 
     pub(crate) fn update(&mut self, row_id: RowId, payload: &[u8]) -> TablePageResult<()> {
@@ -198,11 +190,11 @@ where
 
         let mut working_page = *self.bytes();
         let mut existing_cell =
-            layout::cell_bytes_at_slot(&working_page, TABLE_LEAF_SPEC, slot_index)?;
+            layout::cell_bytes_at_slot::<Table, Leaf>(&working_page, slot_index)?;
         let mut existing_len =
             leaf_cell_len(existing_cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
         let new_len = leaf_cell_encoded_len(payload)?;
-        let mut cell_offset = layout::slot_offset(&working_page, TABLE_LEAF_SPEC, slot_index)?;
+        let mut cell_offset = layout::slot_offset::<Table, Leaf>(&working_page, slot_index)?;
 
         if new_len < existing_len {
             let released_tail = existing_len - new_len;
@@ -213,10 +205,10 @@ where
             {
                 rewrite_leaf_page(&mut working_page, None)?;
                 existing_cell =
-                    layout::cell_bytes_at_slot(&working_page, TABLE_LEAF_SPEC, slot_index)?;
+                    layout::cell_bytes_at_slot::<Table, Leaf>(&working_page, slot_index)?;
                 existing_len = leaf_cell_len(existing_cell)
                     .map_err(|_| TablePageError::CorruptCell { slot_index })?;
-                cell_offset = layout::slot_offset(&working_page, TABLE_LEAF_SPEC, slot_index)?;
+                cell_offset = layout::slot_offset::<Table, Leaf>(&working_page, slot_index)?;
             }
         }
 
@@ -229,9 +221,8 @@ where
         if new_len < existing_len {
             let cell_offset = usize::from(cell_offset);
             write_leaf_cell_at(&mut working_page, cell_offset, row_id, payload)?;
-            layout::release_space(
+            layout::release_space::<Table, Leaf>(
                 &mut working_page,
-                TABLE_LEAF_SPEC,
                 (cell_offset + new_len) as u16,
                 existing_len - new_len,
             )?;
@@ -239,21 +230,20 @@ where
             return Ok(());
         }
 
-        if let Ok(offset) = layout::try_allocate_space(
+        if let Ok(offset) = layout::try_allocate_space::<Table, Leaf>(
             &mut working_page,
-            TABLE_LEAF_SPEC,
             new_len,
             CellWriteMode::Update,
         )? {
             write_leaf_cell_at(&mut working_page, usize::from(offset), row_id, payload)?;
-            layout::set_slot_offset(&mut working_page, TABLE_LEAF_SPEC, slot_index, offset)?;
-            layout::release_space(&mut working_page, TABLE_LEAF_SPEC, cell_offset, existing_len)?;
+            layout::set_slot_offset::<Table, Leaf>(&mut working_page, slot_index, offset)?;
+            layout::release_space::<Table, Leaf>(&mut working_page, cell_offset, existing_len)?;
             *self.bytes_mut() = working_page;
             return Ok(());
         }
 
         let space_error =
-            layout::page_full_for_update(&working_page, TABLE_LEAF_SPEC, new_len, existing_len)?;
+            layout::page_full_for_update::<Table, Leaf>(&working_page, new_len, existing_len)?;
         if space_error.needed > space_error.available {
             return Err(TablePageError::PageFull {
                 needed: space_error.needed,
@@ -275,13 +265,13 @@ where
             SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound { row_id }),
         };
 
-        let existing_cell = layout::cell_bytes_at_slot(self.bytes(), TABLE_LEAF_SPEC, slot_index)?;
+        let existing_cell = layout::cell_bytes_at_slot::<Table, Leaf>(self.bytes(), slot_index)?;
         let existing_len =
             leaf_cell_len(existing_cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
-        let cell_offset = layout::slot_offset(self.bytes(), TABLE_LEAF_SPEC, slot_index)?;
+        let cell_offset = layout::slot_offset::<Table, Leaf>(self.bytes(), slot_index)?;
 
-        layout::remove_slot(self.bytes_mut(), TABLE_LEAF_SPEC, slot_index)?;
-        layout::release_space(self.bytes_mut(), TABLE_LEAF_SPEC, cell_offset, existing_len)
+        layout::remove_slot::<Table, Leaf>(self.bytes_mut(), slot_index)?;
+        layout::release_space::<Table, Leaf>(self.bytes_mut(), cell_offset, existing_len)
     }
 
     pub(crate) fn defragment(&mut self) -> TablePageResult<()> {
@@ -295,7 +285,7 @@ where
 
 impl<'a> Page<Read<'a>, Table, Interior> {
     pub(crate) fn from_bytes(page: &'a [u8; PAGE_SIZE]) -> TablePageResult<Self> {
-        layout::validate(page, TABLE_INTERIOR_SPEC)?;
+        layout::validate::<Table, Interior>(page)?;
         Ok(Self::new(Read { bytes: page }))
     }
 }
@@ -305,13 +295,13 @@ impl<'a> Page<Write<'a>, Table, Interior> {
         page: &'a mut [u8; PAGE_SIZE],
         rightmost_child: PageId,
     ) -> TablePageResult<Self> {
-        layout::init_empty(page, TABLE_INTERIOR_SPEC)?;
+        layout::init_empty::<Table, Interior>(page)?;
         layout::write_u64_at(page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET, rightmost_child);
         Ok(Self::new(Write { bytes: page }))
     }
 
     pub(crate) fn from_bytes(page: &'a mut [u8; PAGE_SIZE]) -> TablePageResult<Self> {
-        layout::validate(page, TABLE_INTERIOR_SPEC)?;
+        layout::validate::<Table, Interior>(page)?;
         Ok(Self::new(Write { bytes: page }))
     }
 }
@@ -382,9 +372,8 @@ where
         };
 
         let cell = encode_interior_cell(left_child, row_id);
-        let cell_offset = match layout::try_allocate_space(
+        let cell_offset = match layout::try_allocate_space::<Table, Interior>(
             self.bytes_mut(),
-            TABLE_INTERIOR_SPEC,
             cell.len(),
             layout::CellWriteMode::Insert,
         )? {
@@ -399,9 +388,8 @@ where
 
                 rewrite_interior_page(self.bytes_mut())?;
 
-                match layout::try_allocate_space(
+                match layout::try_allocate_space::<Table, Interior>(
                     self.bytes_mut(),
-                    TABLE_INTERIOR_SPEC,
                     cell.len(),
                     layout::CellWriteMode::Insert,
                 )? {
@@ -415,7 +403,7 @@ where
             }
         };
         write_interior_cell_at(self.bytes_mut(), usize::from(cell_offset), left_child, row_id);
-        layout::insert_slot(self.bytes_mut(), TABLE_INTERIOR_SPEC, insertion_index, cell_offset)
+        layout::insert_slot::<Table, Interior>(self.bytes_mut(), insertion_index, cell_offset)
     }
 
     pub(crate) fn update(&mut self, row_id: RowId, left_child: PageId) -> TablePageResult<()> {
@@ -425,13 +413,13 @@ where
         };
 
         let existing_cell =
-            layout::cell_bytes_at_slot(self.bytes(), TABLE_INTERIOR_SPEC, slot_index)?;
+            layout::cell_bytes_at_slot::<Table, Interior>(self.bytes(), slot_index)?;
         if existing_cell.len() < INTERIOR_CELL_SIZE {
             return Err(TablePageError::CorruptCell { slot_index });
         }
 
         let cell_offset =
-            usize::from(layout::slot_offset(self.bytes(), TABLE_INTERIOR_SPEC, slot_index)?);
+            usize::from(layout::slot_offset::<Table, Interior>(self.bytes(), slot_index)?);
         write_interior_cell_at(self.bytes_mut(), cell_offset, left_child, row_id);
         Ok(())
     }
@@ -442,14 +430,9 @@ where
             SearchResult::NotFound(_) => return Err(TablePageError::RowIdNotFound { row_id }),
         };
 
-        let cell_offset = layout::slot_offset(self.bytes(), TABLE_INTERIOR_SPEC, slot_index)?;
-        layout::remove_slot(self.bytes_mut(), TABLE_INTERIOR_SPEC, slot_index)?;
-        layout::release_space(
-            self.bytes_mut(),
-            TABLE_INTERIOR_SPEC,
-            cell_offset,
-            INTERIOR_CELL_SIZE,
-        )
+        let cell_offset = layout::slot_offset::<Table, Interior>(self.bytes(), slot_index)?;
+        layout::remove_slot::<Table, Interior>(self.bytes_mut(), slot_index)?;
+        layout::release_space::<Table, Interior>(self.bytes_mut(), cell_offset, INTERIOR_CELL_SIZE)
     }
 
     pub(crate) fn set_rightmost_child(&mut self, page_id: PageId) -> TablePageResult<()> {
@@ -491,7 +474,7 @@ fn find_leaf_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResult<Se
     while left < right {
         let mid = left + ((right - left) / 2);
         let mid_u16 = mid as u16;
-        let cell = layout::cell_bytes_at_slot_on_valid_page(page, TABLE_LEAF_SPEC, mid_u16)?;
+        let cell = layout::cell_bytes_at_slot_on_valid_page::<Table, Leaf>(page, mid_u16)?;
         if cell.len() < LEAF_CELL_PREFIX_SIZE {
             return Err(TablePageError::CorruptCell { slot_index: mid_u16 });
         }
@@ -548,7 +531,7 @@ fn copy_leaf_slot_into_scratch(
     scratch: &mut [u8; PAGE_SIZE],
     scratch_len: &mut usize,
 ) -> TablePageResult<()> {
-    let cell = layout::cell_bytes_at_slot_on_valid_page(page, TABLE_LEAF_SPEC, slot_index)?;
+    let cell = layout::cell_bytes_at_slot_on_valid_page::<Table, Leaf>(page, slot_index)?;
     let cell_len = leaf_cell_len(cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
     copy_leaf_cell_into_scratch(&cell[..cell_len], scratch, scratch_len)
 }
@@ -594,7 +577,7 @@ fn rewrite_leaf_page(
         }
     }
 
-    layout::init_empty(page, TABLE_LEAF_SPEC)?;
+    layout::init_empty::<Table, Leaf>(page)?;
     layout::set_prev_sibling(page, prev_sibling);
     layout::set_next_sibling(page, next_sibling);
 
@@ -604,22 +587,19 @@ fn rewrite_leaf_page(
         let cell_len = leaf_cell_len(&scratch[scratch_offset..scratch_len])
             .map_err(|_| TablePageError::CorruptCell { slot_index: slot_u16 })?;
         let next = scratch_offset + cell_len;
-        let cell_offset = match layout::try_allocate_space(
-            page,
-            TABLE_LEAF_SPEC,
-            cell_len,
-            CellWriteMode::Insert,
-        )? {
-            Ok(offset) => offset,
-            Err(_) => {
-                return Err(TablePageError::CorruptPage(
-                    TablePageCorruptionKind::CellContentUnderflow,
-                ));
-            }
-        };
+        let cell_offset =
+            match layout::try_allocate_space::<Table, Leaf>(page, cell_len, CellWriteMode::Insert)?
+            {
+                Ok(offset) => offset,
+                Err(_) => {
+                    return Err(TablePageError::CorruptPage(
+                        TablePageCorruptionKind::CellContentUnderflow,
+                    ));
+                }
+            };
         page[usize::from(cell_offset)..usize::from(cell_offset) + cell_len]
             .copy_from_slice(&scratch[scratch_offset..next]);
-        layout::insert_slot(page, TABLE_LEAF_SPEC, slot_u16, cell_offset)?;
+        layout::insert_slot::<Table, Leaf>(page, slot_u16, cell_offset)?;
         scratch_offset = next;
     }
 
@@ -676,7 +656,7 @@ fn find_interior_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResul
     while left < right {
         let mid = left + ((right - left) / 2);
         let mid_u16 = mid as u16;
-        let cell = layout::cell_bytes_at_slot_on_valid_page(page, TABLE_INTERIOR_SPEC, mid_u16)?;
+        let cell = layout::cell_bytes_at_slot_on_valid_page::<Table, Interior>(page, mid_u16)?;
         if cell.len() < INTERIOR_CELL_SIZE {
             return Err(TablePageError::CorruptCell { slot_index: mid_u16 });
         }
@@ -711,7 +691,7 @@ fn rewrite_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
 
     for slot in 0..cell_count {
         let slot_u16 = slot as u16;
-        let cell = layout::cell_bytes_at_slot_on_valid_page(page, TABLE_INTERIOR_SPEC, slot_u16)?;
+        let cell = layout::cell_bytes_at_slot_on_valid_page::<Table, Interior>(page, slot_u16)?;
 
         if cell.len() < INTERIOR_CELL_SIZE {
             return Err(TablePageError::CorruptCell { slot_index: slot_u16 });
@@ -724,7 +704,7 @@ fn rewrite_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
         scratch_len = next;
     }
 
-    layout::init_empty(page, TABLE_INTERIOR_SPEC)?;
+    layout::init_empty::<Table, Interior>(page)?;
     layout::set_prev_sibling(page, prev_sibling);
     layout::set_next_sibling(page, next_sibling);
     layout::write_u64_at(page, layout::INTERIOR_RIGHTMOST_CHILD_OFFSET, rightmost_child);
@@ -734,9 +714,8 @@ fn rewrite_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
         let slot_u16 = slot as u16;
         let next = scratch_offset + INTERIOR_CELL_SIZE;
         let cell = &scratch[scratch_offset..next];
-        let cell_offset = match layout::try_allocate_space(
+        let cell_offset = match layout::try_allocate_space::<Table, Interior>(
             page,
-            TABLE_INTERIOR_SPEC,
             cell.len(),
             layout::CellWriteMode::Insert,
         )? {
@@ -748,7 +727,7 @@ fn rewrite_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
             }
         };
         page[usize::from(cell_offset)..usize::from(cell_offset) + cell.len()].copy_from_slice(cell);
-        layout::insert_slot(page, TABLE_INTERIOR_SPEC, slot_u16, cell_offset)?;
+        layout::insert_slot::<Table, Interior>(page, slot_u16, cell_offset)?;
         scratch_offset = next;
     }
 

@@ -43,6 +43,31 @@ pub(crate) enum Leaf {}
 #[derive(Debug)]
 pub(crate) enum Interior {}
 
+pub(crate) trait PageKind<F> {
+    const PAGE_TAG: PageTag;
+    const HEADER_SIZE: usize;
+}
+
+impl PageKind<Table> for Leaf {
+    const PAGE_TAG: PageTag = PageTag::TableLeaf;
+    const HEADER_SIZE: usize = layout::LEAF_HEADER_SIZE;
+}
+
+impl PageKind<Table> for Interior {
+    const PAGE_TAG: PageTag = PageTag::TableInterior;
+    const HEADER_SIZE: usize = layout::INTERIOR_HEADER_SIZE;
+}
+
+impl PageKind<Index> for Leaf {
+    const PAGE_TAG: PageTag = PageTag::IndexLeaf;
+    const HEADER_SIZE: usize = layout::LEAF_HEADER_SIZE;
+}
+
+impl PageKind<Index> for Interior {
+    const PAGE_TAG: PageTag = PageTag::IndexInterior;
+    const HEADER_SIZE: usize = layout::INTERIOR_HEADER_SIZE;
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Read<'a> {
     bytes: &'a [u8; PAGE_SIZE],
@@ -114,16 +139,22 @@ where
         HeaderView { page: self.bytes() }
     }
 
-    pub(crate) fn page_tag(&self) -> TablePageResult<PageTag> {
-        PageTag::from_raw(layout::page_type(self.bytes()))
-    }
-
     pub(crate) fn slot_count(&self) -> u16 {
         layout::cell_count(self.bytes())
     }
+}
+
+impl<A, F, N> Page<A, F, N>
+where
+    A: PageAccess,
+    N: PageKind<F>,
+{
+    pub(crate) fn page_tag(&self) -> PageTag {
+        N::PAGE_TAG
+    }
 
     pub(crate) fn free_space(&self) -> TablePageResult<usize> {
-        layout::free_space(self.bytes(), layout::spec_for_tag(self.page_tag()?))
+        layout::free_space::<F, N>(self.bytes())
     }
 }
 
@@ -270,7 +301,7 @@ mod tests {
         let mut bytes = [0u8; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Table, Leaf>::init_empty(&mut bytes).unwrap();
 
-        assert_eq!(page.page_tag().unwrap(), PageTag::TableLeaf);
+        assert_eq!(page.page_tag(), PageTag::TableLeaf);
         assert_eq!(page.header().page_tag().unwrap(), PageTag::TableLeaf);
         assert_eq!(page.slot_count(), 0);
         assert_eq!(page.header().slot_count(), 0);
@@ -361,7 +392,7 @@ mod tests {
         let any_page = AnyPage::try_from(&bytes).unwrap();
         match any_page {
             AnyPage::TableInterior(page) => {
-                assert_eq!(page.page_tag().unwrap(), PageTag::TableInterior);
+                assert_eq!(page.page_tag(), PageTag::TableInterior);
                 assert_eq!(page.cell_count(), 3);
                 assert_eq!(page.rightmost_child(), 99);
             }
