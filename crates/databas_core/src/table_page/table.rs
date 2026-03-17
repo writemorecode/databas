@@ -711,3 +711,218 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     out.copy_from_slice(&bytes[offset..offset + 2]);
     u16::from_le_bytes(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::page_checksum::PAGE_DATA_END;
+
+    const CONTENT_START_OFFSET: usize = 4;
+    const LEAF_SLOT_DIR_OFFSET: usize = 24;
+    const INTERIOR_SLOT_DIR_OFFSET: usize = 32;
+
+    fn fill_leaf_page_with_payload(
+        page: &mut Page<Write<'_>, Table, Leaf>,
+        payload: &[u8],
+    ) -> Vec<RowId> {
+        let mut row_ids = Vec::new();
+        let mut next_row_id = 1;
+
+        loop {
+            match page.insert(next_row_id, payload) {
+                Ok(()) => {
+                    row_ids.push(next_row_id);
+                    next_row_id += 1;
+                }
+                Err(TablePageError::PageFull { .. }) => return row_ids,
+                Err(err) => panic!("unexpected insert error while filling page: {err:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn leaf_defragment_compacts_page_and_preserves_siblings() {
+        let mut bytes = [0u8; PAGE_SIZE];
+        {
+            let mut page = Page::<Write<'_>, Table, Leaf>::init_empty(&mut bytes).unwrap();
+            page.insert(10, b"ten").unwrap();
+            page.insert(20, b"twenty").unwrap();
+            page.insert(30, b"thirty").unwrap();
+        }
+
+        layout::set_prev_sibling(&mut bytes, Some(7));
+        layout::set_next_sibling(&mut bytes, Some(8));
+
+        let free_space_before = {
+            let mut page = Page::<Write<'_>, Table, Leaf>::from_bytes(&mut bytes).unwrap();
+            page.delete(20).unwrap();
+            page.free_space().unwrap()
+        };
+
+        assert_ne!(layout::first_freeblock(&bytes), 0);
+
+        let mut page = Page::<Write<'_>, Table, Leaf>::from_bytes(&mut bytes).unwrap();
+        page.defragment().unwrap();
+
+        assert_eq!(page.prev_sibling(), Some(7));
+        assert_eq!(page.next_sibling(), Some(8));
+        assert_eq!(page.len(), 2);
+        assert_eq!(page.rowid_at(0).unwrap(), 10);
+        assert_eq!(page.rowid_at(1).unwrap(), 30);
+        assert_eq!(page.search(10).unwrap().unwrap().payload, b"ten");
+        assert_eq!(page.search(20).unwrap(), None);
+        assert_eq!(page.search(30).unwrap().unwrap().payload, b"thirty");
+        assert_eq!(page.free_space().unwrap(), free_space_before);
+        drop(page);
+        assert_eq!(layout::first_freeblock(&bytes), 0);
+        assert_eq!(layout::fragmented_free_bytes(&bytes), 0);
+    }
+
+    #[test]
+    fn leaf_update_rewrites_first_when_fragmented_bytes_would_overflow() {
+        let mut bytes = [0u8; PAGE_SIZE];
+        {
+            let mut page = Page::<Write<'_>, Table, Leaf>::init_empty(&mut bytes).unwrap();
+            page.insert(10, b"rust").unwrap();
+        }
+
+        layout::set_prev_sibling(&mut bytes, Some(11));
+        layout::set_next_sibling(&mut bytes, Some(12));
+        layout::set_fragmented_free_bytes(&mut bytes, MAX_FRAGMENTED_FREE_BYTES);
+
+        let mut page = Page::<Write<'_>, Table, Leaf>::from_bytes(&mut bytes).unwrap();
+        page.update(10, b"rus").unwrap();
+
+        assert_eq!(page.search(10).unwrap().unwrap().payload, b"rus");
+        assert_eq!(page.prev_sibling(), Some(11));
+        assert_eq!(page.next_sibling(), Some(12));
+        drop(page);
+        assert_eq!(layout::fragmented_free_bytes(&bytes), 1);
+    }
+
+    #[test]
+    fn leaf_update_can_grow_cell_after_rewriting_page_with_reclaimable_space() {
+        let mut bytes = [0u8; PAGE_SIZE];
+        let original_payload = vec![b'a'; 100];
+        let inserted_row_ids = {
+            let mut page = Page::<Write<'_>, Table, Leaf>::init_empty(&mut bytes).unwrap();
+            fill_leaf_page_with_payload(&mut page, &original_payload)
+        };
+
+        assert!(inserted_row_ids.len() > 3);
+
+        {
+            let mut page = Page::<Write<'_>, Table, Leaf>::from_bytes(&mut bytes).unwrap();
+            page.delete(2).unwrap();
+        }
+        assert_ne!(layout::first_freeblock(&bytes), 0);
+
+        let expanded_payload = vec![b'b'; 150];
+        let mut page = Page::<Write<'_>, Table, Leaf>::from_bytes(&mut bytes).unwrap();
+        page.update(1, &expanded_payload).unwrap();
+
+        assert_eq!(page.search(1).unwrap().unwrap().payload, expanded_payload.as_slice());
+        assert_eq!(page.search(2).unwrap(), None);
+        drop(page);
+        assert_eq!(layout::first_freeblock(&bytes), 0);
+        assert_eq!(layout::fragmented_free_bytes(&bytes), 0);
+    }
+
+    #[test]
+    fn leaf_search_reports_corrupt_cell_when_payload_runs_past_cell_bytes() {
+        let mut bytes = [0u8; PAGE_SIZE];
+        {
+            let mut page = Page::<Write<'_>, Table, Leaf>::init_empty(&mut bytes).unwrap();
+            page.insert(10, b"abc").unwrap();
+        }
+
+        let cell_offset = usize::from(layout::slot_offset::<Table, Leaf>(&bytes, 0).unwrap());
+        bytes[cell_offset..cell_offset + PAYLOAD_LEN_SIZE].copy_from_slice(&1000u16.to_le_bytes());
+
+        let page = Page::<Read<'_>, Table, Leaf>::from_bytes(&bytes).unwrap();
+        assert!(matches!(page.search(10), Err(TablePageError::CorruptCell { slot_index: 0 })));
+    }
+
+    #[test]
+    fn interior_mutators_and_defragment_preserve_routing_and_siblings() {
+        let mut bytes = [0u8; PAGE_SIZE];
+        {
+            let mut page = Page::<Write<'_>, Table, Interior>::init_empty(&mut bytes, 99).unwrap();
+            page.insert(10, 1).unwrap();
+            page.insert(20, 2).unwrap();
+            page.insert(30, 3).unwrap();
+            page.insert(40, 4).unwrap();
+        }
+
+        layout::set_prev_sibling(&mut bytes, Some(21));
+        layout::set_next_sibling(&mut bytes, Some(22));
+
+        {
+            let mut page = Page::<Write<'_>, Table, Interior>::from_bytes(&mut bytes).unwrap();
+            page.delete(20).unwrap();
+            page.update(30, 300).unwrap();
+            page.set_rightmost_child(123).unwrap();
+        }
+
+        assert_ne!(layout::first_freeblock(&bytes), 0);
+
+        let mut page = Page::<Write<'_>, Table, Interior>::from_bytes(&mut bytes).unwrap();
+        page.defragment().unwrap();
+
+        assert_eq!(page.prev_sibling(), Some(21));
+        assert_eq!(page.next_sibling(), Some(22));
+        assert_eq!(page.rightmost_child(), 123);
+        assert_eq!(page.cell_count(), 3);
+        assert_eq!(page.search(10).unwrap(), Some(TableInteriorCell { left_child: 1, row_id: 10 }));
+        assert_eq!(
+            page.search(30).unwrap(),
+            Some(TableInteriorCell { left_child: 300, row_id: 30 })
+        );
+        assert_eq!(page.search(20).unwrap(), None);
+        assert_eq!(page.child_for_row_id(0).unwrap(), 1);
+        assert_eq!(page.child_for_row_id(10).unwrap(), 300);
+        assert_eq!(page.child_for_row_id(25).unwrap(), 300);
+        assert_eq!(page.child_for_row_id(30).unwrap(), 4);
+        assert_eq!(page.child_for_row_id(40).unwrap(), 123);
+        assert_eq!(page.child_for_row_id(50).unwrap(), 123);
+        drop(page);
+        assert_eq!(layout::first_freeblock(&bytes), 0);
+        assert_eq!(layout::fragmented_free_bytes(&bytes), 0);
+    }
+
+    #[test]
+    fn interior_search_reports_corrupt_cell_when_slot_is_truncated() {
+        let mut bytes = [0u8; PAGE_SIZE];
+        {
+            let mut page = Page::<Write<'_>, Table, Interior>::init_empty(&mut bytes, 99).unwrap();
+            page.insert(10, 1).unwrap();
+        }
+
+        let truncated_offset = (PAGE_DATA_END - (INTERIOR_CELL_SIZE - 1)) as u16;
+        bytes[CONTENT_START_OFFSET..CONTENT_START_OFFSET + 2]
+            .copy_from_slice(&truncated_offset.to_le_bytes());
+        bytes[INTERIOR_SLOT_DIR_OFFSET..INTERIOR_SLOT_DIR_OFFSET + 2]
+            .copy_from_slice(&truncated_offset.to_le_bytes());
+
+        let page = Page::<Read<'_>, Table, Interior>::from_bytes(&bytes).unwrap();
+        assert!(matches!(page.search(10), Err(TablePageError::CorruptCell { slot_index: 0 })));
+    }
+
+    #[test]
+    fn leaf_search_reports_corrupt_cell_when_slot_is_too_short_for_row_id_lookup() {
+        let mut bytes = [0u8; PAGE_SIZE];
+        {
+            let mut page = Page::<Write<'_>, Table, Leaf>::init_empty(&mut bytes).unwrap();
+            page.insert(10, b"abc").unwrap();
+        }
+
+        let truncated_offset = (PAGE_DATA_END - (LEAF_CELL_PREFIX_SIZE - 1)) as u16;
+        bytes[CONTENT_START_OFFSET..CONTENT_START_OFFSET + 2]
+            .copy_from_slice(&truncated_offset.to_le_bytes());
+        bytes[LEAF_SLOT_DIR_OFFSET..LEAF_SLOT_DIR_OFFSET + 2]
+            .copy_from_slice(&truncated_offset.to_le_bytes());
+
+        let page = Page::<Read<'_>, Table, Leaf>::from_bytes(&bytes).unwrap();
+        assert!(matches!(page.search(10), Err(TablePageError::CorruptCell { slot_index: 0 })));
+    }
+}
