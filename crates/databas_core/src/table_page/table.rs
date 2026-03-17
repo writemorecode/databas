@@ -371,10 +371,9 @@ where
             SearchResult::NotFound(insertion_index) => insertion_index,
         };
 
-        let cell = encode_interior_cell(left_child, row_id);
         let cell_offset = match layout::try_allocate_space::<Table, Interior>(
             self.bytes_mut(),
-            cell.len(),
+            INTERIOR_CELL_SIZE,
             layout::CellWriteMode::Insert,
         )? {
             Ok(offset) => offset,
@@ -390,7 +389,7 @@ where
 
                 match layout::try_allocate_space::<Table, Interior>(
                     self.bytes_mut(),
-                    cell.len(),
+                    INTERIOR_CELL_SIZE,
                     layout::CellWriteMode::Insert,
                 )? {
                     Ok(offset) => offset,
@@ -510,32 +509,6 @@ struct LeafCellReplacement<'a> {
     payload: &'a [u8],
 }
 
-fn copy_leaf_cell_into_scratch(
-    cell: &[u8],
-    scratch: &mut [u8; PAGE_SIZE],
-    scratch_len: &mut usize,
-) -> TablePageResult<()> {
-    let next = *scratch_len + cell.len();
-    if next > scratch.len() {
-        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellContentUnderflow));
-    }
-
-    scratch[*scratch_len..next].copy_from_slice(cell);
-    *scratch_len = next;
-    Ok(())
-}
-
-fn copy_leaf_slot_into_scratch(
-    page: &[u8; PAGE_SIZE],
-    slot_index: u16,
-    scratch: &mut [u8; PAGE_SIZE],
-    scratch_len: &mut usize,
-) -> TablePageResult<()> {
-    let cell = layout::cell_bytes_at_slot_on_valid_page::<Table, Leaf>(page, slot_index)?;
-    let cell_len = leaf_cell_len(cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
-    copy_leaf_cell_into_scratch(&cell[..cell_len], scratch, scratch_len)
-}
-
 fn rewrite_leaf_page(
     page: &mut [u8; PAGE_SIZE],
     replacement: Option<LeafCellReplacement<'_>>,
@@ -545,33 +518,58 @@ fn rewrite_leaf_page(
     let cell_count = usize::from(layout::cell_count(page));
     let mut scratch = [0u8; PAGE_SIZE];
     let mut scratch_len = 0usize;
+    let copy_slot = |slot_index: u16,
+                     scratch: &mut [u8; PAGE_SIZE],
+                     scratch_len: &mut usize|
+     -> TablePageResult<()> {
+        let cell = layout::cell_bytes_at_slot_on_valid_page::<Table, Leaf>(page, slot_index)?;
+        let cell_len =
+            leaf_cell_len(cell).map_err(|_| TablePageError::CorruptCell { slot_index })?;
+        let next = *scratch_len + cell_len;
+        if next > scratch.len() {
+            return Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellContentUnderflow));
+        }
+
+        scratch[*scratch_len..next].copy_from_slice(&cell[..cell_len]);
+        *scratch_len = next;
+        Ok(())
+    };
 
     match replacement {
         None => {
             for slot in 0..cell_count {
-                copy_leaf_slot_into_scratch(page, slot as u16, &mut scratch, &mut scratch_len)?;
+                copy_slot(slot as u16, &mut scratch, &mut scratch_len)?;
             }
         }
         Some(replacement_cell) => {
             let replacement_slot = usize::from(replacement_cell.slot_index);
             if replacement_slot >= cell_count {
                 for slot in 0..cell_count {
-                    copy_leaf_slot_into_scratch(page, slot as u16, &mut scratch, &mut scratch_len)?;
+                    copy_slot(slot as u16, &mut scratch, &mut scratch_len)?;
                 }
             } else {
                 for slot in 0..replacement_slot {
-                    copy_leaf_slot_into_scratch(page, slot as u16, &mut scratch, &mut scratch_len)?;
+                    copy_slot(slot as u16, &mut scratch, &mut scratch_len)?;
                 }
 
-                write_leaf_cell_into_scratch(
-                    &mut scratch,
-                    &mut scratch_len,
-                    replacement_cell.row_id,
-                    replacement_cell.payload,
-                )?;
+                let cell_len = leaf_cell_encoded_len(replacement_cell.payload)?;
+                let next = scratch_len + cell_len;
+                if next > scratch.len() {
+                    return Err(TablePageError::CorruptPage(
+                        TablePageCorruptionKind::CellContentUnderflow,
+                    ));
+                }
+                let cell = &mut scratch[scratch_len..next];
+                let payload_len = u16::try_from(replacement_cell.payload.len())
+                    .expect("payload length validated before writing leaf cell");
+                cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
+                cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE]
+                    .copy_from_slice(&replacement_cell.row_id.to_le_bytes());
+                cell[LEAF_CELL_PREFIX_SIZE..].copy_from_slice(replacement_cell.payload);
+                scratch_len = next;
 
                 for slot in (replacement_slot + 1)..cell_count {
-                    copy_leaf_slot_into_scratch(page, slot as u16, &mut scratch, &mut scratch_len)?;
+                    copy_slot(slot as u16, &mut scratch, &mut scratch_len)?;
                 }
             }
         }
@@ -615,35 +613,12 @@ fn write_leaf_cell_at(
 ) -> TablePageResult<()> {
     let cell_end = cell_offset + leaf_cell_encoded_len(payload)?;
     let cell = &mut page[cell_offset..cell_end];
-
-    write_leaf_cell(cell, row_id, payload);
-    Ok(())
-}
-
-fn write_leaf_cell(cell: &mut [u8], row_id: RowId, payload: &[u8]) {
     debug_assert_eq!(cell.len(), LEAF_CELL_PREFIX_SIZE + payload.len());
     let payload_len =
         u16::try_from(payload.len()).expect("payload length validated before writing leaf cell");
-
     cell[0..PAYLOAD_LEN_SIZE].copy_from_slice(&payload_len.to_le_bytes());
     cell[PAYLOAD_LEN_SIZE..LEAF_CELL_PREFIX_SIZE].copy_from_slice(&row_id.to_le_bytes());
     cell[LEAF_CELL_PREFIX_SIZE..].copy_from_slice(payload);
-}
-
-fn write_leaf_cell_into_scratch(
-    scratch: &mut [u8; PAGE_SIZE],
-    scratch_len: &mut usize,
-    row_id: RowId,
-    payload: &[u8],
-) -> TablePageResult<()> {
-    let cell_len = leaf_cell_encoded_len(payload)?;
-    let next = *scratch_len + cell_len;
-    if next > scratch.len() {
-        return Err(TablePageError::CorruptPage(TablePageCorruptionKind::CellContentUnderflow));
-    }
-
-    write_leaf_cell(&mut scratch[*scratch_len..next], row_id, payload);
-    *scratch_len = next;
     Ok(())
 }
 
@@ -671,14 +646,6 @@ fn find_interior_row_id(page: &[u8; PAGE_SIZE], row_id: RowId) -> TablePageResul
 
     let insertion_index = left as u16;
     Ok(SearchResult::NotFound(insertion_index))
-}
-
-/// Encodes `(left_child, row_id)` into the fixed-width interior cell format.
-fn encode_interior_cell(left_child: PageId, row_id: RowId) -> [u8; INTERIOR_CELL_SIZE] {
-    let mut cell = [0u8; INTERIOR_CELL_SIZE];
-    cell[0..LEFT_CHILD_SIZE].copy_from_slice(&left_child.to_le_bytes());
-    cell[LEFT_CHILD_SIZE..INTERIOR_CELL_SIZE].copy_from_slice(&row_id.to_le_bytes());
-    cell
 }
 
 fn rewrite_interior_page(page: &mut [u8; PAGE_SIZE]) -> TablePageResult<()> {
@@ -740,9 +707,10 @@ fn write_interior_cell_at(
     left_child: PageId,
     row_id: RowId,
 ) {
-    let cell = encode_interior_cell(left_child, row_id);
     let cell_end = cell_offset + INTERIOR_CELL_SIZE;
-    page[cell_offset..cell_end].copy_from_slice(&cell);
+    let cell = &mut page[cell_offset..cell_end];
+    cell[0..LEFT_CHILD_SIZE].copy_from_slice(&left_child.to_le_bytes());
+    cell[LEFT_CHILD_SIZE..INTERIOR_CELL_SIZE].copy_from_slice(&row_id.to_le_bytes());
 }
 
 /// Reads a little-endian `u16` from `bytes` at `offset`.
