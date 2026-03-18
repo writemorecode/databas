@@ -35,6 +35,7 @@ pub struct CorruptionError {
 pub enum CorruptionComponent {
     DatabaseHeader,
     DiskPage,
+    Freelist,
     TablePage,
     TableLeafPage,
     TableInteriorPage,
@@ -46,6 +47,7 @@ impl std::fmt::Display for CorruptionComponent {
         match self {
             Self::DatabaseHeader => write!(f, "database header"),
             Self::DiskPage => write!(f, "disk page"),
+            Self::Freelist => write!(f, "freelist"),
             Self::TablePage => write!(f, "table page"),
             Self::TableLeafPage => write!(f, "table leaf page"),
             Self::TableInteriorPage => write!(f, "table interior page"),
@@ -68,6 +70,19 @@ pub enum CorruptionKind {
     HeaderPageCountMismatch { expected: u64, actual: u64 },
     #[error("header page count is zero")]
     HeaderPageCountZero,
+    #[error("freelist head is zero but free page count is {count}")]
+    FreelistCountWithoutHead { count: u64 },
+    #[error("freelist head {head} present but free page count is zero")]
+    FreelistHeadWithoutCount { head: u64 },
+    #[error("freelist page id {page_id} is invalid")]
+    InvalidFreelistPageId { page_id: u64 },
+    #[error("header page cannot appear in freelist")]
+    HeaderPageInFreelist,
+    #[error("freelist trunk leaf count {count} exceeds maximum {max}")]
+    FreelistLeafCountTooLarge { count: u64, max: usize },
+
+    #[error("invalid checksum on freelist page {page_id}")]
+    InvalidFreelistChecksum { page_id: u64 },
     #[error("invalid page type: {page_type}")]
     InvalidPageType { page_type: u8 },
     #[error("invalid cell content start")]
@@ -108,6 +123,10 @@ pub enum ConstraintError {
 pub enum InvalidArgumentError {
     #[error("invalid page id: {page_id}")]
     InvalidPageId { page_id: u64 },
+    #[error("page is already free: {page_id}")]
+    PageAlreadyFree { page_id: u64 },
+    #[error("cannot free pinned page: {page_id}")]
+    CannotFreePinnedPage { page_id: u64 },
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -153,6 +172,9 @@ impl From<DiskManagerError> for StorageError {
             DiskManagerError::InvalidPageId { page_id } => {
                 Self::InvalidArgument(InvalidArgumentError::InvalidPageId { page_id })
             }
+            DiskManagerError::PageAlreadyFree { page_id } => {
+                Self::InvalidArgument(InvalidArgumentError::PageAlreadyFree { page_id })
+            }
             DiskManagerError::InvalidFileSize { size } => Self::Corruption(CorruptionError {
                 component: CorruptionComponent::DatabaseHeader,
                 page_id: Some(0),
@@ -191,6 +213,11 @@ impl From<DiskManagerError> for StorageError {
                     })
                 }
             },
+            DiskManagerError::InvalidFreelist(err) => Self::Corruption(CorruptionError {
+                component: CorruptionComponent::Freelist,
+                page_id: err.page_id(),
+                kind: err.into(),
+            }),
         }
     }
 }
@@ -207,6 +234,9 @@ impl From<PageCacheError> for StorageError {
                     InvariantViolation::PinnedPageDuringFlush { page_id },
                 ))
             }
+            PageCacheError::PinnedPageForFree { page_id } => {
+                Self::InvalidArgument(InvalidArgumentError::CannotFreePinnedPage { page_id })
+            }
             PageCacheError::InvalidFrameCount { frame_count } => {
                 Self::Internal(InternalError::InvariantViolation(
                     InvariantViolation::InvalidFrameCount { frame_count },
@@ -218,6 +248,44 @@ impl From<PageCacheError> for StorageError {
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pinned_free_page_maps_to_invalid_argument() {
+        let err = StorageError::from(PageCacheError::PinnedPageForFree { page_id: 7 });
+        assert_eq!(
+            err.to_string(),
+            StorageError::InvalidArgument(InvalidArgumentError::CannotFreePinnedPage {
+                page_id: 7
+            })
+            .to_string()
+        );
+        assert!(matches!(
+            err,
+            StorageError::InvalidArgument(InvalidArgumentError::CannotFreePinnedPage {
+                page_id: 7
+            })
+        ));
+    }
+
+    #[test]
+    fn invalid_freelist_checksum_maps_to_freelist_checksum_corruption() {
+        let err = StorageError::from(DiskManagerError::InvalidFreelist(
+            crate::disk_manager::FreelistError::InvalidChecksum { page_id: 11 },
+        ));
+        assert!(matches!(
+            err,
+            StorageError::Corruption(CorruptionError {
+                component: CorruptionComponent::Freelist,
+                page_id: Some(11),
+                kind: CorruptionKind::InvalidFreelistChecksum { page_id: 11 },
+            })
+        ));
     }
 }
 
