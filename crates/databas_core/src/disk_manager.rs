@@ -143,7 +143,12 @@ impl DiskManager {
         page_id: PageId,
         buf: &mut [u8; PAGE_SIZE],
     ) -> DiskManagerResult<()> {
-        self.read_page_raw(page_id, buf)?;
+        if page_id >= self.page_count {
+            return Err(DiskManagerError::InvalidPageId { page_id });
+        }
+        let offset = Self::page_offset(page_id);
+        self.file.seek(std::io::SeekFrom::Start(offset))?;
+        self.file.read_exact(buf)?;
         if !checksum_matches(buf) {
             return Err(DiskManagerError::InvalidPageChecksum { page_id });
         }
@@ -224,12 +229,11 @@ impl DiskManager {
             actual_page_count += 1;
 
             let mut trunk_page = [0u8; PAGE_SIZE];
-            self.read_page_raw(trunk_page_id, &mut trunk_page)?;
-            if !checksum_matches(&trunk_page) {
-                return Err(DiskManagerError::InvalidFreelist(FreelistError::InvalidChecksum {
+            self.read_page(trunk_page_id, &mut trunk_page).map_err(|_| {
+                DiskManagerError::InvalidFreelist(FreelistError::InvalidChecksum {
                     page_id: trunk_page_id,
-                }));
-            }
+                })
+            })?;
             let leaf_count = freelist_trunk_leaf_count(&trunk_page)
                 .map_err(DiskManagerError::InvalidFreelist)?;
             let trunk_next = freelist_trunk_next(&trunk_page);
@@ -269,12 +273,11 @@ impl DiskManager {
             }
 
             let mut trunk_page = [0u8; PAGE_SIZE];
-            self.read_page_raw(trunk_page_id, &mut trunk_page)?;
-            if !checksum_matches(&trunk_page) {
-                return Err(DiskManagerError::InvalidFreelist(FreelistError::InvalidChecksum {
+            self.read_page(trunk_page_id, &mut trunk_page).map_err(|_| {
+                DiskManagerError::InvalidFreelist(FreelistError::InvalidChecksum {
                     page_id: trunk_page_id,
-                }));
-            }
+                })
+            })?;
             let leaf_count = freelist_trunk_leaf_count(&trunk_page)
                 .map_err(DiskManagerError::InvalidFreelist)?;
 
@@ -288,20 +291,6 @@ impl DiskManager {
         }
 
         Ok(false)
-    }
-
-    fn read_page_raw(
-        &mut self,
-        page_id: PageId,
-        buf: &mut [u8; PAGE_SIZE],
-    ) -> DiskManagerResult<()> {
-        if page_id >= self.page_count {
-            return Err(DiskManagerError::InvalidPageId { page_id });
-        }
-        let offset = Self::page_offset(page_id);
-        self.file.seek(std::io::SeekFrom::Start(offset))?;
-        self.file.read_exact(buf)?;
-        Ok(())
     }
 
     fn write_header_page(&mut self) -> DiskManagerResult<()> {
