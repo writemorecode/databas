@@ -1,19 +1,29 @@
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, Write},
+    mem,
     path::Path,
 };
 
 use crate::{
     database_header::{DatabaseHeader, DatabaseHeaderError, HEADER_PAGE_ID},
-    page_checksum::{checksum_matches, write_page_checksum},
+    page_checksum::{PAGE_DATA_END, checksum_matches, write_page_checksum},
     types::{PAGE_SIZE, PageId},
 };
+
+const NO_FREELIST_PAGE_ID: PageId = 0;
+const FREELIST_NEXT_TRUNK_OFFSET: usize = 0;
+const FREELIST_LEAF_COUNT_OFFSET: usize = FREELIST_NEXT_TRUNK_OFFSET + mem::size_of::<PageId>();
+const FREELIST_LEAF_ARRAY_OFFSET: usize = FREELIST_LEAF_COUNT_OFFSET + mem::size_of::<u64>();
+const FREELIST_TRUNK_CAPACITY: usize =
+    (PAGE_DATA_END - FREELIST_LEAF_ARRAY_OFFSET) / mem::size_of::<PageId>();
 
 /// Reads and writes pages to and from a database file.
 pub(crate) struct DiskManager {
     file: File,
     page_count: u64,
+    freelist_head: Option<PageId>,
+    freelist_page_count: u64,
 }
 
 impl DiskManager {
@@ -37,7 +47,7 @@ impl DiskManager {
             file.seek(std::io::SeekFrom::Start(0))?;
             file.write_all(&header_page)?;
             file.sync_all()?;
-            return Ok(Self { file, page_count: 1 });
+            return Ok(Self { file, page_count: 1, freelist_head: None, freelist_page_count: 0 });
         }
 
         if !file_size.is_multiple_of(PAGE_SIZE as u64) {
@@ -55,18 +65,28 @@ impl DiskManager {
             DatabaseHeader::read(&header_page).map_err(DiskManagerError::InvalidDatabaseHeader)?;
         header.validate(page_count).map_err(DiskManagerError::InvalidDatabaseHeader)?;
 
-        Ok(Self { file, page_count })
+        let mut disk_manager = Self {
+            file,
+            page_count,
+            freelist_head: decode_freelist_page_id(header.freelist_head),
+            freelist_page_count: header.freelist_page_count,
+        };
+        disk_manager.validate_freelist()?;
+        Ok(disk_manager)
     }
 
     /// Extends the database file by one page.
     /// Returns page ID of the new page.
     pub(crate) fn new_page(&mut self) -> DiskManagerResult<PageId> {
+        if self.freelist_page_count > 0 {
+            return self.allocate_from_freelist();
+        }
+
         let page_id = self.page_count;
         let new_page_id = page_id + 1;
         let new_file_size = Self::page_offset(new_page_id);
         self.file.set_len(new_file_size)?;
-        let mut buf = [0u8; PAGE_SIZE];
-        write_page_checksum(&mut buf);
+        let buf = zero_page_buffer();
         let offset = Self::page_offset(page_id);
         self.file.seek(std::io::SeekFrom::Start(offset))?;
         self.file.write_all(&buf)?;
@@ -75,18 +95,55 @@ impl DiskManager {
         Ok(page_id)
     }
 
+    pub(crate) fn free_page(&mut self, page_id: PageId) -> DiskManagerResult<()> {
+        if page_id == HEADER_PAGE_ID || page_id >= self.page_count {
+            return Err(DiskManagerError::InvalidPageId { page_id });
+        }
+
+        if self.freelist_contains(page_id)? {
+            return Err(DiskManagerError::PageAlreadyFree { page_id });
+        }
+
+        if self.freelist_head.is_none() {
+            let mut trunk_page = [0u8; PAGE_SIZE];
+            init_freelist_trunk_page(&mut trunk_page, None);
+            self.write_page(page_id, &trunk_page)?;
+            self.freelist_head = Some(page_id);
+            self.freelist_page_count = 1;
+            self.write_header_page()?;
+            return Ok(());
+        }
+
+        let head_page_id = self.freelist_head.expect("freelist head must exist");
+        let mut head_page = [0u8; PAGE_SIZE];
+        self.read_page(head_page_id, &mut head_page)?;
+        let leaf_count =
+            freelist_trunk_leaf_count(&head_page).map_err(DiskManagerError::InvalidFreelist)?;
+
+        if leaf_count < FREELIST_TRUNK_CAPACITY {
+            self.write_page(page_id, &zero_page_buffer())?;
+            freelist_trunk_push_leaf(&mut head_page, page_id)
+                .map_err(DiskManagerError::InvalidFreelist)?;
+            self.write_page(head_page_id, &head_page)?;
+        } else {
+            let mut new_head_page = [0u8; PAGE_SIZE];
+            init_freelist_trunk_page(&mut new_head_page, Some(head_page_id));
+            self.write_page(page_id, &new_head_page)?;
+            self.freelist_head = Some(page_id);
+        }
+
+        self.freelist_page_count += 1;
+        self.write_header_page()?;
+        Ok(())
+    }
+
     /// Read page `page_id` from disk and store it in `buf`.
     pub(crate) fn read_page(
         &mut self,
         page_id: PageId,
         buf: &mut [u8; PAGE_SIZE],
     ) -> DiskManagerResult<()> {
-        if page_id >= self.page_count {
-            return Err(DiskManagerError::InvalidPageId { page_id });
-        }
-        let offset = Self::page_offset(page_id);
-        self.file.seek(std::io::SeekFrom::Start(offset))?;
-        self.file.read_exact(buf)?;
+        self.read_page_raw(page_id, buf)?;
         if !checksum_matches(buf) {
             return Err(DiskManagerError::InvalidPageChecksum { page_id });
         }
@@ -116,14 +173,247 @@ impl DiskManager {
         page_id * (PAGE_SIZE as u64)
     }
 
+    fn allocate_from_freelist(&mut self) -> DiskManagerResult<PageId> {
+        let Some(head_page_id) = self.freelist_head else {
+            return Err(DiskManagerError::InvalidFreelist(FreelistError::CountWithoutHead {
+                count: self.freelist_page_count,
+            }));
+        };
+        let mut head_page = [0u8; PAGE_SIZE];
+        self.read_page(head_page_id, &mut head_page)?;
+        let page_id = if let Some(leaf_page_id) =
+            freelist_trunk_pop_leaf(&mut head_page).map_err(DiskManagerError::InvalidFreelist)?
+        {
+            self.write_page(head_page_id, &head_page)?;
+            self.write_page(leaf_page_id, &zero_page_buffer())?;
+            leaf_page_id
+        } else {
+            self.freelist_head = freelist_trunk_next(&head_page);
+            self.freelist_page_count -= 1;
+            self.write_header_page()?;
+            self.write_page(head_page_id, &zero_page_buffer())?;
+            return Ok(head_page_id);
+        };
+
+        self.freelist_page_count -= 1;
+        self.write_header_page()?;
+        Ok(page_id)
+    }
+
+    fn validate_freelist(&mut self) -> DiskManagerResult<()> {
+        if self.freelist_page_count == 0 {
+            if let Some(head) = self.freelist_head {
+                return Err(DiskManagerError::InvalidFreelist(FreelistError::HeadWithoutCount {
+                    head,
+                }));
+            }
+            return Ok(());
+        }
+
+        if self.freelist_head.is_none() {
+            return Err(DiskManagerError::InvalidFreelist(FreelistError::CountWithoutHead {
+                count: self.freelist_page_count,
+            }));
+        }
+
+        let mut next_trunk = self.freelist_head;
+        let mut actual_page_count = 0_u64;
+
+        while let Some(trunk_page_id) = next_trunk {
+            validate_freelist_page_id(trunk_page_id, self.page_count)?;
+            actual_page_count += 1;
+
+            let mut trunk_page = [0u8; PAGE_SIZE];
+            self.read_page_raw(trunk_page_id, &mut trunk_page)?;
+            if !checksum_matches(&trunk_page) {
+                return Err(DiskManagerError::InvalidFreelist(FreelistError::InvalidChecksum {
+                    page_id: trunk_page_id,
+                }));
+            }
+            let leaf_count = freelist_trunk_leaf_count(&trunk_page)
+                .map_err(DiskManagerError::InvalidFreelist)?;
+            let trunk_next = freelist_trunk_next(&trunk_page);
+
+            if let Some(trunk_next) = trunk_next {
+                validate_freelist_page_id(trunk_next, self.page_count)?;
+            }
+
+            for leaf_index in 0..leaf_count {
+                let leaf_page_id = freelist_trunk_leaf_page_id(&trunk_page, leaf_index);
+                validate_freelist_page_id(leaf_page_id, self.page_count)?;
+                actual_page_count += 1;
+            }
+
+            next_trunk = trunk_next;
+        }
+
+        if actual_page_count != self.freelist_page_count {
+            self.freelist_page_count = actual_page_count;
+            self.write_header_page()?;
+        }
+
+        Ok(())
+    }
+
+    fn freelist_contains(&mut self, target_page_id: PageId) -> DiskManagerResult<bool> {
+        if self.freelist_page_count == 0 {
+            return Ok(false);
+        }
+
+        let mut next_trunk = self.freelist_head;
+
+        while let Some(trunk_page_id) = next_trunk {
+            validate_freelist_page_id(trunk_page_id, self.page_count)?;
+            if trunk_page_id == target_page_id {
+                return Ok(true);
+            }
+
+            let mut trunk_page = [0u8; PAGE_SIZE];
+            self.read_page_raw(trunk_page_id, &mut trunk_page)?;
+            if !checksum_matches(&trunk_page) {
+                return Err(DiskManagerError::InvalidFreelist(FreelistError::InvalidChecksum {
+                    page_id: trunk_page_id,
+                }));
+            }
+            let leaf_count = freelist_trunk_leaf_count(&trunk_page)
+                .map_err(DiskManagerError::InvalidFreelist)?;
+
+            for leaf_index in 0..leaf_count {
+                if freelist_trunk_leaf_page_id(&trunk_page, leaf_index) == target_page_id {
+                    return Ok(true);
+                }
+            }
+
+            next_trunk = freelist_trunk_next(&trunk_page);
+        }
+
+        Ok(false)
+    }
+
+    fn read_page_raw(
+        &mut self,
+        page_id: PageId,
+        buf: &mut [u8; PAGE_SIZE],
+    ) -> DiskManagerResult<()> {
+        if page_id >= self.page_count {
+            return Err(DiskManagerError::InvalidPageId { page_id });
+        }
+        let offset = Self::page_offset(page_id);
+        self.file.seek(std::io::SeekFrom::Start(offset))?;
+        self.file.read_exact(buf)?;
+        Ok(())
+    }
+
     fn write_header_page(&mut self) -> DiskManagerResult<()> {
         let mut header_page = [0u8; PAGE_SIZE];
-        DatabaseHeader::new(self.page_count).write(&mut header_page);
+        DatabaseHeader {
+            page_size: PAGE_SIZE as u16,
+            page_count: self.page_count,
+            freelist_head: encode_freelist_page_id(self.freelist_head),
+            freelist_page_count: self.freelist_page_count,
+        }
+        .write(&mut header_page);
         self.file.seek(std::io::SeekFrom::Start(Self::page_offset(HEADER_PAGE_ID)))?;
         self.file.write_all(&header_page)?;
         self.file.sync_all()?;
         Ok(())
     }
+}
+
+fn init_freelist_trunk_page(page: &mut [u8; PAGE_SIZE], next_trunk: Option<PageId>) {
+    page.fill(0);
+    page[FREELIST_NEXT_TRUNK_OFFSET..FREELIST_NEXT_TRUNK_OFFSET + 8]
+        .copy_from_slice(&encode_freelist_page_id(next_trunk).to_le_bytes());
+    page[FREELIST_LEAF_COUNT_OFFSET..FREELIST_LEAF_COUNT_OFFSET + 8]
+        .copy_from_slice(&0_u64.to_le_bytes());
+    write_page_checksum(page);
+}
+
+fn freelist_trunk_next(page: &[u8; PAGE_SIZE]) -> Option<PageId> {
+    decode_freelist_page_id(read_u64(page, FREELIST_NEXT_TRUNK_OFFSET))
+}
+
+fn freelist_trunk_leaf_count(page: &[u8; PAGE_SIZE]) -> Result<usize, FreelistError> {
+    let leaf_count = read_u64(page, FREELIST_LEAF_COUNT_OFFSET);
+    if leaf_count > FREELIST_TRUNK_CAPACITY as u64 {
+        return Err(FreelistError::LeafCountTooLarge {
+            count: leaf_count,
+            max: FREELIST_TRUNK_CAPACITY,
+        });
+    }
+
+    Ok(leaf_count as usize)
+}
+
+fn freelist_trunk_leaf_page_id(page: &[u8; PAGE_SIZE], leaf_index: usize) -> PageId {
+    let offset = FREELIST_LEAF_ARRAY_OFFSET + (leaf_index * mem::size_of::<PageId>());
+    read_u64(page, offset)
+}
+
+fn freelist_trunk_push_leaf(
+    page: &mut [u8; PAGE_SIZE],
+    page_id: PageId,
+) -> Result<(), FreelistError> {
+    let leaf_count = freelist_trunk_leaf_count(page)?;
+    if leaf_count >= FREELIST_TRUNK_CAPACITY {
+        return Err(FreelistError::LeafCountTooLarge {
+            count: (leaf_count + 1) as u64,
+            max: FREELIST_TRUNK_CAPACITY,
+        });
+    }
+
+    let offset = FREELIST_LEAF_ARRAY_OFFSET + (leaf_count * mem::size_of::<PageId>());
+    page[offset..offset + 8].copy_from_slice(&page_id.to_le_bytes());
+    page[FREELIST_LEAF_COUNT_OFFSET..FREELIST_LEAF_COUNT_OFFSET + 8]
+        .copy_from_slice(&((leaf_count + 1) as u64).to_le_bytes());
+    write_page_checksum(page);
+    Ok(())
+}
+
+fn freelist_trunk_pop_leaf(page: &mut [u8; PAGE_SIZE]) -> Result<Option<PageId>, FreelistError> {
+    let leaf_count = freelist_trunk_leaf_count(page)?;
+    if leaf_count == 0 {
+        return Ok(None);
+    }
+
+    let leaf_index = leaf_count - 1;
+    let page_id = freelist_trunk_leaf_page_id(page, leaf_index);
+    let offset = FREELIST_LEAF_ARRAY_OFFSET + (leaf_index * mem::size_of::<PageId>());
+    page[offset..offset + 8].fill(0);
+    page[FREELIST_LEAF_COUNT_OFFSET..FREELIST_LEAF_COUNT_OFFSET + 8]
+        .copy_from_slice(&(leaf_index as u64).to_le_bytes());
+    write_page_checksum(page);
+    Ok(Some(page_id))
+}
+
+fn validate_freelist_page_id(page_id: PageId, page_count: u64) -> DiskManagerResult<()> {
+    if page_id == HEADER_PAGE_ID {
+        return Err(DiskManagerError::InvalidFreelist(FreelistError::HeaderPageInFreelist));
+    }
+    if page_id >= page_count {
+        return Err(DiskManagerError::InvalidFreelist(FreelistError::InvalidPageId { page_id }));
+    }
+    Ok(())
+}
+
+fn zero_page_buffer() -> [u8; PAGE_SIZE] {
+    let mut buf = [0u8; PAGE_SIZE];
+    write_page_checksum(&mut buf);
+    buf
+}
+
+fn decode_freelist_page_id(page_id: PageId) -> Option<PageId> {
+    (page_id != NO_FREELIST_PAGE_ID).then_some(page_id)
+}
+
+fn encode_freelist_page_id(page_id: Option<PageId>) -> PageId {
+    page_id.unwrap_or(NO_FREELIST_PAGE_ID)
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&bytes[offset..offset + 8]);
+    u64::from_le_bytes(out)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -132,17 +422,64 @@ pub(crate) enum DiskManagerError {
     Io(#[source] std::io::Error),
     #[error("invalid page id: {page_id}")]
     InvalidPageId { page_id: u64 },
+    #[error("page is already free: {page_id}")]
+    PageAlreadyFree { page_id: u64 },
     #[error("invalid file size: {size}")]
     InvalidFileSize { size: u64 },
     #[error("invalid page checksum: {page_id}")]
     InvalidPageChecksum { page_id: u64 },
     #[error("invalid database header: {0}")]
     InvalidDatabaseHeader(#[source] DatabaseHeaderError),
+    #[error("invalid freelist: {0}")]
+    InvalidFreelist(#[source] FreelistError),
 }
 
 impl From<std::io::Error> for DiskManagerError {
     fn from(err: std::io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub(crate) enum FreelistError {
+    #[error("freelist head is zero but free page count is {count}")]
+    CountWithoutHead { count: u64 },
+    #[error("freelist head {head} present but free page count is zero")]
+    HeadWithoutCount { head: u64 },
+    #[error("freelist page id {page_id} is invalid")]
+    InvalidPageId { page_id: u64 },
+    #[error("header page cannot appear in freelist")]
+    HeaderPageInFreelist,
+    #[error("freelist trunk leaf count {count} exceeds maximum {max}")]
+    LeafCountTooLarge { count: u64, max: usize },
+    #[error("invalid checksum on freelist page {page_id}")]
+    InvalidChecksum { page_id: u64 },
+}
+
+impl FreelistError {
+    pub(crate) fn page_id(&self) -> Option<u64> {
+        match *self {
+            Self::CountWithoutHead { .. } => None,
+            Self::HeadWithoutCount { head } => Some(head),
+            Self::InvalidPageId { page_id } | Self::InvalidChecksum { page_id } => Some(page_id),
+            Self::HeaderPageInFreelist => Some(HEADER_PAGE_ID),
+            Self::LeafCountTooLarge { .. } => None,
+        }
+    }
+}
+
+impl From<FreelistError> for crate::error::CorruptionKind {
+    fn from(err: FreelistError) -> Self {
+        match err {
+            FreelistError::CountWithoutHead { count } => Self::FreelistCountWithoutHead { count },
+            FreelistError::HeadWithoutCount { head } => Self::FreelistHeadWithoutCount { head },
+            FreelistError::InvalidPageId { page_id } => Self::InvalidFreelistPageId { page_id },
+            FreelistError::HeaderPageInFreelist => Self::HeaderPageInFreelist,
+            FreelistError::LeafCountTooLarge { count, max } => {
+                Self::FreelistLeafCountTooLarge { count, max }
+            }
+            FreelistError::InvalidChecksum { page_id } => Self::InvalidFreelistChecksum { page_id },
+        }
     }
 }
 pub(crate) type DiskManagerResult<T> = Result<T, DiskManagerError>;
@@ -170,6 +507,13 @@ mod test {
         }
         write_page_checksum(&mut buf);
         buf
+    }
+
+    fn write_raw_page(path: &Path, page_id: PageId, page: &[u8; PAGE_SIZE]) {
+        let mut handle = OpenOptions::new().read(true).write(true).open(path).unwrap();
+        handle.seek(std::io::SeekFrom::Start(page_id * PAGE_SIZE as u64)).unwrap();
+        handle.write_all(page).unwrap();
+        handle.sync_all().unwrap();
     }
 
     #[test]
@@ -348,12 +692,119 @@ mod test {
         let file = NamedTempFile::new().unwrap();
         let mut dm = DiskManager::new(file.path()).unwrap();
         assert_eq!(dm.page_count, 1);
+        assert_eq!(dm.freelist_head, None);
 
         let mut header_page = [0u8; PAGE_SIZE];
         dm.read_page(HEADER_PAGE_ID, &mut header_page).unwrap();
         let header = DatabaseHeader::read(&header_page).unwrap();
         assert_eq!(header.page_count, 1);
         assert_eq!(header.page_size, PAGE_SIZE as u16);
+        assert_eq!(header.freelist_head, 0);
+        assert_eq!(header.freelist_page_count, 0);
+    }
+
+    #[test]
+    fn free_page_reuses_page_id_before_growing_file() {
+        let file = NamedTempFile::new().unwrap();
+        let mut dm = DiskManager::new(file.path()).unwrap();
+        let first = dm.new_page().unwrap();
+        let second = dm.new_page().unwrap();
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+
+        dm.free_page(first).unwrap();
+        assert_eq!(dm.page_count, 3);
+        assert_eq!(dm.freelist_head, Some(first));
+
+        let reused = dm.new_page().unwrap();
+        assert_eq!(reused, first);
+        assert_eq!(dm.page_count, 3);
+        assert_eq!(dm.freelist_head, None);
+
+        let mut page = [1u8; PAGE_SIZE];
+        dm.read_page(reused, &mut page).unwrap();
+        assert_eq!(page, zero_page_buffer());
+    }
+
+    #[test]
+    fn free_page_reuses_pages_in_lifo_order() {
+        let file = NamedTempFile::new().unwrap();
+        let mut dm = DiskManager::new(file.path()).unwrap();
+        let page1 = dm.new_page().unwrap();
+        let page2 = dm.new_page().unwrap();
+        let page3 = dm.new_page().unwrap();
+
+        dm.free_page(page1).unwrap();
+        dm.free_page(page2).unwrap();
+        dm.free_page(page3).unwrap();
+
+        assert_eq!(dm.new_page().unwrap(), page3);
+        assert_eq!(dm.new_page().unwrap(), page2);
+        assert_eq!(dm.new_page().unwrap(), page1);
+    }
+
+    #[test]
+    fn freelist_state_persists_across_reopen() {
+        let file = NamedTempFile::new().unwrap();
+        {
+            let mut dm = DiskManager::new(file.path()).unwrap();
+            let page1 = dm.new_page().unwrap();
+            let page2 = dm.new_page().unwrap();
+            dm.free_page(page1).unwrap();
+            dm.free_page(page2).unwrap();
+        }
+
+        let mut dm = DiskManager::new(file.path()).unwrap();
+        assert_eq!(dm.new_page().unwrap(), 2);
+        assert_eq!(dm.new_page().unwrap(), 1);
+    }
+
+    #[test]
+    fn free_page_rejects_invalid_and_duplicate_pages() {
+        let file = NamedTempFile::new().unwrap();
+        let mut dm = DiskManager::new(file.path()).unwrap();
+        let page_id = dm.new_page().unwrap();
+
+        assert!(matches!(
+            dm.free_page(HEADER_PAGE_ID),
+            Err(DiskManagerError::InvalidPageId { page_id: 0 })
+        ));
+        assert!(matches!(
+            dm.free_page(dm.page_count),
+            Err(DiskManagerError::InvalidPageId { page_id }) if page_id == dm.page_count
+        ));
+
+        dm.free_page(page_id).unwrap();
+        assert!(matches!(
+            dm.free_page(page_id),
+            Err(DiskManagerError::PageAlreadyFree { page_id: id }) if id == page_id
+        ));
+    }
+
+    #[test]
+    fn open_rejects_freelist_count_without_head() {
+        let file = NamedTempFile::new().unwrap();
+        let mut header_page = [0u8; PAGE_SIZE];
+        {
+            let mut dm = DiskManager::new(file.path()).unwrap();
+            dm.new_page().unwrap();
+            dm.read_page(HEADER_PAGE_ID, &mut header_page).unwrap();
+        }
+
+        let mut header = DatabaseHeader::read(&header_page).unwrap();
+        header.freelist_page_count = 1;
+        header.freelist_head = 0;
+        header.write(&mut header_page);
+        write_raw_page(file.path(), HEADER_PAGE_ID, &header_page);
+
+        let err = match DiskManager::new(file.path()) {
+            Ok(_) => panic!("expected freelist count without head"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            DiskManagerError::InvalidFreelist(FreelistError::CountWithoutHead { count: 1 })
+        ));
     }
 
     #[test]

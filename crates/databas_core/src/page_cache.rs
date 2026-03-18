@@ -79,6 +79,27 @@ impl PageCache {
         Ok((page_id, PinGuard::new(self, frame_id)))
     }
 
+    pub(crate) fn free_page(&mut self, page_id: PageId) -> PageCacheResult<()> {
+        if let Some(&frame_id) = self.page_table.get(&page_id) {
+            let frame = self.frames.get(frame_id).ok_or(PageCacheError::CorruptPageTableEntry {
+                page_id,
+                frame_id,
+                frame_count: self.frames.len(),
+            })?;
+            if frame.pin_count > 0 {
+                return Err(PageCacheError::PinnedPageForFree { page_id });
+            }
+        }
+
+        self.disk_manager.free_page(page_id)?;
+
+        if let Some(frame_id) = self.page_table.remove(&page_id) {
+            self.frames[frame_id] = Frame::empty();
+        }
+
+        Ok(())
+    }
+
     /// Flushes one resident page if dirty.
     ///
     /// Non-resident pages are a no-op. Pinned pages return `PinnedPage`.
@@ -215,6 +236,8 @@ pub(crate) enum PageCacheError {
     NoEvictableFrame,
     #[error("page {page_id} is pinned")]
     PinnedPage { page_id: u64 },
+    #[error("page {page_id} is pinned and cannot be freed")]
+    PinnedPageForFree { page_id: u64 },
     #[error("invalid frame count: {frame_count}")]
     InvalidFrameCount { frame_count: usize },
     #[error(
@@ -734,6 +757,65 @@ mod tests {
                 frame_count: 1
             })
         ));
+    }
+
+    #[test]
+    fn free_page_returns_error_if_page_is_pinned() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let mut cache = PageCache::new(disk_manager, 1).unwrap();
+        let (page_id, guard) = cache.new_page().unwrap();
+        drop(guard);
+        cache.frames[0].pin_count = 1;
+
+        let result = cache.free_page(page_id);
+        assert!(matches!(
+            result,
+            Err(PageCacheError::PinnedPageForFree { page_id: id }) if id == page_id
+        ));
+    }
+
+    #[test]
+    fn free_page_discards_dirty_resident_page_without_flushing() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let mut cache = PageCache::new(disk_manager, 1).unwrap();
+
+        let page_id = {
+            let (page_id, mut guard) = cache.new_page().unwrap();
+            guard.page_mut()[0] = 211;
+            drop(guard);
+            page_id
+        };
+
+        cache.free_page(page_id).unwrap();
+        let (reused_page_id, reused_guard) = cache.new_page().unwrap();
+        assert_eq!(reused_page_id, page_id);
+        assert_eq!(reused_guard.page(), &{
+            let mut expected = [0u8; PAGE_SIZE];
+            write_page_checksum(&mut expected);
+            expected
+        });
+    }
+
+    #[test]
+    fn freed_page_is_reused_after_reopen() {
+        let file = NamedTempFile::new().unwrap();
+        {
+            let disk_manager = DiskManager::new(file.path()).unwrap();
+            let mut cache = PageCache::new(disk_manager, 1).unwrap();
+            let (page_id, guard) = cache.new_page().unwrap();
+            drop(guard);
+            cache.free_page(page_id).unwrap();
+        }
+
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let mut cache = PageCache::new(disk_manager, 1).unwrap();
+        let (page_id, guard) = cache.new_page().unwrap();
+        assert_eq!(page_id, FIRST_DATA_PAGE_ID);
+        let mut expected = [0u8; PAGE_SIZE];
+        write_page_checksum(&mut expected);
+        assert_eq!(guard.page(), &expected);
     }
 
     #[test]
