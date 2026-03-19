@@ -104,7 +104,7 @@ impl DiskManager {
             return Err(DiskManagerError::PageAlreadyFree { page_id });
         }
 
-        if self.freelist_head.is_none() {
+        let Some(head_page_id) = self.freelist_head else {
             let mut trunk_page = [0u8; PAGE_SIZE];
             init_freelist_trunk_page(&mut trunk_page, None);
             self.write_page(page_id, &trunk_page)?;
@@ -112,9 +112,8 @@ impl DiskManager {
             self.freelist_page_count = 1;
             self.write_header_page()?;
             return Ok(());
-        }
+        };
 
-        let head_page_id = self.freelist_head.expect("freelist head must exist");
         let mut head_page = [0u8; PAGE_SIZE];
         self.read_page(head_page_id, &mut head_page)?;
         let leaf_count =
