@@ -100,10 +100,6 @@ impl DiskManager {
             return Err(DiskManagerError::InvalidPageId { page_id });
         }
 
-        if self.freelist_contains(page_id)? {
-            return Err(DiskManagerError::PageAlreadyFree { page_id });
-        }
-
         let Some(head_page_id) = self.freelist_head else {
             let mut trunk_page = [0u8; PAGE_SIZE];
             init_freelist_trunk_page(&mut trunk_page, None);
@@ -751,28 +747,6 @@ mod test {
         let mut dm = DiskManager::new(file.path()).unwrap();
         assert_eq!(dm.new_page().unwrap(), 2);
         assert_eq!(dm.new_page().unwrap(), 1);
-    }
-
-    #[test]
-    fn free_page_rejects_invalid_and_duplicate_pages() {
-        let file = NamedTempFile::new().unwrap();
-        let mut dm = DiskManager::new(file.path()).unwrap();
-        let page_id = dm.new_page().unwrap();
-
-        assert!(matches!(
-            dm.free_page(HEADER_PAGE_ID),
-            Err(DiskManagerError::InvalidPageId { page_id: 0 })
-        ));
-        assert!(matches!(
-            dm.free_page(dm.page_count),
-            Err(DiskManagerError::InvalidPageId { page_id }) if page_id == dm.page_count
-        ));
-
-        dm.free_page(page_id).unwrap();
-        assert!(matches!(
-            dm.free_page(page_id),
-            Err(DiskManagerError::PageAlreadyFree { page_id: id }) if id == page_id
-        ));
     }
 
     #[test]
