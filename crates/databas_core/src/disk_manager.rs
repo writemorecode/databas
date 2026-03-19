@@ -229,10 +229,13 @@ impl DiskManager {
             actual_page_count += 1;
 
             let mut trunk_page = [0u8; PAGE_SIZE];
-            self.read_page(trunk_page_id, &mut trunk_page).map_err(|_| {
-                DiskManagerError::InvalidFreelist(FreelistError::InvalidChecksum {
-                    page_id: trunk_page_id,
-                })
+            self.read_page(trunk_page_id, &mut trunk_page).map_err(|err| match err {
+                DiskManagerError::InvalidPageChecksum { .. } => {
+                    DiskManagerError::InvalidFreelist(FreelistError::InvalidChecksum {
+                        page_id: trunk_page_id,
+                    })
+                }
+                _ => err,
             })?;
             let leaf_count = freelist_trunk_leaf_count(&trunk_page)
                 .map_err(DiskManagerError::InvalidFreelist)?;
@@ -273,10 +276,13 @@ impl DiskManager {
             }
 
             let mut trunk_page = [0u8; PAGE_SIZE];
-            self.read_page(trunk_page_id, &mut trunk_page).map_err(|_| {
-                DiskManagerError::InvalidFreelist(FreelistError::InvalidChecksum {
-                    page_id: trunk_page_id,
-                })
+            self.read_page(trunk_page_id, &mut trunk_page).map_err(|err| match err {
+                DiskManagerError::InvalidPageChecksum { .. } => {
+                    DiskManagerError::InvalidFreelist(FreelistError::InvalidChecksum {
+                        page_id: trunk_page_id,
+                    })
+                }
+                _ => err,
             })?;
             let leaf_count = freelist_trunk_leaf_count(&trunk_page)
                 .map_err(DiskManagerError::InvalidFreelist)?;
