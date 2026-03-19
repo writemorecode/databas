@@ -141,6 +141,14 @@ impl<A> Page<A, Table, Leaf>
 where
     A: PageAccessMut,
 {
+    pub(crate) fn set_prev_sibling(&mut self, page_id: Option<PageId>) {
+        layout::set_prev_sibling(self.bytes_mut(), page_id);
+    }
+
+    pub(crate) fn set_next_sibling(&mut self, page_id: Option<PageId>) {
+        layout::set_next_sibling(self.bytes_mut(), page_id);
+    }
+
     pub(crate) fn insert(&mut self, row_id: RowId, payload: &[u8]) -> TablePageResult<()> {
         let insertion_index = match find_leaf_row_id(self.bytes(), row_id)? {
             SearchResult::Found(_) => return Err(TablePageError::DuplicateRowId { row_id }),
@@ -361,6 +369,14 @@ impl<A> Page<A, Table, Interior>
 where
     A: PageAccessMut,
 {
+    pub(crate) fn set_prev_sibling(&mut self, page_id: Option<PageId>) {
+        layout::set_prev_sibling(self.bytes_mut(), page_id);
+    }
+
+    pub(crate) fn set_next_sibling(&mut self, page_id: Option<PageId>) {
+        layout::set_next_sibling(self.bytes_mut(), page_id);
+    }
+
     pub(crate) fn insert(&mut self, row_id: RowId, left_child: PageId) -> TablePageResult<()> {
         let insertion_index = match find_interior_row_id(self.bytes(), row_id)? {
             SearchResult::Found(_) => return Err(TablePageError::DuplicateRowId { row_id }),
@@ -748,10 +764,9 @@ mod tests {
             page.insert(10, b"ten").unwrap();
             page.insert(20, b"twenty").unwrap();
             page.insert(30, b"thirty").unwrap();
+            page.set_prev_sibling(Some(7));
+            page.set_next_sibling(Some(8));
         }
-
-        layout::set_prev_sibling(&mut bytes, Some(7));
-        layout::set_next_sibling(&mut bytes, Some(8));
 
         let free_space_before = {
             let mut page = Page::<Write<'_>, Table, Leaf>::from_bytes(&mut bytes).unwrap();
@@ -852,10 +867,9 @@ mod tests {
             page.insert(20, 2).unwrap();
             page.insert(30, 3).unwrap();
             page.insert(40, 4).unwrap();
+            page.set_prev_sibling(Some(21));
+            page.set_next_sibling(Some(22));
         }
-
-        layout::set_prev_sibling(&mut bytes, Some(21));
-        layout::set_next_sibling(&mut bytes, Some(22));
 
         {
             let mut page = Page::<Write<'_>, Table, Interior>::from_bytes(&mut bytes).unwrap();
