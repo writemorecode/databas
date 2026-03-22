@@ -51,6 +51,26 @@ pub const fn max_slot_count(kind: PageKind) -> usize {
     (usable_space_len() - kind.header_size()) / SLOT_ENTRY_SIZE
 }
 
+pub fn read_u16(bytes: &[u8; PAGE_SIZE], offset: usize) -> u16 {
+    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+pub fn write_u16(bytes: &mut [u8; PAGE_SIZE], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+pub fn read_u64(bytes: &[u8; PAGE_SIZE], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("u64 slice has fixed width"))
+}
+
+pub fn write_u64(bytes: &mut [u8; PAGE_SIZE], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+pub const fn slot_entry_offset(header_size: usize, slot_index: u16) -> usize {
+    header_size + (slot_index as usize * SLOT_ENTRY_SIZE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

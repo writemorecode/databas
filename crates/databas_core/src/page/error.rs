@@ -8,6 +8,7 @@ use super::format::PageKind;
 pub enum PageError {
     InvalidPageKind { expected: PageKind, actual: u8 },
     InvalidPageVersion { expected: u8, actual: u8 },
+    InvalidSlotIndex { slot_index: u16, slot_count: u16 },
     MalformedPage(PageCorruption),
     CorruptCell { slot_index: u16, kind: CellCorruption },
     DuplicateKey { key: RowId },
@@ -42,6 +43,9 @@ impl fmt::Display for PageError {
             }
             Self::InvalidPageVersion { expected, actual } => {
                 write!(f, "invalid page version: expected {expected}, got {actual}")
+            }
+            Self::InvalidSlotIndex { slot_index, slot_count } => {
+                write!(f, "invalid slot index {slot_index} for {slot_count} slots")
             }
             Self::MalformedPage(kind) => write!(f, "malformed page: {kind}"),
             Self::CorruptCell { slot_index, kind } => {
