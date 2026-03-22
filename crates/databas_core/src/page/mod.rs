@@ -1,7 +1,10 @@
+mod cell;
 mod core;
 mod error;
 pub mod format;
+mod leaf;
 
+pub use cell::Cell;
 pub use core::{
     AnyPage, Interior, Leaf, NodeMarker, Page, PageAccess, PageAccessMut, Read, SearchResult, Write,
 };

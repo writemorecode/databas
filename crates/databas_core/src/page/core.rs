@@ -30,12 +30,12 @@ impl NodeMarker for Interior {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Read<'a> {
-    bytes: &'a [u8; PAGE_SIZE],
+    pub(crate) bytes: &'a [u8; PAGE_SIZE],
 }
 
 #[derive(Debug)]
 pub struct Write<'a> {
-    bytes: &'a mut [u8; PAGE_SIZE],
+    pub(crate) bytes: &'a mut [u8; PAGE_SIZE],
 }
 
 pub trait PageAccess {
@@ -168,6 +168,27 @@ where
         }
         Ok(())
     }
+
+    pub(crate) fn raw_cell_length(&self, slot_index: u16) -> PageResult<usize>
+    where
+        N: NodeMarker,
+    {
+        let cell_offset = self.slot_offset(slot_index)? as usize;
+        let cell_len = format::read_u16(self.bytes(), cell_offset) as usize;
+        if cell_len < CELL_LENGTH_SIZE {
+            return Err(PageError::CorruptCell {
+                slot_index,
+                kind: super::CellCorruption::LengthTooSmall,
+            });
+        }
+        if cell_offset + cell_len > USABLE_SPACE_END {
+            return Err(PageError::CorruptCell {
+                slot_index,
+                kind: super::CellCorruption::LengthOutOfBounds,
+            });
+        }
+        Ok(cell_len)
+    }
 }
 
 impl<A, N> Page<A, N>
@@ -225,6 +246,64 @@ where
         self.bytes_mut()[last_slot..last_slot + format::SLOT_ENTRY_SIZE].fill(0);
         self.set_slot_count(slot_count - 1);
         Ok(removed)
+    }
+
+    pub(crate) fn defragment(&mut self) -> PageResult<()> {
+        let slot_count = self.slot_count();
+        let header_size = N::KIND.header_size();
+        let bytes = self.bytes();
+        let mut packed = [0_u8; PAGE_SIZE];
+        packed[..header_size].copy_from_slice(&bytes[..header_size]);
+
+        let mut cursor = USABLE_SPACE_END;
+        for slot_index in (0..slot_count).rev() {
+            let cell_offset = self.slot_offset(slot_index)? as usize;
+            let cell_len = self.raw_cell_length(slot_index)?;
+            cursor -= cell_len;
+            packed[cursor..cursor + cell_len]
+                .copy_from_slice(&bytes[cell_offset..cell_offset + cell_len]);
+            format::write_u16(
+                &mut packed,
+                format::slot_entry_offset(header_size, slot_index),
+                cursor as u16,
+            );
+        }
+        format::write_u16(&mut packed, CONTENT_START_OFFSET, cursor as u16);
+
+        *self.bytes_mut() = packed;
+        Ok(())
+    }
+
+    pub(crate) fn reserve_space_for_insert(&mut self, cell_len: usize) -> PageResult<u16> {
+        self.reserve_space(cell_len, format::SLOT_ENTRY_SIZE)
+    }
+
+    pub(crate) fn reserve_space_for_rewrite(&mut self, cell_len: usize) -> PageResult<u16> {
+        self.reserve_space(cell_len, 0)
+    }
+
+    fn reserve_space(&mut self, cell_len: usize, extra_bytes: usize) -> PageResult<u16> {
+        self.ensure_cell_fits(cell_len)?;
+        let needed = cell_len + extra_bytes;
+        if self.free_space() < needed {
+            self.defragment()?;
+        }
+        let available = self.free_space();
+        if available < needed {
+            return Err(PageError::PageFull { needed, available });
+        }
+
+        let new_content_start = self.content_start() as usize - cell_len;
+        self.set_content_start(new_content_start as u16);
+        Ok(new_content_start as u16)
+    }
+
+    fn ensure_cell_fits(&self, cell_len: usize) -> PageResult<()> {
+        let max = USABLE_SPACE_END - N::KIND.header_size();
+        if cell_len > max || cell_len > u16::MAX as usize {
+            return Err(PageError::CellTooLarge { len: cell_len, max });
+        }
+        Ok(())
     }
 }
 
