@@ -3,9 +3,9 @@ use core::marker::PhantomData;
 use crate::types::{PAGE_SIZE, PageId, RowId};
 
 use super::{
-    CellCorruption, PageError, PageResult,
+    PageResult,
     core::{Interior, Leaf, Page, PageAccess, PageAccessMut, Read, Write},
-    leaf,
+    interior, leaf,
 };
 
 #[derive(Debug)]
@@ -81,17 +81,13 @@ where
     A: PageAccess,
 {
     pub fn row_id(&self) -> PageResult<RowId> {
-        Err(PageError::CorruptCell {
-            slot_index: self.slot_index,
-            kind: CellCorruption::LengthTooSmall,
-        })
+        let page = Page::<Read<'_>, Interior>::open(self.bytes())?;
+        Ok(interior::cell_parts(&page, self.slot_index)?.row_id)
     }
 
     pub fn left_child(&self) -> PageResult<PageId> {
-        Err(PageError::CorruptCell {
-            slot_index: self.slot_index,
-            kind: CellCorruption::LengthTooSmall,
-        })
+        let page = Page::<Read<'_>, Interior>::open(self.bytes())?;
+        Ok(interior::cell_parts(&page, self.slot_index)?.left_child)
     }
 }
 
@@ -99,10 +95,10 @@ impl<A> Cell<A, Interior>
 where
     A: PageAccessMut,
 {
-    pub fn set_left_child(&mut self, _page_id: PageId) -> PageResult<()> {
-        Err(PageError::CorruptCell {
-            slot_index: self.slot_index,
-            kind: CellCorruption::LengthTooSmall,
-        })
+    pub fn set_left_child(&mut self, page_id: PageId) -> PageResult<()> {
+        let page = Page::<Read<'_>, Interior>::open(self.bytes())?;
+        let parts = interior::cell_parts(&page, self.slot_index)?;
+        interior::write_left_child(self.bytes_mut(), parts.cell_offset, page_id);
+        Ok(())
     }
 }

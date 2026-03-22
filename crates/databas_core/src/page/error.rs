@@ -27,12 +27,14 @@ pub enum PageCorruption {
     ReservedFooterNotZero,
     SlotOffsetOutOfBounds,
     CellLengthPrefixOutOfBounds,
+    CellRangesOverlap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellCorruption {
     LengthTooSmall,
     LengthOutOfBounds,
+    UnexpectedLength,
 }
 
 impl fmt::Display for PageError {
@@ -84,6 +86,7 @@ impl fmt::Display for PageCorruption {
             Self::CellLengthPrefixOutOfBounds => {
                 write!(f, "cell length prefix runs past the usable page bounds")
             }
+            Self::CellRangesOverlap => write!(f, "cell ranges overlap or alias each other"),
         }
     }
 }
@@ -93,6 +96,7 @@ impl fmt::Display for CellCorruption {
         match self {
             Self::LengthTooSmall => write!(f, "cell length is smaller than the minimum header"),
             Self::LengthOutOfBounds => write!(f, "cell length runs past the usable page bounds"),
+            Self::UnexpectedLength => write!(f, "cell length does not match the page format"),
         }
     }
 }

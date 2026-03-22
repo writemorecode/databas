@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use crate::types::{PAGE_SIZE, RowId};
+use crate::types::{PAGE_SIZE, PageId, RowId};
 
 use super::{
     error::{PageCorruption, PageError, PageResult},
@@ -340,8 +340,21 @@ where
     }
 }
 
+impl<'a> Page<Write<'a>, Leaf> {
+    pub fn init(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
+        Self::initialize(bytes)
+    }
+}
+
 impl<'a> Page<Write<'a>, Interior> {
-    pub(crate) fn initialize_with_rightmost(bytes: &'a mut [u8; PAGE_SIZE], page_id: u64) -> Self {
+    pub fn init(bytes: &'a mut [u8; PAGE_SIZE], rightmost_child: PageId) -> Self {
+        Self::initialize_with_rightmost(bytes, rightmost_child)
+    }
+
+    pub(crate) fn initialize_with_rightmost(
+        bytes: &'a mut [u8; PAGE_SIZE],
+        page_id: PageId,
+    ) -> Self {
         let mut page = Self::initialize(bytes);
         format::write_u64(page.bytes_mut(), format::RIGHTMOST_CHILD_OFFSET, page_id);
         page
@@ -421,6 +434,7 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
         }));
     }
 
+    let mut cell_ranges = Vec::with_capacity(slot_count);
     for slot_index in 0..slot_count as u16 {
         let slot_offset =
             format::read_u16(bytes, format::slot_entry_offset(header_size, slot_index)) as usize;
@@ -430,6 +444,26 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
         if slot_offset + CELL_LENGTH_SIZE > USABLE_SPACE_END {
             return Err(PageError::MalformedPage(PageCorruption::CellLengthPrefixOutOfBounds));
         }
+
+        let cell_len = format::read_u16(bytes, slot_offset) as usize;
+        if expected_kind == format::PageKind::Interior
+            && cell_len >= CELL_LENGTH_SIZE
+            && cell_len <= USABLE_SPACE_END - slot_offset
+            && cell_len != super::interior::INTERIOR_CELL_PREFIX_SIZE
+        {
+            return Err(PageError::CorruptCell {
+                slot_index,
+                kind: super::CellCorruption::UnexpectedLength,
+            });
+        }
+        if cell_len >= CELL_LENGTH_SIZE && cell_len <= USABLE_SPACE_END - slot_offset {
+            cell_ranges.push((slot_offset, slot_offset + cell_len));
+        }
+    }
+
+    cell_ranges.sort_unstable_by_key(|(start, _)| *start);
+    if cell_ranges.windows(2).any(|window| window[0].1 > window[1].0) {
+        return Err(PageError::MalformedPage(PageCorruption::CellRangesOverlap));
     }
 
     Ok(())
@@ -442,6 +476,12 @@ mod tests {
     fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
         let mut bytes = [0_u8; PAGE_SIZE];
         let _ = Page::<Write<'_>, Leaf>::initialize(&mut bytes);
+        bytes
+    }
+
+    fn initialized_interior_page() -> [u8; PAGE_SIZE] {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let _ = Page::<Write<'_>, Interior>::initialize_with_rightmost(&mut bytes, 7);
         bytes
     }
 
@@ -563,6 +603,47 @@ mod tests {
         assert_eq!(
             result.unwrap_err(),
             PageError::MalformedPage(PageCorruption::CellLengthPrefixOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn open_rejects_aliased_cells() {
+        let mut bytes = initialized_leaf_page();
+        format::write_u16(&mut bytes, SLOT_COUNT_OFFSET, 2);
+        format::write_u16(&mut bytes, CONTENT_START_OFFSET, 100);
+        format::write_u16(&mut bytes, format::slot_entry_offset(format::LEAF_HEADER_SIZE, 0), 100);
+        format::write_u16(&mut bytes, format::slot_entry_offset(format::LEAF_HEADER_SIZE, 1), 100);
+        format::write_u16(&mut bytes, 100, 10);
+
+        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+        assert_eq!(
+            result.unwrap_err(),
+            PageError::MalformedPage(PageCorruption::CellRangesOverlap)
+        );
+    }
+
+    #[test]
+    fn open_rejects_interior_cell_with_unexpected_length() {
+        let mut bytes = initialized_interior_page();
+        let invalid_len = super::super::interior::INTERIOR_CELL_PREFIX_SIZE + 4;
+        let cell_offset = USABLE_SPACE_END - invalid_len;
+
+        format::write_u16(&mut bytes, SLOT_COUNT_OFFSET, 1);
+        format::write_u16(&mut bytes, CONTENT_START_OFFSET, cell_offset as u16);
+        format::write_u16(
+            &mut bytes,
+            format::slot_entry_offset(format::INTERIOR_HEADER_SIZE, 0),
+            cell_offset as u16,
+        );
+        format::write_u16(&mut bytes, cell_offset, invalid_len as u16);
+
+        let result = Page::<Read<'_>, Interior>::open(&bytes);
+        assert_eq!(
+            result.unwrap_err(),
+            PageError::CorruptCell {
+                slot_index: 0,
+                kind: crate::page::CellCorruption::UnexpectedLength,
+            }
         );
     }
 

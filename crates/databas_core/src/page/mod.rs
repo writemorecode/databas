@@ -2,6 +2,7 @@ mod cell;
 mod core;
 mod error;
 pub mod format;
+mod interior;
 mod leaf;
 
 pub use cell::Cell;
