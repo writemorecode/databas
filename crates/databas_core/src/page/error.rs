@@ -1,0 +1,136 @@
+use std::{error::Error as StdError, fmt};
+
+use crate::types::RowId;
+
+use super::format::PageKind;
+
+/// Errors returned while validating or modifying encoded pages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageError {
+    /// The encoded page kind tag does not match the expected page kind.
+    InvalidPageKind { expected: PageKind, actual: u8 },
+    /// The encoded page version does not match [`super::FORMAT_VERSION`].
+    InvalidPageVersion { expected: u8, actual: u8 },
+    /// A requested slot index is out of bounds for the current slot count.
+    InvalidSlotIndex { slot_index: u16, slot_count: u16 },
+    /// The page header or slot directory is structurally invalid.
+    MalformedPage(PageCorruption),
+    /// A specific cell failed validation.
+    CorruptCell { slot_index: u16, kind: CellCorruption },
+    /// An insert attempted to reuse an existing row id.
+    DuplicateKey { key: RowId },
+    /// An update targeted a row id that is not present.
+    KeyNotFound { key: RowId },
+    /// The page has insufficient free space for the requested operation.
+    PageFull { needed: usize, available: usize },
+    /// A cell encoding is larger than what the page format can represent.
+    CellTooLarge { len: usize, max: usize },
+}
+
+/// Result type used throughout the page module.
+pub type PageResult<T> = Result<T, PageError>;
+
+/// Structural page corruption detected before or during page access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageCorruption {
+    /// The slot directory would extend past the usable page region.
+    SlotDirectoryExceedsUsableSpace,
+    /// The content-start offset points beyond usable page space.
+    ContentStartOutOfBounds,
+    /// The slot directory and cell-content region overlap.
+    SlotDirectoryOverlapsContent,
+    /// The reserved footer contains non-zero bytes.
+    ReservedFooterNotZero,
+    /// A slot entry points outside the live cell-content region.
+    SlotOffsetOutOfBounds,
+    /// A cell's length prefix would read past page bounds.
+    CellLengthPrefixOutOfBounds,
+}
+
+/// Cell-level corruption detected while decoding a page cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellCorruption {
+    /// The encoded cell length is too small for the minimum required prefix.
+    LengthTooSmall,
+    /// The encoded cell length runs past the usable page region.
+    LengthOutOfBounds,
+    /// The encoded cell length does not match the expected fixed-size layout.
+    UnexpectedLength,
+}
+
+impl fmt::Display for PageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPageKind { expected, actual } => {
+                write!(f, "invalid page kind: expected {expected:?}, got raw tag {actual}")
+            }
+            Self::InvalidPageVersion { expected, actual } => {
+                write!(f, "invalid page version: expected {expected}, got {actual}")
+            }
+            Self::InvalidSlotIndex { slot_index, slot_count } => {
+                write!(f, "invalid slot index {slot_index} for {slot_count} slots")
+            }
+            Self::MalformedPage(kind) => write!(f, "malformed page: {kind}"),
+            Self::CorruptCell { slot_index, kind } => {
+                write!(f, "corrupt cell at slot {slot_index}: {kind}")
+            }
+            Self::DuplicateKey { key } => write!(f, "duplicate key: {key}"),
+            Self::KeyNotFound { key } => write!(f, "key not found: {key}"),
+            Self::PageFull { needed, available } => {
+                write!(f, "page full: need {needed} bytes, only {available} available")
+            }
+            Self::CellTooLarge { len, max } => {
+                write!(f, "cell too large: {len} bytes exceeds max {max}")
+            }
+        }
+    }
+}
+
+impl StdError for PageError {}
+
+impl fmt::Display for PageCorruption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SlotDirectoryExceedsUsableSpace => {
+                write!(f, "slot directory exceeds usable page space")
+            }
+            Self::ContentStartOutOfBounds => {
+                write!(f, "content start is outside usable page space")
+            }
+            Self::SlotDirectoryOverlapsContent => {
+                write!(f, "slot directory overlaps the cell-content region")
+            }
+            Self::ReservedFooterNotZero => write!(f, "reserved footer is not zeroed"),
+            Self::SlotOffsetOutOfBounds => {
+                write!(f, "slot offset points outside the cell-content region")
+            }
+            Self::CellLengthPrefixOutOfBounds => {
+                write!(f, "cell length prefix runs past the usable page bounds")
+            }
+        }
+    }
+}
+
+impl fmt::Display for CellCorruption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LengthTooSmall => write!(f, "cell length is smaller than the minimum header"),
+            Self::LengthOutOfBounds => write!(f, "cell length runs past the usable page bounds"),
+            Self::UnexpectedLength => write!(f, "cell length does not match the page format"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_display_mentions_key_details() {
+        let duplicate = PageError::DuplicateKey { key: 42 };
+        assert_eq!(duplicate.to_string(), "duplicate key: 42");
+
+        let invalid_kind = PageError::InvalidPageKind { expected: PageKind::Leaf, actual: 9 };
+        assert!(invalid_kind.to_string().contains("expected Leaf"));
+    }
+}
