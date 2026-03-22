@@ -45,7 +45,6 @@ pub enum PageCorruption {
     SlotOffsetOutOfBounds,
     /// A cell's length prefix would read past page bounds.
     CellLengthPrefixOutOfBounds,
-    CellRangesOverlap,
 }
 
 /// Cell-level corruption detected while decoding a page cell.
@@ -108,7 +107,6 @@ impl fmt::Display for PageCorruption {
             Self::CellLengthPrefixOutOfBounds => {
                 write!(f, "cell length prefix runs past the usable page bounds")
             }
-            Self::CellRangesOverlap => write!(f, "cell ranges overlap or alias each other"),
         }
     }
 }

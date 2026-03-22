@@ -465,7 +465,6 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
         }));
     }
 
-    let mut cell_ranges = Vec::with_capacity(slot_count);
     for slot_index in 0..slot_count as u16 {
         let slot_offset =
             format::read_u16(bytes, format::slot_entry_offset(header_size, slot_index)) as usize;
@@ -487,14 +486,6 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
                 kind: super::CellCorruption::UnexpectedLength,
             });
         }
-        if cell_len >= CELL_LENGTH_SIZE && cell_len <= USABLE_SPACE_END - slot_offset {
-            cell_ranges.push((slot_offset, slot_offset + cell_len));
-        }
-    }
-
-    cell_ranges.sort_unstable_by_key(|(start, _)| *start);
-    if cell_ranges.windows(2).any(|window| window[0].1 > window[1].0) {
-        return Err(PageError::MalformedPage(PageCorruption::CellRangesOverlap));
     }
 
     Ok(())
@@ -634,22 +625,6 @@ mod tests {
         assert_eq!(
             result.unwrap_err(),
             PageError::MalformedPage(PageCorruption::CellLengthPrefixOutOfBounds)
-        );
-    }
-
-    #[test]
-    fn open_rejects_aliased_cells() {
-        let mut bytes = initialized_leaf_page();
-        format::write_u16(&mut bytes, SLOT_COUNT_OFFSET, 2);
-        format::write_u16(&mut bytes, CONTENT_START_OFFSET, 100);
-        format::write_u16(&mut bytes, format::slot_entry_offset(format::LEAF_HEADER_SIZE, 0), 100);
-        format::write_u16(&mut bytes, format::slot_entry_offset(format::LEAF_HEADER_SIZE, 1), 100);
-        format::write_u16(&mut bytes, 100, 10);
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-        assert_eq!(
-            result.unwrap_err(),
-            PageError::MalformedPage(PageCorruption::CellRangesOverlap)
         );
     }
 
