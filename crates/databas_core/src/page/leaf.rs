@@ -8,6 +8,7 @@ use super::{
 };
 
 const ROW_ID_SIZE: usize = 8;
+/// The fixed-size prefix of a leaf cell: encoded length plus row id.
 pub const LEAF_CELL_PREFIX_SIZE: usize = CELL_LENGTH_SIZE + ROW_ID_SIZE;
 
 #[derive(Debug, Clone, Copy)]
@@ -60,15 +61,18 @@ impl<A> Page<A, Leaf>
 where
     A: PageAccess,
 {
+    /// Searches the leaf page for `row_id`.
     pub fn search(&self, row_id: RowId) -> PageResult<SearchResult> {
         self.search_slots_by(row_id, |page, slot_index| Ok(cell_parts(page, slot_index)?.row_id))
     }
 
+    /// Returns a typed immutable view of the cell at `slot_index`.
     pub fn cell(&self, slot_index: u16) -> PageResult<Cell<Read<'_>, Leaf>> {
         cell_parts(self, slot_index)?;
         Ok(Cell::new(Read { bytes: self.bytes() }, slot_index))
     }
 
+    /// Looks up a row id and returns its cell if present.
     pub fn lookup(&self, row_id: RowId) -> PageResult<Option<Cell<Read<'_>, Leaf>>> {
         match self.search(row_id)? {
             SearchResult::Found(slot_index) => self.cell(slot_index).map(Some),
@@ -81,12 +85,14 @@ impl<A> Page<A, Leaf>
 where
     A: PageAccessMut,
 {
+    /// Returns a typed mutable view of the cell at `slot_index`.
     pub fn cell_mut(&mut self, slot_index: u16) -> PageResult<Cell<Write<'_>, Leaf>> {
         let page = Page::<Read<'_>, Leaf>::open(self.bytes())?;
         cell_parts(&page, slot_index)?;
         Ok(Cell::new(Write { bytes: self.bytes_mut() }, slot_index))
     }
 
+    /// Inserts a new `(row_id, payload)` record while preserving slot order.
     pub fn insert(&mut self, row_id: RowId, payload: &[u8]) -> PageResult<u16> {
         let cell_len = encoded_len(payload.len())?;
         let slot_index = match self.search(row_id)? {
@@ -100,6 +106,7 @@ where
         Ok(slot_index)
     }
 
+    /// Replaces the payload for an existing `row_id`.
     pub fn update(&mut self, row_id: RowId, payload: &[u8]) -> PageResult<()> {
         let cell_len = encoded_len(payload.len())?;
         let slot_index = match self.search(row_id)? {

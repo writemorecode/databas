@@ -9,6 +9,7 @@ use super::{
 
 const PAGE_ID_SIZE: usize = 8;
 const ROW_ID_SIZE: usize = 8;
+/// The fixed-size size of an interior cell: encoded length, child id, and separator key.
 pub const INTERIOR_CELL_PREFIX_SIZE: usize = CELL_LENGTH_SIZE + PAGE_ID_SIZE + ROW_ID_SIZE;
 
 #[derive(Debug, Clone, Copy)]
@@ -57,19 +58,23 @@ impl<A> Page<A, Interior>
 where
     A: PageAccess,
 {
+    /// Returns the page id stored in the rightmost-child header field.
     pub fn rightmost_child(&self) -> PageId {
         format::read_u64(self.bytes(), RIGHTMOST_CHILD_OFFSET)
     }
 
+    /// Searches the interior page for `row_id`.
     pub fn search(&self, row_id: RowId) -> PageResult<SearchResult> {
         self.search_slots_by(row_id, |page, slot_index| Ok(cell_parts(page, slot_index)?.row_id))
     }
 
+    /// Returns a typed immutable view of the cell at `slot_index`.
     pub fn cell(&self, slot_index: u16) -> PageResult<Cell<Read<'_>, Interior>> {
         cell_parts(self, slot_index)?;
         Ok(Cell::new(Read { bytes: self.bytes() }, slot_index))
     }
 
+    /// Looks up a separator key and returns its cell if present.
     pub fn lookup(&self, row_id: RowId) -> PageResult<Option<Cell<Read<'_>, Interior>>> {
         match self.search(row_id)? {
             SearchResult::Found(slot_index) => self.cell(slot_index).map(Some),
@@ -82,16 +87,19 @@ impl<A> Page<A, Interior>
 where
     A: PageAccessMut,
 {
+    /// Updates the page id stored in the rightmost-child header field.
     pub fn set_rightmost_child(&mut self, page_id: PageId) {
         format::write_u64(self.bytes_mut(), RIGHTMOST_CHILD_OFFSET, page_id);
     }
 
+    /// Returns a typed mutable view of the cell at `slot_index`.
     pub fn cell_mut(&mut self, slot_index: u16) -> PageResult<Cell<Write<'_>, Interior>> {
         let page = Page::<Read<'_>, Interior>::open(self.bytes())?;
         cell_parts(&page, slot_index)?;
         Ok(Cell::new(Write { bytes: self.bytes_mut() }, slot_index))
     }
 
+    /// Inserts a new separator key and its left-child pointer while preserving slot order.
     pub fn insert(&mut self, row_id: RowId, left_child: PageId) -> PageResult<u16> {
         let slot_index = match self.search(row_id)? {
             SearchResult::Found(_) => return Err(PageError::DuplicateKey { key: row_id }),
@@ -104,6 +112,7 @@ where
         Ok(slot_index)
     }
 
+    /// Rewrites the left-child pointer for an existing separator key.
     pub fn update(&mut self, row_id: RowId, left_child: PageId) -> PageResult<()> {
         let slot_index = match self.search(row_id)? {
             SearchResult::Found(slot_index) => slot_index,

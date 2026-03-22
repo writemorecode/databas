@@ -10,13 +10,17 @@ use super::{
     },
 };
 
+/// Marker type for leaf pages that store `(row_id, payload)` records.
 #[derive(Debug)]
 pub enum Leaf {}
 
+/// Marker type for interior pages that store separator keys and child pointers.
 #[derive(Debug)]
 pub enum Interior {}
 
+/// Associates a typed page marker with its encoded [`format::PageKind`].
 pub trait NodeMarker {
+    /// The page kind represented by this marker.
     const KIND: format::PageKind;
 }
 
@@ -28,21 +32,27 @@ impl NodeMarker for Interior {
     const KIND: format::PageKind = format::PageKind::Interior;
 }
 
+/// Shared immutable access to a page-sized byte buffer.
 #[derive(Debug, Clone, Copy)]
 pub struct Read<'a> {
     pub(crate) bytes: &'a [u8; PAGE_SIZE],
 }
 
+/// Shared mutable access to a page-sized byte buffer.
 #[derive(Debug)]
 pub struct Write<'a> {
     pub(crate) bytes: &'a mut [u8; PAGE_SIZE],
 }
 
+/// Abstraction over page access modes that can expose immutable bytes.
 pub trait PageAccess {
+    /// Returns the underlying fixed-size page buffer.
     fn bytes(&self) -> &[u8; PAGE_SIZE];
 }
 
+/// Extension of [`PageAccess`] for access modes that can mutate the page buffer.
 pub trait PageAccessMut: PageAccess {
+    /// Returns the underlying page buffer mutably.
     fn bytes_mut(&mut self) -> &mut [u8; PAGE_SIZE];
 }
 
@@ -64,21 +74,31 @@ impl PageAccessMut for Write<'_> {
     }
 }
 
+/// A typed view over an encoded page.
+///
+/// `A` controls the access mode ([`Read`] or [`Write`]), while `N` controls the
+/// logical page kind ([`Leaf`] or [`Interior`]).
 #[derive(Debug)]
 pub struct Page<A, N> {
     access: A,
     _marker: PhantomData<N>,
 }
 
+/// A page whose concrete node kind is determined by the encoded page header.
 #[derive(Debug)]
 pub enum AnyPage<A> {
+    /// A leaf page.
     Leaf(Page<A, Leaf>),
+    /// An interior page.
     Interior(Page<A, Interior>),
 }
 
+/// Result of searching a sorted slot directory by key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchResult {
+    /// The key already exists at the returned slot index.
     Found(u16),
+    /// The key is absent and should be inserted at the returned slot index.
     InsertAt(u16),
 }
 
@@ -92,10 +112,12 @@ impl<A, N> Page<A, N>
 where
     A: PageAccess,
 {
+    /// Returns the raw page bytes.
     pub fn bytes(&self) -> &[u8; PAGE_SIZE] {
         self.access.bytes()
     }
 
+    /// Returns the statically known kind of this page.
     pub fn kind(&self) -> format::PageKind
     where
         N: NodeMarker,
@@ -103,18 +125,22 @@ where
         N::KIND
     }
 
+    /// Returns the encoded page-format version.
     pub fn version(&self) -> u8 {
         self.bytes()[VERSION_OFFSET]
     }
 
+    /// Returns the number of live slots in the slot directory.
     pub fn slot_count(&self) -> u16 {
         format::read_u16(self.bytes(), SLOT_COUNT_OFFSET)
     }
 
+    /// Returns the start offset of the packed cell-content region.
     pub fn content_start(&self) -> u16 {
         format::read_u16(self.bytes(), CONTENT_START_OFFSET)
     }
 
+    /// Returns the contiguous free space between the slot directory and cell content.
     pub fn free_space(&self) -> usize
     where
         N: NodeMarker,
@@ -311,6 +337,7 @@ impl<'a, N> Page<Read<'a>, N>
 where
     N: NodeMarker,
 {
+    /// Validates and opens an immutable typed page view over an initialized buffer.
     pub fn open(bytes: &'a [u8; PAGE_SIZE]) -> PageResult<Self> {
         validate_page(bytes, N::KIND)?;
         Ok(Self::new(Read { bytes }))
@@ -321,11 +348,13 @@ impl<'a, N> Page<Write<'a>, N>
 where
     N: NodeMarker,
 {
+    /// Validates and opens a mutable typed page view over an initialized buffer.
     pub fn open(bytes: &'a mut [u8; PAGE_SIZE]) -> PageResult<Self> {
         validate_page(bytes, N::KIND)?;
         Ok(Self::new(Write { bytes }))
     }
 
+    /// Borrows this mutable page as an immutable page view.
     pub fn as_ref(&self) -> Page<Read<'_>, N> {
         Page::new(Read { bytes: self.bytes() })
     }
@@ -341,12 +370,14 @@ where
 }
 
 impl<'a> Page<Write<'a>, Leaf> {
+    /// Initializes a fresh empty leaf page in-place.
     pub fn init(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
         Self::initialize(bytes)
     }
 }
 
 impl<'a> Page<Write<'a>, Interior> {
+    /// Initializes a fresh empty interior page with its rightmost child pointer set.
     pub fn init(bytes: &'a mut [u8; PAGE_SIZE], rightmost_child: PageId) -> Self {
         Self::initialize_with_rightmost(bytes, rightmost_child)
     }
