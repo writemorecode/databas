@@ -1,4 +1,5 @@
 use core::marker::PhantomData;
+use std::cmp::Ordering;
 
 use crate::types::{PAGE_SIZE, PageId, RowId};
 
@@ -102,6 +103,15 @@ pub enum SearchResult {
     InsertAt(u16),
 }
 
+/// Result of locating a bound within a sorted slot directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundResult {
+    /// The bound resolves to an existing slot index.
+    At(u16),
+    /// The bound lies past the last slot on the page.
+    PastEnd,
+}
+
 impl<A, N> Page<A, N> {
     fn new(access: A) -> Self {
         Self { access, _marker: PhantomData }
@@ -185,6 +195,49 @@ where
         }
 
         Ok(SearchResult::InsertAt(low))
+    }
+
+    pub(crate) fn bound_slots_by<F, P>(
+        &self,
+        key: RowId,
+        mut read_key: F,
+        mut go_right: P,
+    ) -> PageResult<BoundResult>
+    where
+        N: NodeMarker,
+        F: FnMut(&Self, u16) -> PageResult<RowId>,
+        P: FnMut(Ordering) -> bool,
+    {
+        let mut low = 0_u16;
+        let mut high = self.slot_count();
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let mid_key = read_key(self, mid)?;
+            if go_right(mid_key.cmp(&key)) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        if low == self.slot_count() { Ok(BoundResult::PastEnd) } else { Ok(BoundResult::At(low)) }
+    }
+
+    pub(crate) fn lower_bound_slots_by<F>(&self, key: RowId, read_key: F) -> PageResult<BoundResult>
+    where
+        N: NodeMarker,
+        F: FnMut(&Self, u16) -> PageResult<RowId>,
+    {
+        self.bound_slots_by(key, read_key, |ordering| ordering == Ordering::Less)
+    }
+
+    pub(crate) fn upper_bound_slots_by<F>(&self, key: RowId, read_key: F) -> PageResult<BoundResult>
+    where
+        N: NodeMarker,
+        F: FnMut(&Self, u16) -> PageResult<RowId>,
+    {
+        self.bound_slots_by(key, read_key, |ordering| ordering != Ordering::Greater)
     }
 
     pub(crate) fn validate_slot_index(&self, slot_index: u16) -> PageResult<()> {
