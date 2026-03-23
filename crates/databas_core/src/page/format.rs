@@ -1,0 +1,129 @@
+//! Low-level constants and helpers for the on-page binary format.
+//!
+//! The page layout consists of a small header, a slot directory that grows
+//! upward from the header, a packed cell-content region that grows downward
+//! from the end of usable space, and a zeroed reserved footer.
+
+use crate::types::PAGE_SIZE;
+
+/// Current on-disk page format version.
+pub const FORMAT_VERSION: u8 = 1;
+/// Number of bytes reserved at the end of every page.
+pub const RESERVED_FOOTER_SIZE: usize = 4;
+/// Exclusive end offset of the usable region within a page buffer.
+pub const USABLE_SPACE_END: usize = PAGE_SIZE - RESERVED_FOOTER_SIZE;
+/// Width in bytes of a single slot directory entry.
+pub const SLOT_ENTRY_SIZE: usize = 2;
+/// Width in bytes of the length prefix at the start of every leaf cell.
+pub const CELL_LENGTH_SIZE: usize = 2;
+
+/// Offset of the page-kind tag in the shared page header.
+pub const KIND_OFFSET: usize = 0;
+/// Offset of the page-format version in the shared page header.
+pub const VERSION_OFFSET: usize = 1;
+/// Offset of the encoded slot count in the shared page header.
+pub const SLOT_COUNT_OFFSET: usize = 2;
+/// Offset of the content-start pointer in the shared page header.
+pub const CONTENT_START_OFFSET: usize = 4;
+/// Number of bytes in the header shared by all page kinds.
+pub const SHARED_HEADER_SIZE: usize = 6;
+/// Offset of the rightmost-child pointer in an interior-page header.
+pub const RIGHTMOST_CHILD_OFFSET: usize = SHARED_HEADER_SIZE;
+/// Total header size for a leaf page.
+pub const LEAF_HEADER_SIZE: usize = SHARED_HEADER_SIZE;
+/// Total header size for an interior page.
+pub const INTERIOR_HEADER_SIZE: usize = SHARED_HEADER_SIZE + 8;
+
+/// Encoded page kind tag stored in the page header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PageKind {
+    /// A leaf page containing row payloads.
+    Leaf = 1,
+    /// An interior page containing separator keys and child pointers.
+    Interior = 2,
+}
+
+impl PageKind {
+    /// Decodes a raw page-kind tag.
+    pub fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Leaf),
+            2 => Some(Self::Interior),
+            _ => None,
+        }
+    }
+
+    /// Returns the total header size for this page kind.
+    pub const fn header_size(self) -> usize {
+        match self {
+            Self::Leaf => LEAF_HEADER_SIZE,
+            Self::Interior => INTERIOR_HEADER_SIZE,
+        }
+    }
+}
+
+/// Returns the exclusive end offset of the usable page region.
+pub const fn usable_space_end() -> usize {
+    USABLE_SPACE_END
+}
+
+/// Returns the total number of usable bytes in the page.
+pub const fn usable_space_len() -> usize {
+    USABLE_SPACE_END
+}
+
+/// Returns the maximum number of slot entries a page of `kind` can address.
+pub const fn max_slot_count(kind: PageKind) -> usize {
+    (usable_space_len() - kind.header_size()) / SLOT_ENTRY_SIZE
+}
+
+/// Reads a little-endian `u16` from `bytes` at `offset`.
+pub fn read_u16(bytes: &[u8; PAGE_SIZE], offset: usize) -> u16 {
+    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+/// Writes a little-endian `u16` into `bytes` at `offset`.
+pub fn write_u16(bytes: &mut [u8; PAGE_SIZE], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Reads a little-endian `u64` from `bytes` at `offset`.
+pub fn read_u64(bytes: &[u8; PAGE_SIZE], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("u64 slice has fixed width"))
+}
+
+/// Writes a little-endian `u64` into `bytes` at `offset`.
+pub fn write_u64(bytes: &mut [u8; PAGE_SIZE], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Returns the byte offset of `slot_index` within a slot directory.
+pub const fn slot_entry_offset(header_size: usize, slot_index: u16) -> usize {
+    header_size + (slot_index as usize * SLOT_ENTRY_SIZE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usable_space_excludes_reserved_footer() {
+        assert_eq!(usable_space_end(), PAGE_SIZE - RESERVED_FOOTER_SIZE);
+        assert_eq!(usable_space_len(), PAGE_SIZE - RESERVED_FOOTER_SIZE);
+    }
+
+    #[test]
+    fn page_kind_helpers_match_layout() {
+        assert_eq!(PageKind::from_raw(1), Some(PageKind::Leaf));
+        assert_eq!(PageKind::from_raw(2), Some(PageKind::Interior));
+        assert_eq!(PageKind::from_raw(0), None);
+        assert_eq!(PageKind::Leaf.header_size(), LEAF_HEADER_SIZE);
+        assert_eq!(PageKind::Interior.header_size(), INTERIOR_HEADER_SIZE);
+    }
+
+    #[test]
+    fn max_slot_count_uses_kind_specific_header_size() {
+        assert!(max_slot_count(PageKind::Leaf) > max_slot_count(PageKind::Interior));
+    }
+}
