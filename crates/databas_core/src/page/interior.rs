@@ -3,7 +3,7 @@ use crate::types::{PAGE_SIZE, PageId, RowId};
 use super::{
     PageError, PageResult,
     cell::Cell,
-    core::{Interior, Page, PageAccess, PageAccessMut, Read, SearchResult, Write},
+    core::{BoundResult, Interior, Page, PageAccess, PageAccessMut, Read, SearchResult, Write},
     format::{self, RIGHTMOST_CHILD_OFFSET},
 };
 
@@ -56,6 +56,28 @@ where
     /// Returns the page id stored in the rightmost-child header field.
     pub fn rightmost_child(&self) -> PageId {
         format::read_u64(self.bytes(), RIGHTMOST_CHILD_OFFSET)
+    }
+
+    /// Returns the first slot whose separator row id is greater than or equal to `row_id`.
+    pub fn lower_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
+        self.lower_bound_slots_by(row_id, |page, slot_index| {
+            Ok(cell_parts(page, slot_index)?.row_id)
+        })
+    }
+
+    /// Returns the first slot whose separator row id is strictly greater than `row_id`.
+    pub fn upper_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
+        self.upper_bound_slots_by(row_id, |page, slot_index| {
+            Ok(cell_parts(page, slot_index)?.row_id)
+        })
+    }
+
+    /// Returns the child page that may contain `row_id`.
+    pub fn child_for(&self, row_id: RowId) -> PageResult<PageId> {
+        match self.lower_bound(row_id)? {
+            BoundResult::At(slot_index) => Ok(cell_parts(self, slot_index)?.left_child),
+            BoundResult::PastEnd => Ok(self.rightmost_child()),
+        }
     }
 
     /// Searches the interior page for `row_id`.
@@ -169,6 +191,86 @@ mod tests {
 
         assert_eq!(page.rightmost_child(), 88);
         assert_eq!(page.as_ref().rightmost_child(), 88);
+    }
+
+    #[test]
+    fn bounds_return_past_end_on_empty_page() {
+        let bytes = new_interior_page(7);
+        let page = Page::<Read<'_>, Interior>::open(&bytes).unwrap();
+
+        assert_eq!(page.lower_bound(10).unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.upper_bound(10).unwrap(), BoundResult::PastEnd);
+    }
+
+    #[test]
+    fn bounds_locate_exact_and_insertion_positions() {
+        let mut bytes = new_interior_page(90);
+        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        page.insert(10, 1).unwrap();
+        page.insert(20, 2).unwrap();
+        page.insert(30, 3).unwrap();
+
+        let page = page.as_ref();
+        assert_eq!(page.lower_bound(5).unwrap(), BoundResult::At(0));
+        assert_eq!(page.upper_bound(5).unwrap(), BoundResult::At(0));
+        assert_eq!(page.lower_bound(20).unwrap(), BoundResult::At(1));
+        assert_eq!(page.upper_bound(20).unwrap(), BoundResult::At(2));
+        assert_eq!(page.lower_bound(25).unwrap(), BoundResult::At(2));
+        assert_eq!(page.upper_bound(25).unwrap(), BoundResult::At(2));
+        assert_eq!(page.lower_bound(30).unwrap(), BoundResult::At(2));
+        assert_eq!(page.upper_bound(30).unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.lower_bound(99).unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.upper_bound(99).unwrap(), BoundResult::PastEnd);
+    }
+
+    #[test]
+    fn child_for_uses_first_separator_greater_than_or_equal_to_target() {
+        let mut bytes = new_interior_page(90);
+        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        page.insert(10, 1).unwrap();
+        page.insert(20, 2).unwrap();
+        page.insert(30, 3).unwrap();
+
+        let page = page.as_ref();
+        assert_eq!(page.child_for(5).unwrap(), 1);
+        assert_eq!(page.child_for(10).unwrap(), 1);
+        assert_eq!(page.child_for(15).unwrap(), 2);
+        assert_eq!(page.child_for(20).unwrap(), 2);
+        assert_eq!(page.child_for(25).unwrap(), 3);
+        assert_eq!(page.child_for(30).unwrap(), 3);
+        assert_eq!(page.child_for(35).unwrap(), 90);
+    }
+
+    #[test]
+    fn child_for_returns_rightmost_child_when_there_are_no_separators() {
+        let bytes = new_interior_page(77);
+        let page = Page::<Read<'_>, Interior>::open(&bytes).unwrap();
+
+        assert_eq!(page.child_for(0).unwrap(), 77);
+        assert_eq!(page.child_for(99).unwrap(), 77);
+    }
+
+    #[test]
+    fn lower_bound_agrees_with_search_result() {
+        let mut bytes = new_interior_page(90);
+        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        page.insert(10, 1).unwrap();
+        page.insert(20, 2).unwrap();
+        page.insert(30, 3).unwrap();
+
+        let page = page.as_ref();
+        for key in [5, 10, 15, 20, 25, 30, 35] {
+            match page.search(key).unwrap() {
+                SearchResult::Found(slot) | SearchResult::InsertAt(slot) => {
+                    let expected = if slot == page.slot_count() {
+                        BoundResult::PastEnd
+                    } else {
+                        BoundResult::At(slot)
+                    };
+                    assert_eq!(page.lower_bound(key).unwrap(), expected, "key {key}");
+                }
+            }
+        }
     }
 
     #[test]

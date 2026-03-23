@@ -29,7 +29,8 @@ mod leaf;
 pub use cell::Cell;
 /// Page handles, marker types, access traits, and search helpers for typed page access.
 pub use core::{
-    AnyPage, Interior, Leaf, NodeMarker, Page, PageAccess, PageAccessMut, Read, SearchResult, Write,
+    AnyPage, BoundResult, Interior, Leaf, NodeMarker, Page, PageAccess, PageAccessMut, Read,
+    SearchResult, Write,
 };
 /// Errors returned while validating or manipulating encoded pages and cells.
 pub use error::{CellCorruption, PageCorruption, PageError, PageResult};

@@ -3,7 +3,7 @@ use crate::types::{PAGE_SIZE, RowId};
 use super::{
     CellCorruption, PageError, PageResult,
     cell::Cell,
-    core::{Leaf, Page, PageAccess, PageAccessMut, Read, SearchResult, Write},
+    core::{BoundResult, Leaf, Page, PageAccess, PageAccessMut, Read, SearchResult, Write},
     format::{self, CELL_LENGTH_SIZE, USABLE_SPACE_END},
 };
 
@@ -61,6 +61,20 @@ impl<A> Page<A, Leaf>
 where
     A: PageAccess,
 {
+    /// Returns the first slot whose row id is greater than or equal to `row_id`.
+    pub fn lower_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
+        self.lower_bound_slots_by(row_id, |page, slot_index| {
+            Ok(cell_parts(page, slot_index)?.row_id)
+        })
+    }
+
+    /// Returns the first slot whose row id is strictly greater than `row_id`.
+    pub fn upper_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
+        self.upper_bound_slots_by(row_id, |page, slot_index| {
+            Ok(cell_parts(page, slot_index)?.row_id)
+        })
+    }
+
     /// Searches the leaf page for `row_id`.
     pub fn search(&self, row_id: RowId) -> PageResult<SearchResult> {
         self.search_slots_by(row_id, |page, slot_index| Ok(cell_parts(page, slot_index)?.row_id))
@@ -233,6 +247,59 @@ mod tests {
         assert_eq!(page_ref.lookup(5).unwrap().unwrap().payload().unwrap(), b"a");
         assert_eq!(page_ref.lookup(15).unwrap().unwrap().payload().unwrap(), b"bbb");
         assert!(page_ref.lookup(99).unwrap().is_none());
+    }
+
+    #[test]
+    fn bounds_return_past_end_on_empty_page() {
+        let bytes = new_leaf_page();
+        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
+
+        assert_eq!(page.lower_bound(10).unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.upper_bound(10).unwrap(), BoundResult::PastEnd);
+    }
+
+    #[test]
+    fn bounds_locate_exact_and_insertion_positions() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        page.insert(10, b"a").unwrap();
+        page.insert(20, b"b").unwrap();
+        page.insert(30, b"c").unwrap();
+
+        let page = page.as_ref();
+        assert_eq!(page.lower_bound(5).unwrap(), BoundResult::At(0));
+        assert_eq!(page.upper_bound(5).unwrap(), BoundResult::At(0));
+        assert_eq!(page.lower_bound(20).unwrap(), BoundResult::At(1));
+        assert_eq!(page.upper_bound(20).unwrap(), BoundResult::At(2));
+        assert_eq!(page.lower_bound(25).unwrap(), BoundResult::At(2));
+        assert_eq!(page.upper_bound(25).unwrap(), BoundResult::At(2));
+        assert_eq!(page.lower_bound(30).unwrap(), BoundResult::At(2));
+        assert_eq!(page.upper_bound(30).unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.lower_bound(99).unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.upper_bound(99).unwrap(), BoundResult::PastEnd);
+    }
+
+    #[test]
+    fn lower_bound_agrees_with_search_result() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        page.insert(10, b"a").unwrap();
+        page.insert(20, b"b").unwrap();
+        page.insert(30, b"c").unwrap();
+
+        let page = page.as_ref();
+        for key in [5, 10, 15, 20, 25, 30, 35] {
+            match page.search(key).unwrap() {
+                SearchResult::Found(slot) | SearchResult::InsertAt(slot) => {
+                    let expected = if slot == page.slot_count() {
+                        BoundResult::PastEnd
+                    } else {
+                        BoundResult::At(slot)
+                    };
+                    assert_eq!(page.lower_bound(key).unwrap(), expected, "key {key}");
+                }
+            }
+        }
     }
 
     #[test]
