@@ -106,6 +106,18 @@ where
         Ok(slot_index)
     }
 
+    /// Deletes an existing `(row_id, payload)` record and re-packs the page.
+    pub fn delete(&mut self, row_id: RowId) -> PageResult<u16> {
+        let slot_index = match self.search(row_id)? {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound { key: row_id }),
+        };
+
+        self.remove_slot(slot_index)?;
+        self.defragment()?;
+        Ok(slot_index)
+    }
+
     /// Replaces the payload for an existing `row_id`.
     pub fn update(&mut self, row_id: RowId, payload: &[u8]) -> PageResult<()> {
         let cell_len = encoded_len(payload.len())?;
@@ -280,6 +292,105 @@ mod tests {
         let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
         let err = page.update(88, b"missing").unwrap_err();
         assert_eq!(err, PageError::KeyNotFound { key: 88 });
+    }
+
+    #[test]
+    fn delete_returns_removed_slot_index() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        page.insert(10, b"ten").unwrap();
+        page.insert(20, b"twenty").unwrap();
+        page.insert(30, b"thirty").unwrap();
+
+        let removed = page.delete(20).unwrap();
+
+        assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn delete_removes_existing_key_and_preserves_order() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        page.insert(10, b"ten").unwrap();
+        page.insert(20, b"twenty").unwrap();
+        page.insert(30, b"thirty").unwrap();
+
+        page.delete(20).unwrap();
+
+        let page = page.as_ref();
+        assert!(page.lookup(20).unwrap().is_none());
+        assert_eq!(page.search(20).unwrap(), SearchResult::InsertAt(1));
+        assert_eq!(page.cell(0).unwrap().row_id().unwrap(), 10);
+        assert_eq!(page.cell(1).unwrap().row_id().unwrap(), 30);
+    }
+
+    #[test]
+    fn delete_missing_key_returns_not_found() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+
+        let err = page.delete(99).unwrap_err();
+
+        assert_eq!(err, PageError::KeyNotFound { key: 99 });
+    }
+
+    #[test]
+    fn delete_from_single_cell_page_restores_empty_layout() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let empty_free = page.free_space();
+        page.insert(10, b"abc").unwrap();
+
+        let removed = page.delete(10).unwrap();
+
+        assert_eq!(removed, 0);
+        assert_eq!(page.slot_count(), 0);
+        assert_eq!(page.content_start(), USABLE_SPACE_END as u16);
+        assert_eq!(page.free_space(), empty_free);
+        assert!(page.lookup(10).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_reclaims_fragmented_space_and_keeps_survivors_readable() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let filler = [7_u8; 900];
+        page.insert(10, &filler).unwrap();
+        page.insert(20, &filler).unwrap();
+        page.insert(30, &filler).unwrap();
+        page.update(20, b"tiny").unwrap();
+        let fragmented_free = page.free_space();
+
+        page.delete(10).unwrap();
+
+        assert!(page.free_space() > fragmented_free);
+        let page = page.as_ref();
+        assert!(page.lookup(10).unwrap().is_none());
+        assert_eq!(page.lookup(20).unwrap().unwrap().payload().unwrap(), b"tiny");
+        assert_eq!(page.lookup(30).unwrap().unwrap().payload().unwrap(), filler);
+    }
+
+    #[test]
+    fn delete_produces_canonical_packed_layout() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        page.insert(10, b"abc").unwrap();
+        page.insert(20, b"longer-payload").unwrap();
+        page.insert(30, b"z").unwrap();
+        page.update(20, b"x").unwrap();
+
+        page.delete(10).unwrap();
+
+        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
+        assert_eq!(page.slot_count(), 2);
+        let offset0 = page.slot_offset(0).unwrap() as usize;
+        let len0 = page.cell_len(0).unwrap();
+        let offset1 = page.slot_offset(1).unwrap() as usize;
+        let len1 = page.cell_len(1).unwrap();
+        assert_eq!(offset0, page.content_start() as usize);
+        assert_eq!(offset1, offset0 + len0);
+        assert_eq!(offset1 + len1, USABLE_SPACE_END);
+        assert!(page.bytes()[USABLE_SPACE_END..].iter().all(|byte| *byte == 0));
     }
 
     #[test]
