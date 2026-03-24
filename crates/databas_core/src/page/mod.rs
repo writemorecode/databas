@@ -36,6 +36,7 @@ pub use core::{
 pub use error::{CellCorruption, PageCorruption, PageError, PageResult};
 /// Public page-format constants and layout metadata used by page encoders and decoders.
 pub use format::{
-    CELL_LENGTH_SIZE, FORMAT_VERSION, INTERIOR_HEADER_SIZE, LEAF_HEADER_SIZE, PageKind,
-    RESERVED_FOOTER_SIZE, SHARED_HEADER_SIZE, SLOT_ENTRY_SIZE, USABLE_SPACE_END,
+    CELL_LENGTH_SIZE, FORMAT_VERSION, FREEBLOCK_HEADER_SIZE, INTERIOR_HEADER_SIZE,
+    LEAF_HEADER_SIZE, MAX_FRAGMENTED_FREE_BYTES, PageKind, RESERVED_FOOTER_SIZE,
+    SHARED_HEADER_SIZE, SLOT_ENTRY_SIZE, USABLE_SPACE_END,
 };

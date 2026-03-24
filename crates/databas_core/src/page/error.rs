@@ -43,6 +43,14 @@ pub enum PageCorruption {
     SlotDirectoryOverlapsContent,
     /// The reserved footer contains non-zero bytes.
     ReservedFooterNotZero,
+    /// The fragmented free byte count exceeds the supported maximum.
+    FragmentedFreeBytesTooLarge,
+    /// A freeblock header does not begin within the live content region.
+    FreeblockOffsetOutOfBounds,
+    /// A freeblock span is too small to hold its own header.
+    FreeblockTooSmall,
+    /// A freeblock span runs past the usable page region.
+    FreeblockOutOfBounds,
     /// A slot entry points outside the live cell-content region.
     SlotOffsetOutOfBounds,
     /// A cell's length prefix would read past page bounds.
@@ -106,6 +114,18 @@ impl fmt::Display for PageCorruption {
                 write!(f, "slot directory overlaps the cell-content region")
             }
             Self::ReservedFooterNotZero => write!(f, "reserved footer is not zeroed"),
+            Self::FragmentedFreeBytesTooLarge => {
+                write!(f, "fragmented free byte count exceeds the supported maximum")
+            }
+            Self::FreeblockOffsetOutOfBounds => {
+                write!(f, "freeblock offset points outside the content region")
+            }
+            Self::FreeblockTooSmall => {
+                write!(f, "freeblock is smaller than the minimum header size")
+            }
+            Self::FreeblockOutOfBounds => {
+                write!(f, "freeblock runs past the usable page bounds")
+            }
             Self::SlotOffsetOutOfBounds => {
                 write!(f, "slot offset points outside the cell-content region")
             }

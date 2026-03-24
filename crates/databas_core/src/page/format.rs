@@ -16,6 +16,10 @@ pub const USABLE_SPACE_END: usize = PAGE_SIZE - RESERVED_FOOTER_SIZE;
 pub const SLOT_ENTRY_SIZE: usize = 2;
 /// Width in bytes of the length prefix at the start of every leaf cell.
 pub const CELL_LENGTH_SIZE: usize = 2;
+/// Width in bytes of a freeblock header: next freeblock plus total span size.
+pub const FREEBLOCK_HEADER_SIZE: usize = 4;
+/// Maximum fragmented free bytes permitted on a page before defragmentation.
+pub const MAX_FRAGMENTED_FREE_BYTES: u16 = 60;
 
 /// Offset of the page-kind tag in the shared page header.
 pub const KIND_OFFSET: usize = 0;
@@ -25,8 +29,12 @@ pub const VERSION_OFFSET: usize = 1;
 pub const SLOT_COUNT_OFFSET: usize = 2;
 /// Offset of the content-start pointer in the shared page header.
 pub const CONTENT_START_OFFSET: usize = 4;
+/// Offset of the first freeblock pointer in the shared page header.
+pub const FIRST_FREEBLOCK_OFFSET: usize = 6;
+/// Offset of the fragmented free byte count in the shared page header.
+pub const FRAGMENTED_FREE_BYTES_OFFSET: usize = 8;
 /// Number of bytes in the header shared by all page kinds.
-pub const SHARED_HEADER_SIZE: usize = 6;
+pub const SHARED_HEADER_SIZE: usize = 10;
 /// Offset of the rightmost-child pointer in an interior-page header.
 pub const RIGHTMOST_CHILD_OFFSET: usize = SHARED_HEADER_SIZE;
 /// Total header size for a leaf page.
@@ -86,6 +94,19 @@ pub fn read_u16(bytes: &[u8; PAGE_SIZE], offset: usize) -> u16 {
 /// Writes a little-endian `u16` into `bytes` at `offset`.
 pub fn write_u16(bytes: &mut [u8; PAGE_SIZE], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Reads a sentinel-encoded optional `u16` from `bytes` at `offset`.
+pub fn read_optional_u16(bytes: &[u8; PAGE_SIZE], offset: usize) -> Option<u16> {
+    match read_u16(bytes, offset) {
+        u16::MAX => None,
+        value => Some(value),
+    }
+}
+
+/// Writes a sentinel-encoded optional `u16` into `bytes` at `offset`.
+pub fn write_optional_u16(bytes: &mut [u8; PAGE_SIZE], offset: usize, value: Option<u16>) {
+    write_u16(bytes, offset, value.unwrap_or(u16::MAX));
 }
 
 /// Reads a little-endian `u64` from `bytes` at `offset`.
