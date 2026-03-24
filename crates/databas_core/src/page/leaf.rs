@@ -127,8 +127,10 @@ where
             SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound { key: row_id }),
         };
 
+        let cell_offset = self.slot_offset(slot_index)?;
+        let cell_len = self.cell_len(slot_index)?;
         self.remove_slot(slot_index)?;
-        self.defragment()?;
+        self.reclaim_space(cell_offset, cell_len)?;
         Ok(slot_index)
     }
 
@@ -150,6 +152,7 @@ where
         let new_offset = self.reserve_space_for_rewrite(cell_len)?;
         write_cell(self.bytes_mut(), new_offset as usize, row_id, payload);
         self.set_slot_offset(slot_index, new_offset)?;
+        self.reclaim_space(old_offset as u16, old_len)?;
         Ok(())
     }
 }
@@ -331,6 +334,45 @@ mod tests {
     }
 
     #[test]
+    fn insert_reuses_exact_fit_freeblock() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        page.insert(10, b"abc").unwrap();
+        page.insert(20, b"def").unwrap();
+        let freed_offset = page.slot_offset(0).unwrap();
+
+        page.delete(10).unwrap();
+        assert_eq!(page.first_freeblock(), Some(freed_offset));
+
+        page.insert(15, b"xyz").unwrap();
+
+        assert_eq!(page.slot_offset(0).unwrap(), freed_offset);
+        assert_eq!(page.first_freeblock(), None);
+        assert_eq!(page.fragmented_free_bytes(), 0);
+        let page_ref = page.as_ref();
+        assert_eq!(page_ref.lookup(15).unwrap().unwrap().payload().unwrap(), b"xyz");
+    }
+
+    #[test]
+    fn insert_tracks_sub_header_freeblock_remainder_as_fragmented_bytes() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        page.insert(10, b"abc").unwrap();
+        page.insert(20, b"def").unwrap();
+        let freed_offset = page.slot_offset(0).unwrap();
+        assert_eq!(page.cell_len(0).unwrap(), LEAF_CELL_PREFIX_SIZE + 3);
+
+        page.delete(10).unwrap();
+        page.insert(15, b"x").unwrap();
+
+        assert_eq!(page.slot_offset(0).unwrap(), freed_offset + 2);
+        assert_eq!(page.first_freeblock(), None);
+        assert_eq!(page.fragmented_free_bytes(), 2);
+        let page_ref = page.as_ref();
+        assert_eq!(page_ref.lookup(15).unwrap().unwrap().payload().unwrap(), b"x");
+    }
+
+    #[test]
     fn insert_uses_defragmentation_retry_once() {
         let mut bytes = new_leaf_page();
         let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
@@ -438,7 +480,63 @@ mod tests {
     }
 
     #[test]
-    fn delete_produces_canonical_packed_layout() {
+    fn delete_at_content_start_absorbs_adjacent_freeblock_into_gap() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        page.insert(10, b"a").unwrap();
+        page.insert(20, b"b").unwrap();
+        page.insert(30, b"c").unwrap();
+        let offset10 = page.slot_offset(0).unwrap();
+        let offset20 = page.slot_offset(1).unwrap();
+        let offset30 = page.slot_offset(2).unwrap();
+        assert_eq!(page.content_start(), offset30);
+
+        page.delete(20).unwrap();
+        assert_eq!(page.first_freeblock(), Some(offset20));
+
+        page.delete(30).unwrap();
+
+        assert_eq!(page.content_start(), offset10);
+        assert_eq!(page.first_freeblock(), None);
+        assert_eq!(page.fragmented_free_bytes(), 0);
+        let page_ref = page.as_ref();
+        assert_eq!(page_ref.lookup(10).unwrap().unwrap().payload().unwrap(), b"a");
+    }
+
+    #[test]
+    fn delete_merges_adjacent_previous_and_next_freeblocks() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        page.insert(10, b"a").unwrap();
+        page.insert(20, b"b").unwrap();
+        page.insert(30, b"c").unwrap();
+        page.insert(40, b"d").unwrap();
+        let cell_len = page.cell_len(0).unwrap();
+        let offset10 = page.slot_offset(0).unwrap();
+        let offset20 = page.slot_offset(1).unwrap();
+        let offset30 = page.slot_offset(2).unwrap();
+        let offset40 = page.slot_offset(3).unwrap();
+
+        page.delete(30).unwrap();
+        page.delete(10).unwrap();
+        page.delete(20).unwrap();
+
+        let page_ref = page.as_ref();
+        assert_eq!(page_ref.content_start(), offset40);
+        let mut freeblocks = page_ref.freeblocks();
+        let freeblock = freeblocks.next().unwrap().unwrap();
+        assert_eq!(freeblock.offset, offset30);
+        assert_eq!(freeblock.size as usize, cell_len * 3);
+        assert_eq!(freeblock.next, None);
+        assert!(freeblocks.next().is_none());
+        assert_eq!(page_ref.first_freeblock(), Some(offset30));
+        assert_eq!(page_ref.lookup(40).unwrap().unwrap().payload().unwrap(), b"d");
+        let _ = offset10;
+        let _ = offset20;
+    }
+
+    #[test]
+    fn delete_leaves_page_valid_without_forcing_defragmentation() {
         let mut bytes = new_leaf_page();
         let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
         page.insert(10, b"abc").unwrap();
@@ -450,14 +548,42 @@ mod tests {
 
         let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
         assert_eq!(page.slot_count(), 2);
-        let offset0 = page.slot_offset(0).unwrap() as usize;
-        let len0 = page.cell_len(0).unwrap();
-        let offset1 = page.slot_offset(1).unwrap() as usize;
-        let len1 = page.cell_len(1).unwrap();
-        assert_eq!(offset0, page.content_start() as usize);
+        assert!(page.lookup(10).unwrap().is_none());
+        assert_eq!(page.lookup(20).unwrap().unwrap().payload().unwrap(), b"x");
+        assert_eq!(page.lookup(30).unwrap().unwrap().payload().unwrap(), b"z");
+        assert!(page.bytes()[USABLE_SPACE_END..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn defragment_clears_freeblock_chain_and_fragmented_bytes() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        page.insert(10, b"abc").unwrap();
+        page.insert(20, b"def").unwrap();
+        page.insert(30, b"ghi").unwrap();
+
+        page.delete(10).unwrap();
+        page.insert(15, b"x").unwrap();
+        page.delete(20).unwrap();
+
+        assert!(page.first_freeblock().is_some());
+        assert_eq!(page.fragmented_free_bytes(), 2);
+
+        page.defragment().unwrap();
+
+        let page_ref = page.as_ref();
+        assert_eq!(page_ref.first_freeblock(), None);
+        assert_eq!(page_ref.fragmented_free_bytes(), 0);
+        assert!(page_ref.freeblocks().next().is_none());
+        assert_eq!(page_ref.lookup(15).unwrap().unwrap().payload().unwrap(), b"x");
+        assert_eq!(page_ref.lookup(30).unwrap().unwrap().payload().unwrap(), b"ghi");
+        let offset0 = page_ref.slot_offset(0).unwrap() as usize;
+        let len0 = page_ref.cell_len(0).unwrap();
+        let offset1 = page_ref.slot_offset(1).unwrap() as usize;
+        let len1 = page_ref.cell_len(1).unwrap();
+        assert_eq!(offset0, page_ref.content_start() as usize);
         assert_eq!(offset1, offset0 + len0);
         assert_eq!(offset1 + len1, USABLE_SPACE_END);
-        assert!(page.bytes()[USABLE_SPACE_END..].iter().all(|byte| *byte == 0));
     }
 
     #[test]

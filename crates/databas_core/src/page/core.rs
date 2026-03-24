@@ -6,8 +6,9 @@ use crate::types::{PAGE_SIZE, PageId, RowId};
 use super::{
     error::{PageCorruption, PageError, PageResult},
     format::{
-        self, CELL_LENGTH_SIZE, CONTENT_START_OFFSET, FORMAT_VERSION, KIND_OFFSET,
-        SLOT_COUNT_OFFSET, USABLE_SPACE_END, VERSION_OFFSET,
+        self, CELL_LENGTH_SIZE, CONTENT_START_OFFSET, FIRST_FREEBLOCK_OFFSET, FORMAT_VERSION,
+        FRAGMENTED_FREE_BYTES_OFFSET, FREEBLOCK_HEADER_SIZE, KIND_OFFSET,
+        MAX_FRAGMENTED_FREE_BYTES, SLOT_COUNT_OFFSET, USABLE_SPACE_END, VERSION_OFFSET,
     },
 };
 
@@ -112,6 +113,71 @@ pub enum BoundResult {
     PastEnd,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Freeblock {
+    pub(crate) offset: u16,
+    pub(crate) size: u16,
+    pub(crate) next: Option<u16>,
+}
+
+impl Freeblock {
+    fn end(self) -> usize {
+        self.offset as usize + self.size as usize
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FreeblockIter<'a> {
+    bytes: &'a [u8; PAGE_SIZE],
+    content_start: u16,
+    next: Option<u16>,
+}
+
+impl<'a> FreeblockIter<'a> {
+    fn new(bytes: &'a [u8; PAGE_SIZE], content_start: u16, next: Option<u16>) -> Self {
+        Self { bytes, content_start, next }
+    }
+}
+
+impl Iterator for FreeblockIter<'_> {
+    type Item = PageResult<Freeblock>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let offset = self.next?;
+        match read_freeblock(self.bytes, self.content_start, offset) {
+            Ok(freeblock) => {
+                self.next = freeblock.next;
+                Some(Ok(freeblock))
+            }
+            Err(err) => {
+                self.next = None;
+                Some(Err(err))
+            }
+        }
+    }
+}
+
+fn read_freeblock(
+    bytes: &[u8; PAGE_SIZE],
+    content_start: u16,
+    offset: u16,
+) -> PageResult<Freeblock> {
+    let offset = offset as usize;
+    if offset < content_start as usize || offset + FREEBLOCK_HEADER_SIZE > USABLE_SPACE_END {
+        return Err(PageError::MalformedPage(PageCorruption::FreeblockOffsetOutOfBounds));
+    }
+
+    let size = format::read_u16(bytes, offset + 2);
+    if (size as usize) < FREEBLOCK_HEADER_SIZE {
+        return Err(PageError::MalformedPage(PageCorruption::FreeblockTooSmall));
+    }
+    if offset + size as usize > USABLE_SPACE_END {
+        return Err(PageError::MalformedPage(PageCorruption::FreeblockOutOfBounds));
+    }
+
+    Ok(Freeblock { offset: offset as u16, size, next: format::read_optional_u16(bytes, offset) })
+}
+
 impl<A, N> Page<A, N> {
     fn new(access: A) -> Self {
         Self { access, _marker: PhantomData }
@@ -150,12 +216,36 @@ where
         format::read_u16(self.bytes(), CONTENT_START_OFFSET)
     }
 
+    /// Returns the first freeblock on the page, if one exists.
+    pub fn first_freeblock(&self) -> Option<u16> {
+        format::read_optional_u16(self.bytes(), FIRST_FREEBLOCK_OFFSET)
+    }
+
     /// Returns the contiguous free space between the slot directory and cell content.
     pub fn free_space(&self) -> usize
     where
         N: NodeMarker,
     {
         self.content_start() as usize - self.slot_directory_end()
+    }
+
+    pub(crate) fn fragmented_free_bytes(&self) -> u16 {
+        format::read_u16(self.bytes(), FRAGMENTED_FREE_BYTES_OFFSET)
+    }
+
+    pub(crate) fn freeblocks(&self) -> FreeblockIter<'_> {
+        FreeblockIter::new(self.bytes(), self.content_start(), self.first_freeblock())
+    }
+
+    pub(crate) fn total_reclaimable_space(&self) -> PageResult<usize>
+    where
+        N: NodeMarker,
+    {
+        let mut total = self.free_space() + self.fragmented_free_bytes() as usize;
+        for freeblock in self.freeblocks() {
+            total += freeblock?.size as usize;
+        }
+        Ok(total)
     }
 
     pub(crate) fn slot_directory_end(&self) -> usize
@@ -292,6 +382,14 @@ where
         format::write_u16(self.bytes_mut(), CONTENT_START_OFFSET, content_start);
     }
 
+    pub(crate) fn set_first_freeblock(&mut self, first_freeblock: Option<u16>) {
+        format::write_optional_u16(self.bytes_mut(), FIRST_FREEBLOCK_OFFSET, first_freeblock);
+    }
+
+    pub(crate) fn set_fragmented_free_bytes(&mut self, fragmented_free_bytes: u16) {
+        format::write_u16(self.bytes_mut(), FRAGMENTED_FREE_BYTES_OFFSET, fragmented_free_bytes);
+    }
+
     pub(crate) fn set_slot_offset(&mut self, slot_index: u16, cell_offset: u16) -> PageResult<()> {
         self.validate_slot_index(slot_index)?;
         let offset = format::slot_entry_offset(N::KIND.header_size(), slot_index);
@@ -353,6 +451,8 @@ where
             );
         }
         format::write_u16(&mut packed, CONTENT_START_OFFSET, cursor as u16);
+        format::write_optional_u16(&mut packed, FIRST_FREEBLOCK_OFFSET, None);
+        format::write_u16(&mut packed, FRAGMENTED_FREE_BYTES_OFFSET, 0);
 
         *self.bytes_mut() = packed;
         Ok(())
@@ -369,17 +469,35 @@ where
     fn reserve_space(&mut self, cell_len: usize, extra_bytes: usize) -> PageResult<u16> {
         self.ensure_cell_fits(cell_len)?;
         let needed = cell_len + extra_bytes;
-        if self.free_space() < needed {
-            self.defragment()?;
+
+        if self.free_space() >= extra_bytes {
+            if let Some((previous, freeblock)) = self.find_first_fit_freeblock(cell_len)? {
+                let remainder = freeblock.size as usize - cell_len;
+                if remainder == 0
+                    || remainder >= FREEBLOCK_HEADER_SIZE
+                    || self.can_store_fragmented_bytes(remainder)
+                {
+                    return self.allocate_from_freeblock(previous, freeblock, cell_len);
+                }
+            }
         }
+
+        if self.free_space() >= needed {
+            return Ok(self.allocate_from_gap(cell_len));
+        }
+
+        let available = self.total_reclaimable_space()?;
+        if available < needed {
+            return Err(PageError::PageFull { needed, available });
+        }
+
+        self.defragment()?;
         let available = self.free_space();
         if available < needed {
             return Err(PageError::PageFull { needed, available });
         }
 
-        let new_content_start = self.content_start() as usize - cell_len;
-        self.set_content_start(new_content_start as u16);
-        Ok(new_content_start as u16)
+        Ok(self.allocate_from_gap(cell_len))
     }
 
     fn ensure_cell_fits(&self, cell_len: usize) -> PageResult<()> {
@@ -388,6 +506,162 @@ where
             return Err(PageError::CellTooLarge { len: cell_len, max });
         }
         Ok(())
+    }
+
+    fn find_first_fit_freeblock(
+        &self,
+        cell_len: usize,
+    ) -> PageResult<Option<(Option<Freeblock>, Freeblock)>> {
+        let mut previous = None;
+        for freeblock in self.freeblocks() {
+            let freeblock = freeblock?;
+            if freeblock.size as usize >= cell_len {
+                return Ok(Some((previous, freeblock)));
+            }
+            previous = Some(freeblock);
+        }
+        Ok(None)
+    }
+
+    fn allocate_from_gap(&mut self, cell_len: usize) -> u16 {
+        let new_content_start = self.content_start() as usize - cell_len;
+        self.set_content_start(new_content_start as u16);
+        new_content_start as u16
+    }
+
+    fn can_store_fragmented_bytes(&self, extra: usize) -> bool {
+        self.fragmented_free_bytes() as usize + extra <= MAX_FRAGMENTED_FREE_BYTES as usize
+    }
+
+    fn write_freeblock(&mut self, offset: u16, next: Option<u16>, size: u16) {
+        format::write_optional_u16(self.bytes_mut(), offset as usize, next);
+        format::write_u16(self.bytes_mut(), offset as usize + 2, size);
+    }
+
+    fn set_chain_link(&mut self, previous: Option<Freeblock>, next: Option<u16>) {
+        match previous {
+            Some(previous) => {
+                format::write_optional_u16(self.bytes_mut(), previous.offset as usize, next)
+            }
+            None => self.set_first_freeblock(next),
+        }
+    }
+
+    fn add_fragmented_bytes(&mut self, extra: u16) -> PageResult<()> {
+        let total = self.fragmented_free_bytes() + extra;
+        if total > MAX_FRAGMENTED_FREE_BYTES {
+            self.defragment()?;
+            return Ok(());
+        }
+        self.set_fragmented_free_bytes(total);
+        Ok(())
+    }
+
+    fn allocate_from_freeblock(
+        &mut self,
+        previous: Option<Freeblock>,
+        freeblock: Freeblock,
+        cell_len: usize,
+    ) -> PageResult<u16> {
+        let remainder = freeblock.size as usize - cell_len;
+        if remainder == 0 {
+            self.set_chain_link(previous, freeblock.next);
+            return Ok(freeblock.offset);
+        }
+
+        if remainder >= FREEBLOCK_HEADER_SIZE {
+            self.write_freeblock(freeblock.offset, freeblock.next, remainder as u16);
+            return Ok(freeblock.offset + remainder as u16);
+        }
+
+        self.set_chain_link(previous, freeblock.next);
+        self.add_fragmented_bytes(remainder as u16)?;
+        Ok(freeblock.offset + remainder as u16)
+    }
+
+    fn absorb_freeblocks_into_gap(&mut self) -> PageResult<()> {
+        while let Some(first_freeblock) = self.first_freeblock() {
+            if first_freeblock as usize != self.content_start() as usize {
+                break;
+            }
+
+            let freeblock = read_freeblock(self.bytes(), self.content_start(), first_freeblock)?;
+            self.set_first_freeblock(freeblock.next);
+            self.set_content_start(freeblock.end() as u16);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reclaim_space(&mut self, cell_offset: u16, cell_len: usize) -> PageResult<()> {
+        if self.slot_count() == 0 {
+            self.reset_empty_page();
+            return Ok(());
+        }
+
+        let reclaim_start = cell_offset as usize;
+        // If the reclaimed bytes touch the unallocated gap, grow the gap upward and
+        // then keep folding in any freeblocks that now become adjacent to it.
+        if reclaim_start == self.content_start() as usize {
+            self.set_content_start((reclaim_start + cell_len) as u16);
+            self.absorb_freeblocks_into_gap()?;
+            return Ok(());
+        }
+
+        let reclaim_end = reclaim_start + cell_len;
+        let mut previous = None;
+        let mut next = None;
+        // The freeblock chain stays sorted by offset, so a single walk finds both
+        // neighbors we may need to merge with.
+        for freeblock in self.freeblocks() {
+            let freeblock = freeblock?;
+            if freeblock.offset as usize >= reclaim_end {
+                next = Some(freeblock);
+                break;
+            }
+            previous = Some(freeblock);
+        }
+
+        let merged_with_previous = previous.filter(|freeblock| freeblock.end() == reclaim_start);
+        let merged_with_next = next.filter(|freeblock| reclaim_end == freeblock.offset as usize);
+
+        if let Some(previous) = merged_with_previous {
+            // Reuse the previous freeblock header when the reclaimed region bridges
+            // into it, optionally absorbing the next freeblock too.
+            let merged_end = merged_with_next.map_or(reclaim_end, Freeblock::end);
+            let next_link = match merged_with_next {
+                Some(freeblock) => freeblock.next,
+                None => previous.next,
+            };
+            self.write_freeblock(
+                previous.offset,
+                next_link,
+                (merged_end - previous.offset as usize) as u16,
+            );
+            return Ok(());
+        }
+
+        let merged_start = cell_offset;
+        let merged_end = merged_with_next.map_or(reclaim_end, Freeblock::end);
+        let merged_size = merged_end - merged_start as usize;
+        if merged_size < FREEBLOCK_HEADER_SIZE {
+            // Tiny isolated holes cannot encode a freeblock header, so they count
+            // toward fragmented free bytes until a later defragmentation pass.
+            return self.add_fragmented_bytes(merged_size as u16);
+        }
+
+        let next_link = match merged_with_next {
+            Some(freeblock) => freeblock.next,
+            None => next.map(|freeblock| freeblock.offset),
+        };
+        self.write_freeblock(merged_start, next_link, merged_size as u16);
+        self.set_chain_link(previous, Some(merged_start));
+        Ok(())
+    }
+
+    fn reset_empty_page(&mut self) {
+        self.set_content_start(USABLE_SPACE_END as u16);
+        self.set_first_freeblock(None);
+        self.set_fragmented_free_bytes(0);
     }
 }
 
@@ -423,6 +697,8 @@ where
         bytes[VERSION_OFFSET] = FORMAT_VERSION;
         format::write_u16(bytes, SLOT_COUNT_OFFSET, 0);
         format::write_u16(bytes, CONTENT_START_OFFSET, USABLE_SPACE_END as u16);
+        format::write_optional_u16(bytes, FIRST_FREEBLOCK_OFFSET, None);
+        format::write_u16(bytes, FRAGMENTED_FREE_BYTES_OFFSET, 0);
         Self::new(Write { bytes })
     }
 }
@@ -513,6 +789,14 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
             PageCorruption::SlotDirectoryOverlapsContent
         }));
     }
+    if format::read_u16(bytes, FRAGMENTED_FREE_BYTES_OFFSET) > MAX_FRAGMENTED_FREE_BYTES {
+        return Err(PageError::MalformedPage(PageCorruption::FragmentedFreeBytesTooLarge));
+    }
+
+    let first_freeblock = format::read_optional_u16(bytes, FIRST_FREEBLOCK_OFFSET);
+    for freeblock in FreeblockIter::new(bytes, content_start as u16, first_freeblock) {
+        let _ = freeblock?;
+    }
 
     for slot_index in 0..slot_count as u16 {
         let slot_offset =
@@ -555,7 +839,19 @@ mod tests {
         assert_eq!(bytes[VERSION_OFFSET], FORMAT_VERSION);
         assert_eq!(format::read_u16(&bytes, SLOT_COUNT_OFFSET), 0);
         assert_eq!(format::read_u16(&bytes, CONTENT_START_OFFSET), USABLE_SPACE_END as u16);
+        assert_eq!(format::read_optional_u16(&bytes, FIRST_FREEBLOCK_OFFSET), None);
+        assert_eq!(format::read_u16(&bytes, FRAGMENTED_FREE_BYTES_OFFSET), 0);
         assert_eq!(&bytes[USABLE_SPACE_END..], &[0_u8; PAGE_SIZE - USABLE_SPACE_END]);
+    }
+
+    #[test]
+    fn first_freeblock_sentinel_parses_as_none() {
+        let mut bytes = initialized_leaf_page();
+        format::write_u16(&mut bytes, FIRST_FREEBLOCK_OFFSET, u16::MAX);
+
+        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
+
+        assert_eq!(page.first_freeblock(), None);
     }
 
     #[test]
@@ -653,6 +949,36 @@ mod tests {
         assert_eq!(
             result.unwrap_err(),
             PageError::MalformedPage(PageCorruption::ReservedFooterNotZero)
+        );
+    }
+
+    #[test]
+    fn open_rejects_fragmented_free_bytes_past_maximum() {
+        let mut bytes = initialized_leaf_page();
+        format::write_u16(&mut bytes, FRAGMENTED_FREE_BYTES_OFFSET, MAX_FRAGMENTED_FREE_BYTES + 1);
+
+        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+
+        assert_eq!(
+            result.unwrap_err(),
+            PageError::MalformedPage(PageCorruption::FragmentedFreeBytesTooLarge)
+        );
+    }
+
+    #[test]
+    fn open_rejects_freeblock_smaller_than_header() {
+        let mut bytes = initialized_leaf_page();
+        let freeblock_offset = (USABLE_SPACE_END - FREEBLOCK_HEADER_SIZE) as u16;
+        format::write_u16(&mut bytes, CONTENT_START_OFFSET, freeblock_offset);
+        format::write_optional_u16(&mut bytes, FIRST_FREEBLOCK_OFFSET, Some(freeblock_offset));
+        format::write_optional_u16(&mut bytes, freeblock_offset as usize, None);
+        format::write_u16(&mut bytes, freeblock_offset as usize + 2, 3);
+
+        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+
+        assert_eq!(
+            result.unwrap_err(),
+            PageError::MalformedPage(PageCorruption::FreeblockTooSmall)
         );
     }
 
