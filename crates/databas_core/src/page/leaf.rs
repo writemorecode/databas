@@ -142,17 +142,20 @@ where
             SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound { key: row_id }),
         };
 
-        let old_offset = self.slot_offset(slot_index)? as usize;
         let old_len = self.cell_len(slot_index)?;
         if old_len == cell_len {
+            let old_offset = self.slot_offset(slot_index)? as usize;
             write_cell(self.bytes_mut(), old_offset, row_id, payload);
             return Ok(());
         }
 
         let new_offset = self.reserve_space_for_rewrite(cell_len)?;
+        // Reserving rewrite space may defragment the page and rewrite slot offsets,
+        // so re-read the old cell location before reclaiming it.
+        let old_offset = self.slot_offset(slot_index)?;
         write_cell(self.bytes_mut(), new_offset as usize, row_id, payload);
         self.set_slot_offset(slot_index, new_offset)?;
-        self.reclaim_space(old_offset as u16, old_len)?;
+        self.reclaim_space(old_offset, old_len)?;
         Ok(())
     }
 }
@@ -597,6 +600,29 @@ mod tests {
 
         let err = page.update(20, &[2_u8; 2500]).unwrap_err();
         assert!(matches!(err, PageError::PageFull { .. }));
+    }
+
+    #[test]
+    fn update_after_defragmentation_keeps_page_valid() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let large = [1_u8; 1500];
+        let medium = [3_u8; 100];
+        let rewritten = [2_u8; 2000];
+        page.insert(10, &large).unwrap();
+        page.insert(20, &medium).unwrap();
+        page.insert(30, &large).unwrap();
+        page.insert(40, b"small").unwrap();
+
+        page.update(10, b"x").unwrap();
+        page.update(30, b"y").unwrap();
+        page.update(40, &rewritten).unwrap();
+
+        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
+        assert_eq!(page.lookup(10).unwrap().unwrap().payload().unwrap(), b"x");
+        assert_eq!(page.lookup(20).unwrap().unwrap().payload().unwrap(), medium);
+        assert_eq!(page.lookup(30).unwrap().unwrap().payload().unwrap(), b"y");
+        assert_eq!(page.lookup(40).unwrap().unwrap().payload().unwrap(), rewritten);
     }
 
     #[test]
