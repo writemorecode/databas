@@ -794,7 +794,12 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
     }
 
     let first_freeblock = format::read_optional_u16(bytes, FIRST_FREEBLOCK_OFFSET);
-    for freeblock in FreeblockIter::new(bytes, content_start as u16, first_freeblock) {
+    // Bound the number of freeblocks we traverse to avoid infinite loops
+    // on malformed pages where the freeblock chain contains a cycle.
+    let max_freeblocks = USABLE_SPACE_END / FREEBLOCK_HEADER_SIZE;
+    for freeblock in
+        FreeblockIter::new(bytes, content_start as u16, first_freeblock).take(max_freeblocks)
+    {
         let _ = freeblock?;
     }
 
