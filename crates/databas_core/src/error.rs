@@ -16,6 +16,10 @@ pub(crate) enum PageCacheError {
     PinnedPage(u64),
     InvalidFrameCount(usize),
     CorruptPageTableEntry { page_id: u64, frame_id: usize, frame_count: usize },
+    PageTableBorrowConflict { mutable: bool },
+    ReplacementBorrowConflict { mutable: bool },
+    DiskManagerBorrowConflict { mutable: bool },
+    PageBorrowConflict { page_id: Option<u64>, frame_id: usize, mutable: bool },
 }
 
 pub(crate) type PageCacheResult<T> = Result<T, PageCacheError>;
@@ -66,6 +70,28 @@ impl fmt::Display for PageCacheError {
                 f,
                 "corrupt page table entry: page {page_id} maps to invalid frame {frame_id} (frame count: {frame_count})"
             ),
+            Self::PageTableBorrowConflict { mutable } => {
+                let borrow_kind = if *mutable { "mutable" } else { "shared" };
+                write!(f, "{borrow_kind} borrow conflict for page table")
+            }
+            Self::ReplacementBorrowConflict { mutable } => {
+                let borrow_kind = if *mutable { "mutable" } else { "shared" };
+                write!(f, "{borrow_kind} borrow conflict for replacement policy")
+            }
+            Self::DiskManagerBorrowConflict { mutable } => {
+                let borrow_kind = if *mutable { "mutable" } else { "shared" };
+                write!(f, "{borrow_kind} borrow conflict for disk manager")
+            }
+            Self::PageBorrowConflict { page_id, frame_id, mutable } => {
+                let borrow_kind = if *mutable { "mutable" } else { "shared" };
+                match page_id {
+                    Some(page_id) => write!(
+                        f,
+                        "{borrow_kind} borrow conflict for page {page_id} in frame {frame_id}"
+                    ),
+                    None => write!(f, "{borrow_kind} borrow conflict for empty frame {frame_id}"),
+                }
+            }
         }
     }
 }
@@ -77,7 +103,11 @@ impl StdError for PageCacheError {
             Self::NoEvictableFrame
             | Self::PinnedPage(_)
             | Self::InvalidFrameCount(_)
-            | Self::CorruptPageTableEntry { .. } => None,
+            | Self::CorruptPageTableEntry { .. }
+            | Self::PageTableBorrowConflict { .. }
+            | Self::ReplacementBorrowConflict { .. }
+            | Self::DiskManagerBorrowConflict { .. }
+            | Self::PageBorrowConflict { .. } => None,
         }
     }
 }
