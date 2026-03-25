@@ -7,7 +7,7 @@
 use crate::types::PAGE_SIZE;
 
 /// Current on-disk page format version.
-pub const FORMAT_VERSION: u8 = 1;
+pub const FORMAT_VERSION: u8 = 2;
 /// Number of bytes reserved at the end of every page.
 pub const RESERVED_FOOTER_SIZE: usize = 4;
 /// Exclusive end offset of the usable region within a page buffer.
@@ -33,8 +33,12 @@ pub const CONTENT_START_OFFSET: usize = 4;
 pub const FIRST_FREEBLOCK_OFFSET: usize = 6;
 /// Offset of the fragmented free byte count in the shared page header.
 pub const FRAGMENTED_FREE_BYTES_OFFSET: usize = 8;
+/// Offset of the previous-page sibling pointer in the shared page header.
+pub const PREV_PAGE_ID_OFFSET: usize = 10;
+/// Offset of the next-page sibling pointer in the shared page header.
+pub const NEXT_PAGE_ID_OFFSET: usize = PREV_PAGE_ID_OFFSET + 8;
 /// Number of bytes in the header shared by all page kinds.
-pub const SHARED_HEADER_SIZE: usize = 10;
+pub const SHARED_HEADER_SIZE: usize = NEXT_PAGE_ID_OFFSET + 8;
 /// Offset of the rightmost-child pointer in an interior-page header.
 pub const RIGHTMOST_CHILD_OFFSET: usize = SHARED_HEADER_SIZE;
 /// Total header size for a leaf page.
@@ -114,9 +118,22 @@ pub fn read_u64(bytes: &[u8; PAGE_SIZE], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("u64 slice has fixed width"))
 }
 
+/// Reads a sentinel-encoded optional `u64` from `bytes` at `offset`.
+pub fn read_optional_u64(bytes: &[u8; PAGE_SIZE], offset: usize) -> Option<u64> {
+    match read_u64(bytes, offset) {
+        u64::MAX => None,
+        value => Some(value),
+    }
+}
+
 /// Writes a little-endian `u64` into `bytes` at `offset`.
 pub fn write_u64(bytes: &mut [u8; PAGE_SIZE], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Writes a sentinel-encoded optional `u64` into `bytes` at `offset`.
+pub fn write_optional_u64(bytes: &mut [u8; PAGE_SIZE], offset: usize, value: Option<u64>) {
+    write_u64(bytes, offset, value.unwrap_or(u64::MAX));
 }
 
 /// Returns the byte offset of `slot_index` within a slot directory.
@@ -141,6 +158,18 @@ mod tests {
         assert_eq!(PageKind::from_raw(0), None);
         assert_eq!(PageKind::Leaf.header_size(), LEAF_HEADER_SIZE);
         assert_eq!(PageKind::Interior.header_size(), INTERIOR_HEADER_SIZE);
+    }
+
+    #[test]
+    fn optional_u64_helpers_round_trip_sentinel_encoding() {
+        let mut bytes = [0_u8; PAGE_SIZE];
+
+        write_optional_u64(&mut bytes, PREV_PAGE_ID_OFFSET, None);
+        write_optional_u64(&mut bytes, NEXT_PAGE_ID_OFFSET, Some(42));
+
+        assert_eq!(read_optional_u64(&bytes, PREV_PAGE_ID_OFFSET), None);
+        assert_eq!(read_optional_u64(&bytes, NEXT_PAGE_ID_OFFSET), Some(42));
+        assert_eq!(read_u64(&bytes, PREV_PAGE_ID_OFFSET), u64::MAX);
     }
 
     #[test]
