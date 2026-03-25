@@ -1,4 +1,4 @@
-use crate::types::{PAGE_SIZE, PageId, RowId};
+use crate::types::{PAGE_SIZE, PageId, RowId, SlotId};
 
 use super::{
     PageError, PageResult,
@@ -21,7 +21,7 @@ pub(crate) struct InteriorCellParts {
 
 pub(crate) fn cell_parts<A>(
     page: &Page<A, Interior>,
-    slot_index: u16,
+    slot_index: SlotId,
 ) -> PageResult<InteriorCellParts>
 where
     A: PageAccess,
@@ -86,7 +86,7 @@ where
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: u16) -> PageResult<Cell<Read<'_>, Interior>> {
+    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<Read<'_>, Interior>> {
         cell_parts(self, slot_index)?;
         Ok(Cell::new(Read { bytes: self.bytes() }, slot_index))
     }
@@ -110,14 +110,14 @@ where
     }
 
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: u16) -> PageResult<Cell<Write<'_>, Interior>> {
+    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<Cell<Write<'_>, Interior>> {
         let page = Page::<Read<'_>, Interior>::open(self.bytes())?;
         cell_parts(&page, slot_index)?;
         Ok(Cell::new(Write { bytes: self.bytes_mut() }, slot_index))
     }
 
     /// Inserts a new separator key and its left-child pointer while preserving slot order.
-    pub fn insert(&mut self, row_id: RowId, left_child: PageId) -> PageResult<u16> {
+    pub fn insert(&mut self, row_id: RowId, left_child: PageId) -> PageResult<SlotId> {
         let slot_index = match self.search(row_id)? {
             SearchResult::Found(_) => return Err(PageError::DuplicateKey { key: row_id }),
             SearchResult::InsertAt(slot_index) => slot_index,

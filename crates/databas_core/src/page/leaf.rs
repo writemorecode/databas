@@ -1,4 +1,4 @@
-use crate::types::{PAGE_SIZE, RowId};
+use crate::types::{PAGE_SIZE, RowId, SlotId};
 
 use super::{
     CellCorruption, PageError, PageResult,
@@ -18,7 +18,7 @@ pub(crate) struct LeafCellParts {
     pub(crate) payload_end: usize,
 }
 
-pub(crate) fn cell_parts<A>(page: &Page<A, Leaf>, slot_index: u16) -> PageResult<LeafCellParts>
+pub(crate) fn cell_parts<A>(page: &Page<A, Leaf>, slot_index: SlotId) -> PageResult<LeafCellParts>
 where
     A: PageAccess,
 {
@@ -81,7 +81,7 @@ where
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: u16) -> PageResult<Cell<Read<'_>, Leaf>> {
+    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<Read<'_>, Leaf>> {
         cell_parts(self, slot_index)?;
         Ok(Cell::new(Read { bytes: self.bytes() }, slot_index))
     }
@@ -100,14 +100,14 @@ where
     A: PageAccessMut,
 {
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: u16) -> PageResult<Cell<Write<'_>, Leaf>> {
+    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<Cell<Write<'_>, Leaf>> {
         let page = Page::<Read<'_>, Leaf>::open(self.bytes())?;
         cell_parts(&page, slot_index)?;
         Ok(Cell::new(Write { bytes: self.bytes_mut() }, slot_index))
     }
 
     /// Inserts a new `(row_id, payload)` record while preserving slot order.
-    pub fn insert(&mut self, row_id: RowId, payload: &[u8]) -> PageResult<u16> {
+    pub fn insert(&mut self, row_id: RowId, payload: &[u8]) -> PageResult<SlotId> {
         let cell_len = encoded_len(payload.len())?;
         let slot_index = match self.search(row_id)? {
             SearchResult::Found(_) => return Err(PageError::DuplicateKey { key: row_id }),
@@ -121,7 +121,7 @@ where
     }
 
     /// Deletes an existing `(row_id, payload)` record and re-packs the page.
-    pub fn delete(&mut self, row_id: RowId) -> PageResult<u16> {
+    pub fn delete(&mut self, row_id: RowId) -> PageResult<SlotId> {
         let slot_index = match self.search(row_id)? {
             SearchResult::Found(slot_index) => slot_index,
             SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound { key: row_id }),
@@ -226,6 +226,7 @@ mod tests {
         page.insert(30, b"thirty").unwrap();
 
         let page = page.as_ref();
+        assert_eq!(page.cell(0).unwrap().slot_index(), 0 as SlotId);
         assert_eq!(page.cell(0).unwrap().row_id().unwrap(), 10);
         assert_eq!(page.cell(1).unwrap().row_id().unwrap(), 20);
         assert_eq!(page.cell(2).unwrap().row_id().unwrap(), 30);

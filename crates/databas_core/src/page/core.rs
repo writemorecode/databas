@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 use std::cmp::Ordering;
 
-use crate::types::{PAGE_SIZE, PageId, RowId};
+use crate::types::{PAGE_SIZE, PageId, RowId, SlotId};
 
 use super::{
     error::{PageCorruption, PageError, PageResult},
@@ -100,16 +100,16 @@ pub enum AnyPage<A> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchResult {
     /// The key already exists at the returned slot index.
-    Found(u16),
+    Found(SlotId),
     /// The key is absent and should be inserted at the returned slot index.
-    InsertAt(u16),
+    InsertAt(SlotId),
 }
 
 /// Result of locating a bound within a sorted slot directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoundResult {
     /// The bound resolves to an existing slot index.
-    At(u16),
+    At(SlotId),
     /// The bound lies past the last slot on the page.
     PastEnd,
 }
@@ -266,7 +266,7 @@ where
         N::KIND.header_size() + self.slot_count() as usize * format::SLOT_ENTRY_SIZE
     }
 
-    pub(crate) fn slot_offset(&self, slot_index: u16) -> PageResult<u16>
+    pub(crate) fn slot_offset(&self, slot_index: SlotId) -> PageResult<u16>
     where
         N: NodeMarker,
     {
@@ -278,9 +278,9 @@ where
     pub(crate) fn search_slots_by<F>(&self, key: RowId, mut read_key: F) -> PageResult<SearchResult>
     where
         N: NodeMarker,
-        F: FnMut(&Self, u16) -> PageResult<RowId>,
+        F: FnMut(&Self, SlotId) -> PageResult<RowId>,
     {
-        let mut low = 0_u16;
+        let mut low: SlotId = 0;
         let mut high = self.slot_count();
 
         while low < high {
@@ -306,10 +306,10 @@ where
     ) -> PageResult<BoundResult>
     where
         N: NodeMarker,
-        F: FnMut(&Self, u16) -> PageResult<RowId>,
+        F: FnMut(&Self, SlotId) -> PageResult<RowId>,
         P: FnMut(Ordering) -> bool,
     {
-        let mut low = 0_u16;
+        let mut low: SlotId = 0;
         let mut high = self.slot_count();
 
         while low < high {
@@ -328,7 +328,7 @@ where
     pub(crate) fn lower_bound_slots_by<F>(&self, key: RowId, read_key: F) -> PageResult<BoundResult>
     where
         N: NodeMarker,
-        F: FnMut(&Self, u16) -> PageResult<RowId>,
+        F: FnMut(&Self, SlotId) -> PageResult<RowId>,
     {
         self.bound_slots_by(key, read_key, |ordering| ordering == Ordering::Less)
     }
@@ -336,12 +336,12 @@ where
     pub(crate) fn upper_bound_slots_by<F>(&self, key: RowId, read_key: F) -> PageResult<BoundResult>
     where
         N: NodeMarker,
-        F: FnMut(&Self, u16) -> PageResult<RowId>,
+        F: FnMut(&Self, SlotId) -> PageResult<RowId>,
     {
         self.bound_slots_by(key, read_key, |ordering| ordering != Ordering::Greater)
     }
 
-    pub(crate) fn validate_slot_index(&self, slot_index: u16) -> PageResult<()> {
+    pub(crate) fn validate_slot_index(&self, slot_index: SlotId) -> PageResult<()> {
         let slot_count = self.slot_count();
         if slot_index >= slot_count {
             return Err(PageError::InvalidSlotIndex { slot_index, slot_count });
@@ -349,7 +349,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn cell_len(&self, slot_index: u16) -> PageResult<usize>
+    pub(crate) fn cell_len(&self, slot_index: SlotId) -> PageResult<usize>
     where
         N: NodeMarker,
     {
@@ -411,14 +411,18 @@ where
         format::write_u16(self.bytes_mut(), FRAGMENTED_FREE_BYTES_OFFSET, fragmented_free_bytes);
     }
 
-    pub(crate) fn set_slot_offset(&mut self, slot_index: u16, cell_offset: u16) -> PageResult<()> {
+    pub(crate) fn set_slot_offset(
+        &mut self,
+        slot_index: SlotId,
+        cell_offset: u16,
+    ) -> PageResult<()> {
         self.validate_slot_index(slot_index)?;
         let offset = format::slot_entry_offset(N::KIND.header_size(), slot_index);
         format::write_u16(self.bytes_mut(), offset, cell_offset);
         Ok(())
     }
 
-    pub(crate) fn insert_slot(&mut self, slot_index: u16, cell_offset: u16) -> PageResult<()> {
+    pub(crate) fn insert_slot(&mut self, slot_index: SlotId, cell_offset: u16) -> PageResult<()> {
         let slot_count = self.slot_count();
         if slot_index > slot_count {
             return Err(PageError::InvalidSlotIndex { slot_index, slot_count });
@@ -435,7 +439,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn remove_slot(&mut self, slot_index: u16) -> PageResult<u16> {
+    pub(crate) fn remove_slot(&mut self, slot_index: SlotId) -> PageResult<u16> {
         self.validate_slot_index(slot_index)?;
         let slot_count = self.slot_count();
         let header_size = N::KIND.header_size();
@@ -826,7 +830,7 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
         let _ = freeblock?;
     }
 
-    for slot_index in 0..slot_count as u16 {
+    for slot_index in 0..slot_count as SlotId {
         let slot_offset =
             format::read_u16(bytes, format::slot_entry_offset(header_size, slot_index)) as usize;
         if slot_offset < content_start || slot_offset >= USABLE_SPACE_END {
@@ -1144,7 +1148,7 @@ mod tests {
         let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
         let keys = [10_u64, 20, 40, 80];
 
-        let read_key = |_: &Page<Read<'_>, Leaf>, slot_index: u16| Ok(keys[slot_index as usize]);
+        let read_key = |_: &Page<Read<'_>, Leaf>, slot_index: SlotId| Ok(keys[slot_index as usize]);
 
         assert_eq!(page.search_slots_by(5, read_key).unwrap(), SearchResult::InsertAt(0));
         assert_eq!(page.search_slots_by(10, read_key).unwrap(), SearchResult::Found(0));

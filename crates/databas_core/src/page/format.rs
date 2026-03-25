@@ -4,7 +4,7 @@
 //! upward from the header, a packed cell-content region that grows downward
 //! from the end of usable space, and a zeroed reserved footer.
 
-use crate::types::PAGE_SIZE;
+use crate::types::{PAGE_SIZE, SlotId};
 
 /// Current on-disk page format version.
 pub const FORMAT_VERSION: u8 = 2;
@@ -137,7 +137,7 @@ pub fn write_optional_u64(bytes: &mut [u8; PAGE_SIZE], offset: usize, value: Opt
 }
 
 /// Returns the byte offset of `slot_index` within a slot directory.
-pub const fn slot_entry_offset(header_size: usize, slot_index: u16) -> usize {
+pub const fn slot_entry_offset(header_size: usize, slot_index: SlotId) -> usize {
     header_size + (slot_index as usize * SLOT_ENTRY_SIZE)
 }
 
