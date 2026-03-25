@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use crate::types::{PAGE_SIZE, PageId, RowId};
+use crate::types::{PAGE_SIZE, PageId, RowId, SlotId};
 
 use super::{
     PageResult,
@@ -12,17 +12,17 @@ use super::{
 #[derive(Debug)]
 pub struct Cell<A, N> {
     access: A,
-    slot_index: u16,
+    slot_index: SlotId,
     _marker: PhantomData<N>,
 }
 
 impl<A, N> Cell<A, N> {
-    pub(crate) fn new(access: A, slot_index: u16) -> Self {
+    pub(crate) fn new(access: A, slot_index: SlotId) -> Self {
         Self { access, slot_index, _marker: PhantomData }
     }
 
     /// Returns the slot index that this cell view refers to.
-    pub fn slot_index(&self) -> u16 {
+    pub fn slot_index(&self) -> SlotId {
         self.slot_index
     }
 }

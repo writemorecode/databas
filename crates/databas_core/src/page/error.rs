@@ -1,6 +1,6 @@
 use std::{error::Error as StdError, fmt};
 
-use crate::types::RowId;
+use crate::types::{RowId, SlotId};
 
 use super::format::PageKind;
 
@@ -14,11 +14,11 @@ pub enum PageError {
     /// The encoded page version does not match [`super::FORMAT_VERSION`].
     InvalidPageVersion { expected: u8, actual: u8 },
     /// A requested slot index is out of bounds for the current slot count.
-    InvalidSlotIndex { slot_index: u16, slot_count: u16 },
+    InvalidSlotIndex { slot_index: SlotId, slot_count: u16 },
     /// The page header or slot directory is structurally invalid.
     MalformedPage(PageCorruption),
     /// A specific cell failed validation.
-    CorruptCell { slot_index: u16, kind: CellCorruption },
+    CorruptCell { slot_index: SlotId, kind: CellCorruption },
     /// An insert attempted to reuse an existing row id.
     DuplicateKey { key: RowId },
     /// An update targeted a row id that is not present.
@@ -156,6 +156,10 @@ mod tests {
     fn error_display_mentions_key_details() {
         let duplicate = PageError::DuplicateKey { key: 42 };
         assert_eq!(duplicate.to_string(), "duplicate key: 42");
+
+        let slot_index: SlotId = 7;
+        let invalid_slot = PageError::InvalidSlotIndex { slot_index, slot_count: 3 };
+        assert_eq!(invalid_slot.to_string(), "invalid slot index 7 for 3 slots");
 
         let unknown_kind = PageError::UnknownPageKind { actual: 9 };
         assert!(unknown_kind.to_string().contains("unknown page kind"));
