@@ -186,11 +186,19 @@ mod tests {
         let mut bytes = new_interior_page(7);
         let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
         assert_eq!(page.rightmost_child(), 7);
+        assert_eq!(page.prev_page_id(), None);
+        assert_eq!(page.next_page_id(), None);
 
+        page.set_prev_page_id(Some(5));
+        page.set_next_page_id(Some(9));
         page.set_rightmost_child(88);
 
         assert_eq!(page.rightmost_child(), 88);
+        assert_eq!(page.prev_page_id(), Some(5));
+        assert_eq!(page.next_page_id(), Some(9));
         assert_eq!(page.as_ref().rightmost_child(), 88);
+        assert_eq!(page.as_ref().prev_page_id(), Some(5));
+        assert_eq!(page.as_ref().next_page_id(), Some(9));
     }
 
     #[test]
@@ -326,9 +334,11 @@ mod tests {
     }
 
     #[test]
-    fn defragmentation_preserves_order_rightmost_child_and_footer() {
+    fn defragmentation_preserves_order_sibling_pointers_rightmost_child_and_footer() {
         let mut bytes = new_interior_page(444);
         let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        page.set_prev_page_id(Some(111));
+        page.set_next_page_id(Some(222));
         page.insert(10, 1).unwrap();
         page.insert(20, 2).unwrap();
         page.insert(30, 3).unwrap();
@@ -339,6 +349,8 @@ mod tests {
 
         let page_ref = page.as_ref();
         assert_eq!(page_ref.rightmost_child(), 444);
+        assert_eq!(page_ref.prev_page_id(), Some(111));
+        assert_eq!(page_ref.next_page_id(), Some(222));
         assert_eq!(page_ref.cell(0).unwrap().row_id().unwrap(), 10);
         assert_eq!(page_ref.cell(1).unwrap().row_id().unwrap(), 20);
         assert_eq!(page_ref.cell(2).unwrap().row_id().unwrap(), 30);

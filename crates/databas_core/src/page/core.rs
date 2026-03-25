@@ -8,7 +8,8 @@ use super::{
     format::{
         self, CELL_LENGTH_SIZE, CONTENT_START_OFFSET, FIRST_FREEBLOCK_OFFSET, FORMAT_VERSION,
         FRAGMENTED_FREE_BYTES_OFFSET, FREEBLOCK_HEADER_SIZE, KIND_OFFSET,
-        MAX_FRAGMENTED_FREE_BYTES, SLOT_COUNT_OFFSET, USABLE_SPACE_END, VERSION_OFFSET,
+        MAX_FRAGMENTED_FREE_BYTES, NEXT_PAGE_ID_OFFSET, PREV_PAGE_ID_OFFSET, SLOT_COUNT_OFFSET,
+        USABLE_SPACE_END, VERSION_OFFSET,
     },
 };
 
@@ -221,6 +222,16 @@ where
         format::read_optional_u16(self.bytes(), FIRST_FREEBLOCK_OFFSET)
     }
 
+    /// Returns the previous sibling page id on the same tree level, if present.
+    pub fn prev_page_id(&self) -> Option<PageId> {
+        format::read_optional_u64(self.bytes(), PREV_PAGE_ID_OFFSET)
+    }
+
+    /// Returns the next sibling page id on the same tree level, if present.
+    pub fn next_page_id(&self) -> Option<PageId> {
+        format::read_optional_u64(self.bytes(), NEXT_PAGE_ID_OFFSET)
+    }
+
     /// Returns the contiguous free space between the slot directory and cell content.
     pub fn free_space(&self) -> usize
     where
@@ -384,6 +395,16 @@ where
 
     pub(crate) fn set_first_freeblock(&mut self, first_freeblock: Option<u16>) {
         format::write_optional_u16(self.bytes_mut(), FIRST_FREEBLOCK_OFFSET, first_freeblock);
+    }
+
+    /// Updates the previous sibling page id stored in the page header.
+    pub fn set_prev_page_id(&mut self, page_id: Option<PageId>) {
+        format::write_optional_u64(self.bytes_mut(), PREV_PAGE_ID_OFFSET, page_id);
+    }
+
+    /// Updates the next sibling page id stored in the page header.
+    pub fn set_next_page_id(&mut self, page_id: Option<PageId>) {
+        format::write_optional_u64(self.bytes_mut(), NEXT_PAGE_ID_OFFSET, page_id);
     }
 
     pub(crate) fn set_fragmented_free_bytes(&mut self, fragmented_free_bytes: u16) {
@@ -699,6 +720,8 @@ where
         format::write_u16(bytes, CONTENT_START_OFFSET, USABLE_SPACE_END as u16);
         format::write_optional_u16(bytes, FIRST_FREEBLOCK_OFFSET, None);
         format::write_u16(bytes, FRAGMENTED_FREE_BYTES_OFFSET, 0);
+        format::write_optional_u64(bytes, PREV_PAGE_ID_OFFSET, None);
+        format::write_optional_u64(bytes, NEXT_PAGE_ID_OFFSET, None);
         Self::new(Write { bytes })
     }
 }
@@ -846,7 +869,41 @@ mod tests {
         assert_eq!(format::read_u16(&bytes, CONTENT_START_OFFSET), USABLE_SPACE_END as u16);
         assert_eq!(format::read_optional_u16(&bytes, FIRST_FREEBLOCK_OFFSET), None);
         assert_eq!(format::read_u16(&bytes, FRAGMENTED_FREE_BYTES_OFFSET), 0);
+        assert_eq!(format::read_optional_u64(&bytes, PREV_PAGE_ID_OFFSET), None);
+        assert_eq!(format::read_optional_u64(&bytes, NEXT_PAGE_ID_OFFSET), None);
         assert_eq!(&bytes[USABLE_SPACE_END..], &[0_u8; PAGE_SIZE - USABLE_SPACE_END]);
+    }
+
+    #[test]
+    fn leaf_sibling_accessors_round_trip() {
+        let mut bytes = initialized_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+
+        assert_eq!(page.prev_page_id(), None);
+        assert_eq!(page.next_page_id(), None);
+
+        page.set_prev_page_id(Some(11));
+        page.set_next_page_id(Some(22));
+
+        let page = page.as_ref();
+        assert_eq!(page.prev_page_id(), Some(11));
+        assert_eq!(page.next_page_id(), Some(22));
+    }
+
+    #[test]
+    fn interior_sibling_accessors_round_trip() {
+        let mut bytes = initialized_interior_page();
+        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+
+        assert_eq!(page.prev_page_id(), None);
+        assert_eq!(page.next_page_id(), None);
+
+        page.set_prev_page_id(Some(33));
+        page.set_next_page_id(Some(44));
+
+        let page = page.as_ref();
+        assert_eq!(page.prev_page_id(), Some(33));
+        assert_eq!(page.next_page_id(), Some(44));
     }
 
     #[test]

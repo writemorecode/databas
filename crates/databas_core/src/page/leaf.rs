@@ -558,9 +558,11 @@ mod tests {
     }
 
     #[test]
-    fn defragment_clears_freeblock_chain_and_fragmented_bytes() {
+    fn defragment_clears_freeblock_chain_and_fragmented_bytes_and_preserves_sibling_pointers() {
         let mut bytes = new_leaf_page();
         let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        page.set_prev_page_id(Some(12));
+        page.set_next_page_id(Some(34));
         page.insert(10, b"abc").unwrap();
         page.insert(20, b"def").unwrap();
         page.insert(30, b"ghi").unwrap();
@@ -577,6 +579,8 @@ mod tests {
         let page_ref = page.as_ref();
         assert_eq!(page_ref.first_freeblock(), None);
         assert_eq!(page_ref.fragmented_free_bytes(), 0);
+        assert_eq!(page_ref.prev_page_id(), Some(12));
+        assert_eq!(page_ref.next_page_id(), Some(34));
         assert!(page_ref.freeblocks().next().is_none());
         assert_eq!(page_ref.lookup(15).unwrap().unwrap().payload().unwrap(), b"x");
         assert_eq!(page_ref.lookup(30).unwrap().unwrap().payload().unwrap(), b"ghi");
