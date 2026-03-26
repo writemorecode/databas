@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::{
     disk_manager::DiskManager,
     error::{PageCacheError, PageCacheResult},
+    page_replacement::ClockPolicy,
     types::{PAGE_SIZE, PageId},
 };
 
@@ -12,7 +13,6 @@ pub(crate) type FrameId = usize;
 struct Frame {
     page_id: Option<PageId>,
     data: [u8; PAGE_SIZE],
-    reference: bool,
     dirty: bool,
     pin_count: u32,
 }
@@ -20,7 +20,7 @@ struct Frame {
 impl Frame {
     /// Creates an empty frame with zeroed page data and cleared metadata bits.
     fn empty() -> Self {
-        Self { page_id: None, data: [0u8; PAGE_SIZE], reference: false, dirty: false, pin_count: 0 }
+        Self { page_id: None, data: [0u8; PAGE_SIZE], dirty: false, pin_count: 0 }
     }
 }
 
@@ -28,7 +28,7 @@ pub(crate) struct PageCache {
     disk_manager: DiskManager,
     frames: Vec<Frame>,
     page_table: HashMap<PageId, FrameId>,
-    clock_hand: FrameId,
+    replacement: ClockPolicy,
 }
 
 impl PageCache {
@@ -44,13 +44,13 @@ impl PageCache {
             disk_manager,
             frames: vec![Frame::empty(); frame_count],
             page_table: HashMap::new(),
-            clock_hand: 0,
+            replacement: ClockPolicy::new(frame_count),
         })
     }
 
     /// Fetches an existing page into the cache and returns a pin guard.
     ///
-    /// Cache hits set the reference bit and increment pin count.
+    /// Cache hits update replacement state and increment pin count.
     /// Cache misses use CLOCK replacement and may evict a dirty page.
     pub(crate) fn fetch_page(&mut self, page_id: PageId) -> PageCacheResult<PinGuard<'_>> {
         if let Some(&frame_id) = self.page_table.get(&page_id) {
@@ -59,8 +59,8 @@ impl PageCache {
                 .frames
                 .get_mut(frame_id)
                 .ok_or(PageCacheError::CorruptPageTableEntry { page_id, frame_id, frame_count })?;
-            frame.reference = true;
             frame.pin_count = frame.pin_count.checked_add(1).expect("pin count overflow");
+            self.replacement.record_access(frame_id);
             return Ok(PinGuard::new(self, frame_id));
         }
 
@@ -128,30 +128,9 @@ impl PageCache {
         Ok(())
     }
 
-    /// Selects a victim frame using CLOCK second-chance replacement.
-    ///
-    /// Pinned frames are skipped and referenced frames get one second chance.
     fn select_victim_frame(&mut self) -> Option<FrameId> {
-        let max_scans = self.frames.len().saturating_mul(2);
-
-        for _ in 0..max_scans {
-            let frame_id = self.clock_hand;
-            self.advance_clock_hand();
-
-            let frame = &mut self.frames[frame_id];
-            if frame.pin_count > 0 {
-                continue;
-            }
-
-            if frame.reference {
-                frame.reference = false;
-                continue;
-            }
-
-            return Some(frame_id);
-        }
-
-        None
+        let (replacement, frames) = (&mut self.replacement, &self.frames);
+        replacement.select_victim(|frame_id| frames[frame_id].pin_count > 0)
     }
 
     /// Replaces frame contents with `new_page_id`, flushing old dirty data first.
@@ -165,7 +144,8 @@ impl PageCache {
         let mut data = [0u8; PAGE_SIZE];
         self.disk_manager.read_page(new_page_id, &mut data)?;
         self.frames[frame_id] =
-            Frame { page_id: Some(new_page_id), data, reference: true, dirty: false, pin_count: 1 };
+            Frame { page_id: Some(new_page_id), data, dirty: false, pin_count: 1 };
+        self.replacement.record_insert(frame_id);
 
         self.page_table.insert(new_page_id, frame_id);
         Ok(())
@@ -184,11 +164,6 @@ impl PageCache {
         disk_manager.write_page(page_id, &frame.data)?;
         frame.dirty = false;
         Ok(())
-    }
-
-    /// Advances the CLOCK hand, wrapping at the frame vector length.
-    fn advance_clock_hand(&mut self) {
-        self.clock_hand = (self.clock_hand + 1) % self.frames.len();
     }
 
     /// Attempts to flush all dirty unpinned frames and ignores write errors.
@@ -303,7 +278,6 @@ mod tests {
         assert_eq!(cache.frames.len(), 3);
         for frame in &cache.frames {
             assert_eq!(frame.page_id, None);
-            assert_eq!(frame.reference, false);
             assert_eq!(frame.dirty, false);
             assert_eq!(frame.pin_count, 0);
             assert_eq!(frame.data, [0u8; PAGE_SIZE]);
@@ -321,8 +295,8 @@ mod tests {
         assert_eq!(guard.page(), &page);
         drop(guard);
 
+        assert_eq!(cache.frames[0].page_id, Some(0));
         assert_eq!(cache.frames[0].pin_count, 0);
-        assert_eq!(cache.frames[0].reference, true);
     }
 
     #[test]
@@ -409,23 +383,10 @@ mod tests {
         let (_file, disk_manager) = create_disk_with_pages(&pages);
         let mut cache = PageCache::new(disk_manager, 2).unwrap();
 
-        cache.frames[0] = Frame {
-            page_id: Some(0),
-            data: pages[0],
-            reference: false,
-            dirty: false,
-            pin_count: 1,
-        };
-        cache.frames[1] = Frame {
-            page_id: Some(1),
-            data: pages[1],
-            reference: false,
-            dirty: false,
-            pin_count: 0,
-        };
+        cache.frames[0] = Frame { page_id: Some(0), data: pages[0], dirty: false, pin_count: 1 };
+        cache.frames[1] = Frame { page_id: Some(1), data: pages[1], dirty: false, pin_count: 0 };
         cache.page_table.insert(0, 0);
         cache.page_table.insert(1, 1);
-        cache.clock_hand = 0;
 
         {
             let _guard = cache.fetch_page(2).unwrap();
@@ -443,23 +404,10 @@ mod tests {
         let (_file, disk_manager) = create_disk_with_pages(&pages);
         let mut cache = PageCache::new(disk_manager, 2).unwrap();
 
-        cache.frames[0] = Frame {
-            page_id: Some(0),
-            data: pages[0],
-            reference: false,
-            dirty: false,
-            pin_count: 1,
-        };
-        cache.frames[1] = Frame {
-            page_id: Some(1),
-            data: pages[1],
-            reference: false,
-            dirty: false,
-            pin_count: 1,
-        };
+        cache.frames[0] = Frame { page_id: Some(0), data: pages[0], dirty: false, pin_count: 1 };
+        cache.frames[1] = Frame { page_id: Some(1), data: pages[1], dirty: false, pin_count: 1 };
         cache.page_table.insert(0, 0);
         cache.page_table.insert(1, 1);
-        cache.clock_hand = 0;
 
         let result = cache.fetch_page(2);
         assert!(matches!(result, Err(PageCacheError::NoEvictableFrame)));
@@ -492,8 +440,7 @@ mod tests {
         let (_file, disk_manager) = create_disk_with_pages(&pages);
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
-        cache.frames[0] =
-            Frame { page_id: Some(0), data: page, reference: true, dirty: true, pin_count: 1 };
+        cache.frames[0] = Frame { page_id: Some(0), data: page, dirty: true, pin_count: 1 };
         cache.page_table.insert(0, 0);
 
         let result = cache.flush_page(0);
@@ -547,8 +494,7 @@ mod tests {
         let (_file, disk_manager) = create_disk_with_pages(&pages);
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
-        cache.frames[0] =
-            Frame { page_id: Some(0), data: page, reference: true, dirty: true, pin_count: 1 };
+        cache.frames[0] = Frame { page_id: Some(0), data: page, dirty: true, pin_count: 1 };
         cache.page_table.insert(0, 0);
 
         let result = cache.flush_all();
@@ -606,13 +552,8 @@ mod tests {
         let disk_manager = DiskManager::new(file.path()).unwrap();
         let mut cache = PageCache::new(disk_manager, 1).unwrap();
 
-        cache.frames[0] = Frame {
-            page_id: None,
-            data: [0u8; PAGE_SIZE],
-            reference: false,
-            dirty: false,
-            pin_count: 1,
-        };
+        cache.frames[0] =
+            Frame { page_id: None, data: [0u8; PAGE_SIZE], dirty: false, pin_count: 1 };
 
         let result = cache.new_page();
         assert!(matches!(result, Err(PageCacheError::NoEvictableFrame)));
