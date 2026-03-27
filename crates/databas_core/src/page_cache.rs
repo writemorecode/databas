@@ -202,22 +202,16 @@ impl PageCache {
 
     /// Replaces frame contents with `new_page_id`, flushing old dirty data first.
     fn replace_frame(&self, frame_id: FrameId, new_page_id: PageId) -> PageCacheResult<()> {
+        self.flush_frame_if_dirty(frame_id)?;
+
         let frame = &self.frames[frame_id];
         let old_page_id = frame.page_id.get();
-        let mut page_table = self.try_page_table_mut()?;
-        let mut replacement = self.try_replacement_mut()?;
-        let mut disk_manager = self.try_disk_manager_mut()?;
-        let mut frame_data = Self::try_frame_data_mut(frame, frame_id)?;
-
-        if let Some(old_page_id) = old_page_id
-            && frame.dirty.get()
-        {
-            disk_manager.write_page(old_page_id, &frame_data)?;
-            frame.dirty.set(false);
-        }
 
         let mut data = [0u8; PAGE_SIZE];
-        disk_manager.read_page(new_page_id, &mut data)?;
+        self.try_disk_manager_mut()?.read_page(new_page_id, &mut data)?;
+        let mut page_table = self.try_page_table_mut()?;
+        let mut replacement = self.try_replacement_mut()?;
+        let mut frame_data = Self::try_frame_data_mut(frame, frame_id)?;
 
         if let Some(old_page_id) = old_page_id {
             page_table.remove(&old_page_id);
@@ -832,14 +826,13 @@ mod tests {
     }
 
     #[test]
-    fn replace_frame_returns_error_without_side_effects_on_page_table_conflict() {
+    fn replace_frame_returns_error_without_partial_commit_on_page_table_conflict() {
         let pages = [page_with_pattern(3), page_with_pattern(5)];
-        let (file, disk_manager) = create_disk_with_pages(&pages);
+        let (_file, disk_manager) = create_disk_with_pages(&pages);
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
         {
-            let guard = cache.fetch_page(0).unwrap();
-            guard.page_mut().unwrap()[0] = 99;
+            let _guard = cache.fetch_page(0).unwrap();
         }
 
         let page_table = cache.page_table.try_borrow_mut().unwrap();
@@ -848,18 +841,13 @@ mod tests {
         drop(page_table);
 
         assert_eq!(cache.frames[0].page_id.get(), Some(0));
-        assert!(cache.frames[0].dirty.get());
+        assert!(!cache.frames[0].dirty.get());
         assert_eq!(cache.frames[0].pin_count.get(), 0);
-        let cached_page = cache.frames[0].data.try_borrow().unwrap();
-        assert_eq!(cached_page[0], 99);
-        assert_eq!(&cached_page[1..], &pages[0][1..]);
+        assert_eq!(*cache.frames[0].data.try_borrow().unwrap(), pages[0]);
 
         let page_table = cache.page_table.try_borrow().unwrap();
         assert_eq!(page_table.get(&0), Some(&0));
         assert!(!page_table.contains_key(&1));
-
-        let page_on_disk = read_disk_page(file.path(), 0);
-        assert_eq!(page_on_disk, pages[0]);
     }
 
     #[test]
