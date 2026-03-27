@@ -14,6 +14,8 @@ pub(crate) enum PageCacheError {
     Storage(StorageError),
     NoEvictableFrame,
     PinnedPage(u64),
+    PageImmutableBorrowConflict(u64),
+    PageMutableBorrowConflict(u64),
     InvalidFrameCount(usize),
     CorruptPageTableEntry { page_id: u64, frame_id: usize, frame_count: usize },
 }
@@ -59,6 +61,18 @@ impl fmt::Display for PageCacheError {
             Self::Storage(err) => write!(f, "storage error: {err}"),
             Self::NoEvictableFrame => write!(f, "no evictable frame available"),
             Self::PinnedPage(page_id) => write!(f, "page {page_id} is pinned"),
+            Self::PageImmutableBorrowConflict(page_id) => {
+                write!(
+                    f,
+                    "page {page_id} cannot be borrowed immutably while a mutable borrow is active"
+                )
+            }
+            Self::PageMutableBorrowConflict(page_id) => {
+                write!(
+                    f,
+                    "page {page_id} cannot be borrowed mutably while another borrow is active"
+                )
+            }
             Self::InvalidFrameCount(frame_count) => {
                 write!(f, "invalid frame count: {frame_count}")
             }
@@ -76,6 +90,8 @@ impl StdError for PageCacheError {
             Self::Storage(err) => Some(err),
             Self::NoEvictableFrame
             | Self::PinnedPage(_)
+            | Self::PageImmutableBorrowConflict(_)
+            | Self::PageMutableBorrowConflict(_)
             | Self::InvalidFrameCount(_)
             | Self::CorruptPageTableEntry { .. } => None,
         }
