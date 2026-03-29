@@ -15,7 +15,7 @@
 //! individual slot entries after lookup.
 //!
 //! Layout details that are part of the stable page format are re-exported from
-//! [`format`], including header sizes, slot entry width, and the current
+//! [`mod@format`], including header sizes, slot entry width, and the current
 //! [`FORMAT_VERSION`].
 
 mod cell;
