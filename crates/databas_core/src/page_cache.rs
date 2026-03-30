@@ -27,7 +27,7 @@ use crate::{
     error::{PageCacheError, PageCacheResult},
     page::{AnyPage, NodeMarker, Page, PageResult, Read, Write},
     page_replacement::ClockPolicy,
-    types::{PAGE_SIZE, PageId},
+    {PAGE_SIZE, PageId},
 };
 
 pub(crate) type FrameId = usize;

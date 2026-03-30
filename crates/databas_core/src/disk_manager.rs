@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     error::{DiskManagerError, DiskManagerResult},
-    types::{PAGE_SIZE, PageId},
+    {PAGE_SIZE, PageId},
 };
 
 /// Reads and writes pages to and from a database file.

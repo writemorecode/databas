@@ -1,4 +1,4 @@
-use crate::types::{PAGE_SIZE, RowId, SlotId};
+use crate::{PAGE_SIZE, RowId, SlotId};
 
 use super::{
     CellCorruption, PageError, PageResult,
