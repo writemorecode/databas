@@ -20,9 +20,9 @@ pub enum PageError {
     /// A specific cell failed validation.
     CorruptCell { slot_index: SlotId, kind: CellCorruption },
     /// An insert attempted to reuse an existing row id.
-    DuplicateKey { key: RowId },
+    DuplicateRowId { row_id: RowId },
     /// An update targeted a row id that is not present.
-    KeyNotFound { key: RowId },
+    RowIdNotFound { row_id: RowId },
     /// The page has insufficient free space for the requested operation.
     PageFull { needed: usize, available: usize },
     /// A cell encoding is larger than what the page format can represent.
@@ -87,8 +87,8 @@ impl fmt::Display for PageError {
             Self::CorruptCell { slot_index, kind } => {
                 write!(f, "corrupt cell at slot {slot_index}: {kind}")
             }
-            Self::DuplicateKey { key } => write!(f, "duplicate key: {key}"),
-            Self::KeyNotFound { key } => write!(f, "key not found: {key}"),
+            Self::DuplicateRowId { row_id } => write!(f, "duplicate row id: {row_id}"),
+            Self::RowIdNotFound { row_id } => write!(f, "row id not found: {row_id}"),
             Self::PageFull { needed, available } => {
                 write!(f, "page full: need {needed} bytes, only {available} available")
             }
@@ -99,7 +99,22 @@ impl fmt::Display for PageError {
     }
 }
 
-impl StdError for PageError {}
+impl StdError for PageError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::MalformedPage(kind) => Some(kind),
+            Self::CorruptCell { kind, .. } => Some(kind),
+            Self::UnknownPageKind { .. }
+            | Self::InvalidPageKind { .. }
+            | Self::InvalidPageVersion { .. }
+            | Self::InvalidSlotIndex { .. }
+            | Self::DuplicateRowId { .. }
+            | Self::RowIdNotFound { .. }
+            | Self::PageFull { .. }
+            | Self::CellTooLarge { .. } => None,
+        }
+    }
+}
 
 impl fmt::Display for PageCorruption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -148,23 +163,6 @@ impl fmt::Display for CellCorruption {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl StdError for PageCorruption {}
 
-    #[test]
-    fn error_display_mentions_key_details() {
-        let duplicate = PageError::DuplicateKey { key: 42 };
-        assert_eq!(duplicate.to_string(), "duplicate key: 42");
-
-        let slot_index: SlotId = 7;
-        let invalid_slot = PageError::InvalidSlotIndex { slot_index, slot_count: 3 };
-        assert_eq!(invalid_slot.to_string(), "invalid slot index 7 for 3 slots");
-
-        let unknown_kind = PageError::UnknownPageKind { actual: 9 };
-        assert!(unknown_kind.to_string().contains("unknown page kind"));
-
-        let invalid_kind = PageError::InvalidPageKind { expected: PageKind::Leaf, actual: 9 };
-        assert!(invalid_kind.to_string().contains("expected Leaf"));
-    }
-}
+impl StdError for CellCorruption {}

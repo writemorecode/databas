@@ -110,7 +110,7 @@ where
     pub fn insert(&mut self, row_id: RowId, payload: &[u8]) -> PageResult<SlotId> {
         let cell_len = encoded_len(payload.len())?;
         let slot_index = match self.search(row_id)? {
-            SearchResult::Found(_) => return Err(PageError::DuplicateKey { key: row_id }),
+            SearchResult::Found(_) => return Err(PageError::DuplicateRowId { row_id }),
             SearchResult::InsertAt(slot_index) => slot_index,
         };
 
@@ -124,7 +124,7 @@ where
     pub fn delete(&mut self, row_id: RowId) -> PageResult<SlotId> {
         let slot_index = match self.search(row_id)? {
             SearchResult::Found(slot_index) => slot_index,
-            SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound { key: row_id }),
+            SearchResult::InsertAt(_) => return Err(PageError::RowIdNotFound { row_id }),
         };
 
         let cell_offset = self.slot_offset(slot_index)?;
@@ -139,7 +139,7 @@ where
         let cell_len = encoded_len(payload.len())?;
         let slot_index = match self.search(row_id)? {
             SearchResult::Found(slot_index) => slot_index,
-            SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound { key: row_id }),
+            SearchResult::InsertAt(_) => return Err(PageError::RowIdNotFound { row_id }),
         };
 
         let old_len = self.cell_len(slot_index)?;
@@ -239,7 +239,7 @@ mod tests {
 
         page.insert(10, b"ten").unwrap();
         let err = page.insert(10, b"again").unwrap_err();
-        assert_eq!(err, PageError::DuplicateKey { key: 10 });
+        assert_eq!(err, PageError::DuplicateRowId { row_id: 10 });
     }
 
     #[test]
@@ -404,7 +404,7 @@ mod tests {
         let mut bytes = new_leaf_page();
         let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
         let err = page.update(88, b"missing").unwrap_err();
-        assert_eq!(err, PageError::KeyNotFound { key: 88 });
+        assert_eq!(err, PageError::RowIdNotFound { row_id: 88 });
     }
 
     #[test]
@@ -444,7 +444,7 @@ mod tests {
 
         let err = page.delete(99).unwrap_err();
 
-        assert_eq!(err, PageError::KeyNotFound { key: 99 });
+        assert_eq!(err, PageError::RowIdNotFound { row_id: 99 });
     }
 
     #[test]

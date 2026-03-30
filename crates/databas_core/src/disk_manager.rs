@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    error::{StorageError, StorageResult},
+    error::{DiskManagerError, DiskManagerResult},
     types::{PAGE_SIZE, PageId},
 };
 
@@ -17,7 +17,7 @@ pub(crate) struct DiskManager {
 
 impl DiskManager {
     /// Create a new `DiskManager` from a path to a file.
-    pub(crate) fn new(path: &Path) -> Result<Self, StorageError> {
+    pub(crate) fn new(path: &Path) -> Result<Self, DiskManagerError> {
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -30,7 +30,7 @@ impl DiskManager {
         let file_size = file_metadata.len();
 
         if !file_size.is_multiple_of(PAGE_SIZE as u64) {
-            return Err(StorageError::InvalidFileSize(file_size));
+            return Err(DiskManagerError::InvalidFileSize { size: file_size });
         }
 
         let page_count = file_size / (PAGE_SIZE as u64);
@@ -40,7 +40,7 @@ impl DiskManager {
 
     /// Extends the database file by one page.
     /// Returns page ID of the new page.
-    pub(crate) fn new_page(&mut self) -> StorageResult<PageId> {
+    pub(crate) fn new_page(&mut self) -> DiskManagerResult<PageId> {
         let page_id = self.page_count;
         let new_page_id = page_id + 1;
         let new_file_size = Self::page_offset(new_page_id);
@@ -55,9 +55,9 @@ impl DiskManager {
         &mut self,
         page_id: PageId,
         buf: &mut [u8; PAGE_SIZE],
-    ) -> StorageResult<()> {
+    ) -> DiskManagerResult<()> {
         if page_id >= self.page_count {
-            return Err(StorageError::InvalidPageId(page_id));
+            return Err(DiskManagerError::InvalidPageId { page_id });
         }
         let offset = Self::page_offset(page_id);
         self.file.seek(std::io::SeekFrom::Start(offset))?;
@@ -70,9 +70,9 @@ impl DiskManager {
         &mut self,
         page_id: PageId,
         buf: &[u8; PAGE_SIZE],
-    ) -> StorageResult<()> {
+    ) -> DiskManagerResult<()> {
         if page_id >= self.page_count {
-            return Err(StorageError::InvalidPageId(page_id));
+            return Err(DiskManagerError::InvalidPageId { page_id });
         }
         let offset = Self::page_offset(page_id);
         self.file.seek(std::io::SeekFrom::Start(offset))?;
@@ -127,7 +127,10 @@ mod test {
         let mut buf = [0u8; PAGE_SIZE];
         let page_id = 5000;
         let read = dm.read_page(page_id, &mut buf);
-        assert!(matches!(read, Err(StorageError::InvalidPageId(id)) if id == page_id));
+        assert!(matches!(
+            read,
+            Err(DiskManagerError::InvalidPageId { page_id: id }) if id == page_id
+        ));
     }
 
     #[test]
@@ -137,7 +140,10 @@ mod test {
         let buf = [0u8; PAGE_SIZE];
         let page_id = 5000;
         let write = dm.write_page(page_id, &buf);
-        assert!(matches!(write, Err(StorageError::InvalidPageId(id)) if id == page_id));
+        assert!(matches!(
+            write,
+            Err(DiskManagerError::InvalidPageId { page_id: id }) if id == page_id
+        ));
     }
 
     #[test]
@@ -149,7 +155,7 @@ mod test {
         let dm = DiskManager::new(file.path());
         assert!(matches!(
             dm,
-            Err(StorageError::InvalidFileSize(size)) if size == invalid_size
+            Err(DiskManagerError::InvalidFileSize { size }) if size == invalid_size
         ));
     }
 
@@ -188,13 +194,13 @@ mod test {
         let read = dm.read_page(invalid_page_id, &mut read_buf);
         assert!(matches!(
             read,
-            Err(StorageError::InvalidPageId(id)) if id == invalid_page_id
+            Err(DiskManagerError::InvalidPageId { page_id: id }) if id == invalid_page_id
         ));
 
         let write = dm.write_page(invalid_page_id, &write_buf);
         assert!(matches!(
             write,
-            Err(StorageError::InvalidPageId(id)) if id == invalid_page_id
+            Err(DiskManagerError::InvalidPageId { page_id: id }) if id == invalid_page_id
         ));
     }
 
