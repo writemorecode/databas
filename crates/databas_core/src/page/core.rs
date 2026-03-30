@@ -495,15 +495,15 @@ where
         self.ensure_cell_fits(cell_len)?;
         let needed = cell_len + extra_bytes;
 
-        if self.free_space() >= extra_bytes {
-            if let Some((previous, freeblock)) = self.find_first_fit_freeblock(cell_len)? {
-                let remainder = freeblock.size as usize - cell_len;
-                if remainder == 0
-                    || remainder >= FREEBLOCK_HEADER_SIZE
-                    || self.can_store_fragmented_bytes(remainder)
-                {
-                    return self.allocate_from_freeblock(previous, freeblock, cell_len);
-                }
+        if self.free_space() >= extra_bytes
+            && let Some((previous, freeblock)) = self.find_first_fit_freeblock(cell_len)?
+        {
+            let remainder = freeblock.size as usize - cell_len;
+            if remainder == 0
+                || remainder >= FREEBLOCK_HEADER_SIZE
+                || self.can_store_fragmented_bytes(remainder)
+            {
+                return self.allocate_from_freeblock(previous, freeblock, cell_len);
             }
         }
 
