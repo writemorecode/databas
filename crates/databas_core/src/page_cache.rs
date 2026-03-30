@@ -109,7 +109,7 @@ impl PageCache {
     /// Returns an error when `frame_count` is zero.
     pub(crate) fn new(disk_manager: DiskManager, frame_count: usize) -> PageCacheResult<Self> {
         if frame_count == 0 {
-            return Err(PageCacheError::InvalidFrameCount(frame_count));
+            return Err(PageCacheError::InvalidFrameCount { frame_count });
         }
 
         Ok(Self {
@@ -162,7 +162,7 @@ impl PageCache {
 
         let frame = &self.inner.frames[frame_id];
         if frame.pin_count.get() > 0 {
-            return Err(PageCacheError::PinnedPage(page_id));
+            return Err(PageCacheError::PinnedPage { page_id });
         }
 
         self.flush_frame_if_dirty(frame_id)
@@ -186,7 +186,7 @@ impl PageCache {
             };
 
             if pin_count > 0 {
-                return Err(PageCacheError::PinnedPage(page_id));
+                return Err(PageCacheError::PinnedPage { page_id });
             }
 
             self.flush_frame_if_dirty(frame_id)?;
@@ -236,7 +236,9 @@ impl PageCache {
 
         {
             let mut frame_data = frame.data.try_borrow_mut().map_err(|_| {
-                PageCacheError::PageMutableBorrowConflict(old_page_id.unwrap_or(new_page_id))
+                PageCacheError::PageMutableBorrowConflict {
+                    page_id: old_page_id.unwrap_or(new_page_id),
+                }
             })?;
             *frame_data = data;
         }
@@ -268,7 +270,7 @@ impl PageCache {
         let page = frame
             .data
             .try_borrow()
-            .map_err(|_| PageCacheError::PageImmutableBorrowConflict(page_id))?;
+            .map_err(|_| PageCacheError::PageImmutableBorrowConflict { page_id })?;
         self.inner.disk_manager.borrow_mut().write_page(page_id, &page)?;
         frame.dirty.set(false);
         Ok(())
@@ -309,7 +311,7 @@ impl PinGuard {
         let page = frame
             .data
             .try_borrow()
-            .map_err(|_| PageCacheError::PageImmutableBorrowConflict(self.page_id))?;
+            .map_err(|_| PageCacheError::PageImmutableBorrowConflict { page_id: self.page_id })?;
         Ok(PageReadGuard { page })
     }
 
@@ -323,7 +325,7 @@ impl PinGuard {
         let page = frame
             .data
             .try_borrow_mut()
-            .map_err(|_| PageCacheError::PageMutableBorrowConflict(self.page_id))?;
+            .map_err(|_| PageCacheError::PageMutableBorrowConflict { page_id: self.page_id })?;
         frame.dirty.set(true);
         Ok(PageWriteGuard { page })
     }
@@ -459,7 +461,7 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let disk_manager = DiskManager::new(file.path()).unwrap();
         let result = PageCache::new(disk_manager, 0);
-        assert!(matches!(result, Err(PageCacheError::InvalidFrameCount(0))));
+        assert!(matches!(result, Err(PageCacheError::InvalidFrameCount { frame_count: 0 })));
     }
 
     #[test]
@@ -631,7 +633,7 @@ mod tests {
         let _write = guard.write().unwrap();
 
         let result = guard.read();
-        assert!(matches!(result, Err(PageCacheError::PageImmutableBorrowConflict(0))));
+        assert!(matches!(result, Err(PageCacheError::PageImmutableBorrowConflict { page_id: 0 })));
     }
 
     #[test]
@@ -645,7 +647,7 @@ mod tests {
         let _read = guard.read().unwrap();
 
         let result = guard.write();
-        assert!(matches!(result, Err(PageCacheError::PageMutableBorrowConflict(0))));
+        assert!(matches!(result, Err(PageCacheError::PageMutableBorrowConflict { page_id: 0 })));
     }
 
     #[test]
@@ -659,7 +661,7 @@ mod tests {
         let _first_write = guard.write().unwrap();
 
         let result = guard.write();
-        assert!(matches!(result, Err(PageCacheError::PageMutableBorrowConflict(0))));
+        assert!(matches!(result, Err(PageCacheError::PageMutableBorrowConflict { page_id: 0 })));
     }
 
     #[test]
@@ -796,7 +798,7 @@ mod tests {
         cache.inner.meta.borrow_mut().page_table.insert(0, 0);
 
         let result = cache.flush_page(0);
-        assert!(matches!(result, Err(PageCacheError::PinnedPage(0))));
+        assert!(matches!(result, Err(PageCacheError::PinnedPage { page_id: 0 })));
     }
 
     #[test]
@@ -853,7 +855,7 @@ mod tests {
         cache.inner.meta.borrow_mut().page_table.insert(0, 0);
 
         let result = cache.flush_all();
-        assert!(matches!(result, Err(PageCacheError::PinnedPage(0))));
+        assert!(matches!(result, Err(PageCacheError::PinnedPage { page_id: 0 })));
     }
 
     #[test]
@@ -915,7 +917,10 @@ mod tests {
         let mut disk_manager = DiskManager::new(file.path()).unwrap();
         let mut page = [0u8; PAGE_SIZE];
         let read_result = disk_manager.read_page(0, &mut page);
-        assert!(matches!(read_result, Err(crate::error::StorageError::InvalidPageId(0))));
+        assert!(matches!(
+            read_result,
+            Err(crate::error::DiskManagerError::InvalidPageId { page_id: 0 })
+        ));
     }
 
     #[test]

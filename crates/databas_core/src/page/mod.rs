@@ -33,7 +33,7 @@ pub use core::{
     SearchResult, Write,
 };
 /// Errors returned while validating or manipulating encoded pages and cells.
-pub use error::{CellCorruption, PageCorruption, PageError, PageResult};
+pub(crate) use error::{CellCorruption, PageCorruption, PageError, PageResult};
 /// Public page-format constants and layout metadata used by page encoders and decoders.
 pub use format::{
     CELL_LENGTH_SIZE, FORMAT_VERSION, FREEBLOCK_HEADER_SIZE, INTERIOR_HEADER_SIZE,
