@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::{
     page::{CellCorruption, PageCorruption, PageError},
-    types::{PAGE_SIZE, PageId, RowId},
+    {PAGE_SIZE, PageId, RowId},
 };
 
 #[derive(Debug, Error)]

@@ -1,4 +1,4 @@
-use crate::types::{PAGE_SIZE, PageId, RowId, SlotId};
+use crate::{PAGE_SIZE, PageId, RowId, SlotId};
 
 use super::{
     PageError, PageResult,

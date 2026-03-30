@@ -1,4 +1,4 @@
-use crate::types::{RowId, SlotId};
+use crate::{RowId, SlotId};
 use thiserror::Error;
 
 use super::format::PageKind;
