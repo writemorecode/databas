@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::{
     page::{CellCorruption, PageCorruption, PageError},
-    {PAGE_SIZE, PageId, RowId},
+    {PAGE_SIZE, PageId},
 };
 
 #[derive(Debug, Error)]
@@ -83,16 +83,16 @@ pub enum CorruptionKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConstraintError {
-    #[error("duplicate row id: {row_id}")]
-    DuplicateRowId { row_id: RowId },
+    #[error("duplicate key")]
+    DuplicateKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum InvalidArgumentError {
     #[error("invalid page id: {page_id}")]
     InvalidPageId { page_id: PageId },
-    #[error("row id not found: {row_id}")]
-    RowIdNotFound { row_id: RowId },
+    #[error("key not found")]
+    KeyNotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -253,12 +253,8 @@ impl From<PageError> for StorageError {
                 page_id: None,
                 kind: map_cell_corruption(kind),
             }),
-            PageError::DuplicateRowId { row_id } => {
-                Self::Constraint(ConstraintError::DuplicateRowId { row_id })
-            }
-            PageError::RowIdNotFound { row_id } => {
-                Self::InvalidArgument(InvalidArgumentError::RowIdNotFound { row_id })
-            }
+            PageError::DuplicateKey => Self::Constraint(ConstraintError::DuplicateKey),
+            PageError::KeyNotFound => Self::InvalidArgument(InvalidArgumentError::KeyNotFound),
             PageError::PageFull { needed, available } => {
                 Self::LimitExceeded(LimitExceededError::PageFull { needed, available })
             }

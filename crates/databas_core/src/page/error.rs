@@ -1,4 +1,4 @@
-use crate::{RowId, SlotId};
+use crate::SlotId;
 use thiserror::Error;
 
 use super::format::PageKind;
@@ -28,12 +28,12 @@ pub enum PageError {
         #[source]
         kind: CellCorruption,
     },
-    /// An insert attempted to reuse an existing row id.
-    #[error("duplicate row id: {row_id}")]
-    DuplicateRowId { row_id: RowId },
-    /// An update targeted a row id that is not present.
-    #[error("row id not found: {row_id}")]
-    RowIdNotFound { row_id: RowId },
+    /// An insert attempted to reuse an existing key.
+    #[error("duplicate key")]
+    DuplicateKey,
+    /// An update targeted a key that is not present.
+    #[error("key not found")]
+    KeyNotFound,
     /// The page has insufficient free space for the requested operation.
     #[error("page full: need {needed} bytes, only {available} available")]
     PageFull { needed: usize, available: usize },
