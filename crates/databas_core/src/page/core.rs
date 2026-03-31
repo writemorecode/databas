@@ -21,18 +21,40 @@ pub enum Leaf {}
 #[derive(Debug)]
 pub enum Interior {}
 
+/// Marker type for pages that belong to a table b-tree.
+#[derive(Debug)]
+pub enum Table {}
+
+/// Marker type for pages that belong to an index b-tree.
+#[derive(Debug)]
+pub enum Index {}
+
 /// Associates a typed page marker with its encoded [`format::PageKind`].
 pub trait NodeMarker {
-    /// The page kind represented by this marker.
-    const KIND: format::PageKind;
+    /// The structural node kind represented by this marker.
+    const KIND: format::NodeKind;
+}
+
+/// Associates a typed tree marker with its encoded [`format::TreeKind`].
+pub trait TreeMarker {
+    /// The tree kind represented by this marker.
+    const KIND: format::TreeKind;
 }
 
 impl NodeMarker for Leaf {
-    const KIND: format::PageKind = format::PageKind::Leaf;
+    const KIND: format::NodeKind = format::NodeKind::Leaf;
 }
 
 impl NodeMarker for Interior {
-    const KIND: format::PageKind = format::PageKind::Interior;
+    const KIND: format::NodeKind = format::NodeKind::Interior;
+}
+
+impl TreeMarker for Table {
+    const KIND: format::TreeKind = format::TreeKind::Table;
+}
+
+impl TreeMarker for Index {
+    const KIND: format::TreeKind = format::TreeKind::Index;
 }
 
 /// Shared immutable access to a page-sized byte buffer.
@@ -79,21 +101,26 @@ impl PageAccessMut for Write<'_> {
 
 /// A typed view over an encoded page.
 ///
-/// `A` controls the access mode ([`Read`] or [`Write`]), while `N` controls the
-/// logical page kind ([`Leaf`] or [`Interior`]).
+/// `A` controls the access mode ([`Read`] or [`Write`]), `N` controls the node
+/// kind ([`Leaf`] or [`Interior`]), and `T` controls the tree kind
+/// ([`Table`] or [`Index`]).
 #[derive(Debug)]
-pub struct Page<A, N> {
+pub struct Page<A, N, T = Table> {
     access: A,
-    _marker: PhantomData<N>,
+    _marker: PhantomData<(N, T)>,
 }
 
 /// A page whose concrete node kind is determined by the encoded page header.
 #[derive(Debug)]
 pub enum AnyPage<A> {
-    /// A leaf page.
-    Leaf(Page<A, Leaf>),
-    /// An interior page.
-    Interior(Page<A, Interior>),
+    /// A table leaf page.
+    TableLeaf(Page<A, Leaf, Table>),
+    /// A table interior page.
+    TableInterior(Page<A, Interior, Table>),
+    /// An index leaf page.
+    IndexLeaf(Page<A, Leaf, Index>),
+    /// An index interior page.
+    IndexInterior(Page<A, Interior, Index>),
 }
 
 /// Result of searching a sorted slot directory by key.
@@ -179,13 +206,21 @@ fn read_freeblock(
     Ok(Freeblock { offset: offset as u16, size, next: format::read_optional_u16(bytes, offset) })
 }
 
-impl<A, N> Page<A, N> {
+fn page_kind<N, T>() -> format::PageKind
+where
+    N: NodeMarker,
+    T: TreeMarker,
+{
+    format::PageKind::from_parts(N::KIND, T::KIND)
+}
+
+impl<A, N, T> Page<A, N, T> {
     fn new(access: A) -> Self {
         Self { access, _marker: PhantomData }
     }
 }
 
-impl<A, N> Page<A, N>
+impl<A, N, T> Page<A, N, T>
 where
     A: PageAccess,
 {
@@ -198,8 +233,25 @@ where
     pub fn kind(&self) -> format::PageKind
     where
         N: NodeMarker,
+        T: TreeMarker,
+    {
+        page_kind::<N, T>()
+    }
+
+    /// Returns the statically known node kind of this page.
+    pub fn node_kind(&self) -> format::NodeKind
+    where
+        N: NodeMarker,
     {
         N::KIND
+    }
+
+    /// Returns the statically known tree kind of this page.
+    pub fn tree_kind(&self) -> format::TreeKind
+    where
+        T: TreeMarker,
+    {
+        T::KIND
     }
 
     /// Returns the encoded page-format version.
@@ -350,7 +402,7 @@ where
     {
         let cell_offset = self.slot_offset(slot_index)? as usize;
         match N::KIND {
-            format::PageKind::Leaf => {
+            format::NodeKind::Leaf => {
                 let cell_len = format::read_u16(self.bytes(), cell_offset) as usize;
                 if cell_len < CELL_LENGTH_SIZE {
                     return Err(PageError::CorruptCell {
@@ -366,12 +418,12 @@ where
                 }
                 Ok(cell_len)
             }
-            format::PageKind::Interior => Ok(super::interior::INTERIOR_CELL_SIZE),
+            format::NodeKind::Interior => Ok(super::interior::INTERIOR_CELL_SIZE),
         }
     }
 }
 
-impl<A, N> Page<A, N>
+impl<A, N, T> Page<A, N, T>
 where
     A: PageAccessMut,
     N: NodeMarker,
@@ -685,35 +737,37 @@ where
     }
 }
 
-impl<'a, N> Page<Read<'a>, N>
+impl<'a, N, T> Page<Read<'a>, N, T>
 where
     N: NodeMarker,
+    T: TreeMarker,
 {
     /// Validates and opens an immutable typed page view over an initialized buffer.
     pub fn open(bytes: &'a [u8; PAGE_SIZE]) -> PageResult<Self> {
-        validate_page(bytes, N::KIND)?;
+        validate_page(bytes, page_kind::<N, T>())?;
         Ok(Self::new(Read { bytes }))
     }
 }
 
-impl<'a, N> Page<Write<'a>, N>
+impl<'a, N, T> Page<Write<'a>, N, T>
 where
     N: NodeMarker,
+    T: TreeMarker,
 {
     /// Validates and opens a mutable typed page view over an initialized buffer.
     pub fn open(bytes: &'a mut [u8; PAGE_SIZE]) -> PageResult<Self> {
-        validate_page(bytes, N::KIND)?;
+        validate_page(bytes, page_kind::<N, T>())?;
         Ok(Self::new(Write { bytes }))
     }
 
     /// Borrows this mutable page as an immutable page view.
-    pub fn as_ref(&self) -> Page<Read<'_>, N> {
+    pub fn as_ref(&self) -> Page<Read<'_>, N, T> {
         Page::new(Read { bytes: self.bytes() })
     }
 
     pub(crate) fn initialize(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
         bytes.fill(0);
-        bytes[KIND_OFFSET] = N::KIND as u8;
+        bytes[KIND_OFFSET] = page_kind::<N, T>() as u8;
         bytes[VERSION_OFFSET] = FORMAT_VERSION;
         format::write_u16(bytes, SLOT_COUNT_OFFSET, 0);
         format::write_u16(bytes, CONTENT_START_OFFSET, USABLE_SPACE_END as u16);
@@ -725,14 +779,14 @@ where
     }
 }
 
-impl<'a> Page<Write<'a>, Leaf> {
+impl<'a> Page<Write<'a>, Leaf, Table> {
     /// Initializes a fresh empty leaf page in-place.
     pub fn init(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
         Self::initialize(bytes)
     }
 }
 
-impl<'a> Page<Write<'a>, Interior> {
+impl<'a> Page<Write<'a>, Interior, Table> {
     /// Initializes a fresh empty interior page with its rightmost child pointer set.
     pub fn init(bytes: &'a mut [u8; PAGE_SIZE], rightmost_child: PageId) -> Self {
         Self::initialize_with_rightmost(bytes, rightmost_child)
@@ -753,9 +807,17 @@ impl<'a> TryFrom<&'a [u8; PAGE_SIZE]> for AnyPage<Read<'a>> {
 
     fn try_from(bytes: &'a [u8; PAGE_SIZE]) -> Result<Self, Self::Error> {
         match format::PageKind::from_raw(bytes[KIND_OFFSET]) {
-            Some(format::PageKind::Leaf) => Ok(Self::Leaf(Page::<Read<'a>, Leaf>::open(bytes)?)),
-            Some(format::PageKind::Interior) => {
-                Ok(Self::Interior(Page::<Read<'a>, Interior>::open(bytes)?))
+            Some(format::PageKind::TableLeaf) => {
+                Ok(Self::TableLeaf(Page::<Read<'a>, Leaf, Table>::open(bytes)?))
+            }
+            Some(format::PageKind::TableInterior) => {
+                Ok(Self::TableInterior(Page::<Read<'a>, Interior, Table>::open(bytes)?))
+            }
+            Some(format::PageKind::IndexLeaf) => {
+                Ok(Self::IndexLeaf(Page::<Read<'a>, Leaf, Index>::open(bytes)?))
+            }
+            Some(format::PageKind::IndexInterior) => {
+                Ok(Self::IndexInterior(Page::<Read<'a>, Interior, Index>::open(bytes)?))
             }
             None => Err(PageError::UnknownPageKind { actual: bytes[KIND_OFFSET] }),
         }
@@ -767,9 +829,17 @@ impl<'a> TryFrom<&'a mut [u8; PAGE_SIZE]> for AnyPage<Write<'a>> {
 
     fn try_from(bytes: &'a mut [u8; PAGE_SIZE]) -> Result<Self, Self::Error> {
         match format::PageKind::from_raw(bytes[KIND_OFFSET]) {
-            Some(format::PageKind::Leaf) => Ok(Self::Leaf(Page::<Write<'a>, Leaf>::open(bytes)?)),
-            Some(format::PageKind::Interior) => {
-                Ok(Self::Interior(Page::<Write<'a>, Interior>::open(bytes)?))
+            Some(format::PageKind::TableLeaf) => {
+                Ok(Self::TableLeaf(Page::<Write<'a>, Leaf, Table>::open(bytes)?))
+            }
+            Some(format::PageKind::TableInterior) => {
+                Ok(Self::TableInterior(Page::<Write<'a>, Interior, Table>::open(bytes)?))
+            }
+            Some(format::PageKind::IndexLeaf) => {
+                Ok(Self::IndexLeaf(Page::<Write<'a>, Leaf, Index>::open(bytes)?))
+            }
+            Some(format::PageKind::IndexInterior) => {
+                Ok(Self::IndexInterior(Page::<Write<'a>, Interior, Index>::open(bytes)?))
             }
             None => Err(PageError::UnknownPageKind { actual: bytes[KIND_OFFSET] }),
         }
@@ -831,7 +901,7 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
         if slot_offset < content_start || slot_offset >= USABLE_SPACE_END {
             return Err(PageError::MalformedPage(PageCorruption::SlotOffsetOutOfBounds));
         }
-        if expected_kind == format::PageKind::Leaf {
+        if expected_kind.node_kind() == format::NodeKind::Leaf {
             if slot_offset + CELL_LENGTH_SIZE > USABLE_SPACE_END {
                 return Err(PageError::MalformedPage(PageCorruption::CellLengthPrefixOutOfBounds));
             }

@@ -3,7 +3,7 @@ use crate::{PAGE_SIZE, RowId, SlotId};
 use super::{
     CellCorruption, PageError, PageResult,
     cell::Cell,
-    core::{BoundResult, Leaf, Page, PageAccess, PageAccessMut, Read, SearchResult, Write},
+    core::{BoundResult, Leaf, Page, PageAccess, PageAccessMut, Read, SearchResult, Table, Write},
     format::{self, CELL_LENGTH_SIZE, USABLE_SPACE_END},
 };
 
@@ -18,7 +18,10 @@ pub(crate) struct LeafCellParts {
     pub(crate) payload_end: usize,
 }
 
-pub(crate) fn cell_parts<A>(page: &Page<A, Leaf>, slot_index: SlotId) -> PageResult<LeafCellParts>
+pub(crate) fn cell_parts<A>(
+    page: &Page<A, Leaf, Table>,
+    slot_index: SlotId,
+) -> PageResult<LeafCellParts>
 where
     A: PageAccess,
 {
@@ -57,7 +60,7 @@ fn write_cell(bytes: &mut [u8; PAGE_SIZE], cell_offset: usize, row_id: RowId, pa
     bytes[cell_offset + LEAF_CELL_PREFIX_SIZE..cell_offset + cell_len].copy_from_slice(payload);
 }
 
-impl<A> Page<A, Leaf>
+impl<A> Page<A, Leaf, Table>
 where
     A: PageAccess,
 {
@@ -83,13 +86,13 @@ where
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<Read<'_>, Leaf>> {
+    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<Read<'_>, Leaf, Table>> {
         cell_parts(self, slot_index)?;
         Ok(Cell::new(Read { bytes: self.bytes() }, slot_index))
     }
 
     /// Looks up a row id and returns its cell if present.
-    pub fn lookup(&self, row_id: RowId) -> PageResult<Option<Cell<Read<'_>, Leaf>>> {
+    pub fn lookup(&self, row_id: RowId) -> PageResult<Option<Cell<Read<'_>, Leaf, Table>>> {
         match self.search(row_id)? {
             SearchResult::Found(slot_index) => self.cell(slot_index).map(Some),
             SearchResult::InsertAt(_) => Ok(None),
@@ -97,13 +100,13 @@ where
     }
 }
 
-impl<A> Page<A, Leaf>
+impl<A> Page<A, Leaf, Table>
 where
     A: PageAccessMut,
 {
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<Cell<Write<'_>, Leaf>> {
-        let page = Page::<Read<'_>, Leaf>::open(self.bytes())?;
+    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<Cell<Write<'_>, Leaf, Table>> {
+        let page = Page::<Read<'_>, Leaf, Table>::open(self.bytes())?;
         cell_parts(&page, slot_index)?;
         Ok(Cell::new(Write { bytes: self.bytes_mut() }, slot_index))
     }
