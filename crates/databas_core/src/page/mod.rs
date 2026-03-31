@@ -44,3 +44,12 @@ pub use format::{
     PREV_PAGE_ID_OFFSET, PageKind, RESERVED_FOOTER_SIZE, SHARED_HEADER_SIZE, SLOT_ENTRY_SIZE,
     TreeKind, USABLE_SPACE_END,
 };
+
+/// A typed table leaf page alias.
+pub type TableLeafPage<A> = Page<A, Leaf, Table>;
+/// A typed table interior page alias.
+pub type TableInteriorPage<A> = Page<A, Interior, Table>;
+/// A typed index leaf page alias.
+pub type IndexLeafPage<A> = Page<A, Leaf, Index>;
+/// A typed index interior page alias.
+pub type IndexInteriorPage<A> = Page<A, Interior, Index>;
