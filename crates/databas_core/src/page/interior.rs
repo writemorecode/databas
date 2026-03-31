@@ -334,7 +334,7 @@ mod tests {
         let mut bytes = new_interior_page(1);
         let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
         let err = page.update(77, 9).unwrap_err();
-        assert_eq!(err, PageError::RowIdNotFound { row_id: 77 });
+        assert_eq!(err, PageError::KeyNotFound);
     }
 
     #[test]

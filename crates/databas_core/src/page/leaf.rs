@@ -253,7 +253,7 @@ mod tests {
 
         page.insert(10, b"ten").unwrap();
         let err = page.insert(10, b"again").unwrap_err();
-        assert_eq!(err, PageError::DuplicateRowId { row_id: 10 });
+        assert_eq!(err, PageError::DuplicateKey);
     }
 
     #[test]
@@ -418,7 +418,7 @@ mod tests {
         let mut bytes = new_leaf_page();
         let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
         let err = page.update(88, b"missing").unwrap_err();
-        assert_eq!(err, PageError::RowIdNotFound { row_id: 88 });
+        assert_eq!(err, PageError::KeyNotFound);
     }
 
     #[test]
@@ -458,7 +458,7 @@ mod tests {
 
         let err = page.delete(99).unwrap_err();
 
-        assert_eq!(err, PageError::RowIdNotFound { row_id: 99 });
+        assert_eq!(err, PageError::KeyNotFound);
     }
 
     #[test]

@@ -970,7 +970,7 @@ mod tests {
     #[test]
     fn initialize_sets_header_and_zero_footer() {
         let bytes = initialized_leaf_page();
-        assert_eq!(bytes[KIND_OFFSET], format::PageKind::Leaf as u8);
+        assert_eq!(bytes[KIND_OFFSET], format::PageKind::TableLeaf as u8);
         assert_eq!(bytes[VERSION_OFFSET], FORMAT_VERSION);
         assert_eq!(format::read_u16(&bytes, SLOT_COUNT_OFFSET), 0);
         assert_eq!(format::read_u16(&bytes, CONTENT_START_OFFSET), USABLE_SPACE_END as u16);
@@ -1041,7 +1041,7 @@ mod tests {
         let result = Page::<Read<'_>, Leaf>::open(&bytes);
         assert_eq!(
             result.unwrap_err(),
-            PageError::InvalidPageKind { expected: format::PageKind::Leaf, actual: 2 }
+            PageError::InvalidPageKind { expected: format::PageKind::TableLeaf, actual: 2 }
         );
     }
 
@@ -1251,12 +1251,18 @@ mod tests {
         let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
         let keys = [10_u64, 20, 40, 80];
 
-        let read_key = |_: &Page<Read<'_>, Leaf>, slot_index: SlotId| Ok(keys[slot_index as usize]);
-
-        assert_eq!(page.search_slots_by(5, read_key).unwrap(), SearchResult::InsertAt(0));
-        assert_eq!(page.search_slots_by(10, read_key).unwrap(), SearchResult::Found(0));
-        assert_eq!(page.search_slots_by(30, read_key).unwrap(), SearchResult::InsertAt(2));
-        assert_eq!(page.search_slots_by(40, read_key).unwrap(), SearchResult::Found(2));
-        assert_eq!(page.search_slots_by(90, read_key).unwrap(), SearchResult::InsertAt(4));
+        for (query, expected) in [
+            (5, SearchResult::InsertAt(0)),
+            (10, SearchResult::Found(0)),
+            (30, SearchResult::InsertAt(2)),
+            (40, SearchResult::Found(2)),
+            (90, SearchResult::InsertAt(4)),
+        ] {
+            assert_eq!(
+                page.search_slots_by(|_, slot_index| Ok(keys[slot_index as usize].cmp(&query)))
+                    .unwrap(),
+                expected
+            );
+        }
     }
 }
