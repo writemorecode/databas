@@ -1,14 +1,15 @@
 //! Slotted B-tree page types and format constants.
 //!
 //! This module exposes the typed page API used by the storage layer to read and
-//! mutate fixed-size on-disk pages. Pages are split into two families:
-//! [`Leaf`] pages store `(row_id, payload)` records, while [`Interior`] pages
-//! store fixed-size separator cells plus child pointers.
+//! mutate fixed-size on-disk pages. Pages are split across two orthogonal axes:
+//! node kind and tree kind. [`Leaf`] pages store payload-bearing records, while
+//! [`Interior`] pages store separators and child pointers. [`Table`] pages use
+//! row ids as keys; [`Index`] pages use byte-slice keys.
 //!
 //! The main entry point is [`Page`]. A page is parameterized both by access mode
-//! ([`Read`] or [`Write`]) and by node kind ([`Leaf`] or [`Interior`]). This
-//! keeps the API zero-copy while still making invalid combinations harder to
-//! express.
+//! ([`Read`] or [`Write`]), node kind ([`Leaf`] or [`Interior`]), and tree kind
+//! ([`Table`] or [`Index`]). This keeps the API zero-copy while still making
+//! invalid combinations harder to express.
 //!
 //! When the concrete page kind is not known ahead of time, use [`AnyPage`] to
 //! inspect an already-initialized byte buffer. [`Cell`] provides typed access to
@@ -29,14 +30,15 @@ mod leaf;
 pub use cell::Cell;
 /// Page handles, marker types, access traits, and search helpers for typed page access.
 pub use core::{
-    AnyPage, BoundResult, Interior, Leaf, NodeMarker, Page, PageAccess, PageAccessMut, Read,
-    SearchResult, Write,
+    AnyPage, BoundResult, Index, Interior, Leaf, NodeMarker, Page, PageAccess, PageAccessMut, Read,
+    SearchResult, Table, TreeMarker, Write,
 };
 /// Errors returned while validating or manipulating encoded pages and cells.
 pub(crate) use error::{CellCorruption, PageCorruption, PageError, PageResult};
 /// Public page-format constants and layout metadata used by page encoders and decoders.
 pub use format::{
     CELL_LENGTH_SIZE, FORMAT_VERSION, FREEBLOCK_HEADER_SIZE, INTERIOR_HEADER_SIZE,
-    LEAF_HEADER_SIZE, MAX_FRAGMENTED_FREE_BYTES, NEXT_PAGE_ID_OFFSET, PREV_PAGE_ID_OFFSET,
-    PageKind, RESERVED_FOOTER_SIZE, SHARED_HEADER_SIZE, SLOT_ENTRY_SIZE, USABLE_SPACE_END,
+    LEAF_HEADER_SIZE, MAX_FRAGMENTED_FREE_BYTES, NEXT_PAGE_ID_OFFSET, NodeKind,
+    PREV_PAGE_ID_OFFSET, PageKind, RESERVED_FOOTER_SIZE, SHARED_HEADER_SIZE, SLOT_ENTRY_SIZE,
+    TreeKind, USABLE_SPACE_END,
 };

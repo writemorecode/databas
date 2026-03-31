@@ -218,9 +218,9 @@ impl From<PageError> for StorageError {
                 kind: CorruptionKind::UnknownPageKind { actual },
             }),
             PageError::InvalidPageKind { expected, actual } => Self::Corruption(CorruptionError {
-                component: match expected {
-                    crate::page::format::PageKind::Leaf => CorruptionComponent::LeafPage,
-                    crate::page::format::PageKind::Interior => CorruptionComponent::InteriorPage,
+                component: match expected.node_kind() {
+                    crate::page::format::NodeKind::Leaf => CorruptionComponent::LeafPage,
+                    crate::page::format::NodeKind::Interior => CorruptionComponent::InteriorPage,
                 },
                 page_id: None,
                 kind: CorruptionKind::InvalidPageKind {
@@ -271,8 +271,10 @@ impl From<PageError> for StorageError {
 
 fn page_kind_name(kind: crate::page::format::PageKind) -> &'static str {
     match kind {
-        crate::page::format::PageKind::Leaf => "leaf",
-        crate::page::format::PageKind::Interior => "interior",
+        crate::page::format::PageKind::TableLeaf => "table leaf",
+        crate::page::format::PageKind::TableInterior => "table interior",
+        crate::page::format::PageKind::IndexLeaf => "index leaf",
+        crate::page::format::PageKind::IndexInterior => "index interior",
     }
 }
 

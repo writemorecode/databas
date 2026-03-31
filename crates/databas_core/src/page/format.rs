@@ -46,32 +46,89 @@ pub const LEAF_HEADER_SIZE: usize = SHARED_HEADER_SIZE;
 /// Total header size for an interior page.
 pub const INTERIOR_HEADER_SIZE: usize = SHARED_HEADER_SIZE + 8;
 
+/// Structural node kind carried by a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    /// A leaf page.
+    Leaf,
+    /// An interior page.
+    Interior,
+}
+
+impl NodeKind {
+    /// Returns the total header size for this node kind.
+    pub const fn header_size(self) -> usize {
+        match self {
+            Self::Leaf => LEAF_HEADER_SIZE,
+            Self::Interior => INTERIOR_HEADER_SIZE,
+        }
+    }
+}
+
+/// Logical tree kind carried by a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeKind {
+    /// A table b-tree page.
+    Table,
+    /// An index b-tree page.
+    Index,
+}
+
 /// Encoded page kind tag stored in the page header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PageKind {
-    /// A leaf page containing row payloads.
-    Leaf = 1,
-    /// An interior page containing separator keys and child pointers.
-    Interior = 2,
+    /// A table leaf page containing row payloads.
+    TableLeaf = 1,
+    /// A table interior page containing separator row ids and child pointers.
+    TableInterior = 2,
+    /// An index leaf page containing index keys and row references.
+    IndexLeaf = 3,
+    /// An index interior page containing separator keys and child pointers.
+    IndexInterior = 4,
 }
 
 impl PageKind {
     /// Decodes a raw page-kind tag.
     pub fn from_raw(raw: u8) -> Option<Self> {
         match raw {
-            1 => Some(Self::Leaf),
-            2 => Some(Self::Interior),
+            1 => Some(Self::TableLeaf),
+            2 => Some(Self::TableInterior),
+            3 => Some(Self::IndexLeaf),
+            4 => Some(Self::IndexInterior),
             _ => None,
+        }
+    }
+
+    /// Returns the encoded page kind for a `(node_kind, tree_kind)` pair.
+    pub const fn from_parts(node_kind: NodeKind, tree_kind: TreeKind) -> Self {
+        match (tree_kind, node_kind) {
+            (TreeKind::Table, NodeKind::Leaf) => Self::TableLeaf,
+            (TreeKind::Table, NodeKind::Interior) => Self::TableInterior,
+            (TreeKind::Index, NodeKind::Leaf) => Self::IndexLeaf,
+            (TreeKind::Index, NodeKind::Interior) => Self::IndexInterior,
+        }
+    }
+
+    /// Returns the node kind encoded in this page kind.
+    pub const fn node_kind(self) -> NodeKind {
+        match self {
+            Self::TableLeaf | Self::IndexLeaf => NodeKind::Leaf,
+            Self::TableInterior | Self::IndexInterior => NodeKind::Interior,
+        }
+    }
+
+    /// Returns the tree kind encoded in this page kind.
+    pub const fn tree_kind(self) -> TreeKind {
+        match self {
+            Self::TableLeaf | Self::TableInterior => TreeKind::Table,
+            Self::IndexLeaf | Self::IndexInterior => TreeKind::Index,
         }
     }
 
     /// Returns the total header size for this page kind.
     pub const fn header_size(self) -> usize {
-        match self {
-            Self::Leaf => LEAF_HEADER_SIZE,
-            Self::Interior => INTERIOR_HEADER_SIZE,
-        }
+        self.node_kind().header_size()
     }
 }
 
