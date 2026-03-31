@@ -115,7 +115,7 @@ where
     pub fn insert(&mut self, row_id: RowId, payload: &[u8]) -> PageResult<SlotId> {
         let cell_len = encoded_len(payload.len())?;
         let slot_index = match self.search(row_id)? {
-            SearchResult::Found(_) => return Err(PageError::DuplicateRowId { row_id }),
+            SearchResult::Found(_) => return Err(PageError::DuplicateKey),
             SearchResult::InsertAt(slot_index) => slot_index,
         };
 
@@ -129,7 +129,7 @@ where
     pub fn delete(&mut self, row_id: RowId) -> PageResult<SlotId> {
         let slot_index = match self.search(row_id)? {
             SearchResult::Found(slot_index) => slot_index,
-            SearchResult::InsertAt(_) => return Err(PageError::RowIdNotFound { row_id }),
+            SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound),
         };
 
         let cell_offset = self.slot_offset(slot_index)?;
@@ -144,7 +144,7 @@ where
         let cell_len = encoded_len(payload.len())?;
         let slot_index = match self.search(row_id)? {
             SearchResult::Found(slot_index) => slot_index,
-            SearchResult::InsertAt(_) => return Err(PageError::RowIdNotFound { row_id }),
+            SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound),
         };
 
         let old_len = self.cell_len(slot_index)?;

@@ -123,7 +123,7 @@ where
     /// Inserts a new separator key and its left-child pointer while preserving slot order.
     pub fn insert(&mut self, row_id: RowId, left_child: PageId) -> PageResult<SlotId> {
         let slot_index = match self.search(row_id)? {
-            SearchResult::Found(_) => return Err(PageError::DuplicateRowId { row_id }),
+            SearchResult::Found(_) => return Err(PageError::DuplicateKey),
             SearchResult::InsertAt(slot_index) => slot_index,
         };
 
@@ -137,7 +137,7 @@ where
     pub fn update(&mut self, row_id: RowId, left_child: PageId) -> PageResult<()> {
         let slot_index = match self.search(row_id)? {
             SearchResult::Found(slot_index) => slot_index,
-            SearchResult::InsertAt(_) => return Err(PageError::RowIdNotFound { row_id }),
+            SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound),
         };
 
         let cell_offset = self.slot_offset(slot_index)? as usize;
