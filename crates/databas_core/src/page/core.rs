@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 use std::cmp::Ordering;
 
-use crate::{PAGE_SIZE, PageId, RowId, SlotId};
+use crate::{PAGE_SIZE, PageId, SlotId};
 
 use super::{
     error::{PageCorruption, PageError, PageResult},
@@ -275,23 +275,20 @@ where
         Ok(format::read_u16(self.bytes(), offset))
     }
 
-    pub(crate) fn search_slots_by<F>(&self, key: RowId, mut read_key: F) -> PageResult<SearchResult>
+    pub(crate) fn search_slots_by<F>(&self, mut compare_slot: F) -> PageResult<SearchResult>
     where
         N: NodeMarker,
-        F: FnMut(&Self, SlotId) -> PageResult<RowId>,
+        F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
     {
         let mut low: SlotId = 0;
         let mut high = self.slot_count();
 
         while low < high {
             let mid = low + (high - low) / 2;
-            let mid_key = read_key(self, mid)?;
-            if mid_key < key {
-                low = mid + 1;
-            } else if mid_key > key {
-                high = mid;
-            } else {
-                return Ok(SearchResult::Found(mid));
+            match compare_slot(self, mid)? {
+                Ordering::Less => low = mid + 1,
+                Ordering::Greater => high = mid,
+                Ordering::Equal => return Ok(SearchResult::Found(mid)),
             }
         }
 
@@ -300,13 +297,12 @@ where
 
     pub(crate) fn bound_slots_by<F, P>(
         &self,
-        key: RowId,
-        mut read_key: F,
+        mut compare_slot: F,
         mut go_right: P,
     ) -> PageResult<BoundResult>
     where
         N: NodeMarker,
-        F: FnMut(&Self, SlotId) -> PageResult<RowId>,
+        F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
         P: FnMut(Ordering) -> bool,
     {
         let mut low: SlotId = 0;
@@ -314,8 +310,7 @@ where
 
         while low < high {
             let mid = low + (high - low) / 2;
-            let mid_key = read_key(self, mid)?;
-            if go_right(mid_key.cmp(&key)) {
+            if go_right(compare_slot(self, mid)?) {
                 low = mid + 1;
             } else {
                 high = mid;
@@ -325,20 +320,20 @@ where
         if low == self.slot_count() { Ok(BoundResult::PastEnd) } else { Ok(BoundResult::At(low)) }
     }
 
-    pub(crate) fn lower_bound_slots_by<F>(&self, key: RowId, read_key: F) -> PageResult<BoundResult>
+    pub(crate) fn lower_bound_slots_by<F>(&self, compare_slot: F) -> PageResult<BoundResult>
     where
         N: NodeMarker,
-        F: FnMut(&Self, SlotId) -> PageResult<RowId>,
+        F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
     {
-        self.bound_slots_by(key, read_key, |ordering| ordering == Ordering::Less)
+        self.bound_slots_by(compare_slot, |ordering| ordering == Ordering::Less)
     }
 
-    pub(crate) fn upper_bound_slots_by<F>(&self, key: RowId, read_key: F) -> PageResult<BoundResult>
+    pub(crate) fn upper_bound_slots_by<F>(&self, compare_slot: F) -> PageResult<BoundResult>
     where
         N: NodeMarker,
-        F: FnMut(&Self, SlotId) -> PageResult<RowId>,
+        F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
     {
-        self.bound_slots_by(key, read_key, |ordering| ordering != Ordering::Greater)
+        self.bound_slots_by(compare_slot, |ordering| ordering != Ordering::Greater)
     }
 
     pub(crate) fn validate_slot_index(&self, slot_index: SlotId) -> PageResult<()> {

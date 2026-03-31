@@ -63,21 +63,23 @@ where
 {
     /// Returns the first slot whose row id is greater than or equal to `row_id`.
     pub fn lower_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
-        self.lower_bound_slots_by(row_id, |page, slot_index| {
-            Ok(cell_parts(page, slot_index)?.row_id)
+        self.lower_bound_slots_by(|page, slot_index| {
+            Ok(cell_parts(page, slot_index)?.row_id.cmp(&row_id))
         })
     }
 
     /// Returns the first slot whose row id is strictly greater than `row_id`.
     pub fn upper_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
-        self.upper_bound_slots_by(row_id, |page, slot_index| {
-            Ok(cell_parts(page, slot_index)?.row_id)
+        self.upper_bound_slots_by(|page, slot_index| {
+            Ok(cell_parts(page, slot_index)?.row_id.cmp(&row_id))
         })
     }
 
     /// Searches the leaf page for `row_id`.
     pub fn search(&self, row_id: RowId) -> PageResult<SearchResult> {
-        self.search_slots_by(row_id, |page, slot_index| Ok(cell_parts(page, slot_index)?.row_id))
+        self.search_slots_by(|page, slot_index| {
+            Ok(cell_parts(page, slot_index)?.row_id.cmp(&row_id))
+        })
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
