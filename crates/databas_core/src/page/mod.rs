@@ -23,6 +23,8 @@ mod cell;
 mod core;
 mod error;
 pub mod format;
+mod index_interior;
+mod index_leaf;
 mod interior;
 mod leaf;
 

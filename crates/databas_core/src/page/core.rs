@@ -399,26 +399,20 @@ where
     pub(crate) fn cell_len(&self, slot_index: SlotId) -> PageResult<usize>
     where
         N: NodeMarker,
+        T: TreeMarker,
     {
         let cell_offset = self.slot_offset(slot_index)? as usize;
-        match N::KIND {
-            format::NodeKind::Leaf => {
-                let cell_len = format::read_u16(self.bytes(), cell_offset) as usize;
-                if cell_len < CELL_LENGTH_SIZE {
-                    return Err(PageError::CorruptCell {
-                        slot_index,
-                        kind: super::CellCorruption::LengthTooSmall,
-                    });
-                }
-                if cell_offset + cell_len > USABLE_SPACE_END {
-                    return Err(PageError::CorruptCell {
-                        slot_index,
-                        kind: super::CellCorruption::LengthOutOfBounds,
-                    });
-                }
-                Ok(cell_len)
+        match page_kind::<N, T>() {
+            format::PageKind::TableLeaf => {
+                super::leaf::cell_len_at(self.bytes(), slot_index, cell_offset)
             }
-            format::NodeKind::Interior => Ok(super::interior::INTERIOR_CELL_SIZE),
+            format::PageKind::TableInterior => Ok(super::interior::INTERIOR_CELL_SIZE),
+            format::PageKind::IndexLeaf => {
+                super::index_leaf::cell_len_at(self.bytes(), slot_index, cell_offset)
+            }
+            format::PageKind::IndexInterior => {
+                super::index_interior::cell_len_at(self.bytes(), slot_index, cell_offset)
+            }
         }
     }
 }
@@ -427,6 +421,7 @@ impl<A, N, T> Page<A, N, T>
 where
     A: PageAccessMut,
     N: NodeMarker,
+    T: TreeMarker,
 {
     pub(crate) fn bytes_mut(&mut self) -> &mut [u8; PAGE_SIZE] {
         self.access.bytes_mut()
@@ -901,12 +896,32 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
         if slot_offset < content_start || slot_offset >= USABLE_SPACE_END {
             return Err(PageError::MalformedPage(PageCorruption::SlotOffsetOutOfBounds));
         }
-        if expected_kind.node_kind() == format::NodeKind::Leaf {
-            if slot_offset + CELL_LENGTH_SIZE > USABLE_SPACE_END {
-                return Err(PageError::MalformedPage(PageCorruption::CellLengthPrefixOutOfBounds));
+        match expected_kind {
+            format::PageKind::TableLeaf | format::PageKind::IndexLeaf => {
+                if slot_offset + CELL_LENGTH_SIZE > USABLE_SPACE_END {
+                    return Err(PageError::MalformedPage(
+                        PageCorruption::CellLengthPrefixOutOfBounds,
+                    ));
+                }
             }
-        } else if slot_offset + super::interior::INTERIOR_CELL_SIZE > USABLE_SPACE_END {
-            return Err(PageError::MalformedPage(PageCorruption::InteriorCellOutOfBounds));
+            format::PageKind::TableInterior => {
+                if slot_offset + super::interior::INTERIOR_CELL_SIZE > USABLE_SPACE_END {
+                    return Err(PageError::MalformedPage(PageCorruption::InteriorCellOutOfBounds));
+                }
+            }
+            format::PageKind::IndexInterior => {
+                if slot_offset + CELL_LENGTH_SIZE > USABLE_SPACE_END {
+                    return Err(PageError::MalformedPage(
+                        PageCorruption::CellLengthPrefixOutOfBounds,
+                    ));
+                }
+                let cell_len = format::read_u16(bytes, slot_offset) as usize;
+                if cell_len < super::index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE
+                    || slot_offset + cell_len > USABLE_SPACE_END
+                {
+                    return Err(PageError::MalformedPage(PageCorruption::InteriorCellOutOfBounds));
+                }
+            }
         }
     }
 
