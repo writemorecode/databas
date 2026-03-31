@@ -18,6 +18,21 @@ pub(crate) struct LeafCellParts {
     pub(crate) payload_end: usize,
 }
 
+pub(crate) fn cell_len_at(
+    bytes: &[u8; PAGE_SIZE],
+    slot_index: SlotId,
+    cell_offset: usize,
+) -> PageResult<usize> {
+    let cell_len = format::read_u16(bytes, cell_offset) as usize;
+    if cell_len < LEAF_CELL_PREFIX_SIZE {
+        return Err(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthTooSmall });
+    }
+    if cell_offset + cell_len > USABLE_SPACE_END {
+        return Err(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthOutOfBounds });
+    }
+    Ok(cell_len)
+}
+
 pub(crate) fn cell_parts<A>(
     page: &Page<A, Leaf, Table>,
     slot_index: SlotId,
@@ -27,16 +42,10 @@ where
 {
     page.validate_slot_index(slot_index)?;
     let cell_offset = page.slot_offset(slot_index)? as usize;
-    let cell_len = page.cell_len(slot_index)?;
-    if cell_len < LEAF_CELL_PREFIX_SIZE {
-        return Err(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthTooSmall });
-    }
+    let cell_len = cell_len_at(page.bytes(), slot_index, cell_offset)?;
 
     let payload_start = cell_offset + LEAF_CELL_PREFIX_SIZE;
     let payload_end = cell_offset + cell_len;
-    if payload_end > USABLE_SPACE_END {
-        return Err(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthOutOfBounds });
-    }
 
     Ok(LeafCellParts {
         row_id: format::read_u64(page.bytes(), cell_offset + CELL_LENGTH_SIZE),
