@@ -4,8 +4,8 @@ use crate::{PAGE_SIZE, PageId, RowId, SlotId};
 
 use super::{
     PageResult,
-    core::{Interior, Leaf, Page, PageAccess, PageAccessMut, Read, Table, Write},
-    interior, leaf,
+    core::{Index, Interior, Leaf, Page, PageAccess, PageAccessMut, Read, Table, Write},
+    index_leaf, interior, leaf,
 };
 
 /// A typed view over a single slot entry within a page.
@@ -79,6 +79,24 @@ where
         let page = Page::<Read<'_>, Leaf, Table>::open(self.bytes())?;
         let parts = leaf::cell_parts(&page, self.slot_index)?;
         Ok(&mut self.bytes_mut()[parts.payload_start..parts.payload_end])
+    }
+}
+
+impl<A> Cell<A, Leaf, Index>
+where
+    A: PageAccess,
+{
+    /// Returns the indexed key stored in this leaf cell.
+    pub fn key(&self) -> PageResult<&[u8]> {
+        let page = Page::<Read<'_>, Leaf, Index>::open(self.bytes())?;
+        let parts = index_leaf::cell_parts(&page, self.slot_index)?;
+        Ok(&self.bytes()[parts.key_start..parts.key_end])
+    }
+
+    /// Returns the row reference stored alongside this index key.
+    pub fn row_id(&self) -> PageResult<RowId> {
+        let page = Page::<Read<'_>, Leaf, Index>::open(self.bytes())?;
+        Ok(index_leaf::cell_parts(&page, self.slot_index)?.row_id)
     }
 }
 

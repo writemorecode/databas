@@ -781,6 +781,13 @@ impl<'a> Page<Write<'a>, Leaf, Table> {
     }
 }
 
+impl<'a> Page<Write<'a>, Leaf, Index> {
+    /// Initializes a fresh empty index leaf page in-place.
+    pub fn init(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
+        Self::initialize(bytes)
+    }
+}
+
 impl<'a> Page<Write<'a>, Interior, Table> {
     /// Initializes a fresh empty interior page with its rightmost child pointer set.
     pub fn init(bytes: &'a mut [u8; PAGE_SIZE], rightmost_child: PageId) -> Self {
