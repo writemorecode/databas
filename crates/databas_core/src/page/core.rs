@@ -13,7 +13,7 @@ use super::{
     },
 };
 
-/// Marker type for leaf pages that store `(row_id, payload)` records.
+/// Marker type for leaf pages that store payload-bearing records.
 #[derive(Debug)]
 pub enum Leaf {}
 
@@ -110,7 +110,7 @@ pub struct Page<A, N, T = Table> {
     _marker: PhantomData<(N, T)>,
 }
 
-/// A page whose concrete node kind is determined by the encoded page header.
+/// A page whose concrete node kind and tree kind are determined by the encoded page header.
 #[derive(Debug)]
 pub enum AnyPage<A> {
     /// A table leaf page.

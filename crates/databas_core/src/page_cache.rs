@@ -25,7 +25,7 @@ use std::{
 use crate::{
     disk_manager::DiskManager,
     error::{PageCacheError, PageCacheResult},
-    page::{AnyPage, NodeMarker, Page, PageResult, Read, Write},
+    page::{AnyPage, NodeMarker, Page, PageResult, Read, TreeMarker, Write},
     page_replacement::ClockPolicy,
     {PAGE_SIZE, PageId},
 };
@@ -366,6 +366,15 @@ impl PageReadGuard<'_> {
         Page::<Read<'_>, N>::open(self.page())
     }
 
+    /// Opens a typed immutable view over the page bytes for any node/tree pair.
+    pub(crate) fn open_typed<N, T>(&self) -> PageResult<Page<Read<'_>, N, T>>
+    where
+        N: NodeMarker,
+        T: TreeMarker,
+    {
+        Page::<Read<'_>, N, T>::open(self.page())
+    }
+
     /// Opens an immutable typed page view based on the encoded page kind.
     pub(crate) fn open_any(&self) -> PageResult<AnyPage<Read<'_>>> {
         AnyPage::<Read<'_>>::try_from(self.page())
@@ -400,12 +409,30 @@ impl PageWriteGuard<'_> {
         Page::<Read<'_>, N>::open(self.page())
     }
 
+    /// Opens a typed immutable view over the page bytes for any node/tree pair.
+    pub(crate) fn open_typed<N, T>(&self) -> PageResult<Page<Read<'_>, N, T>>
+    where
+        N: NodeMarker,
+        T: TreeMarker,
+    {
+        Page::<Read<'_>, N, T>::open(self.page())
+    }
+
     /// Opens a typed mutable view over the page bytes.
     pub(crate) fn open_mut<N>(&mut self) -> PageResult<Page<Write<'_>, N>>
     where
         N: NodeMarker,
     {
         Page::<Write<'_>, N>::open(self.page_mut())
+    }
+
+    /// Opens a typed mutable view over the page bytes for any node/tree pair.
+    pub(crate) fn open_typed_mut<N, T>(&mut self) -> PageResult<Page<Write<'_>, N, T>>
+    where
+        N: NodeMarker,
+        T: TreeMarker,
+    {
+        Page::<Write<'_>, N, T>::open(self.page_mut())
     }
 
     /// Opens an immutable typed page view based on the encoded page kind.
