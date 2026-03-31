@@ -210,11 +210,11 @@ mod tests {
 
     #[test]
     fn page_kind_helpers_match_layout() {
-        assert_eq!(PageKind::from_raw(1), Some(PageKind::Leaf));
-        assert_eq!(PageKind::from_raw(2), Some(PageKind::Interior));
+        assert_eq!(PageKind::from_raw(1), Some(PageKind::TableLeaf));
+        assert_eq!(PageKind::from_raw(2), Some(PageKind::TableInterior));
         assert_eq!(PageKind::from_raw(0), None);
-        assert_eq!(PageKind::Leaf.header_size(), LEAF_HEADER_SIZE);
-        assert_eq!(PageKind::Interior.header_size(), INTERIOR_HEADER_SIZE);
+        assert_eq!(PageKind::TableLeaf.header_size(), LEAF_HEADER_SIZE);
+        assert_eq!(PageKind::TableInterior.header_size(), INTERIOR_HEADER_SIZE);
     }
 
     #[test]
@@ -231,6 +231,6 @@ mod tests {
 
     #[test]
     fn max_slot_count_uses_kind_specific_header_size() {
-        assert!(max_slot_count(PageKind::Leaf) > max_slot_count(PageKind::Interior));
+        assert!(max_slot_count(PageKind::TableLeaf) > max_slot_count(PageKind::TableInterior));
     }
 }

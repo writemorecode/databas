@@ -616,15 +616,15 @@ mod tests {
             let mut write = guard.write().unwrap();
             let _ = Page::<Write<'_>, Leaf>::init(write.page_mut());
 
-            assert_eq!(write.open::<Leaf>().unwrap().kind(), PageKind::Leaf);
-            assert!(matches!(write.open_any().unwrap(), AnyPage::Leaf(_)));
-            assert_eq!(write.open_mut::<Leaf>().unwrap().kind(), PageKind::Leaf);
-            assert!(matches!(write.open_any_mut().unwrap(), AnyPage::Leaf(_)));
+            assert_eq!(write.open::<Leaf>().unwrap().kind(), PageKind::TableLeaf);
+            assert!(matches!(write.open_any().unwrap(), AnyPage::TableLeaf(_)));
+            assert_eq!(write.open_mut::<Leaf>().unwrap().kind(), PageKind::TableLeaf);
+            assert!(matches!(write.open_any_mut().unwrap(), AnyPage::TableLeaf(_)));
         }
 
         let read = guard.read().unwrap();
-        assert_eq!(read.open::<Leaf>().unwrap().kind(), PageKind::Leaf);
-        assert!(matches!(read.open_any().unwrap(), AnyPage::Leaf(_)));
+        assert_eq!(read.open::<Leaf>().unwrap().kind(), PageKind::TableLeaf);
+        assert!(matches!(read.open_any().unwrap(), AnyPage::TableLeaf(_)));
     }
 
     #[test]
