@@ -5,7 +5,7 @@ use crate::{PAGE_SIZE, PageId, RowId, SlotId};
 use super::{
     PageResult,
     core::{Index, Interior, Leaf, Page, PageAccess, PageAccessMut, Read, Table, Write},
-    index_leaf, interior, leaf,
+    index_interior, index_leaf, interior, leaf,
 };
 
 /// A typed view over a single slot entry within a page.
@@ -126,6 +126,37 @@ where
         let page = Page::<Read<'_>, Interior, Table>::open(self.bytes())?;
         let parts = interior::cell_parts(&page, self.slot_index)?;
         interior::write_left_child(self.bytes_mut(), parts.cell_offset, page_id);
+        Ok(())
+    }
+}
+
+impl<A> Cell<A, Interior, Index>
+where
+    A: PageAccess,
+{
+    /// Returns the separator key stored in this interior cell.
+    pub fn key(&self) -> PageResult<&[u8]> {
+        let page = Page::<Read<'_>, Interior, Index>::open(self.bytes())?;
+        let parts = index_interior::cell_parts(&page, self.slot_index)?;
+        Ok(&self.bytes()[parts.key_start..parts.key_end])
+    }
+
+    /// Returns the left-child page id referenced by this interior cell.
+    pub fn left_child(&self) -> PageResult<PageId> {
+        let page = Page::<Read<'_>, Interior, Index>::open(self.bytes())?;
+        Ok(index_interior::cell_parts(&page, self.slot_index)?.left_child)
+    }
+}
+
+impl<A> Cell<A, Interior, Index>
+where
+    A: PageAccessMut,
+{
+    /// Updates the left-child page id stored in this interior cell.
+    pub fn set_left_child(&mut self, page_id: PageId) -> PageResult<()> {
+        let page = Page::<Read<'_>, Interior, Index>::open(self.bytes())?;
+        let parts = index_interior::cell_parts(&page, self.slot_index)?;
+        index_interior::write_left_child(self.bytes_mut(), parts.cell_offset, page_id);
         Ok(())
     }
 }

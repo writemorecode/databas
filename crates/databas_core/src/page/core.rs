@@ -804,6 +804,22 @@ impl<'a> Page<Write<'a>, Interior, Table> {
     }
 }
 
+impl<'a> Page<Write<'a>, Interior, Index> {
+    /// Initializes a fresh empty index interior page with its rightmost child pointer set.
+    pub fn init(bytes: &'a mut [u8; PAGE_SIZE], rightmost_child: PageId) -> Self {
+        Self::initialize_with_rightmost(bytes, rightmost_child)
+    }
+
+    pub(crate) fn initialize_with_rightmost(
+        bytes: &'a mut [u8; PAGE_SIZE],
+        page_id: PageId,
+    ) -> Self {
+        let mut page = Self::initialize(bytes);
+        format::write_u64(page.bytes_mut(), format::RIGHTMOST_CHILD_OFFSET, page_id);
+        page
+    }
+}
+
 impl<'a> TryFrom<&'a [u8; PAGE_SIZE]> for AnyPage<Read<'a>> {
     type Error = PageError;
 
