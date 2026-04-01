@@ -4,7 +4,7 @@ use crate::{PAGE_SIZE, RowId, SlotId};
 
 use super::{
     CellCorruption, PageError, PageResult,
-    cell::Cell,
+    cell::{Cell, CellMut},
     core::{BoundResult, Index, Leaf, Page, PageAccess, PageAccessMut, Read, SearchResult, Write},
     format::{self, CELL_LENGTH_SIZE, USABLE_SPACE_END},
 };
@@ -13,11 +13,17 @@ const ROW_ID_SIZE: usize = 8;
 /// The fixed-size prefix of an index leaf cell: encoded length plus row reference.
 pub const INDEX_LEAF_CELL_PREFIX_SIZE: usize = CELL_LENGTH_SIZE + ROW_ID_SIZE;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct IndexLeafCellParts {
     pub(crate) row_id: RowId,
-    pub(crate) key_start: usize,
-    pub(crate) key_end: usize,
+    pub(crate) key_range: Range<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedIndexLeafCell {
+    pub(crate) cell_offset: usize,
+    pub(crate) cell_len: usize,
+    pub(crate) parts: IndexLeafCellParts,
 }
 
 pub(crate) fn cell_len_at(
@@ -38,20 +44,21 @@ pub(crate) fn cell_len_at(
 pub(crate) fn cell_parts<A>(
     page: &Page<A, Leaf, Index>,
     slot_index: SlotId,
-) -> PageResult<IndexLeafCellParts>
+) -> PageResult<ParsedIndexLeafCell>
 where
     A: PageAccess,
 {
     page.validate_slot_index(slot_index)?;
     let cell_offset = page.slot_offset(slot_index)? as usize;
     let cell_len = cell_len_at(page.bytes(), slot_index, cell_offset)?;
-    let key_start = cell_offset + INDEX_LEAF_CELL_PREFIX_SIZE;
-    let key_end = cell_offset + cell_len;
 
-    Ok(IndexLeafCellParts {
-        row_id: format::read_u64(page.bytes(), cell_offset + CELL_LENGTH_SIZE),
-        key_start,
-        key_end,
+    Ok(ParsedIndexLeafCell {
+        cell_offset,
+        cell_len,
+        parts: IndexLeafCellParts {
+            row_id: format::read_u64(page.bytes(), cell_offset + CELL_LENGTH_SIZE),
+            key_range: INDEX_LEAF_CELL_PREFIX_SIZE..cell_len,
+        },
     })
 }
 
@@ -78,8 +85,10 @@ fn compare_key<A>(
 where
     A: PageAccess,
 {
-    let parts = cell_parts(page, slot_index)?;
-    Ok(page.bytes()[parts.key_start..parts.key_end].cmp(key))
+    let parsed = cell_parts(page, slot_index)?;
+    let cell_offset = parsed.cell_offset;
+    let key_range = parsed.parts.key_range;
+    Ok(page.bytes()[cell_offset + key_range.start..cell_offset + key_range.end].cmp(key))
 }
 
 fn compare_entry<A>(
@@ -91,9 +100,12 @@ fn compare_entry<A>(
 where
     A: PageAccess,
 {
-    let parts = cell_parts(page, slot_index)?;
-    let ordering = page.bytes()[parts.key_start..parts.key_end].cmp(key);
-    Ok(if ordering == Ordering::Equal { parts.row_id.cmp(&row_id) } else { ordering })
+    let parsed = cell_parts(page, slot_index)?;
+    let cell_offset = parsed.cell_offset;
+    let key_range = parsed.parts.key_range.clone();
+    let ordering =
+        page.bytes()[cell_offset + key_range.start..cell_offset + key_range.end].cmp(key);
+    Ok(if ordering == Ordering::Equal { parsed.parts.row_id.cmp(&row_id) } else { ordering })
 }
 
 fn bound_to_slot(bound: BoundResult, slot_count: SlotId) -> SlotId {
@@ -125,9 +137,10 @@ where
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<Read<'_>, Leaf, Index>> {
-        cell_parts(self, slot_index)?;
-        Ok(Cell::new(Read { bytes: self.bytes() }, slot_index))
+    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Leaf, Index>> {
+        let parsed = cell_parts(self, slot_index)?;
+        let cell_bytes = &self.bytes()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
+        Ok(Cell::new_index_leaf(cell_bytes, parsed.parts, slot_index))
     }
 }
 
@@ -136,10 +149,11 @@ where
     A: PageAccessMut,
 {
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<Cell<Write<'_>, Leaf, Index>> {
-        let page = Page::<Read<'_>, Leaf, Index>::open(self.bytes())?;
-        cell_parts(&page, slot_index)?;
-        Ok(Cell::new(Write { bytes: self.bytes_mut() }, slot_index))
+    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Leaf, Index>> {
+        let parsed = cell_parts(self, slot_index)?;
+        let cell_bytes =
+            &mut self.bytes_mut()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
+        Ok(CellMut::new_index_leaf(cell_bytes, parsed.parts, slot_index))
     }
 
     /// Inserts a new `(key, row_id)` entry while preserving lexicographic key order.
@@ -299,5 +313,16 @@ mod tests {
         let cell = cell.as_ref();
         assert_eq!(cell.key().unwrap(), b"banana");
         assert_eq!(cell.row_id().unwrap(), 2);
+    }
+
+    #[test]
+    fn cell_key_is_sliced_relative_to_cell_start() {
+        let mut bytes = new_index_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf, Index>::open(&mut bytes).unwrap();
+        page.insert(&[7_u8; 64], 1).unwrap();
+        page.insert(b"banana", 2).unwrap();
+
+        let page = page.as_ref();
+        assert_eq!(page.cell(1).unwrap().key().unwrap(), b"banana");
     }
 }
