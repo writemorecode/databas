@@ -967,6 +967,18 @@ mod tests {
         bytes
     }
 
+    fn initialized_index_leaf_page() -> [u8; PAGE_SIZE] {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let _ = Page::<Write<'_>, Leaf, Index>::initialize(&mut bytes);
+        bytes
+    }
+
+    fn initialized_index_interior_page() -> [u8; PAGE_SIZE] {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let _ = Page::<Write<'_>, Interior, Index>::initialize_with_rightmost(&mut bytes, 17);
+        bytes
+    }
+
     #[test]
     fn initialize_sets_header_and_zero_footer() {
         let bytes = initialized_leaf_page();
@@ -979,6 +991,16 @@ mod tests {
         assert_eq!(format::read_optional_u64(&bytes, PREV_PAGE_ID_OFFSET), None);
         assert_eq!(format::read_optional_u64(&bytes, NEXT_PAGE_ID_OFFSET), None);
         assert_eq!(&bytes[USABLE_SPACE_END..], &[0_u8; PAGE_SIZE - USABLE_SPACE_END]);
+    }
+
+    #[test]
+    fn initialize_sets_index_page_kinds() {
+        let leaf = initialized_index_leaf_page();
+        let interior = initialized_index_interior_page();
+
+        assert_eq!(leaf[KIND_OFFSET], format::PageKind::IndexLeaf as u8);
+        assert_eq!(interior[KIND_OFFSET], format::PageKind::IndexInterior as u8);
+        assert_eq!(format::read_u64(&interior, format::RIGHTMOST_CHILD_OFFSET), 17);
     }
 
     #[test]
@@ -1046,6 +1068,24 @@ mod tests {
     }
 
     #[test]
+    fn open_rejects_mismatched_index_kind() {
+        let leaf = initialized_index_leaf_page();
+        let interior = initialized_index_interior_page();
+
+        let leaf_result = Page::<Read<'_>, Leaf>::open(&leaf);
+        assert_eq!(
+            leaf_result.unwrap_err(),
+            PageError::InvalidPageKind { expected: format::PageKind::TableLeaf, actual: 3 }
+        );
+
+        let interior_result = Page::<Read<'_>, Interior>::open(&interior);
+        assert_eq!(
+            interior_result.unwrap_err(),
+            PageError::InvalidPageKind { expected: format::PageKind::TableInterior, actual: 4 }
+        );
+    }
+
+    #[test]
     fn any_page_try_from_rejects_unknown_kind() {
         let mut bytes = [0_u8; PAGE_SIZE];
         bytes[KIND_OFFSET] = 99;
@@ -1054,6 +1094,18 @@ mod tests {
 
         let result = AnyPage::<Read<'_>>::try_from(&bytes);
         assert_eq!(result.unwrap_err(), PageError::UnknownPageKind { actual: 99 });
+    }
+
+    #[test]
+    fn any_page_try_from_opens_index_page_variants() {
+        let leaf = initialized_index_leaf_page();
+        let interior = initialized_index_interior_page();
+
+        assert!(matches!(AnyPage::<Read<'_>>::try_from(&leaf).unwrap(), AnyPage::IndexLeaf(_)));
+        assert!(matches!(
+            AnyPage::<Read<'_>>::try_from(&interior).unwrap(),
+            AnyPage::IndexInterior(_)
+        ));
     }
 
     #[test]
