@@ -153,3 +153,130 @@ where
         Ok(slot_index)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_index_interior_page(rightmost_child: PageId) -> [u8; PAGE_SIZE] {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let _ = Page::<Write<'_>, Interior, Index>::init(&mut bytes, rightmost_child);
+        bytes
+    }
+
+    #[test]
+    fn parses_valid_index_interior_cell() {
+        let mut bytes = new_index_interior_page(99);
+        let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
+        page.insert(b"mango", 5).unwrap();
+
+        let page = page.as_ref();
+        let cell = page.cell(0).unwrap();
+        assert_eq!(cell.key().unwrap(), b"mango");
+        assert_eq!(cell.left_child().unwrap(), 5);
+        assert_eq!(page.rightmost_child(), 99);
+    }
+
+    #[test]
+    fn rightmost_child_accessors_round_trip() {
+        let mut bytes = new_index_interior_page(7);
+        let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
+        assert_eq!(page.rightmost_child(), 7);
+
+        page.set_rightmost_child(88);
+
+        assert_eq!(page.rightmost_child(), 88);
+        assert_eq!(page.as_ref().rightmost_child(), 88);
+    }
+
+    #[test]
+    fn insert_keeps_separator_order_and_allows_duplicates() {
+        let mut bytes = new_index_interior_page(90);
+        let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
+        page.insert(b"pear", 4).unwrap();
+        page.insert(b"apple", 1).unwrap();
+        page.insert(b"mango", 2).unwrap();
+        page.insert(b"mango", 3).unwrap();
+
+        let page = page.as_ref();
+        assert_eq!(page.cell(0).unwrap().key().unwrap(), b"apple");
+        assert_eq!(page.cell(0).unwrap().left_child().unwrap(), 1);
+        assert_eq!(page.cell(1).unwrap().key().unwrap(), b"mango");
+        assert_eq!(page.cell(1).unwrap().left_child().unwrap(), 2);
+        assert_eq!(page.cell(2).unwrap().key().unwrap(), b"mango");
+        assert_eq!(page.cell(2).unwrap().left_child().unwrap(), 3);
+        assert_eq!(page.cell(3).unwrap().key().unwrap(), b"pear");
+        assert_eq!(page.cell(3).unwrap().left_child().unwrap(), 4);
+    }
+
+    #[test]
+    fn bounds_return_past_end_on_empty_page() {
+        let bytes = new_index_interior_page(7);
+        let page = Page::<Read<'_>, Interior, Index>::open(&bytes).unwrap();
+
+        assert_eq!(page.lower_bound(b"banana").unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.upper_bound(b"banana").unwrap(), BoundResult::PastEnd);
+    }
+
+    #[test]
+    fn bounds_cover_exact_in_between_and_duplicate_separator_positions() {
+        let mut bytes = new_index_interior_page(90);
+        let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
+        page.insert(b"apple", 1).unwrap();
+        page.insert(b"mango", 2).unwrap();
+        page.insert(b"mango", 3).unwrap();
+        page.insert(b"pear", 4).unwrap();
+
+        let page = page.as_ref();
+        assert_eq!(page.lower_bound(b"aardvark").unwrap(), BoundResult::At(0));
+        assert_eq!(page.upper_bound(b"aardvark").unwrap(), BoundResult::At(0));
+        assert_eq!(page.lower_bound(b"mango").unwrap(), BoundResult::At(1));
+        assert_eq!(page.upper_bound(b"mango").unwrap(), BoundResult::At(3));
+        assert_eq!(page.lower_bound(b"orange").unwrap(), BoundResult::At(3));
+        assert_eq!(page.upper_bound(b"orange").unwrap(), BoundResult::At(3));
+        assert_eq!(page.lower_bound(b"zebra").unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.upper_bound(b"zebra").unwrap(), BoundResult::PastEnd);
+    }
+
+    #[test]
+    fn child_for_routes_by_first_separator_greater_than_or_equal_to_key() {
+        let mut bytes = new_index_interior_page(90);
+        let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
+        page.insert(b"apple", 1).unwrap();
+        page.insert(b"mango", 2).unwrap();
+        page.insert(b"mango", 3).unwrap();
+        page.insert(b"pear", 4).unwrap();
+
+        let page = page.as_ref();
+        assert_eq!(page.child_for(b"aardvark").unwrap(), 1);
+        assert_eq!(page.child_for(b"apple").unwrap(), 1);
+        assert_eq!(page.child_for(b"banana").unwrap(), 2);
+        assert_eq!(page.child_for(b"mango").unwrap(), 2);
+        assert_eq!(page.child_for(b"orange").unwrap(), 4);
+        assert_eq!(page.child_for(b"zebra").unwrap(), 90);
+    }
+
+    #[test]
+    fn child_for_returns_rightmost_child_on_empty_page() {
+        let bytes = new_index_interior_page(77);
+        let page = Page::<Read<'_>, Interior, Index>::open(&bytes).unwrap();
+
+        assert_eq!(page.child_for(b"apple").unwrap(), 77);
+        assert_eq!(page.child_for(b"zebra").unwrap(), 77);
+    }
+
+    #[test]
+    fn mutable_cell_view_updates_left_child() {
+        let mut bytes = new_index_interior_page(9);
+        let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
+        page.insert(b"mango", 5).unwrap();
+
+        {
+            let mut cell = page.cell_mut(0).unwrap();
+            cell.set_left_child(66).unwrap();
+        }
+
+        let page = page.as_ref();
+        assert_eq!(page.cell(0).unwrap().left_child().unwrap(), 66);
+    }
+}

@@ -174,3 +174,130 @@ where
         Ok(slot_index)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_index_leaf_page() -> [u8; PAGE_SIZE] {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let _ = Page::<Write<'_>, Leaf, Index>::init(&mut bytes);
+        bytes
+    }
+
+    #[test]
+    fn parses_valid_index_leaf_cell() {
+        let mut bytes = new_index_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf, Index>::open(&mut bytes).unwrap();
+        page.insert(b"beta", 7).unwrap();
+
+        let page = page.as_ref();
+        let cell = page.cell(0).unwrap();
+        assert_eq!(cell.key().unwrap(), b"beta");
+        assert_eq!(cell.row_id().unwrap(), 7);
+    }
+
+    #[test]
+    fn insert_keeps_entries_sorted_by_key_then_row_id() {
+        let mut bytes = new_index_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf, Index>::open(&mut bytes).unwrap();
+        page.insert(b"banana", 4).unwrap();
+        page.insert(b"apple", 9).unwrap();
+        page.insert(b"banana", 2).unwrap();
+        page.insert(b"apple", 1).unwrap();
+
+        let page = page.as_ref();
+        assert_eq!(page.cell(0).unwrap().key().unwrap(), b"apple");
+        assert_eq!(page.cell(0).unwrap().row_id().unwrap(), 1);
+        assert_eq!(page.cell(1).unwrap().key().unwrap(), b"apple");
+        assert_eq!(page.cell(1).unwrap().row_id().unwrap(), 9);
+        assert_eq!(page.cell(2).unwrap().key().unwrap(), b"banana");
+        assert_eq!(page.cell(2).unwrap().row_id().unwrap(), 2);
+        assert_eq!(page.cell(3).unwrap().key().unwrap(), b"banana");
+        assert_eq!(page.cell(3).unwrap().row_id().unwrap(), 4);
+    }
+
+    #[test]
+    fn insert_rejects_exact_duplicates_but_allows_duplicate_keys() {
+        let mut bytes = new_index_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf, Index>::open(&mut bytes).unwrap();
+        page.insert(b"banana", 2).unwrap();
+        page.insert(b"banana", 4).unwrap();
+
+        let err = page.insert(b"banana", 2).unwrap_err();
+        assert_eq!(err, PageError::DuplicateKey);
+        assert_eq!(page.as_ref().equal_range(b"banana").unwrap(), 0..2);
+    }
+
+    #[test]
+    fn bounds_return_past_end_on_empty_page() {
+        let bytes = new_index_leaf_page();
+        let page = Page::<Read<'_>, Leaf, Index>::open(&bytes).unwrap();
+
+        assert_eq!(page.lower_bound(b"banana").unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.upper_bound(b"banana").unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.equal_range(b"banana").unwrap(), 0..0);
+    }
+
+    #[test]
+    fn bounds_and_equal_range_cover_duplicate_keys() {
+        let mut bytes = new_index_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf, Index>::open(&mut bytes).unwrap();
+        page.insert(b"apple", 1).unwrap();
+        page.insert(b"banana", 2).unwrap();
+        page.insert(b"banana", 4).unwrap();
+        page.insert(b"banana", 8).unwrap();
+        page.insert(b"cherry", 3).unwrap();
+
+        let page = page.as_ref();
+        assert_eq!(page.lower_bound(b"aardvark").unwrap(), BoundResult::At(0));
+        assert_eq!(page.upper_bound(b"aardvark").unwrap(), BoundResult::At(0));
+        assert_eq!(page.lower_bound(b"banana").unwrap(), BoundResult::At(1));
+        assert_eq!(page.upper_bound(b"banana").unwrap(), BoundResult::At(4));
+        assert_eq!(page.equal_range(b"banana").unwrap(), 1..4);
+        assert_eq!(page.lower_bound(b"blueberry").unwrap(), BoundResult::At(4));
+        assert_eq!(page.upper_bound(b"blueberry").unwrap(), BoundResult::At(4));
+        assert_eq!(page.equal_range(b"blueberry").unwrap(), 4..4);
+        assert_eq!(page.lower_bound(b"zebra").unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.upper_bound(b"zebra").unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.equal_range(b"zebra").unwrap(), 5..5);
+    }
+
+    #[test]
+    fn delete_removes_only_matching_entry() {
+        let mut bytes = new_index_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf, Index>::open(&mut bytes).unwrap();
+        page.insert(b"banana", 2).unwrap();
+        page.insert(b"banana", 4).unwrap();
+        page.insert(b"banana", 8).unwrap();
+
+        assert_eq!(page.delete(b"banana", 4).unwrap(), 1);
+
+        let page = page.as_ref();
+        assert_eq!(page.equal_range(b"banana").unwrap(), 0..2);
+        assert_eq!(page.cell(0).unwrap().row_id().unwrap(), 2);
+        assert_eq!(page.cell(1).unwrap().row_id().unwrap(), 8);
+    }
+
+    #[test]
+    fn delete_returns_not_found_for_missing_entry() {
+        let mut bytes = new_index_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf, Index>::open(&mut bytes).unwrap();
+        page.insert(b"banana", 2).unwrap();
+
+        let err = page.delete(b"banana", 3).unwrap_err();
+        assert_eq!(err, PageError::KeyNotFound);
+    }
+
+    #[test]
+    fn mutable_cell_view_round_trips_as_ref() {
+        let mut bytes = new_index_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf, Index>::open(&mut bytes).unwrap();
+        page.insert(b"banana", 2).unwrap();
+
+        let cell = page.cell_mut(0).unwrap();
+        let cell = cell.as_ref();
+        assert_eq!(cell.key().unwrap(), b"banana");
+        assert_eq!(cell.row_id().unwrap(), 2);
+    }
+}
