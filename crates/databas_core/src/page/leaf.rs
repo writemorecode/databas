@@ -1,8 +1,10 @@
+use std::ops::Range;
+
 use crate::{PAGE_SIZE, RowId, SlotId};
 
 use super::{
     CellCorruption, PageError, PageResult,
-    cell::Cell,
+    cell::{Cell, CellMut},
     core::{BoundResult, Leaf, Page, PageAccess, PageAccessMut, Read, SearchResult, Table, Write},
     format::{self, CELL_LENGTH_SIZE, USABLE_SPACE_END},
 };
@@ -11,11 +13,17 @@ const ROW_ID_SIZE: usize = 8;
 /// The fixed-size prefix of a leaf cell: encoded length plus row id.
 pub const LEAF_CELL_PREFIX_SIZE: usize = CELL_LENGTH_SIZE + ROW_ID_SIZE;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct LeafCellParts {
     pub(crate) row_id: RowId,
-    pub(crate) payload_start: usize,
-    pub(crate) payload_end: usize,
+    pub(crate) payload_range: Range<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedLeafCell {
+    pub(crate) cell_offset: usize,
+    pub(crate) cell_len: usize,
+    pub(crate) parts: LeafCellParts,
 }
 
 pub(crate) fn cell_len_at(
@@ -36,7 +44,7 @@ pub(crate) fn cell_len_at(
 pub(crate) fn cell_parts<A>(
     page: &Page<A, Leaf, Table>,
     slot_index: SlotId,
-) -> PageResult<LeafCellParts>
+) -> PageResult<ParsedLeafCell>
 where
     A: PageAccess,
 {
@@ -44,13 +52,13 @@ where
     let cell_offset = page.slot_offset(slot_index)? as usize;
     let cell_len = cell_len_at(page.bytes(), slot_index, cell_offset)?;
 
-    let payload_start = cell_offset + LEAF_CELL_PREFIX_SIZE;
-    let payload_end = cell_offset + cell_len;
-
-    Ok(LeafCellParts {
-        row_id: format::read_u64(page.bytes(), cell_offset + CELL_LENGTH_SIZE),
-        payload_start,
-        payload_end,
+    Ok(ParsedLeafCell {
+        cell_offset,
+        cell_len,
+        parts: LeafCellParts {
+            row_id: format::read_u64(page.bytes(), cell_offset + CELL_LENGTH_SIZE),
+            payload_range: LEAF_CELL_PREFIX_SIZE..cell_len,
+        },
     })
 }
 
@@ -76,32 +84,33 @@ where
     /// Returns the first slot whose row id is greater than or equal to `row_id`.
     pub fn lower_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
         self.lower_bound_slots_by(|page, slot_index| {
-            Ok(cell_parts(page, slot_index)?.row_id.cmp(&row_id))
+            Ok(cell_parts(page, slot_index)?.parts.row_id.cmp(&row_id))
         })
     }
 
     /// Returns the first slot whose row id is strictly greater than `row_id`.
     pub fn upper_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
         self.upper_bound_slots_by(|page, slot_index| {
-            Ok(cell_parts(page, slot_index)?.row_id.cmp(&row_id))
+            Ok(cell_parts(page, slot_index)?.parts.row_id.cmp(&row_id))
         })
     }
 
     /// Searches the leaf page for `row_id`.
     pub fn search(&self, row_id: RowId) -> PageResult<SearchResult> {
         self.search_slots_by(|page, slot_index| {
-            Ok(cell_parts(page, slot_index)?.row_id.cmp(&row_id))
+            Ok(cell_parts(page, slot_index)?.parts.row_id.cmp(&row_id))
         })
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<Read<'_>, Leaf, Table>> {
-        cell_parts(self, slot_index)?;
-        Ok(Cell::new(Read { bytes: self.bytes() }, slot_index))
+    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Leaf, Table>> {
+        let parsed = cell_parts(self, slot_index)?;
+        let cell_bytes = &self.bytes()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
+        Ok(Cell::new_table_leaf(cell_bytes, parsed.parts, slot_index))
     }
 
     /// Looks up a row id and returns its cell if present.
-    pub fn lookup(&self, row_id: RowId) -> PageResult<Option<Cell<Read<'_>, Leaf, Table>>> {
+    pub fn lookup(&self, row_id: RowId) -> PageResult<Option<Cell<'_, Leaf, Table>>> {
         match self.search(row_id)? {
             SearchResult::Found(slot_index) => self.cell(slot_index).map(Some),
             SearchResult::InsertAt(_) => Ok(None),
@@ -114,10 +123,11 @@ where
     A: PageAccessMut,
 {
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<Cell<Write<'_>, Leaf, Table>> {
-        let page = Page::<Read<'_>, Leaf, Table>::open(self.bytes())?;
-        cell_parts(&page, slot_index)?;
-        Ok(Cell::new(Write { bytes: self.bytes_mut() }, slot_index))
+    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Leaf, Table>> {
+        let parsed = cell_parts(self, slot_index)?;
+        let cell_bytes =
+            &mut self.bytes_mut()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
+        Ok(CellMut::new_table_leaf(cell_bytes, parsed.parts, slot_index))
     }
 
     /// Inserts a new `(row_id, payload)` record while preserving slot order.
@@ -657,5 +667,16 @@ mod tests {
 
         let page_ref = page.as_ref();
         assert_eq!(page_ref.lookup(10).unwrap().unwrap().payload().unwrap(), b"xyz");
+    }
+
+    #[test]
+    fn cell_payload_is_sliced_relative_to_cell_start() {
+        let mut bytes = new_leaf_page();
+        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        page.insert(10, &[1_u8; 64]).unwrap();
+        page.insert(20, b"payload").unwrap();
+
+        let page_ref = page.as_ref();
+        assert_eq!(page_ref.cell(1).unwrap().payload().unwrap(), b"payload");
     }
 }

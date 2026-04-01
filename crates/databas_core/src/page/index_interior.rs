@@ -4,7 +4,7 @@ use crate::{PAGE_SIZE, PageId, SlotId};
 
 use super::{
     CellCorruption, PageError, PageResult,
-    cell::Cell,
+    cell::{Cell, CellMut},
     core::{BoundResult, Index, Interior, Page, PageAccess, PageAccessMut, Read, Write},
     format::{self, CELL_LENGTH_SIZE, RIGHTMOST_CHILD_OFFSET, USABLE_SPACE_END},
 };
@@ -13,12 +13,17 @@ const PAGE_ID_SIZE: usize = 8;
 /// The fixed-size prefix of an index interior cell: encoded length plus left-child page id.
 pub const INDEX_INTERIOR_CELL_PREFIX_SIZE: usize = CELL_LENGTH_SIZE + PAGE_ID_SIZE;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct IndexInteriorCellParts {
-    pub(crate) cell_offset: usize,
     pub(crate) left_child: PageId,
-    pub(crate) key_start: usize,
-    pub(crate) key_end: usize,
+    pub(crate) key_range: std::ops::Range<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedIndexInteriorCell {
+    pub(crate) cell_offset: usize,
+    pub(crate) cell_len: usize,
+    pub(crate) parts: IndexInteriorCellParts,
 }
 
 pub(crate) fn cell_len_at(
@@ -39,26 +44,27 @@ pub(crate) fn cell_len_at(
 pub(crate) fn cell_parts<A>(
     page: &Page<A, Interior, Index>,
     slot_index: SlotId,
-) -> PageResult<IndexInteriorCellParts>
+) -> PageResult<ParsedIndexInteriorCell>
 where
     A: PageAccess,
 {
     page.validate_slot_index(slot_index)?;
     let cell_offset = page.slot_offset(slot_index)? as usize;
     let cell_len = cell_len_at(page.bytes(), slot_index, cell_offset)?;
-    let key_start = cell_offset + INDEX_INTERIOR_CELL_PREFIX_SIZE;
-    let key_end = cell_offset + cell_len;
 
-    Ok(IndexInteriorCellParts {
+    Ok(ParsedIndexInteriorCell {
         cell_offset,
-        left_child: format::read_u64(page.bytes(), cell_offset + CELL_LENGTH_SIZE),
-        key_start,
-        key_end,
+        cell_len,
+        parts: IndexInteriorCellParts {
+            left_child: format::read_u64(page.bytes(), cell_offset + CELL_LENGTH_SIZE),
+            key_range: INDEX_INTERIOR_CELL_PREFIX_SIZE..cell_len,
+        },
     })
 }
 
-pub(crate) fn write_left_child(bytes: &mut [u8; PAGE_SIZE], cell_offset: usize, page_id: PageId) {
-    format::write_u64(bytes, cell_offset + CELL_LENGTH_SIZE, page_id);
+pub(crate) fn write_left_child(bytes: &mut [u8], page_id: PageId) {
+    bytes[CELL_LENGTH_SIZE..CELL_LENGTH_SIZE + PAGE_ID_SIZE]
+        .copy_from_slice(&page_id.to_le_bytes());
 }
 
 fn encoded_len(key_len: usize) -> PageResult<usize> {
@@ -72,7 +78,7 @@ fn encoded_len(key_len: usize) -> PageResult<usize> {
 fn write_cell(bytes: &mut [u8; PAGE_SIZE], cell_offset: usize, left_child: PageId, key: &[u8]) {
     let cell_len = INDEX_INTERIOR_CELL_PREFIX_SIZE + key.len();
     format::write_u16(bytes, cell_offset, cell_len as u16);
-    write_left_child(bytes, cell_offset, left_child);
+    write_left_child(&mut bytes[cell_offset..cell_offset + cell_len], left_child);
     bytes[cell_offset + INDEX_INTERIOR_CELL_PREFIX_SIZE..cell_offset + cell_len]
         .copy_from_slice(key);
 }
@@ -85,8 +91,10 @@ fn compare_key<A>(
 where
     A: PageAccess,
 {
-    let parts = cell_parts(page, slot_index)?;
-    Ok(page.bytes()[parts.key_start..parts.key_end].cmp(key))
+    let parsed = cell_parts(page, slot_index)?;
+    let cell_offset = parsed.cell_offset;
+    let key_range = parsed.parts.key_range;
+    Ok(page.bytes()[cell_offset + key_range.start..cell_offset + key_range.end].cmp(key))
 }
 
 impl<A> Page<A, Interior, Index>
@@ -111,15 +119,16 @@ where
     /// Returns the child page that may contain `key`.
     pub fn child_for(&self, key: &[u8]) -> PageResult<PageId> {
         match self.lower_bound(key)? {
-            BoundResult::At(slot_index) => Ok(cell_parts(self, slot_index)?.left_child),
+            BoundResult::At(slot_index) => Ok(cell_parts(self, slot_index)?.parts.left_child),
             BoundResult::PastEnd => Ok(self.rightmost_child()),
         }
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<Read<'_>, Interior, Index>> {
-        cell_parts(self, slot_index)?;
-        Ok(Cell::new(Read { bytes: self.bytes() }, slot_index))
+    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Interior, Index>> {
+        let parsed = cell_parts(self, slot_index)?;
+        let cell_bytes = &self.bytes()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
+        Ok(Cell::new_index_interior(cell_bytes, parsed.parts, slot_index))
     }
 }
 
@@ -133,10 +142,11 @@ where
     }
 
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<Cell<Write<'_>, Interior, Index>> {
-        let page = Page::<Read<'_>, Interior, Index>::open(self.bytes())?;
-        cell_parts(&page, slot_index)?;
-        Ok(Cell::new(Write { bytes: self.bytes_mut() }, slot_index))
+    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Interior, Index>> {
+        let parsed = cell_parts(self, slot_index)?;
+        let cell_bytes =
+            &mut self.bytes_mut()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
+        Ok(CellMut::new_index_interior(cell_bytes, parsed.parts, slot_index))
     }
 
     /// Inserts a new separator key and its left-child pointer while preserving slot order.
@@ -278,5 +288,16 @@ mod tests {
 
         let page = page.as_ref();
         assert_eq!(page.cell(0).unwrap().left_child().unwrap(), 66);
+    }
+
+    #[test]
+    fn cell_key_is_sliced_relative_to_cell_start() {
+        let mut bytes = new_index_interior_page(9);
+        let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
+        page.insert(&[5_u8; 64], 1).unwrap();
+        page.insert(b"mango", 2).unwrap();
+
+        let page = page.as_ref();
+        assert_eq!(page.cell(1).unwrap().key().unwrap(), b"mango");
     }
 }

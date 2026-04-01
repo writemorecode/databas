@@ -2,7 +2,7 @@ use crate::{PAGE_SIZE, PageId, RowId, SlotId};
 
 use super::{
     PageError, PageResult,
-    cell::Cell,
+    cell::{Cell, CellMut},
     core::{
         BoundResult, Interior, Page, PageAccess, PageAccessMut, Read, SearchResult, Table, Write,
     },
@@ -16,25 +16,34 @@ pub const INTERIOR_CELL_SIZE: usize = PAGE_ID_SIZE + ROW_ID_SIZE;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct InteriorCellParts {
-    pub(crate) cell_offset: usize,
     pub(crate) left_child: PageId,
     pub(crate) row_id: RowId,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ParsedInteriorCell {
+    pub(crate) cell_offset: usize,
+    pub(crate) cell_len: usize,
+    pub(crate) parts: InteriorCellParts,
 }
 
 pub(crate) fn cell_parts<A>(
     page: &Page<A, Interior, Table>,
     slot_index: SlotId,
-) -> PageResult<InteriorCellParts>
+) -> PageResult<ParsedInteriorCell>
 where
     A: PageAccess,
 {
     page.validate_slot_index(slot_index)?;
     let cell_offset = page.slot_offset(slot_index)? as usize;
 
-    Ok(InteriorCellParts {
+    Ok(ParsedInteriorCell {
         cell_offset,
-        left_child: format::read_u64(page.bytes(), cell_offset),
-        row_id: format::read_u64(page.bytes(), cell_offset + PAGE_ID_SIZE),
+        cell_len: INTERIOR_CELL_SIZE,
+        parts: InteriorCellParts {
+            left_child: format::read_u64(page.bytes(), cell_offset),
+            row_id: format::read_u64(page.bytes(), cell_offset + PAGE_ID_SIZE),
+        },
     })
 }
 
@@ -43,12 +52,12 @@ fn encoded_len() -> usize {
 }
 
 fn write_cell(bytes: &mut [u8; PAGE_SIZE], cell_offset: usize, left_child: PageId, row_id: RowId) {
-    write_left_child(bytes, cell_offset, left_child);
+    write_left_child(&mut bytes[cell_offset..cell_offset + INTERIOR_CELL_SIZE], left_child);
     format::write_u64(bytes, cell_offset + PAGE_ID_SIZE, row_id);
 }
 
-pub(crate) fn write_left_child(bytes: &mut [u8; PAGE_SIZE], cell_offset: usize, page_id: PageId) {
-    format::write_u64(bytes, cell_offset, page_id);
+pub(crate) fn write_left_child(bytes: &mut [u8], page_id: PageId) {
+    bytes[..PAGE_ID_SIZE].copy_from_slice(&page_id.to_le_bytes());
 }
 
 impl<A> Page<A, Interior, Table>
@@ -63,21 +72,21 @@ where
     /// Returns the first slot whose separator row id is greater than or equal to `row_id`.
     pub fn lower_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
         self.lower_bound_slots_by(|page, slot_index| {
-            Ok(cell_parts(page, slot_index)?.row_id.cmp(&row_id))
+            Ok(cell_parts(page, slot_index)?.parts.row_id.cmp(&row_id))
         })
     }
 
     /// Returns the first slot whose separator row id is strictly greater than `row_id`.
     pub fn upper_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
         self.upper_bound_slots_by(|page, slot_index| {
-            Ok(cell_parts(page, slot_index)?.row_id.cmp(&row_id))
+            Ok(cell_parts(page, slot_index)?.parts.row_id.cmp(&row_id))
         })
     }
 
     /// Returns the child page that may contain `row_id`.
     pub fn child_for(&self, row_id: RowId) -> PageResult<PageId> {
         match self.lower_bound(row_id)? {
-            BoundResult::At(slot_index) => Ok(cell_parts(self, slot_index)?.left_child),
+            BoundResult::At(slot_index) => Ok(cell_parts(self, slot_index)?.parts.left_child),
             BoundResult::PastEnd => Ok(self.rightmost_child()),
         }
     }
@@ -85,18 +94,19 @@ where
     /// Searches the interior page for `row_id`.
     pub fn search(&self, row_id: RowId) -> PageResult<SearchResult> {
         self.search_slots_by(|page, slot_index| {
-            Ok(cell_parts(page, slot_index)?.row_id.cmp(&row_id))
+            Ok(cell_parts(page, slot_index)?.parts.row_id.cmp(&row_id))
         })
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<Read<'_>, Interior, Table>> {
-        cell_parts(self, slot_index)?;
-        Ok(Cell::new(Read { bytes: self.bytes() }, slot_index))
+    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Interior, Table>> {
+        let parsed = cell_parts(self, slot_index)?;
+        let cell_bytes = &self.bytes()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
+        Ok(Cell::new_table_interior(cell_bytes, parsed.parts, slot_index))
     }
 
     /// Looks up a separator key and returns its cell if present.
-    pub fn lookup(&self, row_id: RowId) -> PageResult<Option<Cell<Read<'_>, Interior, Table>>> {
+    pub fn lookup(&self, row_id: RowId) -> PageResult<Option<Cell<'_, Interior, Table>>> {
         match self.search(row_id)? {
             SearchResult::Found(slot_index) => self.cell(slot_index).map(Some),
             SearchResult::InsertAt(_) => Ok(None),
@@ -114,10 +124,11 @@ where
     }
 
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<Cell<Write<'_>, Interior, Table>> {
-        let page = Page::<Read<'_>, Interior, Table>::open(self.bytes())?;
-        cell_parts(&page, slot_index)?;
-        Ok(Cell::new(Write { bytes: self.bytes_mut() }, slot_index))
+    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Interior, Table>> {
+        let parsed = cell_parts(self, slot_index)?;
+        let cell_bytes =
+            &mut self.bytes_mut()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
+        Ok(CellMut::new_table_interior(cell_bytes, parsed.parts, slot_index))
     }
 
     /// Inserts a new separator key and its left-child pointer while preserving slot order.

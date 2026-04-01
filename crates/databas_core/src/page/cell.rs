@@ -1,162 +1,308 @@
 use core::marker::PhantomData;
 
-use crate::{PAGE_SIZE, PageId, RowId, SlotId};
+use crate::{PageId, RowId, SlotId};
 
 use super::{
     PageResult,
-    core::{Index, Interior, Leaf, Page, PageAccess, PageAccessMut, Read, Table, Write},
+    core::{Index, Interior, Leaf, Table},
     index_interior, index_leaf, interior, leaf,
 };
 
-/// A typed view over a single slot entry within a page.
+#[derive(Debug, Clone)]
+enum CellMetadata {
+    TableLeaf(leaf::LeafCellParts),
+    IndexLeaf(index_leaf::IndexLeafCellParts),
+    TableInterior(interior::InteriorCellParts),
+    IndexInterior(index_interior::IndexInteriorCellParts),
+}
+
+/// A typed immutable view over a single page cell.
 #[derive(Debug)]
-pub struct Cell<A, N, T = Table> {
-    access: A,
+pub struct Cell<'a, N, T = Table> {
+    bytes: &'a [u8],
+    metadata: CellMetadata,
     slot_index: SlotId,
     _marker: PhantomData<(N, T)>,
 }
 
-impl<A, N, T> Cell<A, N, T> {
-    pub(crate) fn new(access: A, slot_index: SlotId) -> Self {
-        Self { access, slot_index, _marker: PhantomData }
+/// A typed mutable view over a single page cell.
+#[derive(Debug)]
+pub struct CellMut<'a, N, T = Table> {
+    bytes: &'a mut [u8],
+    metadata: CellMetadata,
+    slot_index: SlotId,
+    _marker: PhantomData<(N, T)>,
+}
+
+impl<'a, N, T> Cell<'a, N, T> {
+    fn new(bytes: &'a [u8], metadata: CellMetadata, slot_index: SlotId) -> Self {
+        Self { bytes, metadata, slot_index, _marker: PhantomData }
+    }
+
+    pub(crate) fn new_table_leaf(
+        bytes: &'a [u8],
+        parts: leaf::LeafCellParts,
+        slot_index: SlotId,
+    ) -> Self {
+        Self::new(bytes, CellMetadata::TableLeaf(parts), slot_index)
+    }
+
+    pub(crate) fn new_index_leaf(
+        bytes: &'a [u8],
+        parts: index_leaf::IndexLeafCellParts,
+        slot_index: SlotId,
+    ) -> Self {
+        Self::new(bytes, CellMetadata::IndexLeaf(parts), slot_index)
+    }
+
+    pub(crate) fn new_table_interior(
+        bytes: &'a [u8],
+        parts: interior::InteriorCellParts,
+        slot_index: SlotId,
+    ) -> Self {
+        Self::new(bytes, CellMetadata::TableInterior(parts), slot_index)
+    }
+
+    pub(crate) fn new_index_interior(
+        bytes: &'a [u8],
+        parts: index_interior::IndexInteriorCellParts,
+        slot_index: SlotId,
+    ) -> Self {
+        Self::new(bytes, CellMetadata::IndexInterior(parts), slot_index)
     }
 
     /// Returns the slot index that this cell view refers to.
     pub fn slot_index(&self) -> SlotId {
         self.slot_index
     }
-}
 
-impl<A, N, T> Cell<A, N, T>
-where
-    A: PageAccess,
-{
-    fn bytes(&self) -> &[u8; PAGE_SIZE] {
-        self.access.bytes()
+    fn table_leaf_parts(&self) -> &leaf::LeafCellParts {
+        match &self.metadata {
+            CellMetadata::TableLeaf(parts) => parts,
+            _ => unreachable!("table leaf cell metadata mismatch"),
+        }
+    }
+
+    fn index_leaf_parts(&self) -> &index_leaf::IndexLeafCellParts {
+        match &self.metadata {
+            CellMetadata::IndexLeaf(parts) => parts,
+            _ => unreachable!("index leaf cell metadata mismatch"),
+        }
+    }
+
+    fn table_interior_parts(&self) -> &interior::InteriorCellParts {
+        match &self.metadata {
+            CellMetadata::TableInterior(parts) => parts,
+            _ => unreachable!("table interior cell metadata mismatch"),
+        }
+    }
+
+    fn index_interior_parts(&self) -> &index_interior::IndexInteriorCellParts {
+        match &self.metadata {
+            CellMetadata::IndexInterior(parts) => parts,
+            _ => unreachable!("index interior cell metadata mismatch"),
+        }
     }
 }
 
-impl<A, N, T> Cell<A, N, T>
-where
-    A: PageAccessMut,
-{
-    fn bytes_mut(&mut self) -> &mut [u8; PAGE_SIZE] {
-        self.access.bytes_mut()
+impl<'a, N, T> CellMut<'a, N, T> {
+    fn new(bytes: &'a mut [u8], metadata: CellMetadata, slot_index: SlotId) -> Self {
+        Self { bytes, metadata, slot_index, _marker: PhantomData }
     }
-}
 
-impl<'a, N, T> Cell<Write<'a>, N, T> {
+    pub(crate) fn new_table_leaf(
+        bytes: &'a mut [u8],
+        parts: leaf::LeafCellParts,
+        slot_index: SlotId,
+    ) -> Self {
+        Self::new(bytes, CellMetadata::TableLeaf(parts), slot_index)
+    }
+
+    pub(crate) fn new_index_leaf(
+        bytes: &'a mut [u8],
+        parts: index_leaf::IndexLeafCellParts,
+        slot_index: SlotId,
+    ) -> Self {
+        Self::new(bytes, CellMetadata::IndexLeaf(parts), slot_index)
+    }
+
+    pub(crate) fn new_table_interior(
+        bytes: &'a mut [u8],
+        parts: interior::InteriorCellParts,
+        slot_index: SlotId,
+    ) -> Self {
+        Self::new(bytes, CellMetadata::TableInterior(parts), slot_index)
+    }
+
+    pub(crate) fn new_index_interior(
+        bytes: &'a mut [u8],
+        parts: index_interior::IndexInteriorCellParts,
+        slot_index: SlotId,
+    ) -> Self {
+        Self::new(bytes, CellMetadata::IndexInterior(parts), slot_index)
+    }
+
+    /// Returns the slot index that this cell view refers to.
+    pub fn slot_index(&self) -> SlotId {
+        self.slot_index
+    }
+
     /// Borrows this mutable cell as an immutable cell view.
-    pub fn as_ref(&self) -> Cell<Read<'_>, N, T> {
-        Cell::new(Read { bytes: self.bytes() }, self.slot_index)
+    pub fn as_ref(&self) -> Cell<'_, N, T> {
+        Cell::new(self.bytes, self.metadata.clone(), self.slot_index)
+    }
+
+    fn table_leaf_parts(&self) -> &leaf::LeafCellParts {
+        match &self.metadata {
+            CellMetadata::TableLeaf(parts) => parts,
+            _ => unreachable!("table leaf cell metadata mismatch"),
+        }
+    }
+
+    fn index_leaf_parts(&self) -> &index_leaf::IndexLeafCellParts {
+        match &self.metadata {
+            CellMetadata::IndexLeaf(parts) => parts,
+            _ => unreachable!("index leaf cell metadata mismatch"),
+        }
+    }
+
+    fn table_interior_parts(&self) -> &interior::InteriorCellParts {
+        match &self.metadata {
+            CellMetadata::TableInterior(parts) => parts,
+            _ => unreachable!("table interior cell metadata mismatch"),
+        }
+    }
+
+    fn index_interior_parts(&self) -> &index_interior::IndexInteriorCellParts {
+        match &self.metadata {
+            CellMetadata::IndexInterior(parts) => parts,
+            _ => unreachable!("index interior cell metadata mismatch"),
+        }
     }
 }
 
-impl<A> Cell<A, Leaf, Table>
-where
-    A: PageAccess,
-{
+impl Cell<'_, Leaf, Table> {
     /// Returns the row id stored in this leaf cell.
     pub fn row_id(&self) -> PageResult<RowId> {
-        let page = Page::<Read<'_>, Leaf, Table>::open(self.bytes())?;
-        Ok(leaf::cell_parts(&page, self.slot_index)?.row_id)
+        Ok(self.table_leaf_parts().row_id)
     }
 
     /// Returns the payload bytes stored in this leaf cell.
     pub fn payload(&self) -> PageResult<&[u8]> {
-        let page = Page::<Read<'_>, Leaf, Table>::open(self.bytes())?;
-        let parts = leaf::cell_parts(&page, self.slot_index)?;
-        Ok(&self.bytes()[parts.payload_start..parts.payload_end])
+        let range = self.table_leaf_parts().payload_range.clone();
+        Ok(&self.bytes[range])
     }
 }
 
-impl<A> Cell<A, Leaf, Table>
-where
-    A: PageAccessMut,
-{
+impl CellMut<'_, Leaf, Table> {
+    /// Returns the row id stored in this leaf cell.
+    pub fn row_id(&self) -> PageResult<RowId> {
+        Ok(self.table_leaf_parts().row_id)
+    }
+
+    /// Returns the payload bytes stored in this leaf cell.
+    pub fn payload(&self) -> PageResult<&[u8]> {
+        let range = self.table_leaf_parts().payload_range.clone();
+        Ok(&self.bytes[range])
+    }
+
     /// Returns the payload bytes stored in this leaf cell mutably.
     pub fn payload_mut(&mut self) -> PageResult<&mut [u8]> {
-        let page = Page::<Read<'_>, Leaf, Table>::open(self.bytes())?;
-        let parts = leaf::cell_parts(&page, self.slot_index)?;
-        Ok(&mut self.bytes_mut()[parts.payload_start..parts.payload_end])
+        let range = self.table_leaf_parts().payload_range.clone();
+        Ok(&mut self.bytes[range])
     }
 }
 
-impl<A> Cell<A, Leaf, Index>
-where
-    A: PageAccess,
-{
+impl Cell<'_, Leaf, Index> {
     /// Returns the indexed key stored in this leaf cell.
     pub fn key(&self) -> PageResult<&[u8]> {
-        let page = Page::<Read<'_>, Leaf, Index>::open(self.bytes())?;
-        let parts = index_leaf::cell_parts(&page, self.slot_index)?;
-        Ok(&self.bytes()[parts.key_start..parts.key_end])
+        let range = self.index_leaf_parts().key_range.clone();
+        Ok(&self.bytes[range])
     }
 
     /// Returns the row reference stored alongside this index key.
     pub fn row_id(&self) -> PageResult<RowId> {
-        let page = Page::<Read<'_>, Leaf, Index>::open(self.bytes())?;
-        Ok(index_leaf::cell_parts(&page, self.slot_index)?.row_id)
+        Ok(self.index_leaf_parts().row_id)
     }
 }
 
-impl<A> Cell<A, Interior, Table>
-where
-    A: PageAccess,
-{
+impl CellMut<'_, Leaf, Index> {
+    /// Returns the indexed key stored in this leaf cell.
+    pub fn key(&self) -> PageResult<&[u8]> {
+        let range = self.index_leaf_parts().key_range.clone();
+        Ok(&self.bytes[range])
+    }
+
+    /// Returns the row reference stored alongside this index key.
+    pub fn row_id(&self) -> PageResult<RowId> {
+        Ok(self.index_leaf_parts().row_id)
+    }
+}
+
+impl Cell<'_, Interior, Table> {
     /// Returns the separator row id stored in this interior cell.
     pub fn row_id(&self) -> PageResult<RowId> {
-        let page = Page::<Read<'_>, Interior, Table>::open(self.bytes())?;
-        Ok(interior::cell_parts(&page, self.slot_index)?.row_id)
+        Ok(self.table_interior_parts().row_id)
     }
 
     /// Returns the left-child page id referenced by this interior cell.
     pub fn left_child(&self) -> PageResult<PageId> {
-        let page = Page::<Read<'_>, Interior, Table>::open(self.bytes())?;
-        Ok(interior::cell_parts(&page, self.slot_index)?.left_child)
+        Ok(self.table_interior_parts().left_child)
     }
 }
 
-impl<A> Cell<A, Interior, Table>
-where
-    A: PageAccessMut,
-{
+impl CellMut<'_, Interior, Table> {
+    /// Returns the separator row id stored in this interior cell.
+    pub fn row_id(&self) -> PageResult<RowId> {
+        Ok(self.table_interior_parts().row_id)
+    }
+
+    /// Returns the left-child page id referenced by this interior cell.
+    pub fn left_child(&self) -> PageResult<PageId> {
+        Ok(self.table_interior_parts().left_child)
+    }
+
     /// Updates the left-child page id stored in this interior cell.
     pub fn set_left_child(&mut self, page_id: PageId) -> PageResult<()> {
-        let page = Page::<Read<'_>, Interior, Table>::open(self.bytes())?;
-        let parts = interior::cell_parts(&page, self.slot_index)?;
-        interior::write_left_child(self.bytes_mut(), parts.cell_offset, page_id);
+        interior::write_left_child(self.bytes, page_id);
+        if let CellMetadata::TableInterior(parts) = &mut self.metadata {
+            parts.left_child = page_id;
+        }
         Ok(())
     }
 }
 
-impl<A> Cell<A, Interior, Index>
-where
-    A: PageAccess,
-{
+impl Cell<'_, Interior, Index> {
     /// Returns the separator key stored in this interior cell.
     pub fn key(&self) -> PageResult<&[u8]> {
-        let page = Page::<Read<'_>, Interior, Index>::open(self.bytes())?;
-        let parts = index_interior::cell_parts(&page, self.slot_index)?;
-        Ok(&self.bytes()[parts.key_start..parts.key_end])
+        let range = self.index_interior_parts().key_range.clone();
+        Ok(&self.bytes[range])
     }
 
     /// Returns the left-child page id referenced by this interior cell.
     pub fn left_child(&self) -> PageResult<PageId> {
-        let page = Page::<Read<'_>, Interior, Index>::open(self.bytes())?;
-        Ok(index_interior::cell_parts(&page, self.slot_index)?.left_child)
+        Ok(self.index_interior_parts().left_child)
     }
 }
 
-impl<A> Cell<A, Interior, Index>
-where
-    A: PageAccessMut,
-{
+impl CellMut<'_, Interior, Index> {
+    /// Returns the separator key stored in this interior cell.
+    pub fn key(&self) -> PageResult<&[u8]> {
+        let range = self.index_interior_parts().key_range.clone();
+        Ok(&self.bytes[range])
+    }
+
+    /// Returns the left-child page id referenced by this interior cell.
+    pub fn left_child(&self) -> PageResult<PageId> {
+        Ok(self.index_interior_parts().left_child)
+    }
+
     /// Updates the left-child page id stored in this interior cell.
     pub fn set_left_child(&mut self, page_id: PageId) -> PageResult<()> {
-        let page = Page::<Read<'_>, Interior, Index>::open(self.bytes())?;
-        let parts = index_interior::cell_parts(&page, self.slot_index)?;
-        index_interior::write_left_child(self.bytes_mut(), parts.cell_offset, page_id);
+        index_interior::write_left_child(self.bytes, page_id);
+        if let CellMetadata::IndexInterior(parts) = &mut self.metadata {
+            parts.left_child = page_id;
+        }
         Ok(())
     }
 }
