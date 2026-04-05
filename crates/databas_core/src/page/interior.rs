@@ -3,9 +3,7 @@ use crate::{PAGE_SIZE, PageId, RowId, SlotId};
 use super::{
     PageError, PageResult,
     cell::{Cell, CellMut},
-    core::{
-        BoundResult, Interior, Page, PageAccess, PageAccessMut, Read, SearchResult, Table, Write,
-    },
+    core::{BoundResult, Interior, Page, PageAccess, PageAccessMut, SearchResult, Table},
     format::{self, RIGHTMOST_CHILD_OFFSET},
 };
 
@@ -160,6 +158,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::page::{Read, Write};
 
     fn new_interior_page(rightmost_child: PageId) -> [u8; PAGE_SIZE] {
         let mut bytes = [0_u8; PAGE_SIZE];

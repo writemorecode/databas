@@ -453,7 +453,8 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::page::{AnyPage, Leaf, Page, PageKind, Write};
+    use crate::page::format::PageKind;
+    use crate::page::{AnyPage, Leaf, Page, Write};
 
     /// Generates a deterministic page payload from a seed byte.
     fn page_with_pattern(seed: u8) -> [u8; PAGE_SIZE] {
