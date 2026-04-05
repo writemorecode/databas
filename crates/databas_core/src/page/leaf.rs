@@ -5,7 +5,7 @@ use crate::{PAGE_SIZE, RowId, SlotId};
 use super::{
     CellCorruption, PageError, PageResult,
     cell::{Cell, CellMut},
-    core::{BoundResult, Leaf, Page, PageAccess, PageAccessMut, Read, SearchResult, Table, Write},
+    core::{BoundResult, Leaf, Page, PageAccess, PageAccessMut, SearchResult, Table},
     format::{self, CELL_LENGTH_SIZE, USABLE_SPACE_END},
 };
 
@@ -187,6 +187,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::page::{Read, Write};
 
     fn new_leaf_page() -> [u8; PAGE_SIZE] {
         let mut bytes = [0_u8; PAGE_SIZE];

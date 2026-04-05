@@ -28,24 +28,10 @@ mod index_leaf;
 mod interior;
 mod leaf;
 
-/// A typed view over a single page cell in either a leaf or interior page.
-pub use cell::Cell;
-/// A typed mutable view over a single page cell in either a leaf or interior page.
-pub use cell::CellMut;
 /// Page handles, marker types, access traits, and search helpers for typed page access.
-pub use core::{
-    AnyPage, BoundResult, Index, Interior, Leaf, NodeMarker, Page, PageAccess, PageAccessMut, Read,
-    SearchResult, Table, TreeMarker, Write,
-};
+pub use core::{AnyPage, Index, Interior, Leaf, NodeMarker, Page, Read, Table, TreeMarker, Write};
 /// Errors returned while validating or manipulating encoded pages and cells.
 pub(crate) use error::{CellCorruption, PageCorruption, PageError, PageResult};
-/// Public page-format constants and layout metadata used by page encoders and decoders.
-pub use format::{
-    CELL_LENGTH_SIZE, FORMAT_VERSION, FREEBLOCK_HEADER_SIZE, INTERIOR_HEADER_SIZE,
-    LEAF_HEADER_SIZE, MAX_FRAGMENTED_FREE_BYTES, NEXT_PAGE_ID_OFFSET, NodeKind,
-    PREV_PAGE_ID_OFFSET, PageKind, RESERVED_FOOTER_SIZE, SHARED_HEADER_SIZE, SLOT_ENTRY_SIZE,
-    TreeKind, USABLE_SPACE_END,
-};
 
 /// A typed table leaf page alias.
 pub type TableLeafPage<A> = Page<A, Leaf, Table>;

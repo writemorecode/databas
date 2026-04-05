@@ -5,7 +5,7 @@ use crate::{PAGE_SIZE, PageId, SlotId};
 use super::{
     CellCorruption, PageError, PageResult,
     cell::{Cell, CellMut},
-    core::{BoundResult, Index, Interior, Page, PageAccess, PageAccessMut, Read, Write},
+    core::{BoundResult, Index, Interior, Page, PageAccess, PageAccessMut},
     format::{self, CELL_LENGTH_SIZE, RIGHTMOST_CHILD_OFFSET, USABLE_SPACE_END},
 };
 
@@ -167,6 +167,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::page::{Read, Write};
 
     fn new_index_interior_page(rightmost_child: PageId) -> [u8; PAGE_SIZE] {
         let mut bytes = [0_u8; PAGE_SIZE];
