@@ -10,6 +10,7 @@
 //! the core data-model types before the full tree algorithms are implemented.
 
 use core::marker::PhantomData;
+use std::fmt;
 
 use crate::{
     PageId, RowId,
@@ -18,7 +19,7 @@ use crate::{
         self, Page, Write,
         format::{KIND_OFFSET, PageKind},
     },
-    page_cache::PageCache,
+    page_cache::{PageCache, PinGuard},
 };
 
 mod sealed {
@@ -66,22 +67,80 @@ impl TreeKindExt for Index {
     const ROOT_KIND_NAME: &'static str = "index root page";
 }
 
-/// Owned table record returned by table-tree reads and cursor iteration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableRecord<'a> {
+/// Guard-backed table record view returned by table-tree reads and cursor iteration.
+pub struct TableRecord {
     /// The primary row identifier used as the table-tree key.
     pub row_id: RowId,
-    /// The raw row payload stored in the table leaf page.
-    pub payload: &'a [u8],
+    pin: PinGuard,
+    slot_index: u16,
 }
 
-/// Owned index entry returned by index-tree reads and cursor iteration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IndexEntry<'a> {
-    /// The encoded secondary-key bytes.
-    pub key: &'a [u8],
+/// Guard-backed index entry view returned by index-tree reads and cursor iteration.
+pub struct IndexEntry {
     /// The referenced row identifier.
     pub row_id: RowId,
+    pin: PinGuard,
+    slot_index: u16,
+}
+
+impl TableRecord {
+    pub(crate) fn new(pin: PinGuard, slot_index: u16) -> StorageResult<Self> {
+        let row_id = {
+            let page = pin.read()?;
+            let leaf = page.open_typed::<page::Leaf, page::Table>()?;
+            let cell = leaf.cell(slot_index)?;
+            cell.row_id()?
+        };
+        Ok(Self { row_id, pin, slot_index })
+    }
+
+    /// Executes `f` with a borrowed view of the row payload while the backing
+    /// page remains pinned and immutably borrowed.
+    pub fn with_payload<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
+        let page = self.pin.read()?;
+        let leaf = page.open_typed::<page::Leaf, page::Table>()?;
+        let cell = leaf.cell(self.slot_index)?;
+        Ok(f(cell.payload()?))
+    }
+}
+
+impl fmt::Debug for TableRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TableRecord")
+            .field("row_id", &self.row_id)
+            .field("slot_index", &self.slot_index)
+            .finish_non_exhaustive()
+    }
+}
+
+impl IndexEntry {
+    pub(crate) fn new(pin: PinGuard, slot_index: u16) -> StorageResult<Self> {
+        let row_id = {
+            let page = pin.read()?;
+            let leaf = page.open_typed::<page::Leaf, page::Index>()?;
+            let cell = leaf.cell(slot_index)?;
+            cell.row_id()?
+        };
+        Ok(Self { row_id, pin, slot_index })
+    }
+
+    /// Executes `f` with a borrowed view of the indexed key while the backing
+    /// page remains pinned and immutably borrowed.
+    pub fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
+        let page = self.pin.read()?;
+        let leaf = page.open_typed::<page::Leaf, page::Index>()?;
+        let cell = leaf.cell(self.slot_index)?;
+        Ok(f(cell.key()?))
+    }
+}
+
+impl fmt::Debug for IndexEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IndexEntry")
+            .field("row_id", &self.row_id)
+            .field("slot_index", &self.slot_index)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Logical cursor state exposed by the public cursor API.
@@ -169,7 +228,7 @@ impl TableCursor {
     ///
     /// The cursor is expected to end on the matching row when found, or on the
     /// leaf page where `row_id` would be inserted when absent.
-    pub fn get(&mut self, row_id: RowId) -> StorageResult<Option<TableRecord<'_>>> {
+    pub fn get(&mut self, row_id: RowId) -> StorageResult<Option<TableRecord>> {
         let _ = &self.page_cache;
         let _ = row_id;
         todo!("table-tree lookup is not implemented yet")
@@ -186,7 +245,7 @@ impl TableCursor {
     }
 
     /// Replaces the payload stored for an existing `row_id`.
-    pub fn update(&mut self, row_id: RowId, payload: &[u8]) -> StorageResult<TableRecord<'_>> {
+    pub fn update(&mut self, row_id: RowId, payload: &[u8]) -> StorageResult<()> {
         let _ = &self.page_cache;
         let _ = (row_id, payload);
         todo!("table-tree update is not implemented yet")
@@ -213,19 +272,19 @@ impl TableCursor {
     }
 
     /// Reads the currently selected row, if any.
-    pub fn current(&self) -> StorageResult<Option<TableRecord<'_>>> {
+    pub fn current(&self) -> StorageResult<Option<TableRecord>> {
         let _ = &self.page_cache;
         todo!("table-tree cursor reads are not implemented yet")
     }
 
     /// Advances to the next row in sorted row-id order.
-    pub fn next_row(&mut self) -> StorageResult<Option<TableRecord<'_>>> {
+    pub fn next_row(&mut self) -> StorageResult<Option<TableRecord>> {
         let _ = &self.page_cache;
         todo!("table-tree cursor iteration is not implemented yet")
     }
 
     /// Moves to the previous row in sorted row-id order.
-    pub fn prev_row(&mut self) -> StorageResult<Option<TableRecord<'_>>> {
+    pub fn prev_row(&mut self) -> StorageResult<Option<TableRecord>> {
         let _ = &self.page_cache;
         todo!("table-tree cursor iteration is not implemented yet")
     }
@@ -254,19 +313,19 @@ impl IndexCursor {
     }
 
     /// Reads the currently selected index entry, if any.
-    pub fn current(&self) -> StorageResult<Option<IndexEntry<'_>>> {
+    pub fn current(&self) -> StorageResult<Option<IndexEntry>> {
         let _ = &self.page_cache;
         todo!("index-tree cursor reads are not implemented yet")
     }
 
     /// Advances to the next `(key, row_id)` pair in key order.
-    pub fn next_row(&mut self) -> StorageResult<Option<IndexEntry<'_>>> {
+    pub fn next_row(&mut self) -> StorageResult<Option<IndexEntry>> {
         let _ = &self.page_cache;
         todo!("index-tree cursor iteration is not implemented yet")
     }
 
     /// Moves to the previous `(key, row_id)` pair in key order.
-    pub fn prev_row(&mut self) -> StorageResult<Option<IndexEntry<'_>>> {
+    pub fn prev_row(&mut self) -> StorageResult<Option<IndexEntry>> {
         let _ = &self.page_cache;
         todo!("index-tree cursor iteration is not implemented yet")
     }
@@ -288,7 +347,7 @@ impl IndexCursor {
         old_row_id: RowId,
         new_key: &[u8],
         new_row_id: RowId,
-    ) -> StorageResult<IndexEntry<'_>> {
+    ) -> StorageResult<()> {
         let _ = &self.page_cache;
         let _ = (key, old_row_id, new_key, new_row_id);
         todo!("index-tree update is not implemented yet")
