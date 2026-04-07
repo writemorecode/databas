@@ -26,6 +26,21 @@ mod sealed {
     pub trait Sealed {}
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeafSeek {
+    Positioned(u16),
+    Advance(PageId),
+    Exhausted,
+}
+
+fn invalid_tree_page(page_id: PageId, expected: &'static str, actual: u8) -> StorageError {
+    StorageError::Corruption(CorruptionError {
+        component: CorruptionComponent::Page,
+        page_id: Some(page_id),
+        kind: CorruptionKind::InvalidPageKind { expected, actual },
+    })
+}
+
 /// Marker trait for the supported public tree flavors.
 ///
 /// The trait is sealed: only [`Table`] and [`Index`] implement it.
@@ -221,17 +236,212 @@ where
     pub fn seek_to_root(&mut self) {
         self.state = CursorState::Page { page_id: self.root_page_id };
     }
+
+    fn set_page_state(&mut self, page_id: PageId) {
+        self.state = CursorState::Page { page_id };
+    }
+
+    fn set_positioned_state(&mut self, page_id: PageId, slot_index: u16) {
+        self.state = CursorState::Positioned { page_id, slot_index };
+    }
+
+    fn set_exhausted_state(&mut self) {
+        self.state = CursorState::Exhausted;
+    }
 }
 
 impl TableCursor {
+    fn record_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<TableRecord> {
+        let pin = self.page_cache.fetch_page(page_id)?;
+        TableRecord::new(pin, slot_index)
+    }
+
+    fn leaf_page_for_row_id(&self, row_id: RowId) -> StorageResult<PageId> {
+        let mut page_id = self.root_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let next = {
+                let page = pin.read()?;
+                match page.open_any()? {
+                    page::AnyPage::TableLeaf(_) => return Ok(page_id),
+                    page::AnyPage::TableInterior(interior) => interior.child_for(row_id)?,
+                    _ => {
+                        return Err(invalid_tree_page(
+                            page_id,
+                            "table page",
+                            page.page()[KIND_OFFSET],
+                        ));
+                    }
+                }
+            };
+            page_id = next;
+        }
+    }
+
+    fn first_leaf_page_from(&self, start_page_id: PageId) -> StorageResult<PageId> {
+        let mut page_id = start_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let next = {
+                let page = pin.read()?;
+                match page.open_any()? {
+                    page::AnyPage::TableLeaf(_) => return Ok(page_id),
+                    page::AnyPage::TableInterior(interior) => {
+                        if interior.slot_count() == 0 {
+                            interior.rightmost_child()
+                        } else {
+                            interior.cell(0)?.left_child()?
+                        }
+                    }
+                    _ => {
+                        return Err(invalid_tree_page(
+                            page_id,
+                            "table page",
+                            page.page()[KIND_OFFSET],
+                        ));
+                    }
+                }
+            };
+            page_id = next;
+        }
+    }
+
+    fn last_leaf_page_from(&self, start_page_id: PageId) -> StorageResult<PageId> {
+        let mut page_id = start_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let next = {
+                let page = pin.read()?;
+                match page.open_any()? {
+                    page::AnyPage::TableLeaf(_) => return Ok(page_id),
+                    page::AnyPage::TableInterior(interior) => interior.rightmost_child(),
+                    _ => {
+                        return Err(invalid_tree_page(
+                            page_id,
+                            "table page",
+                            page.page()[KIND_OFFSET],
+                        ));
+                    }
+                }
+            };
+            page_id = next;
+        }
+    }
+
+    fn first_record_from_leaf(
+        &mut self,
+        start_page_id: PageId,
+    ) -> StorageResult<Option<TableRecord>> {
+        let mut page_id = start_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let seek = {
+                let page = pin.read()?;
+                match page.open_any()? {
+                    page::AnyPage::TableLeaf(leaf) => {
+                        if leaf.slot_count() > 0 {
+                            LeafSeek::Positioned(0)
+                        } else if let Some(next_page_id) = leaf.next_page_id() {
+                            LeafSeek::Advance(next_page_id)
+                        } else {
+                            LeafSeek::Exhausted
+                        }
+                    }
+                    _ => {
+                        return Err(invalid_tree_page(
+                            page_id,
+                            "table leaf",
+                            page.page()[KIND_OFFSET],
+                        ));
+                    }
+                }
+            };
+
+            match seek {
+                LeafSeek::Positioned(slot_index) => {
+                    self.set_positioned_state(page_id, slot_index);
+                    return self.record_at(page_id, slot_index).map(Some);
+                }
+                LeafSeek::Advance(next_page_id) => page_id = next_page_id,
+                LeafSeek::Exhausted => {
+                    self.set_exhausted_state();
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    fn last_record_from_leaf(
+        &mut self,
+        start_page_id: PageId,
+    ) -> StorageResult<Option<TableRecord>> {
+        let mut page_id = start_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let seek = {
+                let page = pin.read()?;
+                match page.open_any()? {
+                    page::AnyPage::TableLeaf(leaf) => {
+                        if leaf.slot_count() > 0 {
+                            LeafSeek::Positioned(leaf.slot_count() - 1)
+                        } else if let Some(prev_page_id) = leaf.prev_page_id() {
+                            LeafSeek::Advance(prev_page_id)
+                        } else {
+                            LeafSeek::Exhausted
+                        }
+                    }
+                    _ => {
+                        return Err(invalid_tree_page(
+                            page_id,
+                            "table leaf",
+                            page.page()[KIND_OFFSET],
+                        ));
+                    }
+                }
+            };
+
+            match seek {
+                LeafSeek::Positioned(slot_index) => {
+                    self.set_positioned_state(page_id, slot_index);
+                    return self.record_at(page_id, slot_index).map(Some);
+                }
+                LeafSeek::Advance(prev_page_id) => page_id = prev_page_id,
+                LeafSeek::Exhausted => {
+                    self.set_exhausted_state();
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
     /// Searches the table tree for `row_id`.
     ///
     /// The cursor is expected to end on the matching row when found, or on the
     /// leaf page where `row_id` would be inserted when absent.
     pub fn get(&mut self, row_id: RowId) -> StorageResult<Option<TableRecord>> {
-        let _ = &self.page_cache;
-        let _ = row_id;
-        todo!("table-tree lookup is not implemented yet")
+        let page_id = self.leaf_page_for_row_id(row_id)?;
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let slot_index = {
+            let page = pin.read()?;
+            let leaf = page.open_typed::<page::Leaf, page::Table>()?;
+            leaf.lookup(row_id)?.map(|cell| cell.slot_index())
+        };
+
+        match slot_index {
+            Some(slot_index) => {
+                self.set_positioned_state(page_id, slot_index);
+                TableRecord::new(pin, slot_index).map(Some)
+            }
+            None => {
+                self.set_page_state(page_id);
+                Ok(None)
+            }
+        }
     }
 
     /// Inserts a new row payload into the table tree.
@@ -260,74 +470,447 @@ impl TableCursor {
 
     /// Positions the cursor on the smallest row id in the table tree.
     pub fn seek_to_first(&mut self) -> StorageResult<bool> {
-        let _ = &self.page_cache;
-        todo!("table-tree cursor positioning is not implemented yet")
+        let leaf_page_id = self.first_leaf_page_from(self.root_page_id)?;
+        self.first_record_from_leaf(leaf_page_id).map(|record| record.is_some())
     }
 
     /// Positions the cursor on `row_id` if it exists.
     pub fn seek_to_row_id(&mut self, row_id: RowId) -> StorageResult<bool> {
-        let _ = &self.page_cache;
-        let _ = row_id;
-        todo!("table-tree cursor positioning is not implemented yet")
+        Ok(self.get(row_id)?.is_some())
     }
 
     /// Reads the currently selected row, if any.
     pub fn current(&self) -> StorageResult<Option<TableRecord>> {
-        let _ = &self.page_cache;
-        todo!("table-tree cursor reads are not implemented yet")
+        match self.state {
+            CursorState::Positioned { page_id, slot_index } => {
+                self.record_at(page_id, slot_index).map(Some)
+            }
+            CursorState::Page { .. } | CursorState::Exhausted => Ok(None),
+        }
     }
 
     /// Advances to the next row in sorted row-id order.
     pub fn next_row(&mut self) -> StorageResult<Option<TableRecord>> {
-        let _ = &self.page_cache;
-        todo!("table-tree cursor iteration is not implemented yet")
+        match self.state {
+            CursorState::Exhausted => Ok(None),
+            CursorState::Page { page_id } => {
+                let leaf_page_id = self.first_leaf_page_from(page_id)?;
+                self.first_record_from_leaf(leaf_page_id)
+            }
+            CursorState::Positioned { page_id, slot_index } => {
+                let pin = self.page_cache.fetch_page(page_id)?;
+                let seek = {
+                    let page = pin.read()?;
+                    let leaf = page.open_typed::<page::Leaf, page::Table>()?;
+                    if slot_index + 1 < leaf.slot_count() {
+                        LeafSeek::Positioned(slot_index + 1)
+                    } else if let Some(next_page_id) = leaf.next_page_id() {
+                        LeafSeek::Advance(next_page_id)
+                    } else {
+                        LeafSeek::Exhausted
+                    }
+                };
+
+                match seek {
+                    LeafSeek::Positioned(next_slot) => {
+                        self.set_positioned_state(page_id, next_slot);
+                        self.record_at(page_id, next_slot).map(Some)
+                    }
+                    LeafSeek::Advance(next_page_id) => self.first_record_from_leaf(next_page_id),
+                    LeafSeek::Exhausted => {
+                        self.set_exhausted_state();
+                        Ok(None)
+                    }
+                }
+            }
+        }
     }
 
     /// Moves to the previous row in sorted row-id order.
     pub fn prev_row(&mut self) -> StorageResult<Option<TableRecord>> {
-        let _ = &self.page_cache;
-        todo!("table-tree cursor iteration is not implemented yet")
+        match self.state {
+            CursorState::Exhausted => Ok(None),
+            CursorState::Page { page_id } => {
+                let leaf_page_id = self.last_leaf_page_from(page_id)?;
+                self.last_record_from_leaf(leaf_page_id)
+            }
+            CursorState::Positioned { page_id, slot_index } => {
+                let pin = self.page_cache.fetch_page(page_id)?;
+                let seek = {
+                    let page = pin.read()?;
+                    let leaf = page.open_typed::<page::Leaf, page::Table>()?;
+                    if slot_index > 0 {
+                        LeafSeek::Positioned(slot_index - 1)
+                    } else if let Some(prev_page_id) = leaf.prev_page_id() {
+                        LeafSeek::Advance(prev_page_id)
+                    } else {
+                        LeafSeek::Exhausted
+                    }
+                };
+
+                match seek {
+                    LeafSeek::Positioned(prev_slot) => {
+                        self.set_positioned_state(page_id, prev_slot);
+                        self.record_at(page_id, prev_slot).map(Some)
+                    }
+                    LeafSeek::Advance(prev_page_id) => self.last_record_from_leaf(prev_page_id),
+                    LeafSeek::Exhausted => {
+                        self.set_exhausted_state();
+                        Ok(None)
+                    }
+                }
+            }
+        }
     }
 }
 
 impl IndexCursor {
+    fn entry_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<IndexEntry> {
+        let pin = self.page_cache.fetch_page(page_id)?;
+        IndexEntry::new(pin, slot_index)
+    }
+
+    fn leaf_page_for_key(&self, key: &[u8]) -> StorageResult<PageId> {
+        let mut page_id = self.root_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let next = {
+                let page = pin.read()?;
+                match page.open_any()? {
+                    page::AnyPage::IndexLeaf(_) => return Ok(page_id),
+                    page::AnyPage::IndexInterior(interior) => interior.child_for(key)?,
+                    _ => {
+                        return Err(invalid_tree_page(
+                            page_id,
+                            "index page",
+                            page.page()[KIND_OFFSET],
+                        ));
+                    }
+                }
+            };
+            page_id = next;
+        }
+    }
+
+    fn first_leaf_page_from(&self, start_page_id: PageId) -> StorageResult<PageId> {
+        let mut page_id = start_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let next = {
+                let page = pin.read()?;
+                match page.open_any()? {
+                    page::AnyPage::IndexLeaf(_) => return Ok(page_id),
+                    page::AnyPage::IndexInterior(interior) => {
+                        if interior.slot_count() == 0 {
+                            interior.rightmost_child()
+                        } else {
+                            interior.cell(0)?.left_child()?
+                        }
+                    }
+                    _ => {
+                        return Err(invalid_tree_page(
+                            page_id,
+                            "index page",
+                            page.page()[KIND_OFFSET],
+                        ));
+                    }
+                }
+            };
+            page_id = next;
+        }
+    }
+
+    fn last_leaf_page_from(&self, start_page_id: PageId) -> StorageResult<PageId> {
+        let mut page_id = start_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let next = {
+                let page = pin.read()?;
+                match page.open_any()? {
+                    page::AnyPage::IndexLeaf(_) => return Ok(page_id),
+                    page::AnyPage::IndexInterior(interior) => interior.rightmost_child(),
+                    _ => {
+                        return Err(invalid_tree_page(
+                            page_id,
+                            "index page",
+                            page.page()[KIND_OFFSET],
+                        ));
+                    }
+                }
+            };
+            page_id = next;
+        }
+    }
+
+    fn lower_bound_slot(
+        leaf: &Page<page::Read<'_>, page::Leaf, page::Index>,
+        key: &[u8],
+    ) -> StorageResult<Option<u16>> {
+        for slot_index in 0..leaf.slot_count() {
+            let cell = leaf.cell(slot_index)?;
+            if cell.key()? >= key {
+                return Ok(Some(slot_index));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn entry_slot(
+        leaf: &Page<page::Read<'_>, page::Leaf, page::Index>,
+        key: &[u8],
+        row_id: RowId,
+    ) -> StorageResult<Option<u16>> {
+        for slot_index in 0..leaf.slot_count() {
+            let cell = leaf.cell(slot_index)?;
+            match cell.key()?.cmp(key) {
+                core::cmp::Ordering::Less => continue,
+                core::cmp::Ordering::Greater => return Ok(None),
+                core::cmp::Ordering::Equal => {
+                    let cell_row_id = cell.row_id()?;
+                    if cell_row_id == row_id {
+                        return Ok(Some(slot_index));
+                    }
+                    if cell_row_id > row_id {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn first_entry_from_leaf(
+        &mut self,
+        start_page_id: PageId,
+    ) -> StorageResult<Option<IndexEntry>> {
+        let mut page_id = start_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let seek = {
+                let page = pin.read()?;
+                match page.open_any()? {
+                    page::AnyPage::IndexLeaf(leaf) => {
+                        if leaf.slot_count() > 0 {
+                            LeafSeek::Positioned(0)
+                        } else if let Some(next_page_id) = leaf.next_page_id() {
+                            LeafSeek::Advance(next_page_id)
+                        } else {
+                            LeafSeek::Exhausted
+                        }
+                    }
+                    _ => {
+                        return Err(invalid_tree_page(
+                            page_id,
+                            "index leaf",
+                            page.page()[KIND_OFFSET],
+                        ));
+                    }
+                }
+            };
+
+            match seek {
+                LeafSeek::Positioned(slot_index) => {
+                    self.set_positioned_state(page_id, slot_index);
+                    return self.entry_at(page_id, slot_index).map(Some);
+                }
+                LeafSeek::Advance(next_page_id) => page_id = next_page_id,
+                LeafSeek::Exhausted => {
+                    self.set_exhausted_state();
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    fn last_entry_from_leaf(&mut self, start_page_id: PageId) -> StorageResult<Option<IndexEntry>> {
+        let mut page_id = start_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let seek = {
+                let page = pin.read()?;
+                match page.open_any()? {
+                    page::AnyPage::IndexLeaf(leaf) => {
+                        if leaf.slot_count() > 0 {
+                            LeafSeek::Positioned(leaf.slot_count() - 1)
+                        } else if let Some(prev_page_id) = leaf.prev_page_id() {
+                            LeafSeek::Advance(prev_page_id)
+                        } else {
+                            LeafSeek::Exhausted
+                        }
+                    }
+                    _ => {
+                        return Err(invalid_tree_page(
+                            page_id,
+                            "index leaf",
+                            page.page()[KIND_OFFSET],
+                        ));
+                    }
+                }
+            };
+
+            match seek {
+                LeafSeek::Positioned(slot_index) => {
+                    self.set_positioned_state(page_id, slot_index);
+                    return self.entry_at(page_id, slot_index).map(Some);
+                }
+                LeafSeek::Advance(prev_page_id) => page_id = prev_page_id,
+                LeafSeek::Exhausted => {
+                    self.set_exhausted_state();
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
     /// Positions the cursor on the first entry whose key is greater than or
     /// equal to `key`.
     pub fn seek_to_key(&mut self, key: &[u8]) -> StorageResult<bool> {
-        let _ = &self.page_cache;
-        let _ = key;
-        todo!("index-tree cursor positioning is not implemented yet")
+        let page_id = self.leaf_page_for_key(key)?;
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let seek = {
+            let page = pin.read()?;
+            let leaf = page.open_typed::<page::Leaf, page::Index>()?;
+            match Self::lower_bound_slot(&leaf, key)? {
+                Some(slot_index) => LeafSeek::Positioned(slot_index),
+                None => match leaf.next_page_id() {
+                    Some(next_page_id) => LeafSeek::Advance(next_page_id),
+                    None => LeafSeek::Exhausted,
+                },
+            }
+        };
+
+        match seek {
+            LeafSeek::Positioned(slot_index) => {
+                self.set_positioned_state(page_id, slot_index);
+                Ok(true)
+            }
+            LeafSeek::Advance(next_page_id) => {
+                self.first_entry_from_leaf(next_page_id).map(|entry| entry.is_some())
+            }
+            LeafSeek::Exhausted => {
+                self.set_exhausted_state();
+                Ok(false)
+            }
+        }
     }
 
     /// Positions the cursor on one exact `(key, row_id)` pair.
     pub fn seek_to_entry(&mut self, key: &[u8], row_id: RowId) -> StorageResult<bool> {
-        let _ = &self.page_cache;
-        let _ = (key, row_id);
-        todo!("index-tree cursor positioning is not implemented yet")
+        let page_id = self.leaf_page_for_key(key)?;
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let slot_index = {
+            let page = pin.read()?;
+            let leaf = page.open_typed::<page::Leaf, page::Index>()?;
+            Self::entry_slot(&leaf, key, row_id)?
+        };
+
+        match slot_index {
+            Some(slot_index) => {
+                self.set_positioned_state(page_id, slot_index);
+                Ok(true)
+            }
+            None => {
+                self.set_page_state(page_id);
+                Ok(false)
+            }
+        }
     }
 
     /// Positions the cursor on the smallest `(key, row_id)` entry in the tree.
     pub fn seek_to_first(&mut self) -> StorageResult<bool> {
-        let _ = &self.page_cache;
-        todo!("index-tree cursor positioning is not implemented yet")
+        let leaf_page_id = self.first_leaf_page_from(self.root_page_id)?;
+        self.first_entry_from_leaf(leaf_page_id).map(|entry| entry.is_some())
     }
 
     /// Reads the currently selected index entry, if any.
     pub fn current(&self) -> StorageResult<Option<IndexEntry>> {
-        let _ = &self.page_cache;
-        todo!("index-tree cursor reads are not implemented yet")
+        match self.state {
+            CursorState::Positioned { page_id, slot_index } => {
+                self.entry_at(page_id, slot_index).map(Some)
+            }
+            CursorState::Page { .. } | CursorState::Exhausted => Ok(None),
+        }
     }
 
     /// Advances to the next `(key, row_id)` pair in key order.
     pub fn next_row(&mut self) -> StorageResult<Option<IndexEntry>> {
-        let _ = &self.page_cache;
-        todo!("index-tree cursor iteration is not implemented yet")
+        match self.state {
+            CursorState::Exhausted => Ok(None),
+            CursorState::Page { page_id } => {
+                let leaf_page_id = self.first_leaf_page_from(page_id)?;
+                self.first_entry_from_leaf(leaf_page_id)
+            }
+            CursorState::Positioned { page_id, slot_index } => {
+                let pin = self.page_cache.fetch_page(page_id)?;
+                let seek = {
+                    let page = pin.read()?;
+                    let leaf = page.open_typed::<page::Leaf, page::Index>()?;
+                    if slot_index + 1 < leaf.slot_count() {
+                        LeafSeek::Positioned(slot_index + 1)
+                    } else if let Some(next_page_id) = leaf.next_page_id() {
+                        LeafSeek::Advance(next_page_id)
+                    } else {
+                        LeafSeek::Exhausted
+                    }
+                };
+
+                match seek {
+                    LeafSeek::Positioned(next_slot) => {
+                        self.set_positioned_state(page_id, next_slot);
+                        self.entry_at(page_id, next_slot).map(Some)
+                    }
+                    LeafSeek::Advance(next_page_id) => self.first_entry_from_leaf(next_page_id),
+                    LeafSeek::Exhausted => {
+                        self.set_exhausted_state();
+                        Ok(None)
+                    }
+                }
+            }
+        }
     }
 
     /// Moves to the previous `(key, row_id)` pair in key order.
     pub fn prev_row(&mut self) -> StorageResult<Option<IndexEntry>> {
-        let _ = &self.page_cache;
-        todo!("index-tree cursor iteration is not implemented yet")
+        match self.state {
+            CursorState::Exhausted => Ok(None),
+            CursorState::Page { page_id } => {
+                let leaf_page_id = self.last_leaf_page_from(page_id)?;
+                self.last_entry_from_leaf(leaf_page_id)
+            }
+            CursorState::Positioned { page_id, slot_index } => {
+                let pin = self.page_cache.fetch_page(page_id)?;
+                let seek = {
+                    let page = pin.read()?;
+                    let leaf = page.open_typed::<page::Leaf, page::Index>()?;
+                    if slot_index > 0 {
+                        LeafSeek::Positioned(slot_index - 1)
+                    } else if let Some(prev_page_id) = leaf.prev_page_id() {
+                        LeafSeek::Advance(prev_page_id)
+                    } else {
+                        LeafSeek::Exhausted
+                    }
+                };
+
+                match seek {
+                    LeafSeek::Positioned(prev_slot) => {
+                        self.set_positioned_state(page_id, prev_slot);
+                        self.entry_at(page_id, prev_slot).map(Some)
+                    }
+                    LeafSeek::Advance(prev_page_id) => self.last_entry_from_leaf(prev_page_id),
+                    LeafSeek::Exhausted => {
+                        self.set_exhausted_state();
+                        Ok(None)
+                    }
+                }
+            }
+        }
     }
 
     /// Inserts a new `(key, row_id)` pair into the index tree.
