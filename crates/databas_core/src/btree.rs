@@ -33,14 +33,6 @@ enum LeafSeek {
     Exhausted,
 }
 
-fn invalid_tree_page(page_id: PageId, expected: &'static str, actual: u8) -> StorageError {
-    StorageError::Corruption(CorruptionError {
-        component: CorruptionComponent::Page,
-        page_id: Some(page_id),
-        kind: CorruptionKind::InvalidPageKind { expected, actual },
-    })
-}
-
 /// Marker trait for the supported public tree flavors.
 ///
 /// The trait is sealed: only [`Table`] and [`Index`] implement it.
@@ -64,22 +56,65 @@ pub(crate) trait TreeKindExt: TreeKind {
     type PageTree: page::TreeMarker;
 
     const ROOT_KIND_NAME: &'static str;
+    const PAGE_KIND_NAME: &'static str;
 
     fn matches_page_kind(kind: PageKind) -> bool {
         kind.tree_kind() == <Self::PageTree as page::TreeMarker>::KIND
     }
+
+    fn first_descend_child(
+        interior: &Page<page::Read<'_>, page::Interior, Self::PageTree>,
+    ) -> StorageResult<PageId>;
+
+    fn last_descend_child(
+        interior: &Page<page::Read<'_>, page::Interior, Self::PageTree>,
+    ) -> StorageResult<PageId>;
 }
 
 impl TreeKindExt for Table {
     type PageTree = page::Table;
 
     const ROOT_KIND_NAME: &'static str = "table root page";
+    const PAGE_KIND_NAME: &'static str = "table page";
+
+    fn first_descend_child(
+        interior: &Page<page::Read<'_>, page::Interior, Self::PageTree>,
+    ) -> StorageResult<PageId> {
+        if interior.slot_count() == 0 {
+            Ok(interior.rightmost_child())
+        } else {
+            Ok(interior.cell(0)?.left_child()?)
+        }
+    }
+
+    fn last_descend_child(
+        interior: &Page<page::Read<'_>, page::Interior, Self::PageTree>,
+    ) -> StorageResult<PageId> {
+        Ok(interior.rightmost_child())
+    }
 }
 
 impl TreeKindExt for Index {
     type PageTree = page::Index;
 
     const ROOT_KIND_NAME: &'static str = "index root page";
+    const PAGE_KIND_NAME: &'static str = "index page";
+
+    fn first_descend_child(
+        interior: &Page<page::Read<'_>, page::Interior, Self::PageTree>,
+    ) -> StorageResult<PageId> {
+        if interior.slot_count() == 0 {
+            Ok(interior.rightmost_child())
+        } else {
+            Ok(interior.cell(0)?.left_child()?)
+        }
+    }
+
+    fn last_descend_child(
+        interior: &Page<page::Read<'_>, page::Interior, Self::PageTree>,
+    ) -> StorageResult<PageId> {
+        Ok(interior.rightmost_child())
+    }
 }
 
 /// Guard-backed table record view returned by table-tree reads and cursor iteration.
@@ -248,6 +283,92 @@ where
     fn set_exhausted_state(&mut self) {
         self.state = CursorState::Exhausted;
     }
+
+    fn descend_to_first_leaf_from(&self, start_page_id: PageId) -> StorageResult<PageId>
+    where
+        K: TreeKindExt,
+    {
+        let mut page_id = start_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let next = {
+                let page = pin.read()?;
+                let raw_kind = page.page()[KIND_OFFSET];
+                let Some(page_kind) = PageKind::from_raw(raw_kind) else {
+                    return Err(StorageError::from(page::PageError::UnknownPageKind {
+                        actual: raw_kind,
+                    }));
+                };
+
+                if !K::matches_page_kind(page_kind) {
+                    return Err(StorageError::Corruption(CorruptionError {
+                        component: CorruptionComponent::Page,
+                        page_id: Some(page_id),
+                        kind: CorruptionKind::InvalidPageKind {
+                            expected: K::PAGE_KIND_NAME,
+                            actual: raw_kind,
+                        },
+                    }));
+                }
+
+                match page_kind.node_kind() {
+                    page::format::NodeKind::Leaf => {
+                        let _ = page.open_typed::<page::Leaf, K::PageTree>()?;
+                        return Ok(page_id);
+                    }
+                    page::format::NodeKind::Interior => {
+                        let interior = page.open_typed::<page::Interior, K::PageTree>()?;
+                        K::first_descend_child(&interior)?
+                    }
+                }
+            };
+            page_id = next;
+        }
+    }
+
+    fn descend_to_last_leaf_from(&self, start_page_id: PageId) -> StorageResult<PageId>
+    where
+        K: TreeKindExt,
+    {
+        let mut page_id = start_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let next = {
+                let page = pin.read()?;
+                let raw_kind = page.page()[KIND_OFFSET];
+                let Some(page_kind) = PageKind::from_raw(raw_kind) else {
+                    return Err(StorageError::from(page::PageError::UnknownPageKind {
+                        actual: raw_kind,
+                    }));
+                };
+
+                if !K::matches_page_kind(page_kind) {
+                    return Err(StorageError::Corruption(CorruptionError {
+                        component: CorruptionComponent::Page,
+                        page_id: Some(page_id),
+                        kind: CorruptionKind::InvalidPageKind {
+                            expected: K::PAGE_KIND_NAME,
+                            actual: raw_kind,
+                        },
+                    }));
+                }
+
+                match page_kind.node_kind() {
+                    page::format::NodeKind::Leaf => {
+                        let _ = page.open_typed::<page::Leaf, K::PageTree>()?;
+                        return Ok(page_id);
+                    }
+                    page::format::NodeKind::Interior => {
+                        let interior = page.open_typed::<page::Interior, K::PageTree>()?;
+                        K::last_descend_child(&interior)?
+                    }
+                }
+            };
+            page_id = next;
+        }
+    }
 }
 
 impl TableCursor {
@@ -267,63 +388,14 @@ impl TableCursor {
                     page::AnyPage::TableLeaf(_) => return Ok(page_id),
                     page::AnyPage::TableInterior(interior) => interior.child_for(row_id)?,
                     _ => {
-                        return Err(invalid_tree_page(
-                            page_id,
-                            "table page",
-                            page.page()[KIND_OFFSET],
-                        ));
-                    }
-                }
-            };
-            page_id = next;
-        }
-    }
-
-    fn first_leaf_page_from(&self, start_page_id: PageId) -> StorageResult<PageId> {
-        let mut page_id = start_page_id;
-
-        loop {
-            let pin = self.page_cache.fetch_page(page_id)?;
-            let next = {
-                let page = pin.read()?;
-                match page.open_any()? {
-                    page::AnyPage::TableLeaf(_) => return Ok(page_id),
-                    page::AnyPage::TableInterior(interior) => {
-                        if interior.slot_count() == 0 {
-                            interior.rightmost_child()
-                        } else {
-                            interior.cell(0)?.left_child()?
-                        }
-                    }
-                    _ => {
-                        return Err(invalid_tree_page(
-                            page_id,
-                            "table page",
-                            page.page()[KIND_OFFSET],
-                        ));
-                    }
-                }
-            };
-            page_id = next;
-        }
-    }
-
-    fn last_leaf_page_from(&self, start_page_id: PageId) -> StorageResult<PageId> {
-        let mut page_id = start_page_id;
-
-        loop {
-            let pin = self.page_cache.fetch_page(page_id)?;
-            let next = {
-                let page = pin.read()?;
-                match page.open_any()? {
-                    page::AnyPage::TableLeaf(_) => return Ok(page_id),
-                    page::AnyPage::TableInterior(interior) => interior.rightmost_child(),
-                    _ => {
-                        return Err(invalid_tree_page(
-                            page_id,
-                            "table page",
-                            page.page()[KIND_OFFSET],
-                        ));
+                        return Err(StorageError::Corruption(CorruptionError {
+                            component: CorruptionComponent::Page,
+                            page_id: Some(page_id),
+                            kind: CorruptionKind::InvalidPageKind {
+                                expected: "table page",
+                                actual: page.page()[KIND_OFFSET],
+                            },
+                        }));
                     }
                 }
             };
@@ -352,11 +424,14 @@ impl TableCursor {
                         }
                     }
                     _ => {
-                        return Err(invalid_tree_page(
-                            page_id,
-                            "table leaf",
-                            page.page()[KIND_OFFSET],
-                        ));
+                        return Err(StorageError::Corruption(CorruptionError {
+                            component: CorruptionComponent::Page,
+                            page_id: Some(page_id),
+                            kind: CorruptionKind::InvalidPageKind {
+                                expected: "table leaf",
+                                actual: page.page()[KIND_OFFSET],
+                            },
+                        }));
                     }
                 }
             };
@@ -396,11 +471,14 @@ impl TableCursor {
                         }
                     }
                     _ => {
-                        return Err(invalid_tree_page(
-                            page_id,
-                            "table leaf",
-                            page.page()[KIND_OFFSET],
-                        ));
+                        return Err(StorageError::Corruption(CorruptionError {
+                            component: CorruptionComponent::Page,
+                            page_id: Some(page_id),
+                            kind: CorruptionKind::InvalidPageKind {
+                                expected: "table leaf",
+                                actual: page.page()[KIND_OFFSET],
+                            },
+                        }));
                     }
                 }
             };
@@ -470,7 +548,7 @@ impl TableCursor {
 
     /// Positions the cursor on the smallest row id in the table tree.
     pub fn seek_to_first(&mut self) -> StorageResult<bool> {
-        let leaf_page_id = self.first_leaf_page_from(self.root_page_id)?;
+        let leaf_page_id = self.descend_to_first_leaf_from(self.root_page_id)?;
         self.first_record_from_leaf(leaf_page_id).map(|record| record.is_some())
     }
 
@@ -494,7 +572,7 @@ impl TableCursor {
         match self.state {
             CursorState::Exhausted => Ok(None),
             CursorState::Page { page_id } => {
-                let leaf_page_id = self.first_leaf_page_from(page_id)?;
+                let leaf_page_id = self.descend_to_first_leaf_from(page_id)?;
                 self.first_record_from_leaf(leaf_page_id)
             }
             CursorState::Positioned { page_id, slot_index } => {
@@ -531,7 +609,7 @@ impl TableCursor {
         match self.state {
             CursorState::Exhausted => Ok(None),
             CursorState::Page { page_id } => {
-                let leaf_page_id = self.last_leaf_page_from(page_id)?;
+                let leaf_page_id = self.descend_to_last_leaf_from(page_id)?;
                 self.last_record_from_leaf(leaf_page_id)
             }
             CursorState::Positioned { page_id, slot_index } => {
@@ -581,63 +659,14 @@ impl IndexCursor {
                     page::AnyPage::IndexLeaf(_) => return Ok(page_id),
                     page::AnyPage::IndexInterior(interior) => interior.child_for(key)?,
                     _ => {
-                        return Err(invalid_tree_page(
-                            page_id,
-                            "index page",
-                            page.page()[KIND_OFFSET],
-                        ));
-                    }
-                }
-            };
-            page_id = next;
-        }
-    }
-
-    fn first_leaf_page_from(&self, start_page_id: PageId) -> StorageResult<PageId> {
-        let mut page_id = start_page_id;
-
-        loop {
-            let pin = self.page_cache.fetch_page(page_id)?;
-            let next = {
-                let page = pin.read()?;
-                match page.open_any()? {
-                    page::AnyPage::IndexLeaf(_) => return Ok(page_id),
-                    page::AnyPage::IndexInterior(interior) => {
-                        if interior.slot_count() == 0 {
-                            interior.rightmost_child()
-                        } else {
-                            interior.cell(0)?.left_child()?
-                        }
-                    }
-                    _ => {
-                        return Err(invalid_tree_page(
-                            page_id,
-                            "index page",
-                            page.page()[KIND_OFFSET],
-                        ));
-                    }
-                }
-            };
-            page_id = next;
-        }
-    }
-
-    fn last_leaf_page_from(&self, start_page_id: PageId) -> StorageResult<PageId> {
-        let mut page_id = start_page_id;
-
-        loop {
-            let pin = self.page_cache.fetch_page(page_id)?;
-            let next = {
-                let page = pin.read()?;
-                match page.open_any()? {
-                    page::AnyPage::IndexLeaf(_) => return Ok(page_id),
-                    page::AnyPage::IndexInterior(interior) => interior.rightmost_child(),
-                    _ => {
-                        return Err(invalid_tree_page(
-                            page_id,
-                            "index page",
-                            page.page()[KIND_OFFSET],
-                        ));
+                        return Err(StorageError::Corruption(CorruptionError {
+                            component: CorruptionComponent::Page,
+                            page_id: Some(page_id),
+                            kind: CorruptionKind::InvalidPageKind {
+                                expected: "index page",
+                                actual: page.page()[KIND_OFFSET],
+                            },
+                        }));
                     }
                 }
             };
@@ -705,11 +734,14 @@ impl IndexCursor {
                         }
                     }
                     _ => {
-                        return Err(invalid_tree_page(
-                            page_id,
-                            "index leaf",
-                            page.page()[KIND_OFFSET],
-                        ));
+                        return Err(StorageError::Corruption(CorruptionError {
+                            component: CorruptionComponent::Page,
+                            page_id: Some(page_id),
+                            kind: CorruptionKind::InvalidPageKind {
+                                expected: "index leaf",
+                                actual: page.page()[KIND_OFFSET],
+                            },
+                        }));
                     }
                 }
             };
@@ -746,11 +778,14 @@ impl IndexCursor {
                         }
                     }
                     _ => {
-                        return Err(invalid_tree_page(
-                            page_id,
-                            "index leaf",
-                            page.page()[KIND_OFFSET],
-                        ));
+                        return Err(StorageError::Corruption(CorruptionError {
+                            component: CorruptionComponent::Page,
+                            page_id: Some(page_id),
+                            kind: CorruptionKind::InvalidPageKind {
+                                expected: "index leaf",
+                                actual: page.page()[KIND_OFFSET],
+                            },
+                        }));
                     }
                 }
             };
@@ -825,7 +860,7 @@ impl IndexCursor {
 
     /// Positions the cursor on the smallest `(key, row_id)` entry in the tree.
     pub fn seek_to_first(&mut self) -> StorageResult<bool> {
-        let leaf_page_id = self.first_leaf_page_from(self.root_page_id)?;
+        let leaf_page_id = self.descend_to_first_leaf_from(self.root_page_id)?;
         self.first_entry_from_leaf(leaf_page_id).map(|entry| entry.is_some())
     }
 
@@ -844,7 +879,7 @@ impl IndexCursor {
         match self.state {
             CursorState::Exhausted => Ok(None),
             CursorState::Page { page_id } => {
-                let leaf_page_id = self.first_leaf_page_from(page_id)?;
+                let leaf_page_id = self.descend_to_first_leaf_from(page_id)?;
                 self.first_entry_from_leaf(leaf_page_id)
             }
             CursorState::Positioned { page_id, slot_index } => {
@@ -881,7 +916,7 @@ impl IndexCursor {
         match self.state {
             CursorState::Exhausted => Ok(None),
             CursorState::Page { page_id } => {
-                let leaf_page_id = self.last_leaf_page_from(page_id)?;
+                let leaf_page_id = self.descend_to_last_leaf_from(page_id)?;
                 self.last_entry_from_leaf(leaf_page_id)
             }
             CursorState::Positioned { page_id, slot_index } => {
