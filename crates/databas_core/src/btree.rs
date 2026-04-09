@@ -16,7 +16,7 @@ use crate::{
     PageId, RowId,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
     page::{
-        self, Page, Write,
+        self, Page, PageError, Write,
         format::{KIND_OFFSET, PageKind},
     },
     page_cache::{PageCache, PinGuard},
@@ -626,9 +626,22 @@ impl TableCursor {
     /// Returns [`crate::error::ConstraintError::DuplicateKey`] if `row_id`
     /// already exists.
     pub fn insert(&mut self, row_id: RowId, payload: &[u8]) -> StorageResult<()> {
-        let _ = &self.page_cache;
-        let _ = (row_id, payload);
-        todo!("table-tree insert is not implemented yet")
+        let page_id = self.leaf_page_for_row_id(row_id)?;
+        let pin_guard = self.page_cache.fetch_page(page_id)?;
+        let mut write_guard = pin_guard.write()?;
+        let mut page = write_guard.open_typed_mut::<page::Leaf, page::Table>()?;
+
+        let insert_result = page.insert(row_id, payload);
+        match insert_result {
+            Ok(_) => Ok(()),
+            Err(PageError::CellTooLarge { .. }) => {
+                panic!("Cell too large!");
+            }
+            Err(PageError::PageFull { .. }) => {
+                panic!("Page full!")
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Replaces the payload stored for an existing `row_id`.
@@ -832,9 +845,22 @@ impl IndexCursor {
 
     /// Inserts a new `(key, row_id)` pair into the index tree.
     pub fn insert(&mut self, key: &[u8], row_id: RowId) -> StorageResult<()> {
-        let _ = &self.page_cache;
-        let _ = (key, row_id);
-        todo!("index-tree insert is not implemented yet")
+        let page_id = self.leaf_page_for_key(key)?;
+        let pin_guard = self.page_cache.fetch_page(page_id)?;
+        let mut write_guard = pin_guard.write()?;
+        let mut page = write_guard.open_typed_mut::<page::Leaf, page::Index>()?;
+
+        let insert_result = page.insert(key, row_id);
+        match insert_result {
+            Ok(_) => Ok(()),
+            Err(PageError::CellTooLarge { .. }) => {
+                panic!("Cell too large!");
+            }
+            Err(PageError::PageFull { .. }) => {
+                panic!("Page full!")
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Replaces one exact `(key, row_id)` entry with a new one.
