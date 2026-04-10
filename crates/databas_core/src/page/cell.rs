@@ -1,10 +1,11 @@
-use core::marker::PhantomData;
+use core::{marker::PhantomData, mem::size_of};
 
 use crate::{PageId, RowId, SlotId};
 
 use super::{
-    PageResult,
+    CellCorruption, PageError, PageResult,
     core::{Index, Interior, Leaf, Table},
+    format::CELL_LENGTH_SIZE,
     index_interior, index_leaf, interior, leaf,
 };
 
@@ -32,6 +33,17 @@ pub struct CellMut<'a, N, T = Table> {
     metadata: CellMetadata,
     slot_index: SlotId,
     _marker: PhantomData<(N, T)>,
+}
+
+fn decode_index_leaf_row_id(bytes: &[u8], slot_index: SlotId) -> PageResult<RowId> {
+    let row_id_end = CELL_LENGTH_SIZE + size_of::<RowId>();
+    let row_id_bytes = bytes
+        .get(CELL_LENGTH_SIZE..row_id_end)
+        .ok_or(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthTooSmall })?;
+    let row_id_bytes: [u8; size_of::<RowId>()] = row_id_bytes
+        .try_into()
+        .map_err(|_| PageError::CorruptCell { slot_index, kind: CellCorruption::LengthTooSmall })?;
+    Ok(RowId::from_le_bytes(row_id_bytes))
 }
 
 impl<'a, N, T> Cell<'a, N, T> {
@@ -214,6 +226,11 @@ impl CellMut<'_, Leaf, Table> {
 }
 
 impl Cell<'_, Leaf, Index> {
+    /// Returns the referenced row id stored in this leaf cell.
+    pub fn row_id(&self) -> PageResult<RowId> {
+        decode_index_leaf_row_id(self.bytes, self.slot_index)
+    }
+
     /// Returns the variable-sized payload bytes stored in this leaf cell.
     pub fn payload(&self) -> PageResult<&[u8]> {
         let range = self.index_leaf_parts().payload_range.clone();
@@ -222,6 +239,11 @@ impl Cell<'_, Leaf, Index> {
 }
 
 impl CellMut<'_, Leaf, Index> {
+    /// Returns the referenced row id stored in this leaf cell.
+    pub fn row_id(&self) -> PageResult<RowId> {
+        decode_index_leaf_row_id(self.bytes, self.slot_index)
+    }
+
     /// Returns the variable-sized payload bytes stored in this leaf cell.
     pub fn payload(&self) -> PageResult<&[u8]> {
         let range = self.index_leaf_parts().payload_range.clone();
