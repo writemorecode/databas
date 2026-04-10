@@ -273,7 +273,7 @@ impl IndexEntry {
         let page = self.pin.read()?;
         let leaf = page.open_typed::<page::Leaf, page::Index>()?;
         let cell = leaf.cell(self.slot_index)?;
-        Ok(f(cell.key()?))
+        Ok(f(cell.payload()?))
     }
 }
 
@@ -729,7 +729,7 @@ impl IndexCursor {
     ) -> StorageResult<Option<u16>> {
         for slot_index in 0..leaf.slot_count() {
             let cell = leaf.cell(slot_index)?;
-            if cell.key()? >= key {
+            if cell.payload()? >= key {
                 return Ok(Some(slot_index));
             }
         }
@@ -744,7 +744,7 @@ impl IndexCursor {
     ) -> StorageResult<Option<u16>> {
         for slot_index in 0..leaf.slot_count() {
             let cell = leaf.cell(slot_index)?;
-            match cell.key()?.cmp(key) {
+            match cell.payload()?.cmp(key) {
                 core::cmp::Ordering::Less => continue,
                 core::cmp::Ordering::Greater => return Ok(None),
                 core::cmp::Ordering::Equal => {
