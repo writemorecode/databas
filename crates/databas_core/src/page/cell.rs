@@ -214,28 +214,18 @@ impl CellMut<'_, Leaf, Table> {
 }
 
 impl Cell<'_, Leaf, Index> {
-    /// Returns the indexed key stored in this leaf cell.
-    pub fn key(&self) -> PageResult<&[u8]> {
-        let range = self.index_leaf_parts().key_range.clone();
+    /// Returns the variable-sized payload bytes stored in this leaf cell.
+    pub fn payload(&self) -> PageResult<&[u8]> {
+        let range = self.index_leaf_parts().payload_range.clone();
         Ok(&self.bytes[range])
-    }
-
-    /// Returns the row reference stored alongside this index key.
-    pub fn row_id(&self) -> PageResult<RowId> {
-        Ok(self.index_leaf_parts().row_id)
     }
 }
 
 impl CellMut<'_, Leaf, Index> {
-    /// Returns the indexed key stored in this leaf cell.
-    pub fn key(&self) -> PageResult<&[u8]> {
-        let range = self.index_leaf_parts().key_range.clone();
+    /// Returns the variable-sized payload bytes stored in this leaf cell.
+    pub fn payload(&self) -> PageResult<&[u8]> {
+        let range = self.index_leaf_parts().payload_range.clone();
         Ok(&self.bytes[range])
-    }
-
-    /// Returns the row reference stored alongside this index key.
-    pub fn row_id(&self) -> PageResult<RowId> {
-        Ok(self.index_leaf_parts().row_id)
     }
 }
 
@@ -273,9 +263,9 @@ impl CellMut<'_, Interior, Table> {
 }
 
 impl Cell<'_, Interior, Index> {
-    /// Returns the separator key stored in this interior cell.
-    pub fn key(&self) -> PageResult<&[u8]> {
-        let range = self.index_interior_parts().key_range.clone();
+    /// Returns the variable-sized payload bytes stored in this interior cell.
+    pub fn payload(&self) -> PageResult<&[u8]> {
+        let range = self.index_interior_parts().payload_range.clone();
         Ok(&self.bytes[range])
     }
 
@@ -286,9 +276,9 @@ impl Cell<'_, Interior, Index> {
 }
 
 impl CellMut<'_, Interior, Index> {
-    /// Returns the separator key stored in this interior cell.
-    pub fn key(&self) -> PageResult<&[u8]> {
-        let range = self.index_interior_parts().key_range.clone();
+    /// Returns the variable-sized payload bytes stored in this interior cell.
+    pub fn payload(&self) -> PageResult<&[u8]> {
+        let range = self.index_interior_parts().payload_range.clone();
         Ok(&self.bytes[range])
     }
 
