@@ -16,7 +16,7 @@ pub const INDEX_INTERIOR_CELL_PREFIX_SIZE: usize = CELL_LENGTH_SIZE + PAGE_ID_SI
 #[derive(Debug, Clone)]
 pub(crate) struct IndexInteriorCellParts {
     pub(crate) left_child: PageId,
-    pub(crate) key_range: std::ops::Range<usize>,
+    pub(crate) payload_range: std::ops::Range<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +57,7 @@ where
         cell_len,
         parts: IndexInteriorCellParts {
             left_child: format::read_u64(page.bytes(), cell_offset + CELL_LENGTH_SIZE),
-            key_range: INDEX_INTERIOR_CELL_PREFIX_SIZE..cell_len,
+            payload_range: INDEX_INTERIOR_CELL_PREFIX_SIZE..cell_len,
         },
     })
 }
@@ -93,8 +93,8 @@ where
 {
     let parsed = cell_parts(page, slot_index)?;
     let cell_offset = parsed.cell_offset;
-    let key_range = parsed.parts.key_range;
-    Ok(page.bytes()[cell_offset + key_range.start..cell_offset + key_range.end].cmp(key))
+    let payload_range = parsed.parts.payload_range;
+    Ok(page.bytes()[cell_offset + payload_range.start..cell_offset + payload_range.end].cmp(key))
 }
 
 impl<A> Page<A, Interior, Index>
@@ -183,7 +183,7 @@ mod tests {
 
         let page = page.as_ref();
         let cell = page.cell(0).unwrap();
-        assert_eq!(cell.key().unwrap(), b"mango");
+        assert_eq!(cell.payload().unwrap(), b"mango");
         assert_eq!(cell.left_child().unwrap(), 5);
         assert_eq!(page.rightmost_child(), 99);
     }
@@ -210,13 +210,13 @@ mod tests {
         page.insert(b"mango", 3).unwrap();
 
         let page = page.as_ref();
-        assert_eq!(page.cell(0).unwrap().key().unwrap(), b"apple");
+        assert_eq!(page.cell(0).unwrap().payload().unwrap(), b"apple");
         assert_eq!(page.cell(0).unwrap().left_child().unwrap(), 1);
-        assert_eq!(page.cell(1).unwrap().key().unwrap(), b"mango");
+        assert_eq!(page.cell(1).unwrap().payload().unwrap(), b"mango");
         assert_eq!(page.cell(1).unwrap().left_child().unwrap(), 2);
-        assert_eq!(page.cell(2).unwrap().key().unwrap(), b"mango");
+        assert_eq!(page.cell(2).unwrap().payload().unwrap(), b"mango");
         assert_eq!(page.cell(2).unwrap().left_child().unwrap(), 3);
-        assert_eq!(page.cell(3).unwrap().key().unwrap(), b"pear");
+        assert_eq!(page.cell(3).unwrap().payload().unwrap(), b"pear");
         assert_eq!(page.cell(3).unwrap().left_child().unwrap(), 4);
     }
 
@@ -292,13 +292,13 @@ mod tests {
     }
 
     #[test]
-    fn cell_key_is_sliced_relative_to_cell_start() {
+    fn cell_payload_is_sliced_relative_to_cell_start() {
         let mut bytes = new_index_interior_page(9);
         let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
         page.insert(&[5_u8; 64], 1).unwrap();
         page.insert(b"mango", 2).unwrap();
 
         let page = page.as_ref();
-        assert_eq!(page.cell(1).unwrap().key().unwrap(), b"mango");
+        assert_eq!(page.cell(1).unwrap().payload().unwrap(), b"mango");
     }
 }

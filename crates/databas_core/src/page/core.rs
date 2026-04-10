@@ -13,11 +13,11 @@ use super::{
     },
 };
 
-/// Marker type for leaf pages that store payload-bearing records.
+/// Marker type for leaf pages that store b-tree records.
 #[derive(Debug)]
 pub enum Leaf {}
 
-/// Marker type for interior pages that store separator keys and child pointers.
+/// Marker type for interior pages that store separators and child pointers.
 #[derive(Debug)]
 pub enum Interior {}
 

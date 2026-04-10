@@ -2,9 +2,10 @@
 //!
 //! This module exposes the typed page API used by the storage layer to read and
 //! mutate fixed-size on-disk pages. Pages are split across two orthogonal axes:
-//! node kind and tree kind. [`Leaf`] pages store payload-bearing records, while
-//! [`Interior`] pages store separators and child pointers. [`Table`] pages use
-//! row ids as keys; [`Index`] pages use byte-slice keys.
+//! node kind and tree kind. [`Leaf`] pages store records, while [`Interior`]
+//! pages store separators and child pointers. [`Table`] pages use row ids as
+//! keys; [`Index`] pages use byte-slice keys. Depending on the page kind, cells
+//! may also carry a variable-sized payload region.
 //!
 //! The main entry point is [`Page`]. A page is parameterized both by access mode
 //! ([`Read`] or [`Write`]), node kind ([`Leaf`] or [`Interior`]), and tree kind
