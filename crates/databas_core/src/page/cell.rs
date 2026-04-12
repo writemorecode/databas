@@ -88,6 +88,11 @@ impl<'a, N, T> Cell<'a, N, T> {
         self.slot_index
     }
 
+    /// Returns the total encoded size of this cell, including all header fields and payload.
+    pub fn encoded_size(&self) -> usize {
+        self.bytes.len()
+    }
+
     fn table_leaf_parts(&self) -> &leaf::LeafCellParts {
         match &self.metadata {
             CellMetadata::TableLeaf(parts) => parts,
@@ -157,6 +162,11 @@ impl<'a, N, T> CellMut<'a, N, T> {
     /// Returns the slot index that this cell view refers to.
     pub fn slot_index(&self) -> SlotId {
         self.slot_index
+    }
+
+    /// Returns the total encoded size of this cell, including all header fields and payload.
+    pub fn encoded_size(&self) -> usize {
+        self.bytes.len()
     }
 
     /// Borrows this mutable cell as an immutable cell view.
@@ -316,5 +326,65 @@ impl CellMut<'_, Interior, Index> {
             parts.left_child = page_id;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::PAGE_SIZE;
+
+    use super::super::{Index, Interior, Leaf, Page, Table, Write};
+    use super::{index_interior, interior, leaf};
+
+    #[test]
+    fn encoded_size_includes_leaf_header_and_payload() {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Leaf, Table>::initialize(&mut bytes);
+        page.insert(7, b"hello").unwrap();
+
+        let page_ref = page.as_ref();
+        let cell = page_ref.cell(0).unwrap();
+
+        assert_eq!(cell.encoded_size(), leaf::LEAF_CELL_PREFIX_SIZE + b"hello".len());
+    }
+
+    #[test]
+    fn encoded_size_matches_fixed_size_table_interior_cells() {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Interior, Table>::initialize_with_rightmost(&mut bytes, 9);
+        page.insert(42, 3).unwrap();
+
+        let page_ref = page.as_ref();
+        let cell = page_ref.cell(0).unwrap();
+
+        assert_eq!(cell.encoded_size(), interior::INTERIOR_CELL_SIZE);
+    }
+
+    #[test]
+    fn encoded_size_includes_index_interior_prefix_and_payload() {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let mut page =
+            Page::<Write<'_>, Interior, Index>::initialize_with_rightmost(&mut bytes, 17);
+        page.insert(b"mango", 5).unwrap();
+
+        let page_ref = page.as_ref();
+        let cell = page_ref.cell(0).unwrap();
+
+        assert_eq!(
+            cell.encoded_size(),
+            index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE + b"mango".len()
+        );
+    }
+
+    #[test]
+    fn mutable_cell_reports_same_encoded_size() {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Leaf, Table>::initialize(&mut bytes);
+        page.insert(11, b"abc").unwrap();
+
+        let cell = page.cell_mut(0).unwrap();
+
+        assert_eq!(cell.encoded_size(), leaf::LEAF_CELL_PREFIX_SIZE + 3);
+        assert_eq!(cell.as_ref().encoded_size(), leaf::LEAF_CELL_PREFIX_SIZE + 3);
     }
 }
