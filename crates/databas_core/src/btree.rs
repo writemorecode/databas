@@ -788,8 +788,8 @@ impl TableCursor {
     /// Returns [`crate::error::ConstraintError::DuplicateKey`] if `row_id`
     /// already exists.
     pub fn insert(&mut self, row_id: RowId, payload: &[u8]) -> StorageResult<()> {
+        let (leaf_page_id, tree_path) = self.leaf_page_path_for_row_id(row_id)?;
         let insert_result = {
-            let leaf_page_id = self.leaf_page_for_row_id(row_id)?;
             let pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
             let mut write_guard = pin_guard.write()?;
             let mut page = write_guard.open_typed_mut::<page::Leaf, page::Table>()?;
@@ -801,7 +801,7 @@ impl TableCursor {
                 panic!("Cell too large!");
             }
             Err(PageError::PageFull { .. }) => {
-                self.table_insert_with_leaf_page_split(row_id, payload)
+                self.table_insert_with_leaf_page_split(leaf_page_id, &tree_path, row_id, payload)
             }
             Err(err) => Err(err.into()),
         }
@@ -809,12 +809,11 @@ impl TableCursor {
 
     fn table_insert_with_leaf_page_split(
         &mut self,
+        leaf_page_id: PageId,
+        tree_path: &[PageId],
         row_id: RowId,
         payload: &[u8],
     ) -> StorageResult<()> {
-        // Handle page split.
-        let (leaf_page_id, tree_path) = self.leaf_page_path_for_row_id(row_id)?;
-
         // Fetch leaf page from page cache
         let leaf_page_guard = self.page_cache.fetch_page(leaf_page_id)?;
         let mut leaf_guard = leaf_page_guard.write()?;
