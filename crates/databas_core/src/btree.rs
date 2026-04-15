@@ -893,7 +893,10 @@ impl TableCursor {
             page.insert(row_id, payload)
         };
         match insert_result {
-            Ok(_) => Ok(()),
+            Ok(slot_index) => {
+                self.set_positioned_state(leaf_page_id, slot_index);
+                Ok(())
+            }
             Err(PageError::CellTooLarge { .. }) => {
                 panic!("Cell too large!");
             }
@@ -1505,7 +1508,10 @@ impl IndexCursor {
             page.insert(key, row_id)
         };
         match insert_result {
-            Ok(_) => Ok(()),
+            Ok(slot_index) => {
+                self.set_positioned_state(leaf_page_id, slot_index);
+                Ok(())
+            }
             Err(PageError::CellTooLarge { .. }) => {
                 panic!("Cell too large!");
             }
