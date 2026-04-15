@@ -419,6 +419,17 @@ impl IndexInteriorSplitCell {
         }
     }
 
+    fn key_len(&self) -> usize {
+        match self {
+            Self::Snapshot { key_range, .. } => key_range.len(),
+            Self::Incoming { key, .. } => key.len(),
+        }
+    }
+
+    fn encoded_size(&self) -> usize {
+        size_of::<u16>() + size_of::<PageId>() + self.key_len()
+    }
+
     fn key<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE]) -> &'a [u8] {
         match self {
             Self::Snapshot { key_range, .. } => &snapshot[key_range.clone()],
@@ -1273,6 +1284,53 @@ impl IndexCursor {
         }
     }
 
+    fn interior_cells_fit(cells: &[IndexInteriorSplitCell]) -> bool {
+        let used_bytes = page::format::PageKind::IndexInterior.header_size()
+            + cells.len() * page::format::SLOT_ENTRY_SIZE
+            + cells.iter().map(IndexInteriorSplitCell::encoded_size).sum::<usize>();
+        used_bytes <= page::format::USABLE_SPACE_END
+    }
+
+    fn choose_interior_split_index(cells: &[IndexInteriorSplitCell]) -> StorageResult<usize> {
+        debug_assert!(cells.len() >= 2, "interior splits need at least two cells");
+
+        let total_cell_len = cells.iter().map(IndexInteriorSplitCell::encoded_size).sum::<usize>();
+        let mut left_cell_len = 0;
+        let mut best = None;
+
+        for split_index in 1..cells.len() {
+            left_cell_len += cells[split_index - 1].encoded_size();
+            if !Self::interior_cells_fit(&cells[..split_index])
+                || !Self::interior_cells_fit(&cells[split_index..])
+            {
+                continue;
+            }
+
+            let right_cell_len = total_cell_len - left_cell_len;
+            let imbalance = left_cell_len.abs_diff(right_cell_len);
+            let is_better = match best {
+                Some((best_imbalance, best_left_cell_len, _)) => {
+                    imbalance < best_imbalance
+                        || (imbalance == best_imbalance && left_cell_len > best_left_cell_len)
+                }
+                None => true,
+            };
+
+            if is_better {
+                best = Some((imbalance, left_cell_len, split_index));
+            }
+        }
+
+        match best {
+            Some((_, _, split_index)) => Ok(split_index),
+            None => Err(PageError::PageFull {
+                needed: total_cell_len,
+                available: total_cell_len.saturating_sub(1),
+            }
+            .into()),
+        }
+    }
+
     fn entry_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<IndexEntry> {
         let pin = self.page_cache.fetch_page(page_id)?;
         IndexEntry::new(pin, slot_index)
@@ -1678,7 +1736,7 @@ impl IndexCursor {
             right_guard.page_mut(),
         );
 
-        let split_index = cells.len() / 2;
+        let split_index = Self::choose_interior_split_index(&cells)?;
         let (left_cells, right_cells) = cells.split_at(split_index);
         let left_rightmost_child = right_cells
             .first()
