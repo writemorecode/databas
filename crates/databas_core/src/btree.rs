@@ -12,9 +12,10 @@
 use core::marker::PhantomData;
 use std::fmt;
 use std::mem::size_of;
+use std::ops::Range;
 
 use crate::{
-    PageId, RowId,
+    PAGE_SIZE, PageId, RowId,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
     page::{
         self, Page, PageError, SearchResult, Write,
@@ -324,9 +325,9 @@ pub type TableCursor = TreeCursor<Table>;
 pub type IndexCursor = TreeCursor<Index>;
 
 #[derive(Debug, Clone)]
-struct OwnedLeafCell {
-    row_id: RowId,
-    payload: Vec<u8>,
+enum LeafSplitCell {
+    Snapshot { row_id: RowId, payload_range: Range<usize> },
+    Incoming { row_id: RowId, payload_len: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,9 +336,32 @@ enum InteriorChildRef {
     Rightmost,
 }
 
-impl OwnedLeafCell {
+impl LeafSplitCell {
+    fn row_id(&self) -> RowId {
+        match self {
+            Self::Snapshot { row_id, .. } | Self::Incoming { row_id, .. } => *row_id,
+        }
+    }
+
+    fn payload_len(&self) -> usize {
+        match self {
+            Self::Snapshot { payload_range, .. } => payload_range.len(),
+            Self::Incoming { payload_len, .. } => *payload_len,
+        }
+    }
+
     fn encoded_size(&self) -> usize {
-        size_of::<u16>() + size_of::<RowId>() + self.payload.len()
+        size_of::<u16>() + size_of::<RowId>() + self.payload_len()
+    }
+
+    fn payload<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE], incoming: &'a [u8]) -> &'a [u8] {
+        match self {
+            Self::Snapshot { payload_range, .. } => &snapshot[payload_range.clone()],
+            Self::Incoming { payload_len, .. } => {
+                debug_assert_eq!(*payload_len, incoming.len());
+                incoming
+            }
+        }
     }
 }
 
@@ -650,17 +674,17 @@ impl TableCursor {
         }
     }
 
-    fn leaf_cells_fit(cells: &[OwnedLeafCell]) -> bool {
+    fn leaf_cells_fit(cells: &[LeafSplitCell]) -> bool {
         let used_bytes = page::format::PageKind::TableLeaf.header_size()
             + cells.len() * page::format::SLOT_ENTRY_SIZE
-            + cells.iter().map(OwnedLeafCell::encoded_size).sum::<usize>();
+            + cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
         used_bytes <= page::format::USABLE_SPACE_END
     }
 
-    fn choose_leaf_split_index(cells: &[OwnedLeafCell]) -> StorageResult<usize> {
+    fn choose_leaf_split_index(cells: &[LeafSplitCell]) -> StorageResult<usize> {
         debug_assert!(cells.len() >= 2, "leaf splits need at least two cells");
 
-        let total_cell_len = cells.iter().map(OwnedLeafCell::encoded_size).sum::<usize>();
+        let total_cell_len = cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
         let mut left_cell_len = 0;
         let mut best = None;
 
@@ -817,22 +841,30 @@ impl TableCursor {
         // Fetch leaf page from page cache
         let leaf_page_guard = self.page_cache.fetch_page(leaf_page_id)?;
         let mut leaf_guard = leaf_page_guard.write()?;
-        let mut leaf_page =
-            Page::<page::Write<'_>, page::Leaf, page::Table>::open(leaf_guard.page_mut())?;
+        let leaf_snapshot_bytes = *leaf_guard.page();
+        let leaf_snapshot =
+            Page::<page::Read<'_>, page::Leaf, page::Table>::open(&leaf_snapshot_bytes)?;
 
-        let prev_page_id = leaf_page.prev_page_id();
-        let next_page_id = leaf_page.next_page_id();
-        let mut cells = Vec::with_capacity(leaf_page.slot_count() as usize + 1);
-        for slot_index in 0..leaf_page.slot_count() {
-            let cell = leaf_page.cell(slot_index)?;
-            cells.push(OwnedLeafCell { row_id: cell.row_id()?, payload: cell.payload()?.to_vec() });
+        let prev_page_id = leaf_snapshot.prev_page_id();
+        let next_page_id = leaf_snapshot.next_page_id();
+        let mut cells = Vec::with_capacity(leaf_snapshot.slot_count() as usize + 1);
+        for slot_index in 0..leaf_snapshot.slot_count() {
+            let cell = leaf_snapshot.cell(slot_index)?;
+            cells.push(LeafSplitCell::Snapshot {
+                row_id: cell.row_id()?,
+                payload_range: cell.payload()?.as_ptr_range().start as usize
+                    - leaf_snapshot_bytes.as_ptr() as usize
+                    ..cell.payload()?.as_ptr_range().end as usize
+                        - leaf_snapshot_bytes.as_ptr() as usize,
+            });
         }
 
-        match cells.binary_search_by_key(&row_id, |cell| cell.row_id) {
+        match cells.binary_search_by_key(&row_id, LeafSplitCell::row_id) {
             Ok(_) => return Err(PageError::DuplicateKey.into()),
-            Err(insert_index) => {
-                cells.insert(insert_index, OwnedLeafCell { row_id, payload: payload.to_vec() })
-            }
+            Err(insert_index) => cells.insert(
+                insert_index,
+                LeafSplitCell::Incoming { row_id, payload_len: payload.len() },
+            ),
         }
 
         // Allocate new right sibling leaf page
@@ -844,8 +876,7 @@ impl TableCursor {
         let split_index = Self::choose_leaf_split_index(&cells)?;
         let (left_cells, right_cells) = cells.split_at(split_index);
 
-        drop(leaf_page);
-        leaf_page =
+        let mut leaf_page =
             Page::<page::Write<'_>, page::Leaf, page::Table>::initialize(leaf_guard.page_mut());
         leaf_page.set_prev_page_id(prev_page_id);
         leaf_page.set_next_page_id(Some(right_page_id));
@@ -853,10 +884,10 @@ impl TableCursor {
         right_page.set_next_page_id(next_page_id);
 
         for cell in left_cells {
-            leaf_page.insert(cell.row_id, &cell.payload)?;
+            leaf_page.insert(cell.row_id(), cell.payload(&leaf_snapshot_bytes, payload))?;
         }
         for cell in right_cells {
-            right_page.insert(cell.row_id, &cell.payload)?;
+            right_page.insert(cell.row_id(), cell.payload(&leaf_snapshot_bytes, payload))?;
         }
 
         if let Some(next_page_id) = next_page_id {
@@ -867,7 +898,7 @@ impl TableCursor {
         }
 
         let separator_row_id =
-            left_cells.last().expect("leaf split must leave a non-empty left page").row_id;
+            left_cells.last().expect("leaf split must leave a non-empty left page").row_id();
 
         if let Some((&interior_page_id, ancestor_path)) = tree_path.split_last() {
             self.table_insert_into_parent(
@@ -1301,6 +1332,7 @@ mod tests {
     use super::*;
     use crate::{
         Pager, PagerOptions,
+        error::ConstraintError,
         page::format::{PageKind, SLOT_ENTRY_SIZE, USABLE_SPACE_END},
     };
 
