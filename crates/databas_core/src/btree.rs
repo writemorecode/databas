@@ -353,10 +353,16 @@ struct PendingSplit<S> {
     right_page_id: PageId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexSeparator {
+    key: Vec<u8>,
+    row_id: RowId,
+}
+
 #[derive(Debug, Clone)]
 enum IndexInteriorSplitCell {
-    Snapshot { left_child: PageId, key_range: Range<usize> },
-    Incoming { left_child: PageId, key: Box<[u8]> },
+    Snapshot { left_child: PageId, row_id: RowId, key_range: Range<usize> },
+    Incoming { left_child: PageId, row_id: RowId, key: Box<[u8]> },
 }
 
 impl LeafSplitCell {
@@ -424,6 +430,12 @@ impl IndexInteriorSplitCell {
         }
     }
 
+    fn row_id(&self) -> RowId {
+        match self {
+            Self::Snapshot { row_id, .. } | Self::Incoming { row_id, .. } => *row_id,
+        }
+    }
+
     fn key_len(&self) -> usize {
         match self {
             Self::Snapshot { key_range, .. } => key_range.len(),
@@ -432,7 +444,7 @@ impl IndexInteriorSplitCell {
     }
 
     fn encoded_size(&self) -> usize {
-        size_of::<u16>() + size_of::<PageId>() + self.key_len()
+        size_of::<u16>() + size_of::<PageId>() + self.key_len() + size_of::<RowId>()
     }
 
     fn key<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE]) -> &'a [u8] {
@@ -1190,14 +1202,18 @@ impl IndexCursor {
     fn index_insert_into_parent(
         &mut self,
         parent_frame: PathFrame,
-        pending: PendingSplit<Vec<u8>>,
-    ) -> StorageResult<Option<PendingSplit<Vec<u8>>>> {
+        pending: PendingSplit<IndexSeparator>,
+    ) -> StorageResult<Option<PendingSplit<IndexSeparator>>> {
         let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
         let mut interior_guard = interior_page_guard.write()?;
         let mut interior_page =
             Page::<page::Write<'_>, page::Interior, page::Index>::open(interior_guard.page_mut())?;
 
-        match interior_page.insert(&pending.separator, pending.left_page_id) {
+        match interior_page.insert(
+            &pending.separator.key,
+            pending.separator.row_id,
+            pending.left_page_id,
+        ) {
             Ok(inserted_slot_index) => Self::update_interior_child_ref(
                 &mut interior_page,
                 parent_frame.child_ref,
@@ -1314,6 +1330,34 @@ impl IndexCursor {
         IndexEntry::new(pin, slot_index)
     }
 
+    fn leaf_page_for_key_and_row_id(&self, key: &[u8], row_id: RowId) -> StorageResult<PageId> {
+        let mut page_id = self.root_page_id();
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let next = {
+                let page = pin.read()?;
+                match page.open_any()? {
+                    page::AnyPage::IndexLeaf(_) => return Ok(page_id),
+                    page::AnyPage::IndexInterior(interior) => {
+                        interior.child_for_entry(key, row_id)?
+                    }
+                    _ => {
+                        return Err(StorageError::Corruption(CorruptionError {
+                            component: CorruptionComponent::Page,
+                            page_id: Some(page_id),
+                            kind: CorruptionKind::InvalidPageKind {
+                                expected: "index page",
+                                actual: page.page()[KIND_OFFSET],
+                            },
+                        }));
+                    }
+                }
+            };
+            page_id = next;
+        }
+    }
+
     fn leaf_page_for_key(&self, key: &[u8]) -> StorageResult<PageId> {
         let mut page_id = self.root_page_id();
 
@@ -1340,7 +1384,11 @@ impl IndexCursor {
         }
     }
 
-    fn leaf_page_path_for_key(&self, key: &[u8]) -> StorageResult<(PageId, Vec<PathFrame>)> {
+    fn leaf_page_path_for_key_and_row_id(
+        &self,
+        key: &[u8],
+        row_id: RowId,
+    ) -> StorageResult<(PageId, Vec<PathFrame>)> {
         let mut path = Vec::new();
         let mut page_id = self.root_page_id();
 
@@ -1350,7 +1398,9 @@ impl IndexCursor {
                 let page = pin.read()?;
                 match page.open_any()? {
                     page::AnyPage::IndexLeaf(_) => return Ok((page_id, path)),
-                    page::AnyPage::IndexInterior(interior) => match interior.lower_bound(key)? {
+                    page::AnyPage::IndexInterior(interior) => match interior
+                        .lower_bound_entry(key, row_id)?
+                    {
                         page::BoundResult::At(slot_index) => {
                             let child_page_id = interior.cell(slot_index)?.left_child()?;
                             path.push(PathFrame {
@@ -1485,7 +1535,7 @@ impl IndexCursor {
 
     /// Inserts a new `(key, row_id)` pair into the index tree.
     pub fn insert(&mut self, key: &[u8], row_id: RowId) -> StorageResult<()> {
-        let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
+        let (leaf_page_id, tree_path) = self.leaf_page_path_for_key_and_row_id(key, row_id)?;
         let insert_result = {
             let pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
             let mut write_guard = pin_guard.write()?;
@@ -1520,7 +1570,7 @@ impl IndexCursor {
     /// The cursor is expected to end on the matching entry when found, or on
     /// the leaf page where `key` would be inserted when absent.
     pub fn get(&mut self, key: &[u8], row_id: RowId) -> StorageResult<Option<IndexEntry>> {
-        let page_id = self.leaf_page_for_key(key)?;
+        let page_id = self.leaf_page_for_key_and_row_id(key, row_id)?;
         let pin = self.page_cache.fetch_page(page_id)?;
         let slot_index = {
             let page = pin.read()?;
@@ -1545,7 +1595,7 @@ impl IndexCursor {
         leaf_page_id: PageId,
         key: &[u8],
         row_id: RowId,
-    ) -> StorageResult<PendingSplit<Vec<u8>>> {
+    ) -> StorageResult<PendingSplit<IndexSeparator>> {
         let leaf_page_guard = self.page_cache.fetch_page(leaf_page_id)?;
         let mut leaf_guard = leaf_page_guard.write()?;
         let leaf_snapshot_bytes = *leaf_guard.page();
@@ -1608,11 +1658,14 @@ impl IndexCursor {
             next_page.set_prev_page_id(Some(right_page_id));
         }
 
-        let separator_key = left_cells
-            .last()
-            .expect("leaf split must leave a non-empty left page")
-            .key(&leaf_snapshot_bytes, key)
-            .to_vec();
+        let separator = {
+            let separator_cell =
+                left_cells.last().expect("leaf split must leave a non-empty left page");
+            IndexSeparator {
+                key: separator_cell.key(&leaf_snapshot_bytes, key).to_vec(),
+                row_id: separator_cell.row_id(),
+            }
+        };
 
         let target_page_id = if left_cells
             .last()
@@ -1654,14 +1707,14 @@ impl IndexCursor {
         };
         self.set_positioned_state(target_page_id, target_slot_index);
 
-        Ok(PendingSplit { separator: separator_key, left_page_id: leaf_page_id, right_page_id })
+        Ok(PendingSplit { separator, left_page_id: leaf_page_id, right_page_id })
     }
 
     fn index_insert_with_interior_page_split(
         &mut self,
         parent_frame: PathFrame,
-        pending: PendingSplit<Vec<u8>>,
-    ) -> StorageResult<PendingSplit<Vec<u8>>> {
+        pending: PendingSplit<IndexSeparator>,
+    ) -> StorageResult<PendingSplit<IndexSeparator>> {
         let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
         let mut interior_guard = interior_page_guard.write()?;
         let interior_snapshot_bytes = *interior_guard.page();
@@ -1677,6 +1730,7 @@ impl IndexCursor {
             let cell = interior_snapshot.cell(slot_index)?;
             cells.push(IndexInteriorSplitCell::Snapshot {
                 left_child: cell.left_child()?,
+                row_id: cell.row_id()?,
                 key_range: cell.payload()?.as_ptr_range().start as usize
                     - interior_snapshot_bytes.as_ptr() as usize
                     ..cell.payload()?.as_ptr_range().end as usize
@@ -1694,6 +1748,7 @@ impl IndexCursor {
                 };
                 cells[slot_index as usize] = IndexInteriorSplitCell::Snapshot {
                     left_child: pending.right_page_id,
+                    row_id: cells[slot_index as usize].row_id(),
                     key_range,
                 };
             }
@@ -1702,13 +1757,18 @@ impl IndexCursor {
             }
         }
 
-        let insert_index =
-            cells.partition_point(|cell| cell.key(&interior_snapshot_bytes) <= &pending.separator);
+        let insert_index = cells.partition_point(|cell| {
+            cell.key(&interior_snapshot_bytes)
+                .cmp(&pending.separator.key)
+                .then_with(|| cell.row_id().cmp(&pending.separator.row_id))
+                != core::cmp::Ordering::Greater
+        });
         cells.insert(
             insert_index,
             IndexInteriorSplitCell::Incoming {
                 left_child: pending.left_page_id,
-                key: pending.separator.into_boxed_slice(),
+                row_id: pending.separator.row_id,
+                key: pending.separator.key.into_boxed_slice(),
             },
         );
 
@@ -1738,10 +1798,18 @@ impl IndexCursor {
         right_page.set_next_page_id(next_page_id);
 
         for cell in left_cells {
-            interior_page.insert(cell.key(&interior_snapshot_bytes), cell.left_child())?;
+            interior_page.insert(
+                cell.key(&interior_snapshot_bytes),
+                cell.row_id(),
+                cell.left_child(),
+            )?;
         }
         for cell in right_cells {
-            right_page.insert(cell.key(&interior_snapshot_bytes), cell.left_child())?;
+            right_page.insert(
+                cell.key(&interior_snapshot_bytes),
+                cell.row_id(),
+                cell.left_child(),
+            )?;
         }
 
         if let Some(next_page_id) = next_page_id {
@@ -1751,19 +1819,21 @@ impl IndexCursor {
             next_page.set_prev_page_id(Some(right_page_id));
         }
 
-        let separator_key = left_cells
-            .last()
-            .expect("interior split must leave a non-empty left page")
-            .key(&interior_snapshot_bytes)
-            .to_vec();
-        Ok(PendingSplit {
-            separator: separator_key,
-            left_page_id: parent_frame.page_id,
-            right_page_id,
-        })
+        let separator = {
+            let separator_cell =
+                left_cells.last().expect("interior split must leave a non-empty left page");
+            IndexSeparator {
+                key: separator_cell.key(&interior_snapshot_bytes).to_vec(),
+                row_id: separator_cell.row_id(),
+            }
+        };
+        Ok(PendingSplit { separator, left_page_id: parent_frame.page_id, right_page_id })
     }
 
-    fn index_install_new_root(&mut self, pending: PendingSplit<Vec<u8>>) -> StorageResult<()> {
+    fn index_install_new_root(
+        &mut self,
+        pending: PendingSplit<IndexSeparator>,
+    ) -> StorageResult<()> {
         let (root_page_id, root_page_guard) = self.page_cache.new_page()?;
         let mut root_guard = root_page_guard.write()?;
         let mut root_page =
@@ -1771,7 +1841,7 @@ impl IndexCursor {
                 root_guard.page_mut(),
                 pending.right_page_id,
             );
-        root_page.insert(&pending.separator, pending.left_page_id)?;
+        root_page.insert(&pending.separator.key, pending.separator.row_id, pending.left_page_id)?;
         self.root_page_id.set(root_page_id);
         Ok(())
     }

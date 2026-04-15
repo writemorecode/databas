@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use crate::{PAGE_SIZE, PageId, SlotId};
+use crate::{PAGE_SIZE, PageId, RowId, SlotId};
 
 use super::{
     CellCorruption, PageError, PageResult,
@@ -10,13 +10,15 @@ use super::{
 };
 
 const PAGE_ID_SIZE: usize = 8;
-/// The fixed-size prefix of an index interior cell: encoded length plus left-child page id.
+const ROW_ID_SIZE: usize = 8;
+/// The fixed-size header of an index interior cell: encoded length plus left-child page id.
 pub const INDEX_INTERIOR_CELL_PREFIX_SIZE: usize = CELL_LENGTH_SIZE + PAGE_ID_SIZE;
 
 #[derive(Debug, Clone)]
 pub(crate) struct IndexInteriorCellParts {
     pub(crate) left_child: PageId,
-    pub(crate) payload_range: std::ops::Range<usize>,
+    pub(crate) row_id: RowId,
+    pub(crate) key_range: std::ops::Range<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,7 +34,7 @@ pub(crate) fn cell_len_at(
     cell_offset: usize,
 ) -> PageResult<usize> {
     let cell_len = format::read_u16(bytes, cell_offset) as usize;
-    if cell_len < INDEX_INTERIOR_CELL_PREFIX_SIZE {
+    if cell_len < INDEX_INTERIOR_CELL_PREFIX_SIZE + ROW_ID_SIZE {
         return Err(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthTooSmall });
     }
     if cell_offset + cell_len > USABLE_SPACE_END {
@@ -55,9 +57,17 @@ where
     Ok(ParsedIndexInteriorCell {
         cell_offset,
         cell_len,
-        parts: IndexInteriorCellParts {
-            left_child: format::read_u64(page.bytes(), cell_offset + CELL_LENGTH_SIZE),
-            payload_range: INDEX_INTERIOR_CELL_PREFIX_SIZE..cell_len,
+        parts: {
+            let row_id_offset = cell_offset + cell_len - ROW_ID_SIZE;
+            IndexInteriorCellParts {
+                left_child: format::read_u64(page.bytes(), cell_offset + CELL_LENGTH_SIZE),
+                row_id: RowId::from_be_bytes(
+                    page.bytes()[row_id_offset..row_id_offset + ROW_ID_SIZE]
+                        .try_into()
+                        .expect("row id suffix length is validated before decoding"),
+                ),
+                key_range: INDEX_INTERIOR_CELL_PREFIX_SIZE..cell_len - ROW_ID_SIZE,
+            }
         },
     })
 }
@@ -68,19 +78,27 @@ pub(crate) fn write_left_child(bytes: &mut [u8], page_id: PageId) {
 }
 
 fn encoded_len(key_len: usize) -> PageResult<usize> {
-    let len = INDEX_INTERIOR_CELL_PREFIX_SIZE + key_len;
+    let len = INDEX_INTERIOR_CELL_PREFIX_SIZE + key_len + ROW_ID_SIZE;
     if len > u16::MAX as usize {
         return Err(PageError::CellTooLarge { len, max: u16::MAX as usize });
     }
     Ok(len)
 }
 
-fn write_cell(bytes: &mut [u8; PAGE_SIZE], cell_offset: usize, left_child: PageId, key: &[u8]) {
-    let cell_len = INDEX_INTERIOR_CELL_PREFIX_SIZE + key.len();
+fn write_cell(
+    bytes: &mut [u8; PAGE_SIZE],
+    cell_offset: usize,
+    left_child: PageId,
+    key: &[u8],
+    row_id: RowId,
+) {
+    let cell_len = INDEX_INTERIOR_CELL_PREFIX_SIZE + key.len() + ROW_ID_SIZE;
     format::write_u16(bytes, cell_offset, cell_len as u16);
     write_left_child(&mut bytes[cell_offset..cell_offset + cell_len], left_child);
-    bytes[cell_offset + INDEX_INTERIOR_CELL_PREFIX_SIZE..cell_offset + cell_len]
-        .copy_from_slice(key);
+    let key_start = cell_offset + INDEX_INTERIOR_CELL_PREFIX_SIZE;
+    let key_end = key_start + key.len();
+    bytes[key_start..key_end].copy_from_slice(key);
+    bytes[key_end..cell_offset + cell_len].copy_from_slice(&row_id.to_be_bytes());
 }
 
 fn compare_key<A>(
@@ -93,8 +111,25 @@ where
 {
     let parsed = cell_parts(page, slot_index)?;
     let cell_offset = parsed.cell_offset;
-    let payload_range = parsed.parts.payload_range;
-    Ok(page.bytes()[cell_offset + payload_range.start..cell_offset + payload_range.end].cmp(key))
+    let key_range = parsed.parts.key_range;
+    Ok(page.bytes()[cell_offset + key_range.start..cell_offset + key_range.end].cmp(key))
+}
+
+fn compare_entry<A>(
+    page: &Page<A, Interior, Index>,
+    slot_index: SlotId,
+    key: &[u8],
+    row_id: RowId,
+) -> PageResult<Ordering>
+where
+    A: PageAccess,
+{
+    let parsed = cell_parts(page, slot_index)?;
+    let cell_offset = parsed.cell_offset;
+    let key_range = parsed.parts.key_range.clone();
+    let ordering =
+        page.bytes()[cell_offset + key_range.start..cell_offset + key_range.end].cmp(key);
+    Ok(if ordering == Ordering::Equal { parsed.parts.row_id.cmp(&row_id) } else { ordering })
 }
 
 impl<A> Page<A, Interior, Index>
@@ -111,6 +146,11 @@ where
         self.lower_bound_slots_by(|page, slot_index| compare_key(page, slot_index, key))
     }
 
+    /// Returns the first slot whose separator entry is greater than or equal to `(key, row_id)`.
+    pub fn lower_bound_entry(&self, key: &[u8], row_id: RowId) -> PageResult<BoundResult> {
+        self.lower_bound_slots_by(|page, slot_index| compare_entry(page, slot_index, key, row_id))
+    }
+
     /// Returns the first slot whose separator key is strictly greater than `key`.
     pub fn upper_bound(&self, key: &[u8]) -> PageResult<BoundResult> {
         self.upper_bound_slots_by(|page, slot_index| compare_key(page, slot_index, key))
@@ -119,6 +159,14 @@ where
     /// Returns the child page that may contain `key`.
     pub fn child_for(&self, key: &[u8]) -> PageResult<PageId> {
         match self.lower_bound(key)? {
+            BoundResult::At(slot_index) => Ok(cell_parts(self, slot_index)?.parts.left_child),
+            BoundResult::PastEnd => Ok(self.rightmost_child()),
+        }
+    }
+
+    /// Returns the child page that may contain `(key, row_id)`.
+    pub fn child_for_entry(&self, key: &[u8], row_id: RowId) -> PageResult<PageId> {
+        match self.lower_bound_entry(key, row_id)? {
             BoundResult::At(slot_index) => Ok(cell_parts(self, slot_index)?.parts.left_child),
             BoundResult::PastEnd => Ok(self.rightmost_child()),
         }
@@ -150,15 +198,15 @@ where
     }
 
     /// Inserts a new separator key and its left-child pointer while preserving slot order.
-    pub fn insert(&mut self, key: &[u8], left_child: PageId) -> PageResult<SlotId> {
+    pub fn insert(&mut self, key: &[u8], row_id: RowId, left_child: PageId) -> PageResult<SlotId> {
         let cell_len = encoded_len(key.len())?;
-        let slot_index = match self.upper_bound(key)? {
+        let slot_index = match self.lower_bound_entry(key, row_id)? {
             BoundResult::At(slot_index) => slot_index,
             BoundResult::PastEnd => self.slot_count(),
         };
 
         let cell_offset = self.reserve_space_for_insert(cell_len)?;
-        write_cell(self.bytes_mut(), cell_offset as usize, left_child, key);
+        write_cell(self.bytes_mut(), cell_offset as usize, left_child, key, row_id);
         self.insert_slot(slot_index, cell_offset)?;
         Ok(slot_index)
     }
@@ -179,11 +227,12 @@ mod tests {
     fn parses_valid_index_interior_cell() {
         let mut bytes = new_index_interior_page(99);
         let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
-        page.insert(b"mango", 5).unwrap();
+        page.insert(b"mango", 11, 5).unwrap();
 
         let page = page.as_ref();
         let cell = page.cell(0).unwrap();
         assert_eq!(cell.payload().unwrap(), b"mango");
+        assert_eq!(cell.row_id().unwrap(), 11);
         assert_eq!(cell.left_child().unwrap(), 5);
         assert_eq!(page.rightmost_child(), 99);
     }
@@ -204,19 +253,23 @@ mod tests {
     fn insert_keeps_separator_order_and_allows_duplicates() {
         let mut bytes = new_index_interior_page(90);
         let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
-        page.insert(b"pear", 4).unwrap();
-        page.insert(b"apple", 1).unwrap();
-        page.insert(b"mango", 2).unwrap();
-        page.insert(b"mango", 3).unwrap();
+        page.insert(b"pear", 40, 4).unwrap();
+        page.insert(b"apple", 10, 1).unwrap();
+        page.insert(b"mango", 20, 2).unwrap();
+        page.insert(b"mango", 30, 3).unwrap();
 
         let page = page.as_ref();
         assert_eq!(page.cell(0).unwrap().payload().unwrap(), b"apple");
+        assert_eq!(page.cell(0).unwrap().row_id().unwrap(), 10);
         assert_eq!(page.cell(0).unwrap().left_child().unwrap(), 1);
         assert_eq!(page.cell(1).unwrap().payload().unwrap(), b"mango");
+        assert_eq!(page.cell(1).unwrap().row_id().unwrap(), 20);
         assert_eq!(page.cell(1).unwrap().left_child().unwrap(), 2);
         assert_eq!(page.cell(2).unwrap().payload().unwrap(), b"mango");
+        assert_eq!(page.cell(2).unwrap().row_id().unwrap(), 30);
         assert_eq!(page.cell(2).unwrap().left_child().unwrap(), 3);
         assert_eq!(page.cell(3).unwrap().payload().unwrap(), b"pear");
+        assert_eq!(page.cell(3).unwrap().row_id().unwrap(), 40);
         assert_eq!(page.cell(3).unwrap().left_child().unwrap(), 4);
     }
 
@@ -233,10 +286,10 @@ mod tests {
     fn bounds_cover_exact_in_between_and_duplicate_separator_positions() {
         let mut bytes = new_index_interior_page(90);
         let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
-        page.insert(b"apple", 1).unwrap();
-        page.insert(b"mango", 2).unwrap();
-        page.insert(b"mango", 3).unwrap();
-        page.insert(b"pear", 4).unwrap();
+        page.insert(b"apple", 10, 1).unwrap();
+        page.insert(b"mango", 20, 2).unwrap();
+        page.insert(b"mango", 30, 3).unwrap();
+        page.insert(b"pear", 40, 4).unwrap();
 
         let page = page.as_ref();
         assert_eq!(page.lower_bound(b"aardvark").unwrap(), BoundResult::At(0));
@@ -247,16 +300,20 @@ mod tests {
         assert_eq!(page.upper_bound(b"orange").unwrap(), BoundResult::At(3));
         assert_eq!(page.lower_bound(b"zebra").unwrap(), BoundResult::PastEnd);
         assert_eq!(page.upper_bound(b"zebra").unwrap(), BoundResult::PastEnd);
+        assert_eq!(page.lower_bound_entry(b"mango", 19).unwrap(), BoundResult::At(1));
+        assert_eq!(page.lower_bound_entry(b"mango", 20).unwrap(), BoundResult::At(1));
+        assert_eq!(page.lower_bound_entry(b"mango", 21).unwrap(), BoundResult::At(2));
+        assert_eq!(page.lower_bound_entry(b"mango", 31).unwrap(), BoundResult::At(3));
     }
 
     #[test]
     fn child_for_routes_by_first_separator_greater_than_or_equal_to_key() {
         let mut bytes = new_index_interior_page(90);
         let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
-        page.insert(b"apple", 1).unwrap();
-        page.insert(b"mango", 2).unwrap();
-        page.insert(b"mango", 3).unwrap();
-        page.insert(b"pear", 4).unwrap();
+        page.insert(b"apple", 10, 1).unwrap();
+        page.insert(b"mango", 20, 2).unwrap();
+        page.insert(b"mango", 30, 3).unwrap();
+        page.insert(b"pear", 40, 4).unwrap();
 
         let page = page.as_ref();
         assert_eq!(page.child_for(b"aardvark").unwrap(), 1);
@@ -265,6 +322,9 @@ mod tests {
         assert_eq!(page.child_for(b"mango").unwrap(), 2);
         assert_eq!(page.child_for(b"orange").unwrap(), 4);
         assert_eq!(page.child_for(b"zebra").unwrap(), 90);
+        assert_eq!(page.child_for_entry(b"mango", 20).unwrap(), 2);
+        assert_eq!(page.child_for_entry(b"mango", 21).unwrap(), 3);
+        assert_eq!(page.child_for_entry(b"mango", 31).unwrap(), 4);
     }
 
     #[test]
@@ -274,13 +334,14 @@ mod tests {
 
         assert_eq!(page.child_for(b"apple").unwrap(), 77);
         assert_eq!(page.child_for(b"zebra").unwrap(), 77);
+        assert_eq!(page.child_for_entry(b"apple", 1).unwrap(), 77);
     }
 
     #[test]
     fn mutable_cell_view_updates_left_child() {
         let mut bytes = new_index_interior_page(9);
         let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
-        page.insert(b"mango", 5).unwrap();
+        page.insert(b"mango", 11, 5).unwrap();
 
         {
             let mut cell = page.cell_mut(0).unwrap();
@@ -295,10 +356,11 @@ mod tests {
     fn cell_payload_is_sliced_relative_to_cell_start() {
         let mut bytes = new_index_interior_page(9);
         let mut page = Page::<Write<'_>, Interior, Index>::open(&mut bytes).unwrap();
-        page.insert(&[5_u8; 64], 1).unwrap();
-        page.insert(b"mango", 2).unwrap();
+        page.insert(&[5_u8; 64], 1, 1).unwrap();
+        page.insert(b"mango", 2, 2).unwrap();
 
         let page = page.as_ref();
         assert_eq!(page.cell(1).unwrap().payload().unwrap(), b"mango");
+        assert_eq!(page.cell(1).unwrap().row_id().unwrap(), 2);
     }
 }
