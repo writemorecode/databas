@@ -1886,18 +1886,30 @@ mod tests {
         cells
     }
 
+    fn create_stress_test_fixture(
+        page_count: usize,
+    ) -> (NamedTempFile, Pager, Vec<(RowId, Box<[u8]>)>) {
+        let cache_frames = page_count / 4;
+        let file = NamedTempFile::new().unwrap();
+        let pager = Pager::open_with_options(file.path(), PagerOptions { cache_frames }).unwrap();
+        let cells = generate_table_cells(page_count * USABLE_SPACE_END);
+        (file, pager, cells)
+    }
+
+    fn expected_table_records<'a>(cells: &'a [(RowId, Box<[u8]>)]) -> BTreeMap<RowId, &'a [u8]> {
+        cells.iter().map(|(row_id, payload)| (*row_id, payload.as_ref())).collect()
+    }
+
+    fn expected_index_entries(cells: &[(RowId, Box<[u8]>)]) -> BTreeMap<(Box<[u8]>, RowId), ()> {
+        cells.iter().map(|(row_id, payload)| ((payload.clone(), *row_id), ())).collect()
+    }
+
     #[test]
     fn tree_insert_and_get_stress_test() {
         let page_count = 500;
-        let cache_frames = page_count / 4;
-
-        let file = NamedTempFile::new().unwrap();
-        let pager = Pager::open_with_options(file.path(), PagerOptions { cache_frames }).unwrap();
+        let (_file, pager, cells) = create_stress_test_fixture(page_count);
         let mut cursor = pager.create_table().unwrap();
-        let target_bytes = page_count * USABLE_SPACE_END;
-        let cells = generate_table_cells(target_bytes);
-        let expected: BTreeMap<RowId, &[u8]> =
-            cells.iter().map(|(row_id, payload)| (*row_id, payload.as_ref())).collect();
+        let expected = expected_table_records(&cells);
 
         assert!(!cells.is_empty());
         assert_eq!(cells.len(), expected.len(), "generated row ids must be unique");
@@ -1930,18 +1942,9 @@ mod tests {
     #[test]
     fn index_tree_insert_and_get_stress_test() {
         let page_count = 500;
-        let cache_frames = page_count / 4;
-
-        let file = NamedTempFile::new().unwrap();
-        let pager = Pager::open_with_options(file.path(), PagerOptions { cache_frames }).unwrap();
+        let (_file, pager, cells) = create_stress_test_fixture(page_count);
         let mut cursor = pager.create_index().unwrap();
-        let target_bytes = page_count * USABLE_SPACE_END;
-        let cells = generate_table_cells(target_bytes);
-        let expected: BTreeMap<(Box<[u8]>, RowId), ()> = cells
-            .iter()
-            .map(|(row_id, payload)| (payload.clone(), *row_id))
-            .map(|entry| (entry, ()))
-            .collect();
+        let expected = expected_index_entries(&cells);
 
         assert!(!cells.is_empty());
         assert_eq!(cells.len(), expected.len(), "generated (key, row_id) pairs must be unique");
