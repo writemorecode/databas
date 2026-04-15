@@ -337,15 +337,15 @@ enum IndexLeafSplitCell {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InteriorChildRef {
-    Separator(RowId),
+enum ChildSlotRef {
+    Slot(u16),
     Rightmost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IndexInteriorChildRef {
-    Separator(u16),
-    Rightmost,
+struct PathFrame {
+    page_id: PageId,
+    child_ref: ChildSlotRef,
 }
 
 #[derive(Debug, Clone)]
@@ -681,34 +681,20 @@ where
 }
 
 impl TableCursor {
-    fn find_interior_child_ref(
-        interior_page: &Page<page::Write<'_>, page::Interior, page::Table>,
-        child_page_id: PageId,
-    ) -> StorageResult<InteriorChildRef> {
-        for slot_index in 0..interior_page.slot_count() {
-            let cell = interior_page.cell(slot_index)?;
-            if cell.left_child()? == child_page_id {
-                return Ok(InteriorChildRef::Separator(cell.row_id()?));
-            }
-        }
-
-        if interior_page.rightmost_child() == child_page_id {
-            Ok(InteriorChildRef::Rightmost)
-        } else {
-            Err(PageError::KeyNotFound.into())
-        }
-    }
-
     fn update_interior_child_ref(
         interior_page: &mut Page<page::Write<'_>, page::Interior, page::Table>,
-        child_ref: InteriorChildRef,
+        child_ref: ChildSlotRef,
+        inserted_slot_index: u16,
         child_page_id: PageId,
     ) -> StorageResult<()> {
         match child_ref {
-            InteriorChildRef::Separator(separator_row_id) => {
-                interior_page.update(separator_row_id, child_page_id)?;
+            ChildSlotRef::Slot(slot_index) => {
+                let updated_slot_index =
+                    if inserted_slot_index <= slot_index { slot_index + 1 } else { slot_index };
+                let mut cell = interior_page.cell_mut(updated_slot_index)?;
+                cell.set_left_child(child_page_id)?;
             }
-            InteriorChildRef::Rightmost => {
+            ChildSlotRef::Rightmost => {
                 interior_page.set_rightmost_child(child_page_id);
             }
         }
@@ -717,27 +703,31 @@ impl TableCursor {
 
     fn table_insert_into_parent(
         &mut self,
-        ancestor_path: &[PageId],
-        interior_page_id: PageId,
+        ancestor_path: &[PathFrame],
+        parent_frame: PathFrame,
         separator_row_id: RowId,
         left_child: PageId,
         right_child: PageId,
     ) -> StorageResult<()> {
-        let interior_page_guard = self.page_cache.fetch_page(interior_page_id)?;
+        let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
         let mut interior_guard = interior_page_guard.write()?;
         let mut interior_page =
             Page::<page::Write<'_>, page::Interior, page::Table>::open(interior_guard.page_mut())?;
-        let child_ref = Self::find_interior_child_ref(&interior_page, left_child)?;
 
         match interior_page.insert(separator_row_id, left_child) {
-            Ok(_) => Self::update_interior_child_ref(&mut interior_page, child_ref, right_child),
+            Ok(inserted_slot_index) => Self::update_interior_child_ref(
+                &mut interior_page,
+                parent_frame.child_ref,
+                inserted_slot_index,
+                right_child,
+            ),
             Err(PageError::PageFull { .. }) => {
                 drop(interior_page);
                 drop(interior_guard);
                 drop(interior_page_guard);
                 self.table_insert_with_interior_page_split(
                     ancestor_path,
-                    interior_page_id,
+                    parent_frame,
                     separator_row_id,
                     left_child,
                     right_child,
@@ -825,7 +815,7 @@ impl TableCursor {
         }
     }
 
-    fn leaf_page_path_for_row_id(&self, row_id: RowId) -> StorageResult<(PageId, Vec<PageId>)> {
+    fn leaf_page_path_for_row_id(&self, row_id: RowId) -> StorageResult<(PageId, Vec<PathFrame>)> {
         let mut path = Vec::new();
         let mut page_id = self.root_page_id;
 
@@ -836,8 +826,23 @@ impl TableCursor {
                 match page.open_any()? {
                     page::AnyPage::TableLeaf(_) => return Ok((page_id, path)),
                     page::AnyPage::TableInterior(interior) => {
-                        path.push(page_id);
-                        interior.child_for(row_id)?
+                        match interior.lower_bound(row_id)? {
+                            page::BoundResult::At(slot_index) => {
+                                let child_page_id = interior.cell(slot_index)?.left_child()?;
+                                path.push(PathFrame {
+                                    page_id,
+                                    child_ref: ChildSlotRef::Slot(slot_index),
+                                });
+                                child_page_id
+                            }
+                            page::BoundResult::PastEnd => {
+                                path.push(PathFrame {
+                                    page_id,
+                                    child_ref: ChildSlotRef::Rightmost,
+                                });
+                                interior.rightmost_child()
+                            }
+                        }
                     }
                     _ => {
                         return Err(StorageError::Corruption(CorruptionError {
@@ -910,7 +915,7 @@ impl TableCursor {
     fn table_insert_with_leaf_page_split(
         &mut self,
         leaf_page_id: PageId,
-        tree_path: &[PageId],
+        tree_path: &[PathFrame],
         row_id: RowId,
         payload: &[u8],
     ) -> StorageResult<()> {
@@ -976,10 +981,10 @@ impl TableCursor {
         let separator_row_id =
             left_cells.last().expect("leaf split must leave a non-empty left page").row_id();
 
-        if let Some((&interior_page_id, ancestor_path)) = tree_path.split_last() {
+        if let Some((parent_frame, ancestor_path)) = tree_path.split_last() {
             self.table_insert_into_parent(
                 ancestor_path,
-                interior_page_id,
+                *parent_frame,
                 separator_row_id,
                 leaf_page_id,
                 right_page_id,
@@ -1012,21 +1017,20 @@ impl TableCursor {
 
     fn table_insert_with_interior_page_split(
         &mut self,
-        ancestor_path: &[PageId],
-        interior_page_id: PageId,
+        ancestor_path: &[PathFrame],
+        parent_frame: PathFrame,
         row_id: RowId,
         left_child: PageId,
         right_child: PageId,
     ) -> StorageResult<()> {
         // Fetch interior page from page cache
-        let interior_page_guard = self.page_cache.fetch_page(interior_page_id)?;
+        let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
         let mut interior_guard = interior_page_guard.write()?;
         let mut interior_page =
             Page::<page::Write<'_>, page::Interior, page::Table>::open(interior_guard.page_mut())?;
 
         let prev_page_id = interior_page.prev_page_id();
         let next_page_id = interior_page.next_page_id();
-        let child_ref = Self::find_interior_child_ref(&interior_page, left_child)?;
         let mut old_rightmost_child = interior_page.rightmost_child();
         let mut cells: Vec<(RowId, PageId)> =
             Vec::with_capacity(interior_page.slot_count() as usize + 1);
@@ -1035,14 +1039,11 @@ impl TableCursor {
             cells.push((cell.row_id()?, cell.left_child()?));
         }
 
-        match child_ref {
-            InteriorChildRef::Separator(separator_row_id) => {
-                let existing_index = cells
-                    .binary_search_by_key(&separator_row_id, |cell| cell.0)
-                    .expect("existing separator for child must be present");
-                cells[existing_index].1 = right_child;
+        match parent_frame.child_ref {
+            ChildSlotRef::Slot(slot_index) => {
+                cells[slot_index as usize].1 = right_child;
             }
-            InteriorChildRef::Rightmost => {
+            ChildSlotRef::Rightmost => {
                 old_rightmost_child = right_child;
             }
         }
@@ -1075,7 +1076,7 @@ impl TableCursor {
         interior_page.set_prev_page_id(prev_page_id);
         interior_page.set_next_page_id(Some(right_page_id));
         right_page.set_rightmost_child(old_rightmost_child);
-        right_page.set_prev_page_id(Some(interior_page_id));
+        right_page.set_prev_page_id(Some(parent_frame.page_id));
         right_page.set_next_page_id(next_page_id);
 
         for cell in left_cells {
@@ -1095,12 +1096,12 @@ impl TableCursor {
         let separator_row_id =
             left_cells.last().expect("interior split must leave a non-empty left page").0;
 
-        if let Some((&parent_page_id, grandparent_path)) = ancestor_path.split_last() {
+        if let Some((grandparent_frame, grandparent_path)) = ancestor_path.split_last() {
             self.table_insert_into_parent(
                 grandparent_path,
-                parent_page_id,
+                *grandparent_frame,
                 separator_row_id,
-                interior_page_id,
+                parent_frame.page_id,
                 right_page_id,
             )
         } else {
@@ -1111,7 +1112,7 @@ impl TableCursor {
                     root_guard.page_mut(),
                     right_page_id,
                 );
-            root_page.insert(separator_row_id, interior_page_id)?;
+            root_page.insert(separator_row_id, parent_frame.page_id)?;
             self.root_page_id = root_page_id;
             Ok(())
         }
@@ -1165,38 +1166,20 @@ impl TableCursor {
 }
 
 impl IndexCursor {
-    fn find_interior_child_ref(
-        interior_page: &Page<page::Write<'_>, page::Interior, page::Index>,
-        child_page_id: PageId,
-    ) -> StorageResult<IndexInteriorChildRef> {
-        for slot_index in 0..interior_page.slot_count() {
-            let cell = interior_page.cell(slot_index)?;
-            if cell.left_child()? == child_page_id {
-                return Ok(IndexInteriorChildRef::Separator(slot_index));
-            }
-        }
-
-        if interior_page.rightmost_child() == child_page_id {
-            Ok(IndexInteriorChildRef::Rightmost)
-        } else {
-            Err(PageError::KeyNotFound.into())
-        }
-    }
-
     fn update_interior_child_ref(
         interior_page: &mut Page<page::Write<'_>, page::Interior, page::Index>,
-        child_ref: IndexInteriorChildRef,
+        child_ref: ChildSlotRef,
         inserted_slot_index: u16,
         child_page_id: PageId,
     ) -> StorageResult<()> {
         match child_ref {
-            IndexInteriorChildRef::Separator(slot_index) => {
+            ChildSlotRef::Slot(slot_index) => {
                 let updated_slot_index =
                     if inserted_slot_index <= slot_index { slot_index + 1 } else { slot_index };
                 let mut cell = interior_page.cell_mut(updated_slot_index)?;
                 cell.set_left_child(child_page_id)?;
             }
-            IndexInteriorChildRef::Rightmost => {
+            ChildSlotRef::Rightmost => {
                 interior_page.set_rightmost_child(child_page_id);
             }
         }
@@ -1205,22 +1188,21 @@ impl IndexCursor {
 
     fn index_insert_into_parent(
         &mut self,
-        ancestor_path: &[PageId],
-        interior_page_id: PageId,
+        ancestor_path: &[PathFrame],
+        parent_frame: PathFrame,
         separator_key: &[u8],
         left_child: PageId,
         right_child: PageId,
     ) -> StorageResult<()> {
-        let interior_page_guard = self.page_cache.fetch_page(interior_page_id)?;
+        let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
         let mut interior_guard = interior_page_guard.write()?;
         let mut interior_page =
             Page::<page::Write<'_>, page::Interior, page::Index>::open(interior_guard.page_mut())?;
-        let child_ref = Self::find_interior_child_ref(&interior_page, left_child)?;
 
         match interior_page.insert(separator_key, left_child) {
             Ok(inserted_slot_index) => Self::update_interior_child_ref(
                 &mut interior_page,
-                child_ref,
+                parent_frame.child_ref,
                 inserted_slot_index,
                 right_child,
             ),
@@ -1230,7 +1212,7 @@ impl IndexCursor {
                 drop(interior_page_guard);
                 self.index_insert_with_interior_page_split(
                     ancestor_path,
-                    interior_page_id,
+                    parent_frame,
                     separator_key,
                     left_child,
                     right_child,
@@ -1365,7 +1347,7 @@ impl IndexCursor {
         }
     }
 
-    fn leaf_page_path_for_key(&self, key: &[u8]) -> StorageResult<(PageId, Vec<PageId>)> {
+    fn leaf_page_path_for_key(&self, key: &[u8]) -> StorageResult<(PageId, Vec<PathFrame>)> {
         let mut path = Vec::new();
         let mut page_id = self.root_page_id;
 
@@ -1375,10 +1357,20 @@ impl IndexCursor {
                 let page = pin.read()?;
                 match page.open_any()? {
                     page::AnyPage::IndexLeaf(_) => return Ok((page_id, path)),
-                    page::AnyPage::IndexInterior(interior) => {
-                        path.push(page_id);
-                        interior.child_for(key)?
-                    }
+                    page::AnyPage::IndexInterior(interior) => match interior.lower_bound(key)? {
+                        page::BoundResult::At(slot_index) => {
+                            let child_page_id = interior.cell(slot_index)?.left_child()?;
+                            path.push(PathFrame {
+                                page_id,
+                                child_ref: ChildSlotRef::Slot(slot_index),
+                            });
+                            child_page_id
+                        }
+                        page::BoundResult::PastEnd => {
+                            path.push(PathFrame { page_id, child_ref: ChildSlotRef::Rightmost });
+                            interior.rightmost_child()
+                        }
+                    },
                     _ => {
                         return Err(StorageError::Corruption(CorruptionError {
                             component: CorruptionComponent::Page,
@@ -1550,7 +1542,7 @@ impl IndexCursor {
     fn index_insert_with_leaf_page_split(
         &mut self,
         leaf_page_id: PageId,
-        tree_path: &[PageId],
+        tree_path: &[PathFrame],
         key: &[u8],
         row_id: RowId,
     ) -> StorageResult<()> {
@@ -1622,10 +1614,10 @@ impl IndexCursor {
             .key(&leaf_snapshot_bytes, key)
             .to_vec();
 
-        if let Some((&interior_page_id, ancestor_path)) = tree_path.split_last() {
+        if let Some((parent_frame, ancestor_path)) = tree_path.split_last() {
             self.index_insert_into_parent(
                 ancestor_path,
-                interior_page_id,
+                *parent_frame,
                 &separator_key,
                 leaf_page_id,
                 right_page_id,
@@ -1687,13 +1679,13 @@ impl IndexCursor {
 
     fn index_insert_with_interior_page_split(
         &mut self,
-        ancestor_path: &[PageId],
-        interior_page_id: PageId,
+        ancestor_path: &[PathFrame],
+        parent_frame: PathFrame,
         key: &[u8],
         left_child: PageId,
         right_child: PageId,
     ) -> StorageResult<()> {
-        let interior_page_guard = self.page_cache.fetch_page(interior_page_id)?;
+        let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
         let mut interior_guard = interior_page_guard.write()?;
         let interior_snapshot_bytes = *interior_guard.page();
         let mut interior_page =
@@ -1702,7 +1694,6 @@ impl IndexCursor {
             Page::<page::Read<'_>, page::Interior, page::Index>::open(&interior_snapshot_bytes)?;
         let prev_page_id = interior_snapshot.prev_page_id();
         let next_page_id = interior_snapshot.next_page_id();
-        let child_ref = Self::find_interior_child_ref(&interior_page, left_child)?;
         let mut old_rightmost_child = interior_snapshot.rightmost_child();
         let mut cells = Vec::with_capacity(interior_snapshot.slot_count() as usize + 1);
         for slot_index in 0..interior_snapshot.slot_count() {
@@ -1716,8 +1707,8 @@ impl IndexCursor {
             });
         }
 
-        match child_ref {
-            IndexInteriorChildRef::Separator(slot_index) => {
+        match parent_frame.child_ref {
+            ChildSlotRef::Slot(slot_index) => {
                 let key_range = match &cells[slot_index as usize] {
                     IndexInteriorSplitCell::Snapshot { key_range, .. } => key_range.clone(),
                     IndexInteriorSplitCell::Incoming { .. } => {
@@ -1727,7 +1718,7 @@ impl IndexCursor {
                 cells[slot_index as usize] =
                     IndexInteriorSplitCell::Snapshot { left_child: right_child, key_range };
             }
-            IndexInteriorChildRef::Rightmost => {
+            ChildSlotRef::Rightmost => {
                 old_rightmost_child = right_child;
             }
         }
@@ -1758,7 +1749,7 @@ impl IndexCursor {
         interior_page.set_prev_page_id(prev_page_id);
         interior_page.set_next_page_id(Some(right_page_id));
         right_page.set_rightmost_child(old_rightmost_child);
-        right_page.set_prev_page_id(Some(interior_page_id));
+        right_page.set_prev_page_id(Some(parent_frame.page_id));
         right_page.set_next_page_id(next_page_id);
 
         for cell in left_cells {
@@ -1781,12 +1772,12 @@ impl IndexCursor {
             .key(&interior_snapshot_bytes)
             .to_vec();
 
-        if let Some((&parent_page_id, grandparent_path)) = ancestor_path.split_last() {
+        if let Some((grandparent_frame, grandparent_path)) = ancestor_path.split_last() {
             self.index_insert_into_parent(
                 grandparent_path,
-                parent_page_id,
+                *grandparent_frame,
                 &separator_key,
-                interior_page_id,
+                parent_frame.page_id,
                 right_page_id,
             )
         } else {
@@ -1797,7 +1788,7 @@ impl IndexCursor {
                     root_guard.page_mut(),
                     right_page_id,
                 );
-            root_page.insert(&separator_key, interior_page_id)?;
+            root_page.insert(&separator_key, parent_frame.page_id)?;
             self.root_page_id = root_page_id;
             Ok(())
         }

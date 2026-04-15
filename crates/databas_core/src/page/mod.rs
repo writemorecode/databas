@@ -31,7 +31,8 @@ mod leaf;
 
 /// Page handles, marker types, access traits, and search helpers for typed page access.
 pub use core::{
-    AnyPage, Index, Interior, Leaf, NodeMarker, Page, Read, SearchResult, Table, TreeMarker, Write,
+    AnyPage, BoundResult, Index, Interior, Leaf, NodeMarker, Page, Read, SearchResult, Table,
+    TreeMarker, Write,
 };
 /// Errors returned while validating or manipulating encoded pages and cells.
 pub(crate) use error::{CellCorruption, PageCorruption, PageError, PageResult};
