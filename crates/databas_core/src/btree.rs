@@ -23,13 +23,18 @@ use crate::{
 };
 
 mod sealed {
+    /// Prevents external code from implementing [`super::TreeKind`].
     pub trait Sealed {}
 }
 
+/// Outcome of trying to position a scan within or beyond one leaf page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LeafSeek {
+    /// A concrete slot was found in the current leaf page.
     Positioned(u16),
+    /// The scan must continue from an adjacent leaf page.
     Advance(PageId),
+    /// No more leaf pages remain in the scan direction.
     Exhausted,
 }
 
@@ -141,22 +146,29 @@ impl sealed::Sealed for Index {}
 impl TreeKind for Table {}
 impl TreeKind for Index {}
 
+/// Internal tree-kind hooks shared by table and index cursor code.
 pub(crate) trait TreeKindExt: TreeKind {
+    /// Page marker associated with the tree flavor.
     type PageTree: page::TreeMarker;
 
+    /// Human-readable name of the root page kind for corruption diagnostics.
     const ROOT_KIND_NAME: &'static str;
+    /// Human-readable name of the general page kind for corruption diagnostics.
     const PAGE_KIND_NAME: &'static str;
     /// Human-readable name of the leaf page kind for corruption diagnostics.
     const LEAF_KIND_NAME: &'static str;
 
+    /// Returns whether `kind` belongs to this tree flavor.
     fn matches_page_kind(kind: PageKind) -> bool {
         kind.tree_kind() == <Self::PageTree as page::TreeMarker>::KIND
     }
 
+    /// Returns the leftmost child to descend into from an interior page.
     fn first_descend_child(
         interior: &Page<page::Read<'_>, page::Interior, Self::PageTree>,
     ) -> StorageResult<PageId>;
 
+    /// Returns the rightmost child to descend into from an interior page.
     fn last_descend_child(
         interior: &Page<page::Read<'_>, page::Interior, Self::PageTree>,
     ) -> StorageResult<PageId>;
@@ -227,6 +239,7 @@ pub struct IndexEntry {
 }
 
 impl TableRecord {
+    /// Builds a table record view from one pinned leaf-page slot.
     pub(crate) fn new(pin: PinGuard, slot_index: u16) -> StorageResult<Self> {
         let row_id = {
             let page = pin.read()?;
@@ -257,6 +270,7 @@ impl fmt::Debug for TableRecord {
 }
 
 impl IndexEntry {
+    /// Builds an index entry view from one pinned leaf-page slot.
     pub(crate) fn new(pin: PinGuard, slot_index: u16) -> StorageResult<Self> {
         let row_id = {
             let page = pin.read()?;
@@ -322,56 +336,80 @@ pub type TableCursor = TreeCursor<Table>;
 /// Typed alias for an index-tree cursor.
 pub type IndexCursor = TreeCursor<Index>;
 
+/// Temporary description of one table leaf cell while rebuilding split pages.
 #[derive(Debug, Clone)]
 enum LeafSplitCell {
+    /// An existing cell borrowed from the pre-split page snapshot.
     Snapshot { row_id: RowId, payload_range: Range<usize> },
+    /// The newly inserted cell that triggered the split.
     Incoming { row_id: RowId, payload_len: usize },
 }
 
+/// Temporary description of one index leaf cell while rebuilding split pages.
 #[derive(Debug, Clone)]
 enum IndexLeafSplitCell {
+    /// An existing cell borrowed from the pre-split page snapshot.
     Snapshot { row_id: RowId, key_range: Range<usize> },
+    /// The newly inserted cell that triggered the split.
     Incoming { row_id: RowId, key_len: usize },
 }
 
+/// Identifies which child pointer of an interior page led to a descended path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChildSlotRef {
+    /// The child pointer stored in one interior cell.
     Slot(u16),
+    /// The dedicated rightmost child pointer of the page.
     Rightmost,
 }
 
+/// One step of the path from the root to a target leaf page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PathFrame {
+    /// Interior page traversed on the way down.
     page_id: PageId,
+    /// Child reference followed from that interior page.
     child_ref: ChildSlotRef,
 }
 
+/// Split result that still needs to be inserted into an ancestor page.
 #[derive(Debug, Clone)]
 struct PendingSplit<S> {
+    /// Separator key promoted out of the split page.
     separator: S,
+    /// Left child page after the split.
     left_page_id: PageId,
+    /// Right child page after the split.
     right_page_id: PageId,
 }
 
+/// Separator payload promoted from an index split.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexSeparator {
+    /// Separator key bytes.
     key: Vec<u8>,
+    /// Row id used to break ties between duplicate keys.
     row_id: RowId,
 }
 
+/// Temporary description of one index interior cell while rebuilding split pages.
 #[derive(Debug, Clone)]
 enum IndexInteriorSplitCell {
+    /// An existing cell borrowed from the pre-split page snapshot.
     Snapshot { left_child: PageId, row_id: RowId, key_range: Range<usize> },
+    /// The newly inserted separator cell that triggered the split.
     Incoming { left_child: PageId, row_id: RowId, key: Box<[u8]> },
 }
 
 impl LeafSplitCell {
+    /// Returns the row id used to sort this split cell.
     fn row_id(&self) -> RowId {
         match self {
             Self::Snapshot { row_id, .. } | Self::Incoming { row_id, .. } => *row_id,
         }
     }
 
+    /// Returns the payload length this cell will occupy after the split.
     fn payload_len(&self) -> usize {
         match self {
             Self::Snapshot { payload_range, .. } => payload_range.len(),
@@ -379,10 +417,12 @@ impl LeafSplitCell {
         }
     }
 
+    /// Returns the total encoded size of the cell including fixed fields.
     fn encoded_size(&self) -> usize {
         size_of::<u16>() + size_of::<RowId>() + self.payload_len()
     }
 
+    /// Returns the payload bytes from either the page snapshot or the incoming value.
     fn payload<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE], incoming: &'a [u8]) -> &'a [u8] {
         match self {
             Self::Snapshot { payload_range, .. } => &snapshot[payload_range.clone()],
@@ -395,12 +435,14 @@ impl LeafSplitCell {
 }
 
 impl IndexLeafSplitCell {
+    /// Returns the row id used to order duplicate index keys.
     fn row_id(&self) -> RowId {
         match self {
             Self::Snapshot { row_id, .. } | Self::Incoming { row_id, .. } => *row_id,
         }
     }
 
+    /// Returns the key length this cell will occupy after the split.
     fn key_len(&self) -> usize {
         match self {
             Self::Snapshot { key_range, .. } => key_range.len(),
@@ -408,10 +450,12 @@ impl IndexLeafSplitCell {
         }
     }
 
+    /// Returns the total encoded size of the cell including fixed fields.
     fn encoded_size(&self) -> usize {
         size_of::<u16>() + size_of::<RowId>() + self.key_len()
     }
 
+    /// Returns the key bytes from either the page snapshot or the incoming value.
     fn key<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE], incoming: &'a [u8]) -> &'a [u8] {
         match self {
             Self::Snapshot { key_range, .. } => &snapshot[key_range.clone()],
@@ -424,18 +468,21 @@ impl IndexLeafSplitCell {
 }
 
 impl IndexInteriorSplitCell {
+    /// Returns the left child page referenced by this interior cell.
     fn left_child(&self) -> PageId {
         match self {
             Self::Snapshot { left_child, .. } | Self::Incoming { left_child, .. } => *left_child,
         }
     }
 
+    /// Returns the row id stored alongside the separator key.
     fn row_id(&self) -> RowId {
         match self {
             Self::Snapshot { row_id, .. } | Self::Incoming { row_id, .. } => *row_id,
         }
     }
 
+    /// Returns the key length this cell will occupy after the split.
     fn key_len(&self) -> usize {
         match self {
             Self::Snapshot { key_range, .. } => key_range.len(),
@@ -443,10 +490,12 @@ impl IndexInteriorSplitCell {
         }
     }
 
+    /// Returns the total encoded size of the cell including fixed fields.
     fn encoded_size(&self) -> usize {
         size_of::<u16>() + size_of::<PageId>() + self.key_len() + size_of::<RowId>()
     }
 
+    /// Returns the separator key bytes from either the snapshot or owned storage.
     fn key<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE]) -> &'a [u8] {
         match self {
             Self::Snapshot { key_range, .. } => &snapshot[key_range.clone()],
@@ -459,6 +508,7 @@ impl<K> TreeCursor<K>
 where
     K: TreeKind,
 {
+    /// Creates a cursor anchored at `root_page_id` in page-level state.
     pub(crate) fn new(page_cache: PageCache, root_page_id: PageId) -> Self {
         Self {
             page_cache,
@@ -498,18 +548,22 @@ where
         self.state = CursorState::Page { page_id: self.root_page_id() };
     }
 
+    /// Switches the cursor to a page-anchored but not slot-anchored state.
     fn set_page_state(&mut self, page_id: PageId) {
         self.state = CursorState::Page { page_id };
     }
 
+    /// Switches the cursor to one concrete slot inside a leaf page.
     fn set_positioned_state(&mut self, page_id: PageId, slot_index: u16) {
         self.state = CursorState::Positioned { page_id, slot_index };
     }
 
+    /// Marks the cursor as having moved past the scan range.
     fn set_exhausted_state(&mut self) {
         self.state = CursorState::Exhausted;
     }
 
+    /// Bubbles one pending split up the recorded tree path until it lands.
     fn propagate_split<S, FParent, FRoot>(
         &mut self,
         tree_path: &[PathFrame],
@@ -532,6 +586,7 @@ where
         install_root(self, pending)
     }
 
+    /// Follows leftmost children from `start_page_id` until reaching a leaf.
     fn descend_to_first_leaf_from(&self, start_page_id: PageId) -> StorageResult<PageId>
     where
         K: TreeKindExt,
@@ -575,6 +630,7 @@ where
         }
     }
 
+    /// Follows rightmost children from `start_page_id` until reaching a leaf.
     fn descend_to_last_leaf_from(&self, start_page_id: PageId) -> StorageResult<PageId>
     where
         K: TreeKindExt,
@@ -720,6 +776,7 @@ where
 }
 
 impl TableCursor {
+    /// Re-points the parent-side child reference after inserting a separator.
     fn update_interior_child_ref(
         interior_page: &mut Page<page::Write<'_>, page::Interior, page::Table>,
         child_ref: ChildSlotRef,
@@ -740,6 +797,7 @@ impl TableCursor {
         Ok(())
     }
 
+    /// Inserts one promoted separator into a table interior page or reports another split.
     fn table_insert_into_parent(
         &mut self,
         parent_frame: PathFrame,
@@ -768,6 +826,7 @@ impl TableCursor {
         }
     }
 
+    /// Returns whether the provided table leaf cells fit into one leaf page.
     fn leaf_cells_fit(cells: &[LeafSplitCell]) -> bool {
         let used_bytes = page::format::PageKind::TableLeaf.header_size()
             + cells.len() * page::format::SLOT_ENTRY_SIZE
@@ -775,6 +834,7 @@ impl TableCursor {
         used_bytes <= page::format::USABLE_SPACE_END
     }
 
+    /// Chooses the table leaf split point with the smallest byte imbalance.
     fn choose_leaf_split_index(cells: &[LeafSplitCell]) -> StorageResult<usize> {
         debug_assert!(cells.len() >= 2, "leaf splits need at least two cells");
 
@@ -815,11 +875,13 @@ impl TableCursor {
         }
     }
 
+    /// Materializes one table record from a positioned leaf slot.
     fn record_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<TableRecord> {
         let pin = self.page_cache.fetch_page(page_id)?;
         TableRecord::new(pin, slot_index)
     }
 
+    /// Descends to the leaf page that contains or would contain `row_id`.
     fn leaf_page_for_row_id(&self, row_id: RowId) -> StorageResult<PageId> {
         let mut page_id = self.root_page_id();
 
@@ -846,6 +908,7 @@ impl TableCursor {
         }
     }
 
+    /// Descends to the target leaf and records the interior path taken to reach it.
     fn leaf_page_path_for_row_id(&self, row_id: RowId) -> StorageResult<(PageId, Vec<PathFrame>)> {
         let mut path = Vec::new();
         let mut page_id = self.root_page_id();
@@ -952,6 +1015,7 @@ impl TableCursor {
         }
     }
 
+    /// Splits a full table leaf page and returns the separator to propagate upward.
     fn table_insert_with_leaf_page_split(
         &mut self,
         leaf_page_id: PageId,
@@ -1034,6 +1098,7 @@ impl TableCursor {
         Ok(PendingSplit { separator: separator_row_id, left_page_id: leaf_page_id, right_page_id })
     }
 
+    /// Splits a full table interior page while inserting a propagated separator.
     fn table_insert_with_interior_page_split(
         &mut self,
         parent_frame: PathFrame,
@@ -1118,6 +1183,7 @@ impl TableCursor {
         })
     }
 
+    /// Creates a fresh table root page after the old root split.
     fn table_install_new_root(&mut self, pending: PendingSplit<RowId>) -> StorageResult<()> {
         let (root_page_id, root_page_guard) = self.page_cache.new_page()?;
         let mut root_guard = root_page_guard.write()?;
@@ -1179,6 +1245,7 @@ impl TableCursor {
 }
 
 impl IndexCursor {
+    /// Re-points the parent-side child reference after inserting a separator.
     fn update_interior_child_ref(
         interior_page: &mut Page<page::Write<'_>, page::Interior, page::Index>,
         child_ref: ChildSlotRef,
@@ -1199,6 +1266,7 @@ impl IndexCursor {
         Ok(())
     }
 
+    /// Inserts one promoted separator into an index interior page or reports another split.
     fn index_insert_into_parent(
         &mut self,
         parent_frame: PathFrame,
@@ -1231,6 +1299,7 @@ impl IndexCursor {
         }
     }
 
+    /// Returns whether the provided index leaf cells fit into one leaf page.
     fn leaf_cells_fit(cells: &[IndexLeafSplitCell]) -> bool {
         let used_bytes = page::format::PageKind::IndexLeaf.header_size()
             + cells.len() * page::format::SLOT_ENTRY_SIZE
@@ -1238,6 +1307,7 @@ impl IndexCursor {
         used_bytes <= page::format::USABLE_SPACE_END
     }
 
+    /// Chooses the index leaf split point with the smallest byte imbalance.
     fn choose_leaf_split_index(cells: &[IndexLeafSplitCell]) -> StorageResult<usize> {
         debug_assert!(cells.len() >= 2, "leaf splits need at least two cells");
 
@@ -1278,6 +1348,7 @@ impl IndexCursor {
         }
     }
 
+    /// Returns whether the provided index interior cells fit into one interior page.
     fn interior_cells_fit(cells: &[IndexInteriorSplitCell]) -> bool {
         let used_bytes = page::format::PageKind::IndexInterior.header_size()
             + cells.len() * page::format::SLOT_ENTRY_SIZE
@@ -1285,6 +1356,7 @@ impl IndexCursor {
         used_bytes <= page::format::USABLE_SPACE_END
     }
 
+    /// Chooses the index interior split point with the smallest byte imbalance.
     fn choose_interior_split_index(cells: &[IndexInteriorSplitCell]) -> StorageResult<usize> {
         debug_assert!(cells.len() >= 2, "interior splits need at least two cells");
 
@@ -1325,11 +1397,13 @@ impl IndexCursor {
         }
     }
 
+    /// Materializes one index entry from a positioned leaf slot.
     fn entry_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<IndexEntry> {
         let pin = self.page_cache.fetch_page(page_id)?;
         IndexEntry::new(pin, slot_index)
     }
 
+    /// Descends to the leaf page that contains or would contain `(key, row_id)`.
     fn leaf_page_for_key_and_row_id(&self, key: &[u8], row_id: RowId) -> StorageResult<PageId> {
         let mut page_id = self.root_page_id();
 
@@ -1358,6 +1432,7 @@ impl IndexCursor {
         }
     }
 
+    /// Descends to the leftmost leaf page that could contain `key`.
     fn leaf_page_for_key(&self, key: &[u8]) -> StorageResult<PageId> {
         let mut page_id = self.root_page_id();
 
@@ -1384,6 +1459,7 @@ impl IndexCursor {
         }
     }
 
+    /// Descends to the target leaf and records the interior path taken to reach it.
     fn leaf_page_path_for_key_and_row_id(
         &self,
         key: &[u8],
@@ -1430,6 +1506,7 @@ impl IndexCursor {
         }
     }
 
+    /// Returns the first slot whose key is greater than or equal to `key`.
     fn lower_bound_slot(
         leaf: &Page<page::Read<'_>, page::Leaf, page::Index>,
         key: &[u8],
@@ -1444,6 +1521,7 @@ impl IndexCursor {
         Ok(None)
     }
 
+    /// Returns the slot of one exact `(key, row_id)` match within a leaf page.
     fn entry_slot(
         leaf: &Page<page::Read<'_>, page::Leaf, page::Index>,
         key: &[u8],
@@ -1590,6 +1668,7 @@ impl IndexCursor {
         }
     }
 
+    /// Splits a full index leaf page and returns the separator to propagate upward.
     fn index_insert_with_leaf_page_split(
         &mut self,
         leaf_page_id: PageId,
@@ -1710,6 +1789,7 @@ impl IndexCursor {
         Ok(PendingSplit { separator, left_page_id: leaf_page_id, right_page_id })
     }
 
+    /// Splits a full index interior page while inserting a propagated separator.
     fn index_insert_with_interior_page_split(
         &mut self,
         parent_frame: PathFrame,
@@ -1830,6 +1910,7 @@ impl IndexCursor {
         Ok(PendingSplit { separator, left_page_id: parent_frame.page_id, right_page_id })
     }
 
+    /// Creates a fresh index root page after the old root split.
     fn index_install_new_root(
         &mut self,
         pending: PendingSplit<IndexSeparator>,
@@ -1870,6 +1951,7 @@ impl IndexCursor {
     }
 }
 
+/// Allocates and initializes a brand-new empty root leaf page for one tree kind.
 pub(crate) fn initialize_empty_root<K>(page_cache: &PageCache) -> StorageResult<PageId>
 where
     K: TreeKindExt,
@@ -1880,6 +1962,7 @@ where
     Ok(page_id)
 }
 
+/// Verifies that `root_page_id` names a page compatible with tree kind `K`.
 pub(crate) fn validate_root_page<K>(
     page_cache: &PageCache,
     root_page_id: PageId,
