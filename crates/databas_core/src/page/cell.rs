@@ -295,9 +295,14 @@ impl CellMut<'_, Interior, Table> {
 }
 
 impl Cell<'_, Interior, Index> {
+    /// Returns the separator row id stored in this interior cell payload suffix.
+    pub fn row_id(&self) -> PageResult<RowId> {
+        Ok(self.index_interior_parts().row_id)
+    }
+
     /// Returns the variable-sized payload bytes stored in this interior cell.
     pub fn payload(&self) -> PageResult<&[u8]> {
-        let range = self.index_interior_parts().payload_range.clone();
+        let range = self.index_interior_parts().key_range.clone();
         Ok(&self.bytes[range])
     }
 
@@ -308,9 +313,14 @@ impl Cell<'_, Interior, Index> {
 }
 
 impl CellMut<'_, Interior, Index> {
+    /// Returns the separator row id stored in this interior cell payload suffix.
+    pub fn row_id(&self) -> PageResult<RowId> {
+        Ok(self.index_interior_parts().row_id)
+    }
+
     /// Returns the variable-sized payload bytes stored in this interior cell.
     pub fn payload(&self) -> PageResult<&[u8]> {
-        let range = self.index_interior_parts().payload_range.clone();
+        let range = self.index_interior_parts().key_range.clone();
         Ok(&self.bytes[range])
     }
 
@@ -331,7 +341,7 @@ impl CellMut<'_, Interior, Index> {
 
 #[cfg(test)]
 mod tests {
-    use crate::PAGE_SIZE;
+    use crate::{PAGE_SIZE, RowId};
 
     use super::super::{Index, Interior, Leaf, Page, Table, Write};
     use super::{index_interior, interior, leaf};
@@ -365,14 +375,14 @@ mod tests {
         let mut bytes = [0_u8; PAGE_SIZE];
         let mut page =
             Page::<Write<'_>, Interior, Index>::initialize_with_rightmost(&mut bytes, 17);
-        page.insert(b"mango", 5).unwrap();
+        page.insert(b"mango", 11, 5).unwrap();
 
         let page_ref = page.as_ref();
         let cell = page_ref.cell(0).unwrap();
 
         assert_eq!(
             cell.encoded_size(),
-            index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE + b"mango".len()
+            index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE + b"mango".len() + size_of::<RowId>()
         );
     }
 
