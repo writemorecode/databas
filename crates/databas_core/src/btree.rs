@@ -10,9 +10,7 @@
 //! the core data-model types before the full tree algorithms are implemented.
 
 use core::marker::PhantomData;
-use std::fmt;
-use std::mem::size_of;
-use std::ops::Range;
+use std::{cell::Cell, fmt, mem::size_of, ops::Range, rc::Rc};
 
 use crate::{
     PAGE_SIZE, PageId, RowId,
@@ -314,7 +312,7 @@ pub enum CursorState {
 #[derive(Clone)]
 pub struct TreeCursor<K> {
     page_cache: PageCache,
-    root_page_id: PageId,
+    root_page_id: Rc<Cell<PageId>>,
     state: CursorState,
     _marker: PhantomData<K>,
 }
@@ -452,7 +450,7 @@ where
     pub(crate) fn new(page_cache: PageCache, root_page_id: PageId) -> Self {
         Self {
             page_cache,
-            root_page_id,
+            root_page_id: Rc::new(Cell::new(root_page_id)),
             state: CursorState::Page { page_id: root_page_id },
             _marker: PhantomData,
         }
@@ -460,7 +458,7 @@ where
 
     /// Returns the root page id that anchors this tree.
     pub fn root_page_id(&self) -> PageId {
-        self.root_page_id
+        self.root_page_id.get()
     }
 
     /// Returns the cursor's current logical state.
@@ -485,7 +483,7 @@ where
 
     /// Resets the cursor back to the tree root page.
     pub fn seek_to_root(&mut self) {
-        self.state = CursorState::Page { page_id: self.root_page_id };
+        self.state = CursorState::Page { page_id: self.root_page_id() };
     }
 
     fn set_page_state(&mut self, page_id: PageId) {
@@ -811,7 +809,7 @@ impl TableCursor {
     }
 
     fn leaf_page_for_row_id(&self, row_id: RowId) -> StorageResult<PageId> {
-        let mut page_id = self.root_page_id;
+        let mut page_id = self.root_page_id();
 
         loop {
             let pin = self.page_cache.fetch_page(page_id)?;
@@ -838,7 +836,7 @@ impl TableCursor {
 
     fn leaf_page_path_for_row_id(&self, row_id: RowId) -> StorageResult<(PageId, Vec<PathFrame>)> {
         let mut path = Vec::new();
-        let mut page_id = self.root_page_id;
+        let mut page_id = self.root_page_id();
 
         loop {
             let pin = self.page_cache.fetch_page(page_id)?;
@@ -1117,7 +1115,7 @@ impl TableCursor {
                 pending.right_page_id,
             );
         root_page.insert(pending.separator, pending.left_page_id)?;
-        self.root_page_id = root_page_id;
+        self.root_page_id.set(root_page_id);
         Ok(())
     }
 
@@ -1137,7 +1135,7 @@ impl TableCursor {
 
     /// Positions the cursor on the smallest row id in the table tree.
     pub fn seek_to_first(&mut self) -> StorageResult<bool> {
-        let leaf_page_id = self.descend_to_first_leaf_from(self.root_page_id)?;
+        let leaf_page_id = self.descend_to_first_leaf_from(self.root_page_id())?;
         self.edge_item_from_leaf(leaf_page_id, ScanDirection::Forward, Self::record_at)
             .map(|record| record.is_some())
     }
@@ -1317,7 +1315,7 @@ impl IndexCursor {
     }
 
     fn leaf_page_for_key(&self, key: &[u8]) -> StorageResult<PageId> {
-        let mut page_id = self.root_page_id;
+        let mut page_id = self.root_page_id();
 
         loop {
             let pin = self.page_cache.fetch_page(page_id)?;
@@ -1344,7 +1342,7 @@ impl IndexCursor {
 
     fn leaf_page_path_for_key(&self, key: &[u8]) -> StorageResult<(PageId, Vec<PathFrame>)> {
         let mut path = Vec::new();
-        let mut page_id = self.root_page_id;
+        let mut page_id = self.root_page_id();
 
         loop {
             let pin = self.page_cache.fetch_page(page_id)?;
@@ -1460,7 +1458,7 @@ impl IndexCursor {
 
     /// Positions the cursor on the smallest `(key, row_id)` entry in the tree.
     pub fn seek_to_first(&mut self) -> StorageResult<bool> {
-        let leaf_page_id = self.descend_to_first_leaf_from(self.root_page_id)?;
+        let leaf_page_id = self.descend_to_first_leaf_from(self.root_page_id())?;
         self.edge_item_from_leaf(leaf_page_id, ScanDirection::Forward, Self::entry_at)
             .map(|entry| entry.is_some())
     }
@@ -1774,7 +1772,7 @@ impl IndexCursor {
                 pending.right_page_id,
             );
         root_page.insert(&pending.separator, pending.left_page_id)?;
-        self.root_page_id = root_page_id;
+        self.root_page_id.set(root_page_id);
         Ok(())
     }
 
@@ -1904,6 +1902,41 @@ mod tests {
         cells.iter().map(|(row_id, payload)| ((payload.clone(), *row_id), ())).collect()
     }
 
+    fn split_test_table_payload(row_id: RowId) -> Box<[u8]> {
+        vec![(row_id & 0xFF) as u8; 768].into_boxed_slice()
+    }
+
+    fn split_test_index_key(ordinal: u64) -> Box<[u8]> {
+        let mut key = vec![0_u8; 768];
+        key[..size_of::<u64>()].copy_from_slice(&ordinal.to_be_bytes());
+        key[size_of::<u64>()..].fill((ordinal & 0xFF) as u8);
+        key.into_boxed_slice()
+    }
+
+    fn force_table_root_split(cursor: &mut TableCursor) -> RowId {
+        let initial_root_page_id = cursor.root_page_id();
+        for row_id in 1..=1_024 {
+            let payload = split_test_table_payload(row_id);
+            cursor.insert(row_id, &payload).unwrap();
+            if cursor.root_page_id() != initial_root_page_id {
+                return row_id + 1;
+            }
+        }
+        panic!("table root did not split");
+    }
+
+    fn force_index_root_split(cursor: &mut IndexCursor) -> RowId {
+        let initial_root_page_id = cursor.root_page_id();
+        for ordinal in 1..=1_024 {
+            let key = split_test_index_key(ordinal);
+            cursor.insert(&key, ordinal).unwrap();
+            if cursor.root_page_id() != initial_root_page_id {
+                return ordinal + 1;
+            }
+        }
+        panic!("index root did not split");
+    }
+
     #[test]
     fn tree_insert_and_get_stress_test() {
         let page_count = 500;
@@ -1979,5 +2012,51 @@ mod tests {
             assert_eq!(expected.get(&(key.clone(), row_id)).copied(), None);
             assert!(cursor.get(&key, row_id).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn table_cursor_clones_observe_root_splits() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+        let mut cursor = pager.create_table().unwrap();
+        let mut stale_clone = cursor.clone();
+        let initial_root_page_id = cursor.root_page_id();
+
+        let target_row_id = force_table_root_split(&mut cursor);
+        let target_payload = split_test_table_payload(target_row_id);
+        cursor.insert(target_row_id, &target_payload).unwrap();
+
+        assert_ne!(cursor.root_page_id(), initial_root_page_id);
+        assert_eq!(stale_clone.root_page_id(), cursor.root_page_id());
+
+        let record =
+            stale_clone.get(target_row_id).unwrap().expect("record should remain reachable");
+        assert_eq!(record.row_id, target_row_id);
+        record.with_payload(|payload| assert_eq!(payload, target_payload.as_ref())).unwrap();
+    }
+
+    #[test]
+    fn index_cursor_clones_observe_root_splits() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+        let mut cursor = pager.create_index().unwrap();
+        let mut stale_clone = cursor.clone();
+        let initial_root_page_id = cursor.root_page_id();
+
+        let target_row_id = force_index_root_split(&mut cursor);
+        let target_key = split_test_index_key(target_row_id);
+        cursor.insert(&target_key, target_row_id).unwrap();
+
+        assert_ne!(cursor.root_page_id(), initial_root_page_id);
+        assert_eq!(stale_clone.root_page_id(), cursor.root_page_id());
+
+        let entry = stale_clone
+            .get(&target_key, target_row_id)
+            .unwrap()
+            .expect("entry should remain reachable");
+        assert_eq!(entry.row_id, target_row_id);
+        entry.with_key(|key| assert_eq!(key, target_key.as_ref())).unwrap();
     }
 }
