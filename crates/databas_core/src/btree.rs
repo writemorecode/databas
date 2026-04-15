@@ -330,10 +330,28 @@ enum LeafSplitCell {
     Incoming { row_id: RowId, payload_len: usize },
 }
 
+#[derive(Debug, Clone)]
+enum IndexLeafSplitCell {
+    Snapshot { row_id: RowId, key_range: Range<usize> },
+    Incoming { row_id: RowId, key_len: usize },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InteriorChildRef {
     Separator(RowId),
     Rightmost,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexInteriorChildRef {
+    Separator(u16),
+    Rightmost,
+}
+
+#[derive(Debug, Clone)]
+enum IndexInteriorSplitCell {
+    Snapshot { left_child: PageId, key_range: Range<usize> },
+    Incoming { left_child: PageId, key: Box<[u8]> },
 }
 
 impl LeafSplitCell {
@@ -361,6 +379,50 @@ impl LeafSplitCell {
                 debug_assert_eq!(*payload_len, incoming.len());
                 incoming
             }
+        }
+    }
+}
+
+impl IndexLeafSplitCell {
+    fn row_id(&self) -> RowId {
+        match self {
+            Self::Snapshot { row_id, .. } | Self::Incoming { row_id, .. } => *row_id,
+        }
+    }
+
+    fn key_len(&self) -> usize {
+        match self {
+            Self::Snapshot { key_range, .. } => key_range.len(),
+            Self::Incoming { key_len, .. } => *key_len,
+        }
+    }
+
+    fn encoded_size(&self) -> usize {
+        size_of::<u16>() + size_of::<RowId>() + self.key_len()
+    }
+
+    fn key<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE], incoming: &'a [u8]) -> &'a [u8] {
+        match self {
+            Self::Snapshot { key_range, .. } => &snapshot[key_range.clone()],
+            Self::Incoming { key_len, .. } => {
+                debug_assert_eq!(*key_len, incoming.len());
+                incoming
+            }
+        }
+    }
+}
+
+impl IndexInteriorSplitCell {
+    fn left_child(&self) -> PageId {
+        match self {
+            Self::Snapshot { left_child, .. } | Self::Incoming { left_child, .. } => *left_child,
+        }
+    }
+
+    fn key<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE]) -> &'a [u8] {
+        match self {
+            Self::Snapshot { key_range, .. } => &snapshot[key_range.clone()],
+            Self::Incoming { key, .. } => key,
         }
     }
 }
@@ -1089,6 +1151,128 @@ impl TableCursor {
 }
 
 impl IndexCursor {
+    fn find_interior_child_ref(
+        interior_page: &Page<page::Write<'_>, page::Interior, page::Index>,
+        child_page_id: PageId,
+    ) -> StorageResult<IndexInteriorChildRef> {
+        for slot_index in 0..interior_page.slot_count() {
+            let cell = interior_page.cell(slot_index)?;
+            if cell.left_child()? == child_page_id {
+                return Ok(IndexInteriorChildRef::Separator(slot_index));
+            }
+        }
+
+        if interior_page.rightmost_child() == child_page_id {
+            Ok(IndexInteriorChildRef::Rightmost)
+        } else {
+            Err(PageError::KeyNotFound.into())
+        }
+    }
+
+    fn update_interior_child_ref(
+        interior_page: &mut Page<page::Write<'_>, page::Interior, page::Index>,
+        child_ref: IndexInteriorChildRef,
+        inserted_slot_index: u16,
+        child_page_id: PageId,
+    ) -> StorageResult<()> {
+        match child_ref {
+            IndexInteriorChildRef::Separator(slot_index) => {
+                let updated_slot_index =
+                    if inserted_slot_index <= slot_index { slot_index + 1 } else { slot_index };
+                let mut cell = interior_page.cell_mut(updated_slot_index)?;
+                cell.set_left_child(child_page_id)?;
+            }
+            IndexInteriorChildRef::Rightmost => {
+                interior_page.set_rightmost_child(child_page_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn index_insert_into_parent(
+        &mut self,
+        ancestor_path: &[PageId],
+        interior_page_id: PageId,
+        separator_key: &[u8],
+        left_child: PageId,
+        right_child: PageId,
+    ) -> StorageResult<()> {
+        let interior_page_guard = self.page_cache.fetch_page(interior_page_id)?;
+        let mut interior_guard = interior_page_guard.write()?;
+        let mut interior_page =
+            Page::<page::Write<'_>, page::Interior, page::Index>::open(interior_guard.page_mut())?;
+        let child_ref = Self::find_interior_child_ref(&interior_page, left_child)?;
+
+        match interior_page.insert(separator_key, left_child) {
+            Ok(inserted_slot_index) => Self::update_interior_child_ref(
+                &mut interior_page,
+                child_ref,
+                inserted_slot_index,
+                right_child,
+            ),
+            Err(PageError::PageFull { .. }) => {
+                drop(interior_page);
+                drop(interior_guard);
+                drop(interior_page_guard);
+                self.index_insert_with_interior_page_split(
+                    ancestor_path,
+                    interior_page_id,
+                    separator_key,
+                    left_child,
+                    right_child,
+                )
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn leaf_cells_fit(cells: &[IndexLeafSplitCell]) -> bool {
+        let used_bytes = page::format::PageKind::IndexLeaf.header_size()
+            + cells.len() * page::format::SLOT_ENTRY_SIZE
+            + cells.iter().map(IndexLeafSplitCell::encoded_size).sum::<usize>();
+        used_bytes <= page::format::USABLE_SPACE_END
+    }
+
+    fn choose_leaf_split_index(cells: &[IndexLeafSplitCell]) -> StorageResult<usize> {
+        debug_assert!(cells.len() >= 2, "leaf splits need at least two cells");
+
+        let total_cell_len = cells.iter().map(IndexLeafSplitCell::encoded_size).sum::<usize>();
+        let mut left_cell_len = 0;
+        let mut best = None;
+
+        for split_index in 1..cells.len() {
+            left_cell_len += cells[split_index - 1].encoded_size();
+            if !Self::leaf_cells_fit(&cells[..split_index])
+                || !Self::leaf_cells_fit(&cells[split_index..])
+            {
+                continue;
+            }
+
+            let right_cell_len = total_cell_len - left_cell_len;
+            let imbalance = left_cell_len.abs_diff(right_cell_len);
+            let is_better = match best {
+                Some((best_imbalance, best_left_cell_len, _)) => {
+                    imbalance < best_imbalance
+                        || (imbalance == best_imbalance && left_cell_len > best_left_cell_len)
+                }
+                None => true,
+            };
+
+            if is_better {
+                best = Some((imbalance, left_cell_len, split_index));
+            }
+        }
+
+        match best {
+            Some((_, _, split_index)) => Ok(split_index),
+            None => Err(PageError::PageFull {
+                needed: total_cell_len,
+                available: total_cell_len.saturating_sub(1),
+            }
+            .into()),
+        }
+    }
+
     fn entry_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<IndexEntry> {
         let pin = self.page_cache.fetch_page(page_id)?;
         IndexEntry::new(pin, slot_index)
@@ -1104,6 +1288,36 @@ impl IndexCursor {
                 match page.open_any()? {
                     page::AnyPage::IndexLeaf(_) => return Ok(page_id),
                     page::AnyPage::IndexInterior(interior) => interior.child_for(key)?,
+                    _ => {
+                        return Err(StorageError::Corruption(CorruptionError {
+                            component: CorruptionComponent::Page,
+                            page_id: Some(page_id),
+                            kind: CorruptionKind::InvalidPageKind {
+                                expected: "index page",
+                                actual: page.page()[KIND_OFFSET],
+                            },
+                        }));
+                    }
+                }
+            };
+            page_id = next;
+        }
+    }
+
+    fn leaf_page_path_for_key(&self, key: &[u8]) -> StorageResult<(PageId, Vec<PageId>)> {
+        let mut path = Vec::new();
+        let mut page_id = self.root_page_id;
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let next = {
+                let page = pin.read()?;
+                match page.open_any()? {
+                    page::AnyPage::IndexLeaf(_) => return Ok((page_id, path)),
+                    page::AnyPage::IndexInterior(interior) => {
+                        path.push(page_id);
+                        interior.child_for(key)?
+                    }
                     _ => {
                         return Err(StorageError::Corruption(CorruptionError {
                             component: CorruptionComponent::Page,
@@ -1193,24 +1407,7 @@ impl IndexCursor {
 
     /// Positions the cursor on one exact `(key, row_id)` pair.
     pub fn seek_to_entry(&mut self, key: &[u8], row_id: RowId) -> StorageResult<bool> {
-        let page_id = self.leaf_page_for_key(key)?;
-        let pin = self.page_cache.fetch_page(page_id)?;
-        let slot_index = {
-            let page = pin.read()?;
-            let leaf = page.open_typed::<page::Leaf, page::Index>()?;
-            Self::entry_slot(&leaf, key, row_id)?
-        };
-
-        match slot_index {
-            Some(slot_index) => {
-                self.set_positioned_state(page_id, slot_index);
-                Ok(true)
-            }
-            None => {
-                self.set_page_state(page_id);
-                Ok(false)
-            }
-        }
+        Ok(self.get(key, row_id)?.is_some())
     }
 
     /// Positions the cursor on the smallest `(key, row_id)` entry in the tree.
@@ -1242,21 +1439,303 @@ impl IndexCursor {
 
     /// Inserts a new `(key, row_id)` pair into the index tree.
     pub fn insert(&mut self, key: &[u8], row_id: RowId) -> StorageResult<()> {
-        let page_id = self.leaf_page_for_key(key)?;
-        let pin_guard = self.page_cache.fetch_page(page_id)?;
-        let mut write_guard = pin_guard.write()?;
-        let mut page = write_guard.open_typed_mut::<page::Leaf, page::Index>()?;
-
-        let insert_result = page.insert(key, row_id);
+        let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
+        let insert_result = {
+            let pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
+            let mut write_guard = pin_guard.write()?;
+            let mut page = write_guard.open_typed_mut::<page::Leaf, page::Index>()?;
+            page.insert(key, row_id)
+        };
         match insert_result {
             Ok(_) => Ok(()),
             Err(PageError::CellTooLarge { .. }) => {
                 panic!("Cell too large!");
             }
             Err(PageError::PageFull { .. }) => {
-                panic!("Page full!")
+                self.index_insert_with_leaf_page_split(leaf_page_id, &tree_path, key, row_id)
             }
             Err(err) => Err(err.into()),
+        }
+    }
+
+    /// Searches the index tree for one exact `(key, row_id)` entry.
+    ///
+    /// The cursor is expected to end on the matching entry when found, or on
+    /// the leaf page where `key` would be inserted when absent.
+    pub fn get(&mut self, key: &[u8], row_id: RowId) -> StorageResult<Option<IndexEntry>> {
+        let page_id = self.leaf_page_for_key(key)?;
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let slot_index = {
+            let page = pin.read()?;
+            let leaf = page.open_typed::<page::Leaf, page::Index>()?;
+            Self::entry_slot(&leaf, key, row_id)?
+        };
+
+        match slot_index {
+            Some(slot_index) => {
+                self.set_positioned_state(page_id, slot_index);
+                IndexEntry::new(pin, slot_index).map(Some)
+            }
+            None => {
+                self.set_page_state(page_id);
+                Ok(None)
+            }
+        }
+    }
+
+    fn index_insert_with_leaf_page_split(
+        &mut self,
+        leaf_page_id: PageId,
+        tree_path: &[PageId],
+        key: &[u8],
+        row_id: RowId,
+    ) -> StorageResult<()> {
+        let leaf_page_guard = self.page_cache.fetch_page(leaf_page_id)?;
+        let mut leaf_guard = leaf_page_guard.write()?;
+        let leaf_snapshot_bytes = *leaf_guard.page();
+        let leaf_snapshot =
+            Page::<page::Read<'_>, page::Leaf, page::Index>::open(&leaf_snapshot_bytes)?;
+
+        let prev_page_id = leaf_snapshot.prev_page_id();
+        let next_page_id = leaf_snapshot.next_page_id();
+        let mut cells = Vec::with_capacity(leaf_snapshot.slot_count() as usize + 1);
+        for slot_index in 0..leaf_snapshot.slot_count() {
+            let cell = leaf_snapshot.cell(slot_index)?;
+            cells.push(IndexLeafSplitCell::Snapshot {
+                row_id: cell.row_id()?,
+                key_range: cell.payload()?.as_ptr_range().start as usize
+                    - leaf_snapshot_bytes.as_ptr() as usize
+                    ..cell.payload()?.as_ptr_range().end as usize
+                        - leaf_snapshot_bytes.as_ptr() as usize,
+            });
+        }
+
+        match cells.binary_search_by(|cell| {
+            let ordering = cell.key(&leaf_snapshot_bytes, key).cmp(key);
+            if ordering == core::cmp::Ordering::Equal {
+                cell.row_id().cmp(&row_id)
+            } else {
+                ordering
+            }
+        }) {
+            Ok(_) => return Err(PageError::DuplicateKey.into()),
+            Err(insert_index) => cells
+                .insert(insert_index, IndexLeafSplitCell::Incoming { row_id, key_len: key.len() }),
+        }
+
+        let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
+        let mut right_guard = right_page_guard.write()?;
+        let mut right_page =
+            Page::<page::Write<'_>, page::Leaf, page::Index>::initialize(right_guard.page_mut());
+
+        let split_index = Self::choose_leaf_split_index(&cells)?;
+        let (left_cells, right_cells) = cells.split_at(split_index);
+
+        let mut leaf_page =
+            Page::<page::Write<'_>, page::Leaf, page::Index>::initialize(leaf_guard.page_mut());
+        leaf_page.set_prev_page_id(prev_page_id);
+        leaf_page.set_next_page_id(Some(right_page_id));
+        right_page.set_prev_page_id(Some(leaf_page_id));
+        right_page.set_next_page_id(next_page_id);
+
+        for cell in left_cells {
+            leaf_page.insert(cell.key(&leaf_snapshot_bytes, key), cell.row_id())?;
+        }
+        for cell in right_cells {
+            right_page.insert(cell.key(&leaf_snapshot_bytes, key), cell.row_id())?;
+        }
+
+        if let Some(next_page_id) = next_page_id {
+            let next_page_guard = self.page_cache.fetch_page(next_page_id)?;
+            let mut next_guard = next_page_guard.write()?;
+            let mut next_page = next_guard.open_typed_mut::<page::Leaf, page::Index>()?;
+            next_page.set_prev_page_id(Some(right_page_id));
+        }
+
+        let separator_key = left_cells
+            .last()
+            .expect("leaf split must leave a non-empty left page")
+            .key(&leaf_snapshot_bytes, key)
+            .to_vec();
+
+        if let Some((&interior_page_id, ancestor_path)) = tree_path.split_last() {
+            self.index_insert_into_parent(
+                ancestor_path,
+                interior_page_id,
+                &separator_key,
+                leaf_page_id,
+                right_page_id,
+            )?;
+        } else {
+            let (root_page_id, root_page_guard) = self.page_cache.new_page()?;
+            let mut root_guard = root_page_guard.write()?;
+            let mut root_page =
+                Page::<page::Write<'_>, page::Interior, page::Index>::initialize_with_rightmost(
+                    root_guard.page_mut(),
+                    right_page_id,
+                );
+            root_page.insert(&separator_key, leaf_page_id)?;
+            self.root_page_id = root_page_id;
+        };
+
+        let target_page_id = if left_cells
+            .last()
+            .expect("leaf split must leave a non-empty left page")
+            .key(&leaf_snapshot_bytes, key)
+            .cmp(key)
+            .then_with(|| {
+                left_cells
+                    .last()
+                    .expect("leaf split must leave a non-empty left page")
+                    .row_id()
+                    .cmp(&row_id)
+            })
+            != core::cmp::Ordering::Less
+        {
+            leaf_page_id
+        } else {
+            right_page_id
+        };
+        let target_slot_index = match if target_page_id == leaf_page_id {
+            leaf_page.equal_range(key)?.find(|&slot_index| {
+                leaf_page
+                    .cell(slot_index)
+                    .and_then(|cell| cell.row_id())
+                    .map(|cell_row_id| cell_row_id == row_id)
+                    .unwrap_or(false)
+            })
+        } else {
+            right_page.equal_range(key)?.find(|&slot_index| {
+                right_page
+                    .cell(slot_index)
+                    .and_then(|cell| cell.row_id())
+                    .map(|cell_row_id| cell_row_id == row_id)
+                    .unwrap_or(false)
+            })
+        } {
+            Some(slot_index) => slot_index,
+            None => unreachable!("split insert must place the new entry"),
+        };
+        self.set_positioned_state(target_page_id, target_slot_index);
+
+        Ok(())
+    }
+
+    fn index_insert_with_interior_page_split(
+        &mut self,
+        ancestor_path: &[PageId],
+        interior_page_id: PageId,
+        key: &[u8],
+        left_child: PageId,
+        right_child: PageId,
+    ) -> StorageResult<()> {
+        let interior_page_guard = self.page_cache.fetch_page(interior_page_id)?;
+        let mut interior_guard = interior_page_guard.write()?;
+        let interior_snapshot_bytes = *interior_guard.page();
+        let mut interior_page =
+            Page::<page::Write<'_>, page::Interior, page::Index>::open(interior_guard.page_mut())?;
+        let interior_snapshot =
+            Page::<page::Read<'_>, page::Interior, page::Index>::open(&interior_snapshot_bytes)?;
+        let prev_page_id = interior_snapshot.prev_page_id();
+        let next_page_id = interior_snapshot.next_page_id();
+        let child_ref = Self::find_interior_child_ref(&interior_page, left_child)?;
+        let mut old_rightmost_child = interior_snapshot.rightmost_child();
+        let mut cells = Vec::with_capacity(interior_snapshot.slot_count() as usize + 1);
+        for slot_index in 0..interior_snapshot.slot_count() {
+            let cell = interior_snapshot.cell(slot_index)?;
+            cells.push(IndexInteriorSplitCell::Snapshot {
+                left_child: cell.left_child()?,
+                key_range: cell.payload()?.as_ptr_range().start as usize
+                    - interior_snapshot_bytes.as_ptr() as usize
+                    ..cell.payload()?.as_ptr_range().end as usize
+                        - interior_snapshot_bytes.as_ptr() as usize,
+            });
+        }
+
+        match child_ref {
+            IndexInteriorChildRef::Separator(slot_index) => {
+                let key_range = match &cells[slot_index as usize] {
+                    IndexInteriorSplitCell::Snapshot { key_range, .. } => key_range.clone(),
+                    IndexInteriorSplitCell::Incoming { .. } => {
+                        unreachable!("interior split snapshots are collected before inserts")
+                    }
+                };
+                cells[slot_index as usize] =
+                    IndexInteriorSplitCell::Snapshot { left_child: right_child, key_range };
+            }
+            IndexInteriorChildRef::Rightmost => {
+                old_rightmost_child = right_child;
+            }
+        }
+
+        let insert_index = cells.partition_point(|cell| cell.key(&interior_snapshot_bytes) <= key);
+        cells
+            .insert(insert_index, IndexInteriorSplitCell::Incoming { left_child, key: key.into() });
+
+        let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
+        let mut right_guard = right_page_guard.write()?;
+        let mut right_page = Page::<page::Write<'_>, page::Interior, page::Index>::initialize(
+            right_guard.page_mut(),
+        );
+
+        let split_index = cells.len() / 2;
+        let (left_cells, right_cells) = cells.split_at(split_index);
+        let left_rightmost_child = right_cells
+            .first()
+            .map(IndexInteriorSplitCell::left_child)
+            .unwrap_or(old_rightmost_child);
+
+        drop(interior_page);
+        interior_page =
+            Page::<page::Write<'_>, page::Interior, page::Index>::initialize_with_rightmost(
+                interior_guard.page_mut(),
+                left_rightmost_child,
+            );
+        interior_page.set_prev_page_id(prev_page_id);
+        interior_page.set_next_page_id(Some(right_page_id));
+        right_page.set_rightmost_child(old_rightmost_child);
+        right_page.set_prev_page_id(Some(interior_page_id));
+        right_page.set_next_page_id(next_page_id);
+
+        for cell in left_cells {
+            interior_page.insert(cell.key(&interior_snapshot_bytes), cell.left_child())?;
+        }
+        for cell in right_cells {
+            right_page.insert(cell.key(&interior_snapshot_bytes), cell.left_child())?;
+        }
+
+        if let Some(next_page_id) = next_page_id {
+            let next_page_guard = self.page_cache.fetch_page(next_page_id)?;
+            let mut next_guard = next_page_guard.write()?;
+            let mut next_page = next_guard.open_typed_mut::<page::Interior, page::Index>()?;
+            next_page.set_prev_page_id(Some(right_page_id));
+        }
+
+        let separator_key = left_cells
+            .last()
+            .expect("interior split must leave a non-empty left page")
+            .key(&interior_snapshot_bytes)
+            .to_vec();
+
+        if let Some((&parent_page_id, grandparent_path)) = ancestor_path.split_last() {
+            self.index_insert_into_parent(
+                grandparent_path,
+                parent_page_id,
+                &separator_key,
+                interior_page_id,
+                right_page_id,
+            )
+        } else {
+            let (root_page_id, root_page_guard) = self.page_cache.new_page()?;
+            let mut root_guard = root_page_guard.write()?;
+            let mut root_page =
+                Page::<page::Write<'_>, page::Interior, page::Index>::initialize_with_rightmost(
+                    root_guard.page_mut(),
+                    right_page_id,
+                );
+            root_page.insert(&separator_key, interior_page_id)?;
+            self.root_page_id = root_page_id;
+            Ok(())
         }
     }
 
@@ -1332,7 +1811,6 @@ mod tests {
     use super::*;
     use crate::{
         Pager, PagerOptions,
-        error::ConstraintError,
         page::format::{PageKind, SLOT_ENTRY_SIZE, USABLE_SPACE_END},
     };
 
@@ -1407,6 +1885,57 @@ mod tests {
         for row_id in missing_row_ids {
             assert_eq!(expected.get(&row_id).copied(), None);
             assert!(cursor.get(row_id).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn index_tree_insert_and_get_stress_test() {
+        let page_count = 500;
+        let cache_frames = page_count / 4;
+
+        let file = NamedTempFile::new().unwrap();
+        let pager = Pager::open_with_options(file.path(), PagerOptions { cache_frames }).unwrap();
+        let mut cursor = pager.create_index().unwrap();
+        let target_bytes = page_count * USABLE_SPACE_END;
+        let cells = generate_table_cells(target_bytes);
+        let expected: BTreeMap<(Box<[u8]>, RowId), ()> = cells
+            .iter()
+            .map(|(row_id, payload)| (payload.clone(), *row_id))
+            .map(|entry| (entry, ()))
+            .collect();
+
+        assert!(!cells.is_empty());
+        assert_eq!(cells.len(), expected.len(), "generated (key, row_id) pairs must be unique");
+
+        for (row_id, payload) in &cells {
+            cursor.insert(payload, *row_id).unwrap();
+        }
+
+        for ((expected_key, row_id), ()) in &expected {
+            let entry = cursor.get(expected_key, *row_id).unwrap().expect("Entry not found");
+            assert_eq!(entry.row_id, *row_id);
+            entry.with_key(|key| assert_eq!(key, expected_key.as_ref())).unwrap();
+        }
+
+        let mut rng = fastrand::Rng::with_seed(0x1D3E5_u64);
+        let mut missing_entries = Vec::new();
+        while missing_entries.len() < 8 {
+            let row_id = rng.u64(..);
+            let key_len = rng.usize(1..=64);
+            let mut key = vec![0_u8; key_len];
+            for byte in &mut key {
+                *byte = rng.u8(..);
+            }
+
+            let candidate = (key.into_boxed_slice(), row_id);
+            if !expected.contains_key(&candidate) {
+                missing_entries.push(candidate);
+            }
+        }
+
+        for (key, row_id) in missing_entries {
+            assert_eq!(expected.get(&(key.clone(), row_id)).copied(), None);
+            assert!(cursor.get(&key, row_id).unwrap().is_none());
         }
     }
 }
