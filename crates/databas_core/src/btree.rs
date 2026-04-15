@@ -1913,6 +1913,10 @@ mod tests {
         key.into_boxed_slice()
     }
 
+    fn duplicate_split_test_index_key() -> Box<[u8]> {
+        vec![0xAB; 768].into_boxed_slice()
+    }
+
     fn force_table_root_split(cursor: &mut TableCursor) -> RowId {
         let initial_root_page_id = cursor.root_page_id();
         for row_id in 1..=1_024 {
@@ -1935,6 +1939,17 @@ mod tests {
             }
         }
         panic!("index root did not split");
+    }
+
+    fn force_duplicate_index_root_split(cursor: &mut IndexCursor, key: &[u8]) -> (RowId, RowId) {
+        let initial_root_page_id = cursor.root_page_id();
+        for row_id in 1..=1_024 {
+            cursor.insert(key, row_id).unwrap();
+            if cursor.root_page_id() != initial_root_page_id {
+                return (row_id, row_id + 1);
+            }
+        }
+        panic!("duplicate-key index root did not split");
     }
 
     #[test]
@@ -2012,6 +2027,46 @@ mod tests {
             assert_eq!(expected.get(&(key.clone(), row_id)).copied(), None);
             assert!(cursor.get(&key, row_id).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn index_get_finds_duplicate_key_entry_after_root_split() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+        let mut cursor = pager.create_index().unwrap();
+        let key = duplicate_split_test_index_key();
+
+        let (split_row_id, _) = force_duplicate_index_root_split(&mut cursor, &key);
+
+        let entry = cursor
+            .get(&key, split_row_id)
+            .unwrap()
+            .expect("duplicate-key entry on right sibling should remain reachable");
+        assert_eq!(entry.row_id, split_row_id);
+        entry.with_key(|entry_key| assert_eq!(entry_key, key.as_ref())).unwrap();
+    }
+
+    #[test]
+    fn index_insert_preserves_global_order_after_duplicate_key_root_split() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+        let mut cursor = pager.create_index().unwrap();
+        let key = duplicate_split_test_index_key();
+
+        let (_, next_row_id) = force_duplicate_index_root_split(&mut cursor, &key);
+        cursor.insert(&key, next_row_id).unwrap();
+
+        let mut scanned_row_ids = Vec::new();
+        let mut scan = pager.open_index(cursor.root_page_id()).unwrap();
+        let mut current = scan.seek_to_first().unwrap().then(|| scan.current().unwrap().unwrap());
+        while let Some(entry) = current {
+            scanned_row_ids.push(entry.row_id);
+            current = scan.next_row().unwrap();
+        }
+
+        assert_eq!(scanned_row_ids, (1..=next_row_id).collect::<Vec<_>>());
     }
 
     #[test]
