@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub mod btree;
 pub(crate) mod disk_manager;
 pub mod error;
