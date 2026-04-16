@@ -25,7 +25,7 @@ use std::{
 use crate::{
     disk_manager::DiskManager,
     error::{PageCacheError, PageCacheResult},
-    page::{AnyPage, NodeMarker, Page, PageResult, Read, TreeMarker, Write},
+    page::{AnyPage, NodeMarker, Page, PageResult, Read, Table, TreeMarker, Write},
     page_replacement::ClockPolicy,
     {PAGE_SIZE, PageId},
 };
@@ -359,11 +359,11 @@ impl PageReadGuard<'_> {
     }
 
     /// Opens a typed immutable view over the page bytes.
-    pub(crate) fn open<N>(&self) -> PageResult<Page<Read<'_>, N>>
+    pub(crate) fn open<N>(&self) -> PageResult<Page<Read<'_>, N, Table>>
     where
         N: NodeMarker,
     {
-        Page::<Read<'_>, N>::open(self.page())
+        Page::<Read<'_>, N, Table>::open(self.page())
     }
 
     /// Opens a typed immutable view over the page bytes for any node/tree pair.
@@ -402,11 +402,11 @@ impl PageWriteGuard<'_> {
     }
 
     /// Opens a typed immutable view over the page bytes.
-    pub(crate) fn open<N>(&self) -> PageResult<Page<Read<'_>, N>>
+    pub(crate) fn open<N>(&self) -> PageResult<Page<Read<'_>, N, Table>>
     where
         N: NodeMarker,
     {
-        Page::<Read<'_>, N>::open(self.page())
+        Page::<Read<'_>, N, Table>::open(self.page())
     }
 
     /// Opens a typed immutable view over the page bytes for any node/tree pair.
@@ -419,11 +419,11 @@ impl PageWriteGuard<'_> {
     }
 
     /// Opens a typed mutable view over the page bytes.
-    pub(crate) fn open_mut<N>(&mut self) -> PageResult<Page<Write<'_>, N>>
+    pub(crate) fn open_mut<N>(&mut self) -> PageResult<Page<Write<'_>, N, Table>>
     where
         N: NodeMarker,
     {
-        Page::<Write<'_>, N>::open(self.page_mut())
+        Page::<Write<'_>, N, Table>::open(self.page_mut())
     }
 
     /// Opens a typed mutable view over the page bytes for any node/tree pair.
@@ -615,7 +615,7 @@ mod tests {
 
         {
             let mut write = guard.write().unwrap();
-            let _ = Page::<Write<'_>, Leaf>::init(write.page_mut());
+            let _ = Page::<Write<'_>, Leaf, Table>::init(write.page_mut());
 
             assert_eq!(write.open::<Leaf>().unwrap().kind(), PageKind::TableLeaf);
             assert!(matches!(write.open_any().unwrap(), AnyPage::TableLeaf(_)));

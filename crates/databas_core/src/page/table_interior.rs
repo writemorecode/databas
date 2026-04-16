@@ -162,14 +162,17 @@ mod tests {
 
     fn new_interior_page(rightmost_child: PageId) -> [u8; PAGE_SIZE] {
         let mut bytes = [0_u8; PAGE_SIZE];
-        let _ = Page::<Write<'_>, Interior>::initialize_with_rightmost(&mut bytes, rightmost_child);
+        let _ = Page::<Write<'_>, Interior, Table>::initialize_with_rightmost(
+            &mut bytes,
+            rightmost_child,
+        );
         bytes
     }
 
     #[test]
     fn parses_valid_interior_cell() {
         let mut bytes = new_interior_page(99);
-        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Interior, Table>::open(&mut bytes).unwrap();
         page.insert(20, 5).unwrap();
 
         let page_ref = page.as_ref();
@@ -183,12 +186,12 @@ mod tests {
     fn rejects_interior_cell_that_runs_past_page_end() {
         let mut bytes = new_interior_page(10);
         {
-            let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+            let mut page = Page::<Write<'_>, Interior, Table>::open(&mut bytes).unwrap();
             page.set_content_start((format::USABLE_SPACE_END - 8) as u16);
             page.insert_slot(0, (format::USABLE_SPACE_END - 8) as u16).unwrap();
         }
 
-        let err = Page::<Read<'_>, Interior>::open(&bytes).unwrap_err();
+        let err = Page::<Read<'_>, Interior, Table>::open(&bytes).unwrap_err();
         assert_eq!(
             err,
             PageError::MalformedPage(super::super::PageCorruption::InteriorCellOutOfBounds)
@@ -198,7 +201,7 @@ mod tests {
     #[test]
     fn rightmost_child_accessors_round_trip() {
         let mut bytes = new_interior_page(7);
-        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Interior, Table>::open(&mut bytes).unwrap();
         assert_eq!(page.rightmost_child(), 7);
         assert_eq!(page.prev_page_id(), None);
         assert_eq!(page.next_page_id(), None);
@@ -218,7 +221,7 @@ mod tests {
     #[test]
     fn bounds_return_past_end_on_empty_page() {
         let bytes = new_interior_page(7);
-        let page = Page::<Read<'_>, Interior>::open(&bytes).unwrap();
+        let page = Page::<Read<'_>, Interior, Table>::open(&bytes).unwrap();
 
         assert_eq!(page.lower_bound(10).unwrap(), BoundResult::PastEnd);
         assert_eq!(page.upper_bound(10).unwrap(), BoundResult::PastEnd);
@@ -227,7 +230,7 @@ mod tests {
     #[test]
     fn bounds_locate_exact_and_insertion_positions() {
         let mut bytes = new_interior_page(90);
-        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Interior, Table>::open(&mut bytes).unwrap();
         page.insert(10, 1).unwrap();
         page.insert(20, 2).unwrap();
         page.insert(30, 3).unwrap();
@@ -248,7 +251,7 @@ mod tests {
     #[test]
     fn child_for_uses_first_separator_greater_than_or_equal_to_target() {
         let mut bytes = new_interior_page(90);
-        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Interior, Table>::open(&mut bytes).unwrap();
         page.insert(10, 1).unwrap();
         page.insert(20, 2).unwrap();
         page.insert(30, 3).unwrap();
@@ -266,7 +269,7 @@ mod tests {
     #[test]
     fn child_for_returns_rightmost_child_when_there_are_no_separators() {
         let bytes = new_interior_page(77);
-        let page = Page::<Read<'_>, Interior>::open(&bytes).unwrap();
+        let page = Page::<Read<'_>, Interior, Table>::open(&bytes).unwrap();
 
         assert_eq!(page.child_for(0).unwrap(), 77);
         assert_eq!(page.child_for(99).unwrap(), 77);
@@ -275,7 +278,7 @@ mod tests {
     #[test]
     fn lower_bound_agrees_with_search_result() {
         let mut bytes = new_interior_page(90);
-        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Interior, Table>::open(&mut bytes).unwrap();
         page.insert(10, 1).unwrap();
         page.insert(20, 2).unwrap();
         page.insert(30, 3).unwrap();
@@ -298,7 +301,7 @@ mod tests {
     #[test]
     fn insert_keeps_separator_order_sorted() {
         let mut bytes = new_interior_page(90);
-        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Interior, Table>::open(&mut bytes).unwrap();
         page.insert(40, 4).unwrap();
         page.insert(10, 1).unwrap();
         page.insert(25, 2).unwrap();
@@ -313,7 +316,7 @@ mod tests {
     #[test]
     fn update_changes_left_child_for_existing_separator() {
         let mut bytes = new_interior_page(9);
-        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Interior, Table>::open(&mut bytes).unwrap();
         page.insert(50, 5).unwrap();
 
         page.update(50, 77).unwrap();
@@ -326,7 +329,7 @@ mod tests {
     #[test]
     fn mutable_cell_view_updates_left_child() {
         let mut bytes = new_interior_page(9);
-        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Interior, Table>::open(&mut bytes).unwrap();
         page.insert(50, 5).unwrap();
 
         {
@@ -342,7 +345,7 @@ mod tests {
     #[test]
     fn update_returns_not_found_for_missing_separator() {
         let mut bytes = new_interior_page(1);
-        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Interior, Table>::open(&mut bytes).unwrap();
         let err = page.update(77, 9).unwrap_err();
         assert_eq!(err, PageError::KeyNotFound);
     }
@@ -350,7 +353,7 @@ mod tests {
     #[test]
     fn defragmentation_preserves_order_sibling_pointers_rightmost_child_and_footer() {
         let mut bytes = new_interior_page(444);
-        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Interior, Table>::open(&mut bytes).unwrap();
         page.set_prev_page_id(Some(111));
         page.set_next_page_id(Some(222));
         page.insert(10, 1).unwrap();

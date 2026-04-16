@@ -191,14 +191,14 @@ mod tests {
 
     fn new_leaf_page() -> [u8; PAGE_SIZE] {
         let mut bytes = [0_u8; PAGE_SIZE];
-        let _ = Page::<Write<'_>, Leaf>::initialize(&mut bytes);
+        let _ = Page::<Write<'_>, Leaf, Table>::initialize(&mut bytes);
         bytes
     }
 
     #[test]
     fn parses_valid_leaf_cell() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(7, b"hello").unwrap();
 
         let page_ref = page.as_ref();
@@ -211,12 +211,12 @@ mod tests {
     fn rejects_leaf_cell_with_short_length() {
         let mut bytes = new_leaf_page();
         {
-            let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+            let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
             page.set_content_start((USABLE_SPACE_END - 4) as u16);
             format::write_u16(page.bytes_mut(), USABLE_SPACE_END - 4, 4);
             page.insert_slot(0, (USABLE_SPACE_END - 4) as u16).unwrap();
         }
-        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
+        let page = Page::<Read<'_>, Leaf, Table>::open(&bytes).unwrap();
         let err = page.cell(0).unwrap_err();
         assert_eq!(
             err,
@@ -228,12 +228,12 @@ mod tests {
     fn rejects_leaf_cell_with_payload_running_past_page() {
         let mut bytes = new_leaf_page();
         {
-            let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+            let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
             page.set_content_start((USABLE_SPACE_END - LEAF_CELL_PREFIX_SIZE) as u16);
             format::write_u16(page.bytes_mut(), USABLE_SPACE_END - LEAF_CELL_PREFIX_SIZE, 64);
             page.insert_slot(0, (USABLE_SPACE_END - LEAF_CELL_PREFIX_SIZE) as u16).unwrap();
         }
-        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
+        let page = Page::<Read<'_>, Leaf, Table>::open(&bytes).unwrap();
         let err = page.cell(0).unwrap_err();
         assert_eq!(
             err,
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn insert_keeps_slot_order_sorted() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
 
         page.insert(20, b"twenty").unwrap();
         page.insert(10, b"ten").unwrap();
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn insert_rejects_duplicate_keys() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
 
         page.insert(10, b"ten").unwrap();
         let err = page.insert(10, b"again").unwrap_err();
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn lookup_returns_inserted_payloads() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(5, b"a").unwrap();
         page.insert(15, b"bbb").unwrap();
         page.insert(25, b"cc").unwrap();
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn bounds_return_past_end_on_empty_page() {
         let bytes = new_leaf_page();
-        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
+        let page = Page::<Read<'_>, Leaf, Table>::open(&bytes).unwrap();
 
         assert_eq!(page.lower_bound(10).unwrap(), BoundResult::PastEnd);
         assert_eq!(page.upper_bound(10).unwrap(), BoundResult::PastEnd);
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn bounds_locate_exact_and_insertion_positions() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, b"a").unwrap();
         page.insert(20, b"b").unwrap();
         page.insert(30, b"c").unwrap();
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn lower_bound_agrees_with_search_result() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, b"a").unwrap();
         page.insert(20, b"b").unwrap();
         page.insert(30, b"c").unwrap();
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn update_same_size_overwrites_in_place() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, b"abc").unwrap();
         let offset_before = page.slot_offset(0).unwrap();
 
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn update_larger_payload_rewrites_at_end() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, b"a").unwrap();
         let offset_before = page.slot_offset(0).unwrap();
 
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn insert_reuses_exact_fit_freeblock() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, b"abc").unwrap();
         page.insert(20, b"def").unwrap();
         let freed_offset = page.slot_offset(0).unwrap();
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn insert_tracks_sub_header_freeblock_remainder_as_fragmented_bytes() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, b"abc").unwrap();
         page.insert(20, b"def").unwrap();
         let freed_offset = page.slot_offset(0).unwrap();
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn insert_uses_defragmentation_retry_once() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         let filler = [9_u8; 1500];
         page.insert(10, &filler).unwrap();
         page.insert(20, &filler).unwrap();
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn update_returns_not_found_for_missing_key() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         let err = page.update(88, b"missing").unwrap_err();
         assert_eq!(err, PageError::KeyNotFound);
     }
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn delete_returns_removed_slot_index() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, b"ten").unwrap();
         page.insert(20, b"twenty").unwrap();
         page.insert(30, b"thirty").unwrap();
@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn delete_removes_existing_key_and_preserves_order() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, b"ten").unwrap();
         page.insert(20, b"twenty").unwrap();
         page.insert(30, b"thirty").unwrap();
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn delete_missing_key_returns_not_found() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
 
         let err = page.delete(99).unwrap_err();
 
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn delete_from_single_cell_page_restores_empty_layout() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         let empty_free = page.free_space();
         page.insert(10, b"abc").unwrap();
 
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn delete_reclaims_fragmented_space_and_keeps_survivors_readable() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         let filler = [7_u8; 900];
         page.insert(10, &filler).unwrap();
         page.insert(20, &filler).unwrap();
@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn delete_at_content_start_absorbs_adjacent_freeblock_into_gap() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, b"a").unwrap();
         page.insert(20, b"b").unwrap();
         page.insert(30, b"c").unwrap();
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn delete_merges_adjacent_previous_and_next_freeblocks() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, b"a").unwrap();
         page.insert(20, b"b").unwrap();
         page.insert(30, b"c").unwrap();
@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn delete_leaves_page_valid_without_forcing_defragmentation() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, b"abc").unwrap();
         page.insert(20, b"longer-payload").unwrap();
         page.insert(30, b"z").unwrap();
@@ -575,7 +575,7 @@ mod tests {
 
         page.delete(10).unwrap();
 
-        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
+        let page = Page::<Read<'_>, Leaf, Table>::open(&bytes).unwrap();
         assert_eq!(page.slot_count(), 2);
         assert!(page.lookup(10).unwrap().is_none());
         assert_eq!(page.lookup(20).unwrap().unwrap().payload().unwrap(), b"x");
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn defragment_clears_freeblock_chain_and_fragmented_bytes_and_preserves_sibling_pointers() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.set_prev_page_id(Some(12));
         page.set_next_page_id(Some(34));
         page.insert(10, b"abc").unwrap();
@@ -622,7 +622,7 @@ mod tests {
     #[test]
     fn update_returns_page_full_after_defrag() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         let large = [1_u8; 1900];
         page.insert(10, &large).unwrap();
         page.insert(20, &large).unwrap();
@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn update_after_defragmentation_keeps_page_valid() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         let large = [1_u8; 1500];
         let medium = [3_u8; 100];
         let rewritten = [2_u8; 2000];
@@ -648,7 +648,7 @@ mod tests {
         page.update(30, b"y").unwrap();
         page.update(40, &rewritten).unwrap();
 
-        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
+        let page = Page::<Read<'_>, Leaf, Table>::open(&bytes).unwrap();
         assert_eq!(page.lookup(10).unwrap().unwrap().payload().unwrap(), b"x");
         assert_eq!(page.lookup(20).unwrap().unwrap().payload().unwrap(), medium);
         assert_eq!(page.lookup(30).unwrap().unwrap().payload().unwrap(), b"y");
@@ -658,7 +658,7 @@ mod tests {
     #[test]
     fn mutable_cell_view_exposes_payload_slice() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, b"abc").unwrap();
 
         {
@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn cell_payload_is_sliced_relative_to_cell_start() {
         let mut bytes = new_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert(10, &[1_u8; 64]).unwrap();
         page.insert(20, b"payload").unwrap();
 

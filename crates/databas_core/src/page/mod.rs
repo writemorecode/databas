@@ -26,8 +26,8 @@ mod error;
 pub mod format;
 mod index_interior;
 mod index_leaf;
-mod interior;
-mod leaf;
+mod table_interior;
+mod table_leaf;
 
 /// Page handles, marker types, access traits, and search helpers for typed page access.
 pub use core::{

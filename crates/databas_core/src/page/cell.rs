@@ -6,20 +6,20 @@ use super::{
     CellCorruption, PageError, PageResult,
     core::{Index, Interior, Leaf, Table},
     format::CELL_LENGTH_SIZE,
-    index_interior, index_leaf, interior, leaf,
+    index_interior, index_leaf, table_interior, table_leaf,
 };
 
 #[derive(Debug, Clone)]
 enum CellMetadata {
-    TableLeaf(leaf::LeafCellParts),
+    TableLeaf(table_leaf::LeafCellParts),
     IndexLeaf(index_leaf::IndexLeafCellParts),
-    TableInterior(interior::InteriorCellParts),
+    TableInterior(table_interior::InteriorCellParts),
     IndexInterior(index_interior::IndexInteriorCellParts),
 }
 
 /// A typed immutable view over a single page cell.
 #[derive(Debug)]
-pub struct Cell<'a, N, T = Table> {
+pub struct Cell<'a, N, T> {
     bytes: &'a [u8],
     metadata: CellMetadata,
     slot_index: SlotId,
@@ -28,7 +28,7 @@ pub struct Cell<'a, N, T = Table> {
 
 /// A typed mutable view over a single page cell.
 #[derive(Debug)]
-pub struct CellMut<'a, N, T = Table> {
+pub struct CellMut<'a, N, T> {
     bytes: &'a mut [u8],
     metadata: CellMetadata,
     slot_index: SlotId,
@@ -53,7 +53,7 @@ impl<'a, N, T> Cell<'a, N, T> {
 
     pub(crate) fn new_table_leaf(
         bytes: &'a [u8],
-        parts: leaf::LeafCellParts,
+        parts: table_leaf::LeafCellParts,
         slot_index: SlotId,
     ) -> Self {
         Self::new(bytes, CellMetadata::TableLeaf(parts), slot_index)
@@ -69,7 +69,7 @@ impl<'a, N, T> Cell<'a, N, T> {
 
     pub(crate) fn new_table_interior(
         bytes: &'a [u8],
-        parts: interior::InteriorCellParts,
+        parts: table_interior::InteriorCellParts,
         slot_index: SlotId,
     ) -> Self {
         Self::new(bytes, CellMetadata::TableInterior(parts), slot_index)
@@ -93,7 +93,7 @@ impl<'a, N, T> Cell<'a, N, T> {
         self.bytes.len()
     }
 
-    fn table_leaf_parts(&self) -> &leaf::LeafCellParts {
+    fn table_leaf_parts(&self) -> &table_leaf::LeafCellParts {
         match &self.metadata {
             CellMetadata::TableLeaf(parts) => parts,
             _ => unreachable!("table leaf cell metadata mismatch"),
@@ -107,7 +107,7 @@ impl<'a, N, T> Cell<'a, N, T> {
         }
     }
 
-    fn table_interior_parts(&self) -> &interior::InteriorCellParts {
+    fn table_interior_parts(&self) -> &table_interior::InteriorCellParts {
         match &self.metadata {
             CellMetadata::TableInterior(parts) => parts,
             _ => unreachable!("table interior cell metadata mismatch"),
@@ -129,7 +129,7 @@ impl<'a, N, T> CellMut<'a, N, T> {
 
     pub(crate) fn new_table_leaf(
         bytes: &'a mut [u8],
-        parts: leaf::LeafCellParts,
+        parts: table_leaf::LeafCellParts,
         slot_index: SlotId,
     ) -> Self {
         Self::new(bytes, CellMetadata::TableLeaf(parts), slot_index)
@@ -145,7 +145,7 @@ impl<'a, N, T> CellMut<'a, N, T> {
 
     pub(crate) fn new_table_interior(
         bytes: &'a mut [u8],
-        parts: interior::InteriorCellParts,
+        parts: table_interior::InteriorCellParts,
         slot_index: SlotId,
     ) -> Self {
         Self::new(bytes, CellMetadata::TableInterior(parts), slot_index)
@@ -174,7 +174,7 @@ impl<'a, N, T> CellMut<'a, N, T> {
         Cell::new(self.bytes, self.metadata.clone(), self.slot_index)
     }
 
-    fn table_leaf_parts(&self) -> &leaf::LeafCellParts {
+    fn table_leaf_parts(&self) -> &table_leaf::LeafCellParts {
         match &self.metadata {
             CellMetadata::TableLeaf(parts) => parts,
             _ => unreachable!("table leaf cell metadata mismatch"),
@@ -188,7 +188,7 @@ impl<'a, N, T> CellMut<'a, N, T> {
         }
     }
 
-    fn table_interior_parts(&self) -> &interior::InteriorCellParts {
+    fn table_interior_parts(&self) -> &table_interior::InteriorCellParts {
         match &self.metadata {
             CellMetadata::TableInterior(parts) => parts,
             _ => unreachable!("table interior cell metadata mismatch"),
@@ -286,7 +286,7 @@ impl CellMut<'_, Interior, Table> {
 
     /// Updates the left-child page id stored in this interior cell.
     pub fn set_left_child(&mut self, page_id: PageId) -> PageResult<()> {
-        interior::write_left_child(self.bytes, page_id);
+        table_interior::write_left_child(self.bytes, page_id);
         if let CellMetadata::TableInterior(parts) = &mut self.metadata {
             parts.left_child = page_id;
         }
@@ -344,7 +344,7 @@ mod tests {
     use crate::{PAGE_SIZE, RowId};
 
     use super::super::{Index, Interior, Leaf, Page, Table, Write};
-    use super::{index_interior, interior, leaf};
+    use super::{index_interior, table_interior, table_leaf};
 
     #[test]
     fn encoded_size_includes_leaf_header_and_payload() {
@@ -355,7 +355,7 @@ mod tests {
         let page_ref = page.as_ref();
         let cell = page_ref.cell(0).unwrap();
 
-        assert_eq!(cell.encoded_size(), leaf::LEAF_CELL_PREFIX_SIZE + b"hello".len());
+        assert_eq!(cell.encoded_size(), table_leaf::LEAF_CELL_PREFIX_SIZE + b"hello".len());
     }
 
     #[test]
@@ -367,7 +367,7 @@ mod tests {
         let page_ref = page.as_ref();
         let cell = page_ref.cell(0).unwrap();
 
-        assert_eq!(cell.encoded_size(), interior::INTERIOR_CELL_SIZE);
+        assert_eq!(cell.encoded_size(), table_interior::INTERIOR_CELL_SIZE);
     }
 
     #[test]
@@ -394,7 +394,7 @@ mod tests {
 
         let cell = page.cell_mut(0).unwrap();
 
-        assert_eq!(cell.encoded_size(), leaf::LEAF_CELL_PREFIX_SIZE + 3);
-        assert_eq!(cell.as_ref().encoded_size(), leaf::LEAF_CELL_PREFIX_SIZE + 3);
+        assert_eq!(cell.encoded_size(), table_leaf::LEAF_CELL_PREFIX_SIZE + 3);
+        assert_eq!(cell.as_ref().encoded_size(), table_leaf::LEAF_CELL_PREFIX_SIZE + 3);
     }
 }

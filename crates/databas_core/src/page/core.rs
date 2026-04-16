@@ -105,7 +105,7 @@ impl PageAccessMut for Write<'_> {
 /// kind ([`Leaf`] or [`Interior`]), and `T` controls the tree kind
 /// ([`Table`] or [`Index`]).
 #[derive(Debug)]
-pub struct Page<A, N, T = Table> {
+pub struct Page<A, N, T> {
     access: A,
     _marker: PhantomData<(N, T)>,
 }
@@ -404,9 +404,9 @@ where
         let cell_offset = self.slot_offset(slot_index)? as usize;
         match page_kind::<N, T>() {
             format::PageKind::TableLeaf => {
-                super::leaf::cell_len_at(self.bytes(), slot_index, cell_offset)
+                super::table_leaf::cell_len_at(self.bytes(), slot_index, cell_offset)
             }
-            format::PageKind::TableInterior => Ok(super::interior::INTERIOR_CELL_SIZE),
+            format::PageKind::TableInterior => Ok(super::table_interior::INTERIOR_CELL_SIZE),
             format::PageKind::IndexLeaf => {
                 super::index_leaf::cell_len_at(self.bytes(), slot_index, cell_offset)
             }
@@ -928,7 +928,7 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
                 }
             }
             format::PageKind::TableInterior => {
-                if slot_offset + super::interior::INTERIOR_CELL_SIZE > USABLE_SPACE_END {
+                if slot_offset + super::table_interior::INTERIOR_CELL_SIZE > USABLE_SPACE_END {
                     return Err(PageError::MalformedPage(PageCorruption::InteriorCellOutOfBounds));
                 }
             }
@@ -957,13 +957,13 @@ mod tests {
 
     fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
         let mut bytes = [0_u8; PAGE_SIZE];
-        let _ = Page::<Write<'_>, Leaf>::initialize(&mut bytes);
+        let _ = Page::<Write<'_>, Leaf, Table>::initialize(&mut bytes);
         bytes
     }
 
     fn initialized_interior_page() -> [u8; PAGE_SIZE] {
         let mut bytes = [0_u8; PAGE_SIZE];
-        let _ = Page::<Write<'_>, Interior>::initialize_with_rightmost(&mut bytes, 7);
+        let _ = Page::<Write<'_>, Interior, Table>::initialize_with_rightmost(&mut bytes, 7);
         bytes
     }
 
@@ -1006,7 +1006,7 @@ mod tests {
     #[test]
     fn leaf_sibling_accessors_round_trip() {
         let mut bytes = initialized_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
 
         assert_eq!(page.prev_page_id(), None);
         assert_eq!(page.next_page_id(), None);
@@ -1022,7 +1022,7 @@ mod tests {
     #[test]
     fn interior_sibling_accessors_round_trip() {
         let mut bytes = initialized_interior_page();
-        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Interior, Table>::open(&mut bytes).unwrap();
 
         assert_eq!(page.prev_page_id(), None);
         assert_eq!(page.next_page_id(), None);
@@ -1040,7 +1040,7 @@ mod tests {
         let mut bytes = initialized_leaf_page();
         format::write_u16(&mut bytes, FIRST_FREEBLOCK_OFFSET, u16::MAX);
 
-        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
+        let page = Page::<Read<'_>, Leaf, Table>::open(&bytes).unwrap();
 
         assert_eq!(page.first_freeblock(), None);
     }
@@ -1052,7 +1052,7 @@ mod tests {
         bytes[VERSION_OFFSET] = FORMAT_VERSION;
         format::write_u16(&mut bytes, CONTENT_START_OFFSET, USABLE_SPACE_END as u16);
 
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+        let result = Page::<Read<'_>, Leaf, Table>::open(&bytes);
         assert_eq!(result.unwrap_err(), PageError::UnknownPageKind { actual: 99 });
     }
 
@@ -1060,7 +1060,7 @@ mod tests {
     fn open_rejects_mismatched_kind() {
         let bytes = initialized_interior_page();
 
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+        let result = Page::<Read<'_>, Leaf, Table>::open(&bytes);
         assert_eq!(
             result.unwrap_err(),
             PageError::InvalidPageKind { expected: format::PageKind::TableLeaf, actual: 2 }
@@ -1072,13 +1072,13 @@ mod tests {
         let leaf = initialized_index_leaf_page();
         let interior = initialized_index_interior_page();
 
-        let leaf_result = Page::<Read<'_>, Leaf>::open(&leaf);
+        let leaf_result = Page::<Read<'_>, Leaf, Table>::open(&leaf);
         assert_eq!(
             leaf_result.unwrap_err(),
             PageError::InvalidPageKind { expected: format::PageKind::TableLeaf, actual: 3 }
         );
 
-        let interior_result = Page::<Read<'_>, Interior>::open(&interior);
+        let interior_result = Page::<Read<'_>, Interior, Table>::open(&interior);
         assert_eq!(
             interior_result.unwrap_err(),
             PageError::InvalidPageKind { expected: format::PageKind::TableInterior, actual: 4 }
@@ -1113,7 +1113,7 @@ mod tests {
         let mut bytes = initialized_leaf_page();
         bytes[VERSION_OFFSET] = FORMAT_VERSION + 1;
 
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+        let result = Page::<Read<'_>, Leaf, Table>::open(&bytes);
         assert_eq!(
             result.unwrap_err(),
             PageError::InvalidPageVersion { expected: FORMAT_VERSION, actual: FORMAT_VERSION + 1 }
@@ -1129,7 +1129,7 @@ mod tests {
             ((USABLE_SPACE_END - format::LEAF_HEADER_SIZE) / format::SLOT_ENTRY_SIZE + 1) as u16,
         );
 
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+        let result = Page::<Read<'_>, Leaf, Table>::open(&bytes);
         assert_eq!(
             result.unwrap_err(),
             PageError::MalformedPage(PageCorruption::SlotDirectoryExceedsUsableSpace)
@@ -1141,7 +1141,7 @@ mod tests {
         let mut bytes = initialized_leaf_page();
         format::write_u16(&mut bytes, CONTENT_START_OFFSET, (USABLE_SPACE_END + 1) as u16);
 
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+        let result = Page::<Read<'_>, Leaf, Table>::open(&bytes);
         assert_eq!(
             result.unwrap_err(),
             PageError::MalformedPage(PageCorruption::ContentStartOutOfBounds)
@@ -1154,7 +1154,7 @@ mod tests {
         format::write_u16(&mut bytes, SLOT_COUNT_OFFSET, 2);
         format::write_u16(&mut bytes, CONTENT_START_OFFSET, format::LEAF_HEADER_SIZE as u16 + 1);
 
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+        let result = Page::<Read<'_>, Leaf, Table>::open(&bytes);
         assert_eq!(
             result.unwrap_err(),
             PageError::MalformedPage(PageCorruption::SlotDirectoryOverlapsContent)
@@ -1166,7 +1166,7 @@ mod tests {
         let mut bytes = initialized_leaf_page();
         bytes[PAGE_SIZE - 1] = 1;
 
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+        let result = Page::<Read<'_>, Leaf, Table>::open(&bytes);
         assert_eq!(
             result.unwrap_err(),
             PageError::MalformedPage(PageCorruption::ReservedFooterNotZero)
@@ -1178,7 +1178,7 @@ mod tests {
         let mut bytes = initialized_leaf_page();
         format::write_u16(&mut bytes, FRAGMENTED_FREE_BYTES_OFFSET, MAX_FRAGMENTED_FREE_BYTES + 1);
 
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+        let result = Page::<Read<'_>, Leaf, Table>::open(&bytes);
 
         assert_eq!(
             result.unwrap_err(),
@@ -1195,7 +1195,7 @@ mod tests {
         format::write_optional_u16(&mut bytes, freeblock_offset as usize, None);
         format::write_u16(&mut bytes, freeblock_offset as usize + 2, 3);
 
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+        let result = Page::<Read<'_>, Leaf, Table>::open(&bytes);
 
         assert_eq!(
             result.unwrap_err(),
@@ -1210,7 +1210,7 @@ mod tests {
         format::write_u16(&mut bytes, CONTENT_START_OFFSET, 100);
         format::write_u16(&mut bytes, format::slot_entry_offset(format::LEAF_HEADER_SIZE, 0), 90);
 
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+        let result = Page::<Read<'_>, Leaf, Table>::open(&bytes);
         assert_eq!(
             result.unwrap_err(),
             PageError::MalformedPage(PageCorruption::SlotOffsetOutOfBounds)
@@ -1228,7 +1228,7 @@ mod tests {
             (USABLE_SPACE_END - 1) as u16,
         );
 
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+        let result = Page::<Read<'_>, Leaf, Table>::open(&bytes);
         assert_eq!(
             result.unwrap_err(),
             PageError::MalformedPage(PageCorruption::CellLengthPrefixOutOfBounds)
@@ -1238,7 +1238,7 @@ mod tests {
     #[test]
     fn open_rejects_interior_cell_past_usable_space() {
         let mut bytes = initialized_interior_page();
-        let cell_offset = USABLE_SPACE_END - super::super::interior::INTERIOR_CELL_SIZE + 1;
+        let cell_offset = USABLE_SPACE_END - super::super::table_interior::INTERIOR_CELL_SIZE + 1;
 
         format::write_u16(&mut bytes, SLOT_COUNT_OFFSET, 1);
         format::write_u16(&mut bytes, CONTENT_START_OFFSET, cell_offset as u16);
@@ -1248,7 +1248,7 @@ mod tests {
             cell_offset as u16,
         );
 
-        let result = Page::<Read<'_>, Interior>::open(&bytes);
+        let result = Page::<Read<'_>, Interior, Table>::open(&bytes);
         assert_eq!(
             result.unwrap_err(),
             PageError::MalformedPage(PageCorruption::InteriorCellOutOfBounds)
@@ -1258,7 +1258,7 @@ mod tests {
     #[test]
     fn slot_helpers_shift_and_remove_entries() {
         let mut bytes = initialized_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
 
         page.insert_slot(0, 300).unwrap();
         page.insert_slot(1, 320).unwrap();
@@ -1278,7 +1278,7 @@ mod tests {
     #[test]
     fn free_space_tracks_header_and_slot_directory() {
         let mut bytes = initialized_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+        let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
         page.insert_slot(0, 1000).unwrap();
         page.insert_slot(1, 1100).unwrap();
         page.set_content_start(900);
@@ -1293,14 +1293,14 @@ mod tests {
     fn binary_search_reports_found_and_insert_positions() {
         let mut bytes = initialized_leaf_page();
         {
-            let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
+            let mut page = Page::<Write<'_>, Leaf, Table>::open(&mut bytes).unwrap();
             page.set_content_start(1000);
             page.insert_slot(0, 1000).unwrap();
             page.insert_slot(1, 1010).unwrap();
             page.insert_slot(2, 1020).unwrap();
             page.insert_slot(3, 1030).unwrap();
         }
-        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
+        let page = Page::<Read<'_>, Leaf, Table>::open(&bytes).unwrap();
         let keys = [10_u64, 20, 40, 80];
 
         for (query, expected) in [
