@@ -817,7 +817,6 @@ impl TableCursor {
             )
             .map(|()| None),
             Err(PageError::PageFull { .. }) => {
-                drop(interior_page);
                 drop(interior_guard);
                 drop(interior_page_guard);
                 self.table_insert_with_interior_page_split(parent_frame, pending).map(Some)
@@ -1148,7 +1147,6 @@ impl TableCursor {
         let left_rightmost_child =
             right_cells.first().map(|cell| cell.1).unwrap_or(old_rightmost_child);
 
-        drop(interior_page);
         interior_page =
             Page::<page::Write<'_>, page::Interior, page::Table>::initialize_with_rightmost(
                 interior_guard.page_mut(),
@@ -1290,7 +1288,6 @@ impl IndexCursor {
             )
             .map(|()| None),
             Err(PageError::PageFull { .. }) => {
-                drop(interior_page);
                 drop(interior_guard);
                 drop(interior_page_guard);
                 self.index_insert_with_interior_page_split(parent_frame, pending).map(Some)
@@ -1798,8 +1795,6 @@ impl IndexCursor {
         let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
         let mut interior_guard = interior_page_guard.write()?;
         let interior_snapshot_bytes = *interior_guard.page();
-        let mut interior_page =
-            Page::<page::Write<'_>, page::Interior, page::Index>::open(interior_guard.page_mut())?;
         let interior_snapshot =
             Page::<page::Read<'_>, page::Interior, page::Index>::open(&interior_snapshot_bytes)?;
         let prev_page_id = interior_snapshot.prev_page_id();
@@ -1865,8 +1860,7 @@ impl IndexCursor {
             .map(IndexInteriorSplitCell::left_child)
             .unwrap_or(old_rightmost_child);
 
-        drop(interior_page);
-        interior_page =
+        let mut interior_page =
             Page::<page::Write<'_>, page::Interior, page::Index>::initialize_with_rightmost(
                 interior_guard.page_mut(),
                 left_rightmost_child,
@@ -2054,7 +2048,7 @@ mod tests {
         (file, pager, cells)
     }
 
-    fn expected_table_records<'a>(cells: &'a [(RowId, Box<[u8]>)]) -> BTreeMap<RowId, &'a [u8]> {
+    fn expected_table_records(cells: &[(RowId, Box<[u8]>)]) -> BTreeMap<RowId, &[u8]> {
         cells.iter().map(|(row_id, payload)| (*row_id, payload.as_ref())).collect()
     }
 
@@ -2378,10 +2372,10 @@ mod tests {
         for child_page_id in root_child_page_ids {
             let pin = cursor.page_cache.fetch_page(child_page_id).unwrap();
             let page = pin.read().unwrap();
-            if let page::AnyPage::TableInterior(interior) = page.open_any().unwrap() {
-                if interior.slot_count() >= min_slot_count {
-                    return Some(child_page_id);
-                }
+            if let page::AnyPage::TableInterior(interior) = page.open_any().unwrap()
+                && interior.slot_count() >= min_slot_count
+            {
+                return Some(child_page_id);
             }
         }
 
@@ -2410,10 +2404,10 @@ mod tests {
         for child_page_id in root_child_page_ids {
             let pin = cursor.page_cache.fetch_page(child_page_id).unwrap();
             let page = pin.read().unwrap();
-            if let page::AnyPage::IndexInterior(interior) = page.open_any().unwrap() {
-                if interior.slot_count() >= min_slot_count {
-                    return Some(child_page_id);
-                }
+            if let page::AnyPage::IndexInterior(interior) = page.open_any().unwrap()
+                && interior.slot_count() >= min_slot_count
+            {
+                return Some(child_page_id);
             }
         }
 
