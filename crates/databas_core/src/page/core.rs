@@ -404,14 +404,16 @@ where
         let cell_offset = self.slot_offset(slot_index)? as usize;
         match page_kind::<N, T>() {
             format::PageKind::TableLeaf => {
-                super::table_leaf::cell_len_at(self.bytes(), slot_index, cell_offset)
+                super::cell::table_leaf_cell_len_at(self.bytes(), slot_index, cell_offset)
             }
-            format::PageKind::TableInterior => Ok(super::table_interior::INTERIOR_CELL_SIZE),
+            format::PageKind::TableInterior => {
+                super::cell::table_interior_cell_len_at(self.bytes(), slot_index, cell_offset)
+            }
             format::PageKind::IndexLeaf => {
-                super::index_leaf::cell_len_at(self.bytes(), slot_index, cell_offset)
+                super::cell::index_leaf_cell_len_at(self.bytes(), slot_index, cell_offset)
             }
             format::PageKind::IndexInterior => {
-                super::index_interior::cell_len_at(self.bytes(), slot_index, cell_offset)
+                super::cell::index_interior_cell_len_at(self.bytes(), slot_index, cell_offset)
             }
         }
     }

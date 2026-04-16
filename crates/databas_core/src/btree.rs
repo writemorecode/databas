@@ -187,7 +187,7 @@ impl TreeKindExt for Table {
         if interior.slot_count() == 0 {
             Ok(interior.rightmost_child())
         } else {
-            Ok(interior.cell(0)?.left_child()?)
+            Ok(interior.cell(0)?.left_child())
         }
     }
 
@@ -211,7 +211,7 @@ impl TreeKindExt for Index {
         if interior.slot_count() == 0 {
             Ok(interior.rightmost_child())
         } else {
-            Ok(interior.cell(0)?.left_child()?)
+            Ok(interior.cell(0)?.left_child())
         }
     }
 
@@ -245,7 +245,7 @@ impl TableRecord {
             let page = pin.read()?;
             let leaf = page.open_typed::<page::Leaf, page::Table>()?;
             let cell = leaf.cell(slot_index)?;
-            cell.row_id()?
+            cell.row_id()
         };
         Ok(Self { row_id, pin, slot_index })
     }
@@ -256,7 +256,7 @@ impl TableRecord {
         let page = self.pin.read()?;
         let leaf = page.open_typed::<page::Leaf, page::Table>()?;
         let cell = leaf.cell(self.slot_index)?;
-        Ok(f(cell.payload()?))
+        Ok(f(cell.payload()))
     }
 }
 
@@ -276,7 +276,7 @@ impl IndexEntry {
             let page = pin.read()?;
             let leaf = page.open_typed::<page::Leaf, page::Index>()?;
             let cell = leaf.cell(slot_index)?;
-            cell.row_id()?
+            cell.row_id()
         };
         Ok(Self { row_id, pin, slot_index })
     }
@@ -287,7 +287,7 @@ impl IndexEntry {
         let page = self.pin.read()?;
         let leaf = page.open_typed::<page::Leaf, page::Index>()?;
         let cell = leaf.cell(self.slot_index)?;
-        Ok(f(cell.payload()?))
+        Ok(f(cell.key()))
     }
 }
 
@@ -788,7 +788,7 @@ impl TableCursor {
                 let updated_slot_index =
                     if inserted_slot_index <= slot_index { slot_index + 1 } else { slot_index };
                 let mut cell = interior_page.cell_mut(updated_slot_index)?;
-                cell.set_left_child(child_page_id)?;
+                cell.set_left_child(child_page_id);
             }
             ChildSlotRef::Rightmost => {
                 interior_page.set_rightmost_child(child_page_id);
@@ -921,7 +921,7 @@ impl TableCursor {
                     page::AnyPage::TableInterior(interior) => {
                         match interior.lower_bound(row_id)? {
                             page::BoundResult::At(slot_index) => {
-                                let child_page_id = interior.cell(slot_index)?.left_child()?;
+                                let child_page_id = interior.cell(slot_index)?.left_child();
                                 path.push(PathFrame {
                                     page_id,
                                     child_ref: ChildSlotRef::Slot(slot_index),
@@ -1033,12 +1033,12 @@ impl TableCursor {
         let mut cells = Vec::with_capacity(leaf_snapshot.slot_count() as usize + 1);
         for slot_index in 0..leaf_snapshot.slot_count() {
             let cell = leaf_snapshot.cell(slot_index)?;
+            let payload = cell.payload();
             cells.push(LeafSplitCell::Snapshot {
-                row_id: cell.row_id()?,
-                payload_range: cell.payload()?.as_ptr_range().start as usize
+                row_id: cell.row_id(),
+                payload_range: payload.as_ptr_range().start as usize
                     - leaf_snapshot_bytes.as_ptr() as usize
-                    ..cell.payload()?.as_ptr_range().end as usize
-                        - leaf_snapshot_bytes.as_ptr() as usize,
+                    ..payload.as_ptr_range().end as usize - leaf_snapshot_bytes.as_ptr() as usize,
             });
         }
 
@@ -1116,7 +1116,7 @@ impl TableCursor {
             Vec::with_capacity(interior_page.slot_count() as usize + 1);
         for slot_index in 0..interior_page.slot_count() {
             let cell = interior_page.cell(slot_index)?;
-            cells.push((cell.row_id()?, cell.left_child()?));
+            cells.push((cell.row_id(), cell.left_child()));
         }
 
         match parent_frame.child_ref {
@@ -1255,7 +1255,7 @@ impl IndexCursor {
                 let updated_slot_index =
                     if inserted_slot_index <= slot_index { slot_index + 1 } else { slot_index };
                 let mut cell = interior_page.cell_mut(updated_slot_index)?;
-                cell.set_left_child(child_page_id)?;
+                cell.set_left_child(child_page_id);
             }
             ChildSlotRef::Rightmost => {
                 interior_page.set_rightmost_child(child_page_id);
@@ -1475,7 +1475,7 @@ impl IndexCursor {
                         .lower_bound_entry(key, row_id)?
                     {
                         page::BoundResult::At(slot_index) => {
-                            let child_page_id = interior.cell(slot_index)?.left_child()?;
+                            let child_page_id = interior.cell(slot_index)?.left_child();
                             path.push(PathFrame {
                                 page_id,
                                 child_ref: ChildSlotRef::Slot(slot_index),
@@ -1510,7 +1510,7 @@ impl IndexCursor {
     ) -> StorageResult<Option<u16>> {
         for slot_index in 0..leaf.slot_count() {
             let cell = leaf.cell(slot_index)?;
-            if cell.payload()? >= key {
+            if cell.key() >= key {
                 return Ok(Some(slot_index));
             }
         }
@@ -1526,11 +1526,11 @@ impl IndexCursor {
     ) -> StorageResult<Option<u16>> {
         for slot_index in 0..leaf.slot_count() {
             let cell = leaf.cell(slot_index)?;
-            match cell.payload()?.cmp(key) {
+            match cell.key().cmp(key) {
                 core::cmp::Ordering::Less => continue,
                 core::cmp::Ordering::Greater => return Ok(None),
                 core::cmp::Ordering::Equal => {
-                    let cell_row_id = cell.row_id()?;
+                    let cell_row_id = cell.row_id();
                     if cell_row_id == row_id {
                         return Ok(Some(slot_index));
                     }
@@ -1683,12 +1683,12 @@ impl IndexCursor {
         let mut cells = Vec::with_capacity(leaf_snapshot.slot_count() as usize + 1);
         for slot_index in 0..leaf_snapshot.slot_count() {
             let cell = leaf_snapshot.cell(slot_index)?;
+            let key_bytes = cell.key();
             cells.push(IndexLeafSplitCell::Snapshot {
-                row_id: cell.row_id()?,
-                key_range: cell.payload()?.as_ptr_range().start as usize
+                row_id: cell.row_id(),
+                key_range: key_bytes.as_ptr_range().start as usize
                     - leaf_snapshot_bytes.as_ptr() as usize
-                    ..cell.payload()?.as_ptr_range().end as usize
-                        - leaf_snapshot_bytes.as_ptr() as usize,
+                    ..key_bytes.as_ptr_range().end as usize - leaf_snapshot_bytes.as_ptr() as usize,
             });
         }
 
@@ -1765,7 +1765,7 @@ impl IndexCursor {
             leaf_page.equal_range(key)?.find(|&slot_index| {
                 leaf_page
                     .cell(slot_index)
-                    .and_then(|cell| cell.row_id())
+                    .map(|cell| cell.row_id())
                     .map(|cell_row_id| cell_row_id == row_id)
                     .unwrap_or(false)
             })
@@ -1773,7 +1773,7 @@ impl IndexCursor {
             right_page.equal_range(key)?.find(|&slot_index| {
                 right_page
                     .cell(slot_index)
-                    .and_then(|cell| cell.row_id())
+                    .map(|cell| cell.row_id())
                     .map(|cell_row_id| cell_row_id == row_id)
                     .unwrap_or(false)
             })
@@ -1803,12 +1803,13 @@ impl IndexCursor {
         let mut cells = Vec::with_capacity(interior_snapshot.slot_count() as usize + 1);
         for slot_index in 0..interior_snapshot.slot_count() {
             let cell = interior_snapshot.cell(slot_index)?;
+            let key_bytes = cell.key();
             cells.push(IndexInteriorSplitCell::Snapshot {
-                left_child: cell.left_child()?,
-                row_id: cell.row_id()?,
-                key_range: cell.payload()?.as_ptr_range().start as usize
+                left_child: cell.left_child(),
+                row_id: cell.row_id(),
+                key_range: key_bytes.as_ptr_range().start as usize
                     - interior_snapshot_bytes.as_ptr() as usize
-                    ..cell.payload()?.as_ptr_range().end as usize
+                    ..key_bytes.as_ptr_range().end as usize
                         - interior_snapshot_bytes.as_ptr() as usize,
             });
         }
@@ -2117,9 +2118,7 @@ mod tests {
         let pin = cursor.page_cache.fetch_page(leaf_page_id).unwrap();
         let page = pin.read().unwrap();
         let leaf = page.open_typed::<page::Leaf, page::Table>().unwrap();
-        (0..leaf.slot_count())
-            .map(|slot_index| leaf.cell(slot_index).unwrap().row_id().unwrap())
-            .collect()
+        (0..leaf.slot_count()).map(|slot_index| leaf.cell(slot_index).unwrap().row_id()).collect()
     }
 
     fn table_leaf_next_page_id(cursor: &TableCursor, leaf_page_id: PageId) -> Option<PageId> {
@@ -2133,9 +2132,7 @@ mod tests {
         let pin = cursor.page_cache.fetch_page(leaf_page_id).unwrap();
         let page = pin.read().unwrap();
         let leaf = page.open_typed::<page::Leaf, page::Index>().unwrap();
-        (0..leaf.slot_count())
-            .map(|slot_index| leaf.cell(slot_index).unwrap().row_id().unwrap())
-            .collect()
+        (0..leaf.slot_count()).map(|slot_index| leaf.cell(slot_index).unwrap().row_id()).collect()
     }
 
     fn index_leaf_ordinals(cursor: &IndexCursor, leaf_page_id: PageId) -> Vec<u64> {
@@ -2146,7 +2143,7 @@ mod tests {
             .map(|slot_index| {
                 let mut ordinal = [0_u8; size_of::<u64>()];
                 let cell = leaf.cell(slot_index).unwrap();
-                ordinal.copy_from_slice(&cell.payload().unwrap()[..size_of::<u64>()]);
+                ordinal.copy_from_slice(&cell.key()[..size_of::<u64>()]);
                 u64::from_be_bytes(ordinal)
             })
             .collect()
@@ -2192,7 +2189,7 @@ mod tests {
         let interior = page.open_typed::<page::Interior, page::Table>().unwrap();
         let mut child_page_ids = Vec::with_capacity(interior.slot_count() as usize + 1);
         for slot_index in 0..interior.slot_count() {
-            child_page_ids.push(interior.cell(slot_index).unwrap().left_child().unwrap());
+            child_page_ids.push(interior.cell(slot_index).unwrap().left_child());
         }
         child_page_ids.push(interior.rightmost_child());
         child_page_ids
@@ -2207,7 +2204,7 @@ mod tests {
         let interior = page.open_typed::<page::Interior, page::Index>().unwrap();
         let mut child_page_ids = Vec::with_capacity(interior.slot_count() as usize + 1);
         for slot_index in 0..interior.slot_count() {
-            child_page_ids.push(interior.cell(slot_index).unwrap().left_child().unwrap());
+            child_page_ids.push(interior.cell(slot_index).unwrap().left_child());
         }
         child_page_ids.push(interior.rightmost_child());
         child_page_ids
@@ -2363,7 +2360,7 @@ mod tests {
             };
             let mut child_page_ids = Vec::with_capacity(root.slot_count() as usize + 1);
             for slot_index in 0..root.slot_count() {
-                child_page_ids.push(root.cell(slot_index).unwrap().left_child().unwrap());
+                child_page_ids.push(root.cell(slot_index).unwrap().left_child());
             }
             child_page_ids.push(root.rightmost_child());
             child_page_ids
@@ -2395,7 +2392,7 @@ mod tests {
             };
             let mut child_page_ids = Vec::with_capacity(root.slot_count() as usize + 1);
             for slot_index in 0..root.slot_count() {
-                child_page_ids.push(root.cell(slot_index).unwrap().left_child().unwrap());
+                child_page_ids.push(root.cell(slot_index).unwrap().left_child());
             }
             child_page_ids.push(root.rightmost_child());
             child_page_ids

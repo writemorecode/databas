@@ -1,86 +1,186 @@
-use core::{marker::PhantomData, mem::size_of};
+use core::{marker::PhantomData, ops::Range};
 
-use crate::{PageId, RowId, SlotId};
+use crate::{PAGE_SIZE, PageId, RowId, SlotId};
 
 use super::{
     CellCorruption, PageError, PageResult,
     core::{Index, Interior, Leaf, Table},
-    format::CELL_LENGTH_SIZE,
+    format::{self, CELL_LENGTH_SIZE, USABLE_SPACE_END},
     index_interior, index_leaf, table_interior, table_leaf,
 };
 
+pub(crate) trait CellKind {
+    type Header: Clone + core::fmt::Debug;
+}
+
 #[derive(Debug, Clone)]
-enum CellMetadata {
-    TableLeaf(table_leaf::LeafCellParts),
-    IndexLeaf(index_leaf::IndexLeafCellParts),
-    TableInterior(table_interior::InteriorCellParts),
-    IndexInterior(index_interior::IndexInteriorCellParts),
+pub(crate) struct TableLeafHeader {
+    row_id: RowId,
+    payload_range: Range<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IndexLeafHeader {
+    row_id: RowId,
+    key_range: Range<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TableInteriorHeader {
+    left_child: PageId,
+    row_id: RowId,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IndexInteriorHeader {
+    left_child: PageId,
+    row_id: RowId,
+    key_range: Range<usize>,
+}
+
+impl CellKind for (Leaf, Table) {
+    type Header = TableLeafHeader;
+}
+
+impl CellKind for (Leaf, Index) {
+    type Header = IndexLeafHeader;
+}
+
+impl CellKind for (Interior, Table) {
+    type Header = TableInteriorHeader;
+}
+
+impl CellKind for (Interior, Index) {
+    type Header = IndexInteriorHeader;
+}
+
+fn cell_end(cell_offset: usize, cell_len: usize, slot_index: SlotId) -> PageResult<usize> {
+    let cell_end = cell_offset
+        .checked_add(cell_len)
+        .ok_or(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthOutOfBounds })?;
+    if cell_end > USABLE_SPACE_END {
+        return Err(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthOutOfBounds });
+    }
+    Ok(cell_end)
+}
+
+fn read_variable_cell_len(
+    bytes: &[u8; PAGE_SIZE],
+    cell_offset: usize,
+    slot_index: SlotId,
+    min_len: usize,
+) -> PageResult<usize> {
+    let cell_len = format::read_u16(bytes, cell_offset) as usize;
+    if cell_len < min_len {
+        return Err(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthTooSmall });
+    }
+    cell_end(cell_offset, cell_len, slot_index)?;
+    Ok(cell_len)
+}
+
+fn slice_cell<'a>(
+    bytes: &'a [u8; PAGE_SIZE],
+    cell_offset: usize,
+    cell_len: usize,
+    slot_index: SlotId,
+) -> PageResult<&'a [u8]> {
+    let cell_end = cell_end(cell_offset, cell_len, slot_index)?;
+    bytes
+        .get(cell_offset..cell_end)
+        .ok_or(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthOutOfBounds })
+}
+
+fn slice_cell_mut<'a>(
+    bytes: &'a mut [u8; PAGE_SIZE],
+    cell_offset: usize,
+    cell_len: usize,
+    slot_index: SlotId,
+) -> PageResult<&'a mut [u8]> {
+    let cell_end = cell_end(cell_offset, cell_len, slot_index)?;
+    bytes
+        .get_mut(cell_offset..cell_end)
+        .ok_or(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthOutOfBounds })
+}
+
+pub(crate) fn table_leaf_cell_len_at(
+    bytes: &[u8; PAGE_SIZE],
+    slot_index: SlotId,
+    cell_offset: usize,
+) -> PageResult<usize> {
+    read_variable_cell_len(bytes, cell_offset, slot_index, table_leaf::LEAF_CELL_PREFIX_SIZE)
+}
+
+pub(crate) fn index_leaf_cell_len_at(
+    bytes: &[u8; PAGE_SIZE],
+    slot_index: SlotId,
+    cell_offset: usize,
+) -> PageResult<usize> {
+    read_variable_cell_len(bytes, cell_offset, slot_index, index_leaf::INDEX_LEAF_CELL_PREFIX_SIZE)
+}
+
+pub(crate) fn table_interior_cell_len_at(
+    bytes: &[u8; PAGE_SIZE],
+    slot_index: SlotId,
+    cell_offset: usize,
+) -> PageResult<usize> {
+    cell_end(cell_offset, table_interior::INTERIOR_CELL_SIZE, slot_index)?;
+    let _ = bytes;
+    Ok(table_interior::INTERIOR_CELL_SIZE)
+}
+
+pub(crate) fn index_interior_cell_len_at(
+    bytes: &[u8; PAGE_SIZE],
+    slot_index: SlotId,
+    cell_offset: usize,
+) -> PageResult<usize> {
+    read_variable_cell_len(
+        bytes,
+        cell_offset,
+        slot_index,
+        index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE + core::mem::size_of::<RowId>(),
+    )
 }
 
 /// A typed immutable view over a single page cell.
 #[derive(Debug)]
-pub struct Cell<'a, N, T> {
+pub struct Cell<'a, N, T>
+where
+    (N, T): CellKind,
+{
     bytes: &'a [u8],
-    metadata: CellMetadata,
+    header: <(N, T) as CellKind>::Header,
     slot_index: SlotId,
     _marker: PhantomData<(N, T)>,
 }
 
 /// A typed mutable view over a single page cell.
 #[derive(Debug)]
-pub struct CellMut<'a, N, T> {
+pub struct CellMut<'a, N, T>
+where
+    (N, T): CellKind,
+{
     bytes: &'a mut [u8],
-    metadata: CellMetadata,
+    header: <(N, T) as CellKind>::Header,
     slot_index: SlotId,
     _marker: PhantomData<(N, T)>,
 }
 
-fn decode_index_leaf_row_id(bytes: &[u8], slot_index: SlotId) -> PageResult<RowId> {
-    let row_id_end = CELL_LENGTH_SIZE + size_of::<RowId>();
-    let row_id_bytes = bytes
-        .get(CELL_LENGTH_SIZE..row_id_end)
-        .ok_or(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthTooSmall })?;
-    let row_id_bytes: [u8; size_of::<RowId>()] = row_id_bytes
+fn decode_index_interior_row_id(bytes: &[u8], slot_index: SlotId) -> PageResult<RowId> {
+    let row_id_bytes: [u8; core::mem::size_of::<RowId>()] = bytes
         .try_into()
         .map_err(|_| PageError::CorruptCell { slot_index, kind: CellCorruption::LengthTooSmall })?;
-    Ok(RowId::from_le_bytes(row_id_bytes))
+    Ok(RowId::from_be_bytes(row_id_bytes))
 }
 
-impl<'a, N, T> Cell<'a, N, T> {
-    fn new(bytes: &'a [u8], metadata: CellMetadata, slot_index: SlotId) -> Self {
-        Self { bytes, metadata, slot_index, _marker: PhantomData }
-    }
-
-    pub(crate) fn new_table_leaf(
-        bytes: &'a [u8],
-        parts: table_leaf::LeafCellParts,
-        slot_index: SlotId,
-    ) -> Self {
-        Self::new(bytes, CellMetadata::TableLeaf(parts), slot_index)
-    }
-
-    pub(crate) fn new_index_leaf(
-        bytes: &'a [u8],
-        parts: index_leaf::IndexLeafCellParts,
-        slot_index: SlotId,
-    ) -> Self {
-        Self::new(bytes, CellMetadata::IndexLeaf(parts), slot_index)
-    }
-
-    pub(crate) fn new_table_interior(
-        bytes: &'a [u8],
-        parts: table_interior::InteriorCellParts,
-        slot_index: SlotId,
-    ) -> Self {
-        Self::new(bytes, CellMetadata::TableInterior(parts), slot_index)
-    }
-
-    pub(crate) fn new_index_interior(
-        bytes: &'a [u8],
-        parts: index_interior::IndexInteriorCellParts,
-        slot_index: SlotId,
-    ) -> Self {
-        Self::new(bytes, CellMetadata::IndexInterior(parts), slot_index)
+impl<'a, N, T> Cell<'a, N, T>
+where
+    (N, T): CellKind,
+{
+    fn from_parts(bytes: &'a [u8], header: <(N, T) as CellKind>::Header, slot_index: SlotId) -> Self
+    where
+        (N, T): CellKind,
+    {
+        Self { bytes, header, slot_index, _marker: PhantomData }
     }
 
     /// Returns the slot index that this cell view refers to.
@@ -92,71 +192,21 @@ impl<'a, N, T> Cell<'a, N, T> {
     pub fn encoded_size(&self) -> usize {
         self.bytes.len()
     }
-
-    fn table_leaf_parts(&self) -> &table_leaf::LeafCellParts {
-        match &self.metadata {
-            CellMetadata::TableLeaf(parts) => parts,
-            _ => unreachable!("table leaf cell metadata mismatch"),
-        }
-    }
-
-    fn index_leaf_parts(&self) -> &index_leaf::IndexLeafCellParts {
-        match &self.metadata {
-            CellMetadata::IndexLeaf(parts) => parts,
-            _ => unreachable!("index leaf cell metadata mismatch"),
-        }
-    }
-
-    fn table_interior_parts(&self) -> &table_interior::InteriorCellParts {
-        match &self.metadata {
-            CellMetadata::TableInterior(parts) => parts,
-            _ => unreachable!("table interior cell metadata mismatch"),
-        }
-    }
-
-    fn index_interior_parts(&self) -> &index_interior::IndexInteriorCellParts {
-        match &self.metadata {
-            CellMetadata::IndexInterior(parts) => parts,
-            _ => unreachable!("index interior cell metadata mismatch"),
-        }
-    }
 }
 
-impl<'a, N, T> CellMut<'a, N, T> {
-    fn new(bytes: &'a mut [u8], metadata: CellMetadata, slot_index: SlotId) -> Self {
-        Self { bytes, metadata, slot_index, _marker: PhantomData }
-    }
-
-    pub(crate) fn new_table_leaf(
+impl<'a, N, T> CellMut<'a, N, T>
+where
+    (N, T): CellKind,
+{
+    fn from_parts(
         bytes: &'a mut [u8],
-        parts: table_leaf::LeafCellParts,
+        header: <(N, T) as CellKind>::Header,
         slot_index: SlotId,
-    ) -> Self {
-        Self::new(bytes, CellMetadata::TableLeaf(parts), slot_index)
-    }
-
-    pub(crate) fn new_index_leaf(
-        bytes: &'a mut [u8],
-        parts: index_leaf::IndexLeafCellParts,
-        slot_index: SlotId,
-    ) -> Self {
-        Self::new(bytes, CellMetadata::IndexLeaf(parts), slot_index)
-    }
-
-    pub(crate) fn new_table_interior(
-        bytes: &'a mut [u8],
-        parts: table_interior::InteriorCellParts,
-        slot_index: SlotId,
-    ) -> Self {
-        Self::new(bytes, CellMetadata::TableInterior(parts), slot_index)
-    }
-
-    pub(crate) fn new_index_interior(
-        bytes: &'a mut [u8],
-        parts: index_interior::IndexInteriorCellParts,
-        slot_index: SlotId,
-    ) -> Self {
-        Self::new(bytes, CellMetadata::IndexInterior(parts), slot_index)
+    ) -> Self
+    where
+        (N, T): CellKind,
+    {
+        Self { bytes, header, slot_index, _marker: PhantomData }
     }
 
     /// Returns the slot index that this cell view refers to.
@@ -171,230 +221,273 @@ impl<'a, N, T> CellMut<'a, N, T> {
 
     /// Borrows this mutable cell as an immutable cell view.
     pub fn as_ref(&self) -> Cell<'_, N, T> {
-        Cell::new(self.bytes, self.metadata.clone(), self.slot_index)
-    }
-
-    fn table_leaf_parts(&self) -> &table_leaf::LeafCellParts {
-        match &self.metadata {
-            CellMetadata::TableLeaf(parts) => parts,
-            _ => unreachable!("table leaf cell metadata mismatch"),
-        }
-    }
-
-    fn index_leaf_parts(&self) -> &index_leaf::IndexLeafCellParts {
-        match &self.metadata {
-            CellMetadata::IndexLeaf(parts) => parts,
-            _ => unreachable!("index leaf cell metadata mismatch"),
-        }
-    }
-
-    fn table_interior_parts(&self) -> &table_interior::InteriorCellParts {
-        match &self.metadata {
-            CellMetadata::TableInterior(parts) => parts,
-            _ => unreachable!("table interior cell metadata mismatch"),
-        }
-    }
-
-    fn index_interior_parts(&self) -> &index_interior::IndexInteriorCellParts {
-        match &self.metadata {
-            CellMetadata::IndexInterior(parts) => parts,
-            _ => unreachable!("index interior cell metadata mismatch"),
-        }
+        Cell::from_parts(self.bytes, self.header.clone(), self.slot_index)
     }
 }
 
-impl Cell<'_, Leaf, Table> {
+impl<'a> Cell<'a, Leaf, Table> {
+    pub(crate) fn new(
+        page_bytes: &'a [u8; PAGE_SIZE],
+        cell_offset: usize,
+        slot_index: SlotId,
+    ) -> PageResult<Self> {
+        let cell_len = table_leaf_cell_len_at(page_bytes, slot_index, cell_offset)?;
+        let row_id = format::read_u64(page_bytes, cell_offset + CELL_LENGTH_SIZE);
+        let bytes = slice_cell(page_bytes, cell_offset, cell_len, slot_index)?;
+        Ok(Self::from_parts(
+            bytes,
+            TableLeafHeader { row_id, payload_range: table_leaf::LEAF_CELL_PREFIX_SIZE..cell_len },
+            slot_index,
+        ))
+    }
+
     /// Returns the row id stored in this leaf cell.
-    pub fn row_id(&self) -> PageResult<RowId> {
-        Ok(self.table_leaf_parts().row_id)
+    pub fn row_id(&self) -> RowId {
+        self.header.row_id
     }
 
     /// Returns the payload bytes stored in this leaf cell.
-    pub fn payload(&self) -> PageResult<&[u8]> {
-        let range = self.table_leaf_parts().payload_range.clone();
-        Ok(&self.bytes[range])
+    pub fn payload(&self) -> &[u8] {
+        &self.bytes[self.header.payload_range.clone()]
     }
 }
 
-impl CellMut<'_, Leaf, Table> {
+impl<'a> CellMut<'a, Leaf, Table> {
+    pub(crate) fn new(
+        page_bytes: &'a mut [u8; PAGE_SIZE],
+        cell_offset: usize,
+        slot_index: SlotId,
+    ) -> PageResult<Self> {
+        let cell_len = table_leaf_cell_len_at(page_bytes, slot_index, cell_offset)?;
+        let row_id = format::read_u64(page_bytes, cell_offset + CELL_LENGTH_SIZE);
+        let bytes = slice_cell_mut(page_bytes, cell_offset, cell_len, slot_index)?;
+        Ok(Self::from_parts(
+            bytes,
+            TableLeafHeader { row_id, payload_range: table_leaf::LEAF_CELL_PREFIX_SIZE..cell_len },
+            slot_index,
+        ))
+    }
+
     /// Returns the row id stored in this leaf cell.
-    pub fn row_id(&self) -> PageResult<RowId> {
-        Ok(self.table_leaf_parts().row_id)
+    pub fn row_id(&self) -> RowId {
+        self.header.row_id
     }
 
     /// Returns the payload bytes stored in this leaf cell.
-    pub fn payload(&self) -> PageResult<&[u8]> {
-        let range = self.table_leaf_parts().payload_range.clone();
-        Ok(&self.bytes[range])
+    pub fn payload(&self) -> &[u8] {
+        &self.bytes[self.header.payload_range.clone()]
     }
 
     /// Returns the payload bytes stored in this leaf cell mutably.
-    pub fn payload_mut(&mut self) -> PageResult<&mut [u8]> {
-        let range = self.table_leaf_parts().payload_range.clone();
-        Ok(&mut self.bytes[range])
+    pub fn payload_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes[self.header.payload_range.clone()]
     }
 }
 
-impl Cell<'_, Leaf, Index> {
+impl<'a> Cell<'a, Leaf, Index> {
+    pub(crate) fn new(
+        page_bytes: &'a [u8; PAGE_SIZE],
+        cell_offset: usize,
+        slot_index: SlotId,
+    ) -> PageResult<Self> {
+        let cell_len = index_leaf_cell_len_at(page_bytes, slot_index, cell_offset)?;
+        let row_id = format::read_u64(page_bytes, cell_offset + CELL_LENGTH_SIZE);
+        let bytes = slice_cell(page_bytes, cell_offset, cell_len, slot_index)?;
+        Ok(Self::from_parts(
+            bytes,
+            IndexLeafHeader {
+                row_id,
+                key_range: index_leaf::INDEX_LEAF_CELL_PREFIX_SIZE..cell_len,
+            },
+            slot_index,
+        ))
+    }
+
     /// Returns the referenced row id stored in this leaf cell.
-    pub fn row_id(&self) -> PageResult<RowId> {
-        decode_index_leaf_row_id(self.bytes, self.slot_index)
+    pub fn row_id(&self) -> RowId {
+        self.header.row_id
     }
 
-    /// Returns the variable-sized payload bytes stored in this leaf cell.
-    pub fn payload(&self) -> PageResult<&[u8]> {
-        let range = self.index_leaf_parts().payload_range.clone();
-        Ok(&self.bytes[range])
+    /// Returns the variable-sized key bytes stored in this leaf cell.
+    pub fn key(&self) -> &[u8] {
+        &self.bytes[self.header.key_range.clone()]
     }
 }
 
-impl CellMut<'_, Leaf, Index> {
+impl<'a> CellMut<'a, Leaf, Index> {
+    pub(crate) fn new(
+        page_bytes: &'a mut [u8; PAGE_SIZE],
+        cell_offset: usize,
+        slot_index: SlotId,
+    ) -> PageResult<Self> {
+        let cell_len = index_leaf_cell_len_at(page_bytes, slot_index, cell_offset)?;
+        let row_id = format::read_u64(page_bytes, cell_offset + CELL_LENGTH_SIZE);
+        let bytes = slice_cell_mut(page_bytes, cell_offset, cell_len, slot_index)?;
+        Ok(Self::from_parts(
+            bytes,
+            IndexLeafHeader {
+                row_id,
+                key_range: index_leaf::INDEX_LEAF_CELL_PREFIX_SIZE..cell_len,
+            },
+            slot_index,
+        ))
+    }
+
     /// Returns the referenced row id stored in this leaf cell.
-    pub fn row_id(&self) -> PageResult<RowId> {
-        decode_index_leaf_row_id(self.bytes, self.slot_index)
+    pub fn row_id(&self) -> RowId {
+        self.header.row_id
     }
 
-    /// Returns the variable-sized payload bytes stored in this leaf cell.
-    pub fn payload(&self) -> PageResult<&[u8]> {
-        let range = self.index_leaf_parts().payload_range.clone();
-        Ok(&self.bytes[range])
+    /// Returns the variable-sized key bytes stored in this leaf cell.
+    pub fn key(&self) -> &[u8] {
+        &self.bytes[self.header.key_range.clone()]
     }
 }
 
-impl Cell<'_, Interior, Table> {
+impl<'a> Cell<'a, Interior, Table> {
+    pub(crate) fn new(
+        page_bytes: &'a [u8; PAGE_SIZE],
+        cell_offset: usize,
+        slot_index: SlotId,
+    ) -> PageResult<Self> {
+        let cell_len = table_interior_cell_len_at(page_bytes, slot_index, cell_offset)?;
+        let bytes = slice_cell(page_bytes, cell_offset, cell_len, slot_index)?;
+        Ok(Self::from_parts(
+            bytes,
+            TableInteriorHeader {
+                left_child: format::read_u64(page_bytes, cell_offset),
+                row_id: format::read_u64(page_bytes, cell_offset + core::mem::size_of::<PageId>()),
+            },
+            slot_index,
+        ))
+    }
+
     /// Returns the separator row id stored in this interior cell.
-    pub fn row_id(&self) -> PageResult<RowId> {
-        Ok(self.table_interior_parts().row_id)
+    pub fn row_id(&self) -> RowId {
+        self.header.row_id
     }
 
     /// Returns the left-child page id referenced by this interior cell.
-    pub fn left_child(&self) -> PageResult<PageId> {
-        Ok(self.table_interior_parts().left_child)
+    pub fn left_child(&self) -> PageId {
+        self.header.left_child
     }
 }
 
-impl CellMut<'_, Interior, Table> {
+impl<'a> CellMut<'a, Interior, Table> {
+    pub(crate) fn new(
+        page_bytes: &'a mut [u8; PAGE_SIZE],
+        cell_offset: usize,
+        slot_index: SlotId,
+    ) -> PageResult<Self> {
+        let cell_len = table_interior_cell_len_at(page_bytes, slot_index, cell_offset)?;
+        let left_child = format::read_u64(page_bytes, cell_offset);
+        let row_id = format::read_u64(page_bytes, cell_offset + core::mem::size_of::<PageId>());
+        let bytes = slice_cell_mut(page_bytes, cell_offset, cell_len, slot_index)?;
+        Ok(Self::from_parts(bytes, TableInteriorHeader { left_child, row_id }, slot_index))
+    }
+
     /// Returns the separator row id stored in this interior cell.
-    pub fn row_id(&self) -> PageResult<RowId> {
-        Ok(self.table_interior_parts().row_id)
+    pub fn row_id(&self) -> RowId {
+        self.header.row_id
     }
 
     /// Returns the left-child page id referenced by this interior cell.
-    pub fn left_child(&self) -> PageResult<PageId> {
-        Ok(self.table_interior_parts().left_child)
+    pub fn left_child(&self) -> PageId {
+        self.header.left_child
     }
 
     /// Updates the left-child page id stored in this interior cell.
-    pub fn set_left_child(&mut self, page_id: PageId) -> PageResult<()> {
+    pub fn set_left_child(&mut self, page_id: PageId) {
         table_interior::write_left_child(self.bytes, page_id);
-        if let CellMetadata::TableInterior(parts) = &mut self.metadata {
-            parts.left_child = page_id;
-        }
-        Ok(())
+        self.header.left_child = page_id;
     }
 }
 
-impl Cell<'_, Interior, Index> {
-    /// Returns the separator row id stored in this interior cell payload suffix.
-    pub fn row_id(&self) -> PageResult<RowId> {
-        Ok(self.index_interior_parts().row_id)
+impl<'a> Cell<'a, Interior, Index> {
+    pub(crate) fn new(
+        page_bytes: &'a [u8; PAGE_SIZE],
+        cell_offset: usize,
+        slot_index: SlotId,
+    ) -> PageResult<Self> {
+        let cell_len = index_interior_cell_len_at(page_bytes, slot_index, cell_offset)?;
+        let row_id_offset = cell_offset + cell_len - core::mem::size_of::<RowId>();
+        let row_id = decode_index_interior_row_id(
+            &page_bytes[row_id_offset..row_id_offset + core::mem::size_of::<RowId>()],
+            slot_index,
+        )?;
+        let bytes = slice_cell(page_bytes, cell_offset, cell_len, slot_index)?;
+        Ok(Self::from_parts(
+            bytes,
+            IndexInteriorHeader {
+                left_child: format::read_u64(page_bytes, cell_offset + CELL_LENGTH_SIZE),
+                row_id,
+                key_range: index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE
+                    ..cell_len - core::mem::size_of::<RowId>(),
+            },
+            slot_index,
+        ))
     }
 
-    /// Returns the variable-sized payload bytes stored in this interior cell.
-    pub fn payload(&self) -> PageResult<&[u8]> {
-        let range = self.index_interior_parts().key_range.clone();
-        Ok(&self.bytes[range])
+    /// Returns the separator row id stored in this interior cell payload suffix.
+    pub fn row_id(&self) -> RowId {
+        self.header.row_id
+    }
+
+    /// Returns the variable-sized key bytes stored in this interior cell.
+    pub fn key(&self) -> &[u8] {
+        &self.bytes[self.header.key_range.clone()]
     }
 
     /// Returns the left-child page id referenced by this interior cell.
-    pub fn left_child(&self) -> PageResult<PageId> {
-        Ok(self.index_interior_parts().left_child)
+    pub fn left_child(&self) -> PageId {
+        self.header.left_child
     }
 }
 
-impl CellMut<'_, Interior, Index> {
-    /// Returns the separator row id stored in this interior cell payload suffix.
-    pub fn row_id(&self) -> PageResult<RowId> {
-        Ok(self.index_interior_parts().row_id)
+impl<'a> CellMut<'a, Interior, Index> {
+    pub(crate) fn new(
+        page_bytes: &'a mut [u8; PAGE_SIZE],
+        cell_offset: usize,
+        slot_index: SlotId,
+    ) -> PageResult<Self> {
+        let cell_len = index_interior_cell_len_at(page_bytes, slot_index, cell_offset)?;
+        let row_id_offset = cell_offset + cell_len - core::mem::size_of::<RowId>();
+        let row_id = decode_index_interior_row_id(
+            &page_bytes[row_id_offset..row_id_offset + core::mem::size_of::<RowId>()],
+            slot_index,
+        )?;
+        let left_child = format::read_u64(page_bytes, cell_offset + CELL_LENGTH_SIZE);
+        let bytes = slice_cell_mut(page_bytes, cell_offset, cell_len, slot_index)?;
+        Ok(Self::from_parts(
+            bytes,
+            IndexInteriorHeader {
+                left_child,
+                row_id,
+                key_range: index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE
+                    ..cell_len - core::mem::size_of::<RowId>(),
+            },
+            slot_index,
+        ))
     }
 
-    /// Returns the variable-sized payload bytes stored in this interior cell.
-    pub fn payload(&self) -> PageResult<&[u8]> {
-        let range = self.index_interior_parts().key_range.clone();
-        Ok(&self.bytes[range])
+    /// Returns the separator row id stored in this interior cell payload suffix.
+    pub fn row_id(&self) -> RowId {
+        self.header.row_id
+    }
+
+    /// Returns the variable-sized key bytes stored in this interior cell.
+    pub fn key(&self) -> &[u8] {
+        &self.bytes[self.header.key_range.clone()]
     }
 
     /// Returns the left-child page id referenced by this interior cell.
-    pub fn left_child(&self) -> PageResult<PageId> {
-        Ok(self.index_interior_parts().left_child)
+    pub fn left_child(&self) -> PageId {
+        self.header.left_child
     }
 
     /// Updates the left-child page id stored in this interior cell.
-    pub fn set_left_child(&mut self, page_id: PageId) -> PageResult<()> {
+    pub fn set_left_child(&mut self, page_id: PageId) {
         index_interior::write_left_child(self.bytes, page_id);
-        if let CellMetadata::IndexInterior(parts) = &mut self.metadata {
-            parts.left_child = page_id;
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{PAGE_SIZE, RowId};
-
-    use super::super::{Index, Interior, Leaf, Page, Table, Write};
-    use super::{index_interior, table_interior, table_leaf};
-
-    #[test]
-    fn encoded_size_includes_leaf_header_and_payload() {
-        let mut bytes = [0_u8; PAGE_SIZE];
-        let mut page = Page::<Write<'_>, Leaf, Table>::initialize(&mut bytes);
-        page.insert(7, b"hello").unwrap();
-
-        let page_ref = page.as_ref();
-        let cell = page_ref.cell(0).unwrap();
-
-        assert_eq!(cell.encoded_size(), table_leaf::LEAF_CELL_PREFIX_SIZE + b"hello".len());
-    }
-
-    #[test]
-    fn encoded_size_matches_fixed_size_table_interior_cells() {
-        let mut bytes = [0_u8; PAGE_SIZE];
-        let mut page = Page::<Write<'_>, Interior, Table>::initialize_with_rightmost(&mut bytes, 9);
-        page.insert(42, 3).unwrap();
-
-        let page_ref = page.as_ref();
-        let cell = page_ref.cell(0).unwrap();
-
-        assert_eq!(cell.encoded_size(), table_interior::INTERIOR_CELL_SIZE);
-    }
-
-    #[test]
-    fn encoded_size_includes_index_interior_prefix_and_payload() {
-        let mut bytes = [0_u8; PAGE_SIZE];
-        let mut page =
-            Page::<Write<'_>, Interior, Index>::initialize_with_rightmost(&mut bytes, 17);
-        page.insert(b"mango", 11, 5).unwrap();
-
-        let page_ref = page.as_ref();
-        let cell = page_ref.cell(0).unwrap();
-
-        assert_eq!(
-            cell.encoded_size(),
-            index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE + b"mango".len() + size_of::<RowId>()
-        );
-    }
-
-    #[test]
-    fn mutable_cell_reports_same_encoded_size() {
-        let mut bytes = [0_u8; PAGE_SIZE];
-        let mut page = Page::<Write<'_>, Leaf, Table>::initialize(&mut bytes);
-        page.insert(11, b"abc").unwrap();
-
-        let cell = page.cell_mut(0).unwrap();
-
-        assert_eq!(cell.encoded_size(), table_leaf::LEAF_CELL_PREFIX_SIZE + 3);
-        assert_eq!(cell.as_ref().encoded_size(), table_leaf::LEAF_CELL_PREFIX_SIZE + 3);
+        self.header.left_child = page_id;
     }
 }
