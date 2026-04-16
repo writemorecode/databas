@@ -2001,8 +2001,15 @@ mod tests {
     use super::*;
     use crate::{
         Pager, PagerOptions,
+        error::{ConstraintError, StorageError},
         page::format::{PageKind, SLOT_ENTRY_SIZE, USABLE_SPACE_END},
     };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SplitBoundary {
+        LastLeft,
+        FirstRight,
+    }
 
     fn generate_table_cells(target_bytes: usize) -> Vec<(RowId, Box<[u8]>)> {
         let mut rng = fastrand::Rng::with_seed(0x5EED_u64);
@@ -2103,6 +2110,476 @@ mod tests {
             }
         }
         panic!("duplicate-key index root did not split");
+    }
+
+    fn assert_duplicate_key_error(err: StorageError) {
+        assert!(
+            matches!(err, StorageError::Constraint(ConstraintError::DuplicateKey)),
+            "expected duplicate-key error, got {err:?}"
+        );
+    }
+
+    fn table_leaf_row_ids(cursor: &TableCursor, leaf_page_id: PageId) -> Vec<RowId> {
+        let pin = cursor.page_cache.fetch_page(leaf_page_id).unwrap();
+        let page = pin.read().unwrap();
+        let leaf = page.open_typed::<page::Leaf, page::Table>().unwrap();
+        (0..leaf.slot_count())
+            .map(|slot_index| leaf.cell(slot_index).unwrap().row_id().unwrap())
+            .collect()
+    }
+
+    fn table_leaf_next_page_id(cursor: &TableCursor, leaf_page_id: PageId) -> Option<PageId> {
+        let pin = cursor.page_cache.fetch_page(leaf_page_id).unwrap();
+        let page = pin.read().unwrap();
+        let leaf = page.open_typed::<page::Leaf, page::Table>().unwrap();
+        leaf.next_page_id()
+    }
+
+    fn index_leaf_row_ids(cursor: &IndexCursor, leaf_page_id: PageId) -> Vec<RowId> {
+        let pin = cursor.page_cache.fetch_page(leaf_page_id).unwrap();
+        let page = pin.read().unwrap();
+        let leaf = page.open_typed::<page::Leaf, page::Index>().unwrap();
+        (0..leaf.slot_count())
+            .map(|slot_index| leaf.cell(slot_index).unwrap().row_id().unwrap())
+            .collect()
+    }
+
+    fn index_leaf_ordinals(cursor: &IndexCursor, leaf_page_id: PageId) -> Vec<u64> {
+        let pin = cursor.page_cache.fetch_page(leaf_page_id).unwrap();
+        let page = pin.read().unwrap();
+        let leaf = page.open_typed::<page::Leaf, page::Index>().unwrap();
+        (0..leaf.slot_count())
+            .map(|slot_index| {
+                let mut ordinal = [0_u8; size_of::<u64>()];
+                let cell = leaf.cell(slot_index).unwrap();
+                ordinal.copy_from_slice(&cell.payload().unwrap()[..size_of::<u64>()]);
+                u64::from_be_bytes(ordinal)
+            })
+            .collect()
+    }
+
+    fn index_leaf_next_page_id(cursor: &IndexCursor, leaf_page_id: PageId) -> Option<PageId> {
+        let pin = cursor.page_cache.fetch_page(leaf_page_id).unwrap();
+        let page = pin.read().unwrap();
+        let leaf = page.open_typed::<page::Leaf, page::Index>().unwrap();
+        leaf.next_page_id()
+    }
+
+    fn table_leaf_page_ids(cursor: &TableCursor) -> Vec<PageId> {
+        let mut leaf_page_ids = Vec::new();
+        let mut page_id = cursor.descend_to_first_leaf_from(cursor.root_page_id()).unwrap();
+        loop {
+            leaf_page_ids.push(page_id);
+            match table_leaf_next_page_id(cursor, page_id) {
+                Some(next_page_id) => page_id = next_page_id,
+                None => return leaf_page_ids,
+            }
+        }
+    }
+
+    fn index_leaf_page_ids(cursor: &IndexCursor) -> Vec<PageId> {
+        let mut leaf_page_ids = Vec::new();
+        let mut page_id = cursor.descend_to_first_leaf_from(cursor.root_page_id()).unwrap();
+        loop {
+            leaf_page_ids.push(page_id);
+            match index_leaf_next_page_id(cursor, page_id) {
+                Some(next_page_id) => page_id = next_page_id,
+                None => return leaf_page_ids,
+            }
+        }
+    }
+
+    fn table_interior_child_page_ids(
+        cursor: &TableCursor,
+        interior_page_id: PageId,
+    ) -> Vec<PageId> {
+        let pin = cursor.page_cache.fetch_page(interior_page_id).unwrap();
+        let page = pin.read().unwrap();
+        let interior = page.open_typed::<page::Interior, page::Table>().unwrap();
+        let mut child_page_ids = Vec::with_capacity(interior.slot_count() as usize + 1);
+        for slot_index in 0..interior.slot_count() {
+            child_page_ids.push(interior.cell(slot_index).unwrap().left_child().unwrap());
+        }
+        child_page_ids.push(interior.rightmost_child());
+        child_page_ids
+    }
+
+    fn index_interior_child_page_ids(
+        cursor: &IndexCursor,
+        interior_page_id: PageId,
+    ) -> Vec<PageId> {
+        let pin = cursor.page_cache.fetch_page(interior_page_id).unwrap();
+        let page = pin.read().unwrap();
+        let interior = page.open_typed::<page::Interior, page::Index>().unwrap();
+        let mut child_page_ids = Vec::with_capacity(interior.slot_count() as usize + 1);
+        for slot_index in 0..interior.slot_count() {
+            child_page_ids.push(interior.cell(slot_index).unwrap().left_child().unwrap());
+        }
+        child_page_ids.push(interior.rightmost_child());
+        child_page_ids
+    }
+
+    fn collect_table_row_ids(cursor: &mut TableCursor) -> Vec<RowId> {
+        let mut row_ids = Vec::new();
+        let mut current =
+            cursor.seek_to_first().unwrap().then(|| cursor.current().unwrap().unwrap());
+        while let Some(record) = current {
+            row_ids.push(record.row_id);
+            current = cursor.next_row().unwrap();
+        }
+        row_ids
+    }
+
+    fn collect_index_row_ids(cursor: &mut IndexCursor) -> Vec<RowId> {
+        let mut row_ids = Vec::new();
+        let mut current =
+            cursor.seek_to_first().unwrap().then(|| cursor.current().unwrap().unwrap());
+        while let Some(entry) = current {
+            row_ids.push(entry.row_id);
+            current = cursor.next_row().unwrap();
+        }
+        row_ids
+    }
+
+    fn collect_index_row_ids_for_key(cursor: &mut IndexCursor, key: &[u8]) -> Vec<RowId> {
+        if !cursor.seek_to_key(key).unwrap() {
+            return Vec::new();
+        }
+
+        let mut row_ids = Vec::new();
+        let mut current = cursor.current().unwrap();
+        while let Some(entry) = current {
+            let matches_key = entry.with_key(|entry_key| entry_key == key).unwrap();
+            if !matches_key {
+                break;
+            }
+            row_ids.push(entry.row_id);
+            current = cursor.next_row().unwrap();
+        }
+        row_ids
+    }
+
+    fn largest_gap_midpoint(values: &[u64]) -> Option<u64> {
+        values
+            .windows(2)
+            .filter_map(|window| {
+                let gap = window[1] - window[0];
+                (gap > 1).then_some((gap, window[0] + gap / 2))
+            })
+            .max_by_key(|(gap, _)| *gap)
+            .map(|(_, midpoint)| midpoint)
+    }
+
+    fn choose_table_split_candidate(
+        existing_row_ids: &[RowId],
+        payload_len: usize,
+        boundary: SplitBoundary,
+    ) -> RowId {
+        for candidate in existing_row_ids.windows(2).filter_map(|window| {
+            let gap = window[1] - window[0];
+            (gap > 1).then_some(window[0] + gap / 2)
+        }) {
+            let mut cells: Vec<_> = existing_row_ids
+                .iter()
+                .copied()
+                .map(|row_id| LeafSplitCell::Snapshot { row_id, payload_range: 0..payload_len })
+                .collect();
+            let insert_index = match cells.binary_search_by_key(&candidate, LeafSplitCell::row_id) {
+                Ok(_) => continue,
+                Err(insert_index) => {
+                    cells.insert(
+                        insert_index,
+                        LeafSplitCell::Incoming { row_id: candidate, payload_len },
+                    );
+                    insert_index
+                }
+            };
+            let split_index = TableCursor::choose_leaf_split_index(&cells).unwrap();
+            let matches_boundary = match boundary {
+                SplitBoundary::LastLeft => insert_index + 1 == split_index,
+                SplitBoundary::FirstRight => insert_index == split_index,
+            };
+            if matches_boundary {
+                return candidate;
+            }
+        }
+
+        panic!("could not find candidate for {boundary:?}");
+    }
+
+    fn fill_table_root_leaf_with_stride(cursor: &TableCursor, stride: RowId) -> Vec<RowId> {
+        let leaf_page_id = cursor.root_page_id();
+        let mut row_ids = Vec::new();
+        let mut next_row_id = stride;
+        loop {
+            let payload = split_test_table_payload(next_row_id);
+            let result = {
+                let pin = cursor.page_cache.fetch_page(leaf_page_id).unwrap();
+                let mut write_guard = pin.write().unwrap();
+                let mut page = write_guard.open_typed_mut::<page::Leaf, page::Table>().unwrap();
+                page.insert(next_row_id, &payload)
+            };
+            match result {
+                Ok(_) => row_ids.push(next_row_id),
+                Err(PageError::PageFull { .. }) => return row_ids,
+                Err(err) => {
+                    panic!("unexpected table leaf error while pre-filling split test: {err:?}")
+                }
+            }
+            next_row_id = next_row_id.checked_add(stride).unwrap();
+        }
+    }
+
+    fn fill_index_leaf_with_duplicate_key(
+        cursor: &IndexCursor,
+        leaf_page_id: PageId,
+        key: &[u8],
+        stride: RowId,
+    ) -> Vec<RowId> {
+        let mut row_ids = Vec::new();
+        let mut next_row_id = stride;
+        loop {
+            let result = {
+                let pin = cursor.page_cache.fetch_page(leaf_page_id).unwrap();
+                let mut write_guard = pin.write().unwrap();
+                let mut page = write_guard.open_typed_mut::<page::Leaf, page::Index>().unwrap();
+                page.insert(key, next_row_id)
+            };
+            match result {
+                Ok(_) => row_ids.push(next_row_id),
+                Err(PageError::PageFull { .. }) => return row_ids,
+                Err(err) => {
+                    panic!("unexpected index leaf error while pre-filling split test: {err:?}")
+                }
+            }
+            next_row_id = next_row_id.checked_add(stride).unwrap();
+        }
+    }
+
+    fn find_table_non_root_interior_with_min_slot_count(
+        cursor: &TableCursor,
+        min_slot_count: u16,
+    ) -> Option<PageId> {
+        let root_child_page_ids = {
+            let pin = cursor.page_cache.fetch_page(cursor.root_page_id()).unwrap();
+            let page = pin.read().unwrap();
+            let root = match page.open_any().unwrap() {
+                page::AnyPage::TableInterior(root) => root,
+                _ => return None,
+            };
+            let mut child_page_ids = Vec::with_capacity(root.slot_count() as usize + 1);
+            for slot_index in 0..root.slot_count() {
+                child_page_ids.push(root.cell(slot_index).unwrap().left_child().unwrap());
+            }
+            child_page_ids.push(root.rightmost_child());
+            child_page_ids
+        };
+
+        for child_page_id in root_child_page_ids {
+            let pin = cursor.page_cache.fetch_page(child_page_id).unwrap();
+            let page = pin.read().unwrap();
+            if let page::AnyPage::TableInterior(interior) = page.open_any().unwrap() {
+                if interior.slot_count() >= min_slot_count {
+                    return Some(child_page_id);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn find_index_non_root_interior_with_min_slot_count(
+        cursor: &IndexCursor,
+        min_slot_count: u16,
+    ) -> Option<PageId> {
+        let root_child_page_ids = {
+            let pin = cursor.page_cache.fetch_page(cursor.root_page_id()).unwrap();
+            let page = pin.read().unwrap();
+            let root = match page.open_any().unwrap() {
+                page::AnyPage::IndexInterior(root) => root,
+                _ => return None,
+            };
+            let mut child_page_ids = Vec::with_capacity(root.slot_count() as usize + 1);
+            for slot_index in 0..root.slot_count() {
+                child_page_ids.push(root.cell(slot_index).unwrap().left_child().unwrap());
+            }
+            child_page_ids.push(root.rightmost_child());
+            child_page_ids
+        };
+
+        for child_page_id in root_child_page_ids {
+            let pin = cursor.page_cache.fetch_page(child_page_id).unwrap();
+            let page = pin.read().unwrap();
+            if let page::AnyPage::IndexInterior(interior) = page.open_any().unwrap() {
+                if interior.slot_count() >= min_slot_count {
+                    return Some(child_page_id);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn grow_table_until_non_root_interior(
+        cursor: &mut TableCursor,
+        stride: RowId,
+        min_slot_count: u16,
+    ) -> (BTreeSet<RowId>, PageId) {
+        let mut expected = BTreeSet::new();
+        let mut ordinal = 1_u64;
+        loop {
+            let row_id = ordinal.checked_mul(stride).unwrap();
+            let payload = split_test_table_payload(row_id);
+            cursor.insert(row_id, &payload).unwrap();
+            expected.insert(row_id);
+            if let Some(interior_page_id) =
+                find_table_non_root_interior_with_min_slot_count(cursor, min_slot_count)
+            {
+                return (expected, interior_page_id);
+            }
+            ordinal += 1;
+            assert!(ordinal < 16_384, "table tree never grew a non-root interior page");
+        }
+    }
+
+    fn grow_index_until_non_root_interior(
+        cursor: &mut IndexCursor,
+        stride: RowId,
+        min_slot_count: u16,
+    ) -> (BTreeSet<RowId>, PageId) {
+        let mut expected = BTreeSet::new();
+        let mut ordinal = 1_u64;
+        loop {
+            let row_id = ordinal.checked_mul(stride).unwrap();
+            let key = split_test_index_key(row_id);
+            cursor.insert(&key, row_id).unwrap();
+            expected.insert(row_id);
+            if let Some(interior_page_id) =
+                find_index_non_root_interior_with_min_slot_count(cursor, min_slot_count)
+            {
+                return (expected, interior_page_id);
+            }
+            ordinal += 1;
+            assert!(ordinal < 16_384, "index tree never grew a non-root interior page");
+        }
+    }
+
+    fn find_table_leaf_page_for_child_ref(
+        cursor: &TableCursor,
+        target_child_ref: ChildSlotRef,
+    ) -> Option<PageId> {
+        for leaf_page_id in table_leaf_page_ids(cursor) {
+            let row_ids = table_leaf_row_ids(cursor, leaf_page_id);
+            let Some(candidate) = largest_gap_midpoint(&row_ids) else {
+                continue;
+            };
+            let (path_leaf_page_id, tree_path) =
+                cursor.leaf_page_path_for_row_id(candidate).unwrap();
+            if path_leaf_page_id == leaf_page_id
+                && tree_path.len() >= 2
+                && tree_path.last().unwrap().child_ref == target_child_ref
+            {
+                return Some(leaf_page_id);
+            }
+        }
+        None
+    }
+
+    fn find_index_leaf_page_for_child_ref(
+        cursor: &IndexCursor,
+        target_child_ref: ChildSlotRef,
+    ) -> Option<PageId> {
+        for leaf_page_id in index_leaf_page_ids(cursor) {
+            let ordinals = index_leaf_ordinals(cursor, leaf_page_id);
+            let Some(candidate) = largest_gap_midpoint(&ordinals) else {
+                continue;
+            };
+            let key = split_test_index_key(candidate);
+            let (path_leaf_page_id, tree_path) =
+                cursor.leaf_page_path_for_key_and_row_id(&key, candidate).unwrap();
+            if path_leaf_page_id == leaf_page_id
+                && tree_path.len() >= 2
+                && tree_path.last().unwrap().child_ref == target_child_ref
+            {
+                return Some(leaf_page_id);
+            }
+        }
+        None
+    }
+
+    fn fill_table_leaf_until_full(
+        cursor: &TableCursor,
+        leaf_page_id: PageId,
+        expected: &mut BTreeSet<RowId>,
+    ) -> RowId {
+        loop {
+            let row_ids = table_leaf_row_ids(cursor, leaf_page_id);
+            let candidate = largest_gap_midpoint(&row_ids)
+                .expect("target table leaf should still have a free gap");
+            let payload = split_test_table_payload(candidate);
+            let result = {
+                let pin = cursor.page_cache.fetch_page(leaf_page_id).unwrap();
+                let mut write_guard = pin.write().unwrap();
+                let mut page = write_guard.open_typed_mut::<page::Leaf, page::Table>().unwrap();
+                page.insert(candidate, &payload)
+            };
+            match result {
+                Ok(_) => {
+                    assert!(expected.insert(candidate));
+                }
+                Err(PageError::PageFull { .. }) => return candidate,
+                Err(err) => {
+                    panic!("unexpected table leaf error while preparing non-root split: {err:?}")
+                }
+            }
+        }
+    }
+
+    fn fill_index_leaf_until_full(
+        cursor: &IndexCursor,
+        leaf_page_id: PageId,
+        expected: &mut BTreeSet<RowId>,
+    ) -> RowId {
+        loop {
+            let ordinals = index_leaf_ordinals(cursor, leaf_page_id);
+            let candidate = largest_gap_midpoint(&ordinals)
+                .expect("target index leaf should still have a free gap");
+            let key = split_test_index_key(candidate);
+            let result = {
+                let pin = cursor.page_cache.fetch_page(leaf_page_id).unwrap();
+                let mut write_guard = pin.write().unwrap();
+                let mut page = write_guard.open_typed_mut::<page::Leaf, page::Index>().unwrap();
+                page.insert(&key, candidate)
+            };
+            match result {
+                Ok(_) => {
+                    assert!(expected.insert(candidate));
+                }
+                Err(PageError::PageFull { .. }) => return candidate,
+                Err(err) => {
+                    panic!("unexpected index leaf error while preparing non-root split: {err:?}")
+                }
+            }
+        }
+    }
+
+    fn force_duplicate_index_root_split_with_stride(
+        cursor: &mut IndexCursor,
+        key: &[u8],
+        stride: RowId,
+    ) -> BTreeSet<RowId> {
+        let initial_root_page_id = cursor.root_page_id();
+        let mut expected = BTreeSet::new();
+        let mut row_id = stride;
+        loop {
+            cursor.insert(key, row_id).unwrap();
+            expected.insert(row_id);
+            if cursor.root_page_id() != initial_root_page_id {
+                return expected;
+            }
+            row_id = row_id.checked_add(stride).unwrap();
+            assert!(row_id < 16_384 * stride, "duplicate-key index tree never split its root");
+        }
     }
 
     #[test]
@@ -2266,5 +2743,425 @@ mod tests {
             .expect("entry should remain reachable");
         assert_eq!(entry.row_id, target_row_id);
         entry.with_key(|key| assert_eq!(key, target_key.as_ref())).unwrap();
+    }
+
+    #[test]
+    fn table_insert_rejects_duplicate_keys_before_and_during_leaf_split() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+
+        let mut cursor = pager.create_table().unwrap();
+        let payload = split_test_table_payload(42);
+        cursor.insert(42, &payload).unwrap();
+        assert_duplicate_key_error(cursor.insert(42, &payload).unwrap_err());
+
+        let mut split_cursor = pager.create_table().unwrap();
+        let existing_row_ids = fill_table_root_leaf_with_stride(&split_cursor, 10_000);
+        let duplicate_row_id = existing_row_ids[existing_row_ids.len() / 2];
+        let duplicate_payload = split_test_table_payload(duplicate_row_id);
+        let err = split_cursor
+            .table_insert_with_leaf_page_split(
+                split_cursor.root_page_id(),
+                duplicate_row_id,
+                &duplicate_payload,
+            )
+            .unwrap_err();
+        assert_duplicate_key_error(err);
+    }
+
+    #[test]
+    fn index_insert_rejects_exact_duplicates_before_and_during_leaf_split() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+
+        let mut cursor = pager.create_index().unwrap();
+        let key = split_test_index_key(42);
+        cursor.insert(&key, 42).unwrap();
+        assert_duplicate_key_error(cursor.insert(&key, 42).unwrap_err());
+
+        let mut split_cursor = pager.create_index().unwrap();
+        let duplicate_key = duplicate_split_test_index_key();
+        let existing_row_ids = fill_index_leaf_with_duplicate_key(
+            &split_cursor,
+            split_cursor.root_page_id(),
+            &duplicate_key,
+            10_000,
+        );
+        let duplicate_row_id = existing_row_ids[existing_row_ids.len() / 2];
+        let err = split_cursor
+            .index_insert_with_leaf_page_split(
+                split_cursor.root_page_id(),
+                &duplicate_key,
+                duplicate_row_id,
+            )
+            .unwrap_err();
+        assert_duplicate_key_error(err);
+    }
+
+    #[test]
+    fn table_get_and_insert_update_cursor_state() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+        let mut cursor = pager.create_table().unwrap();
+        let root_page_id = cursor.root_page_id();
+
+        let row_id = 42;
+        let payload = split_test_table_payload(row_id);
+        cursor.insert(row_id, &payload).unwrap();
+        assert_eq!(
+            cursor.state(),
+            CursorState::Positioned { page_id: root_page_id, slot_index: 0 }
+        );
+        assert!(cursor.is_positioned());
+        assert_eq!(cursor.current_page_id(), Some(root_page_id));
+        let current = cursor.current().unwrap().expect("insert should position the cursor");
+        assert_eq!(current.row_id, row_id);
+        current
+            .with_payload(|record_payload| assert_eq!(record_payload, payload.as_ref()))
+            .unwrap();
+
+        assert!(cursor.get(row_id - 1).unwrap().is_none());
+        assert_eq!(cursor.state(), CursorState::Page { page_id: root_page_id });
+        assert!(!cursor.is_positioned());
+        assert_eq!(cursor.current_page_id(), Some(root_page_id));
+        assert!(cursor.current().unwrap().is_none());
+
+        let record = cursor.get(row_id).unwrap().expect("existing row should be found");
+        assert_eq!(record.row_id, row_id);
+        record.with_payload(|record_payload| assert_eq!(record_payload, payload.as_ref())).unwrap();
+        assert_eq!(
+            cursor.state(),
+            CursorState::Positioned { page_id: root_page_id, slot_index: 0 }
+        );
+        assert!(cursor.is_positioned());
+    }
+
+    #[test]
+    fn index_get_and_insert_update_cursor_state() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+        let mut cursor = pager.create_index().unwrap();
+        let root_page_id = cursor.root_page_id();
+
+        let key = duplicate_split_test_index_key();
+        cursor.insert(&key, 10).unwrap();
+        assert_eq!(
+            cursor.state(),
+            CursorState::Positioned { page_id: root_page_id, slot_index: 0 }
+        );
+        assert!(cursor.is_positioned());
+        let first = cursor.current().unwrap().expect("insert should position the cursor");
+        assert_eq!(first.row_id, 10);
+        first.with_key(|entry_key| assert_eq!(entry_key, key.as_ref())).unwrap();
+
+        cursor.insert(&key, 30).unwrap();
+        assert_eq!(
+            cursor.state(),
+            CursorState::Positioned { page_id: root_page_id, slot_index: 1 }
+        );
+        assert!(cursor.is_positioned());
+
+        assert!(cursor.get(&key, 20).unwrap().is_none());
+        assert_eq!(cursor.state(), CursorState::Page { page_id: root_page_id });
+        assert!(!cursor.is_positioned());
+        assert_eq!(cursor.current_page_id(), Some(root_page_id));
+        assert!(cursor.current().unwrap().is_none());
+
+        let entry =
+            cursor.get(&key, 30).unwrap().expect("existing duplicate-key entry should be found");
+        assert_eq!(entry.row_id, 30);
+        entry.with_key(|entry_key| assert_eq!(entry_key, key.as_ref())).unwrap();
+        assert_eq!(
+            cursor.state(),
+            CursorState::Positioned { page_id: root_page_id, slot_index: 1 }
+        );
+        assert!(cursor.is_positioned());
+    }
+
+    #[test]
+    fn table_leaf_split_positions_boundary_insert_on_last_left_leaf() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+        let mut cursor = pager.create_table().unwrap();
+        let left_page_id = cursor.root_page_id();
+        let existing_row_ids = fill_table_root_leaf_with_stride(&cursor, 10_000);
+        let candidate = choose_table_split_candidate(
+            &existing_row_ids,
+            split_test_table_payload(0).len(),
+            SplitBoundary::LastLeft,
+        );
+        let payload = split_test_table_payload(candidate);
+
+        cursor.table_insert_with_leaf_page_split(left_page_id, candidate, &payload).unwrap();
+
+        let right_page_id = table_leaf_next_page_id(&cursor, left_page_id)
+            .expect("leaf split should create a right sibling");
+        let left_row_ids = table_leaf_row_ids(&cursor, left_page_id);
+        let right_row_ids = table_leaf_row_ids(&cursor, right_page_id);
+        assert_eq!(left_row_ids.last().copied(), Some(candidate));
+        assert!(candidate < right_row_ids[0]);
+        assert_eq!(cursor.current_page_id(), Some(left_page_id));
+        assert_eq!(
+            cursor.state(),
+            CursorState::Positioned {
+                page_id: left_page_id,
+                slot_index: (left_row_ids.len() - 1) as u16,
+            }
+        );
+        let current = cursor.current().unwrap().expect("split should position the inserted row");
+        assert_eq!(current.row_id, candidate);
+        current
+            .with_payload(|record_payload| assert_eq!(record_payload, payload.as_ref()))
+            .unwrap();
+    }
+
+    #[test]
+    fn table_leaf_split_positions_boundary_insert_on_first_right_leaf() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+        let mut cursor = pager.create_table().unwrap();
+        let left_page_id = cursor.root_page_id();
+        let existing_row_ids = fill_table_root_leaf_with_stride(&cursor, 10_000);
+        let candidate = choose_table_split_candidate(
+            &existing_row_ids,
+            split_test_table_payload(0).len(),
+            SplitBoundary::FirstRight,
+        );
+        let payload = split_test_table_payload(candidate);
+
+        cursor.table_insert_with_leaf_page_split(left_page_id, candidate, &payload).unwrap();
+
+        let right_page_id = table_leaf_next_page_id(&cursor, left_page_id)
+            .expect("leaf split should create a right sibling");
+        let left_row_ids = table_leaf_row_ids(&cursor, left_page_id);
+        let right_row_ids = table_leaf_row_ids(&cursor, right_page_id);
+        assert!(left_row_ids.last().copied().unwrap() < candidate);
+        assert_eq!(right_row_ids.first().copied(), Some(candidate));
+        assert_eq!(cursor.current_page_id(), Some(right_page_id));
+        assert_eq!(
+            cursor.state(),
+            CursorState::Positioned { page_id: right_page_id, slot_index: 0 }
+        );
+        let current = cursor.current().unwrap().expect("split should position the inserted row");
+        assert_eq!(current.row_id, candidate);
+        current
+            .with_payload(|record_payload| assert_eq!(record_payload, payload.as_ref()))
+            .unwrap();
+    }
+
+    #[test]
+    fn index_insert_and_get_work_below_between_and_above_duplicate_key_split_boundaries() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+        let mut cursor = pager.create_index().unwrap();
+        let key = duplicate_split_test_index_key();
+        let mut expected = force_duplicate_index_root_split_with_stride(&mut cursor, &key, 10_000);
+
+        let left_page_id = cursor.leaf_page_for_key(&key).unwrap();
+        let right_page_id = index_leaf_next_page_id(&cursor, left_page_id)
+            .expect("duplicate-key split should create a right sibling");
+        let left_row_ids = index_leaf_row_ids(&cursor, left_page_id);
+        let right_row_ids = index_leaf_row_ids(&cursor, right_page_id);
+        let below_all = left_row_ids[0] - 5;
+        let between_leaves = left_row_ids.last().copied().unwrap()
+            + (right_row_ids[0] - left_row_ids.last().copied().unwrap()) / 2;
+        let above_all = right_row_ids.last().copied().unwrap() + 5;
+
+        for row_id in [below_all, between_leaves, above_all] {
+            cursor.insert(&key, row_id).unwrap();
+            expected.insert(row_id);
+            let entry = cursor
+                .get(&key, row_id)
+                .unwrap()
+                .expect("inserted duplicate-key entry should be found");
+            assert_eq!(entry.row_id, row_id);
+            entry.with_key(|entry_key| assert_eq!(entry_key, key.as_ref())).unwrap();
+        }
+
+        let mut scan = pager.open_index(cursor.root_page_id()).unwrap();
+        assert_eq!(
+            collect_index_row_ids_for_key(&mut scan, &key),
+            expected.into_iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn table_insert_propagates_leaf_split_through_non_root_slot_child() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 32 }).unwrap();
+        let mut cursor = pager.create_table().unwrap();
+        let (mut expected, parent_page_id) =
+            grow_table_until_non_root_interior(&mut cursor, 10_000, 2);
+        let child_page_ids = table_interior_child_page_ids(&cursor, parent_page_id);
+        let target_leaf_page_id = child_page_ids[1];
+        let candidate = fill_table_leaf_until_full(&cursor, target_leaf_page_id, &mut expected);
+        let (leaf_page_id, tree_path) = cursor.leaf_page_path_for_row_id(candidate).unwrap();
+        assert_eq!(leaf_page_id, target_leaf_page_id);
+        assert!(tree_path.len() >= 2);
+        assert!(tree_path.iter().any(|frame| {
+            frame.page_id == parent_page_id && frame.child_ref == ChildSlotRef::Slot(1)
+        }));
+
+        let payload = split_test_table_payload(candidate);
+        cursor.insert(candidate, &payload).unwrap();
+        expected.insert(candidate);
+
+        let record = cursor.get(candidate).unwrap().expect("inserted row should remain reachable");
+        assert_eq!(record.row_id, candidate);
+        record.with_payload(|record_payload| assert_eq!(record_payload, payload.as_ref())).unwrap();
+
+        let mut scan = pager.open_table(cursor.root_page_id()).unwrap();
+        assert_eq!(collect_table_row_ids(&mut scan), expected.into_iter().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn table_insert_propagates_leaf_split_through_non_root_rightmost_child() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 32 }).unwrap();
+        let mut cursor = pager.create_table().unwrap();
+        let (mut expected, _) = grow_table_until_non_root_interior(&mut cursor, 10_000, 2);
+        let target_leaf_page_id =
+            find_table_leaf_page_for_child_ref(&cursor, ChildSlotRef::Rightmost)
+                .expect("tree should contain a non-root rightmost leaf child");
+        let candidate = fill_table_leaf_until_full(&cursor, target_leaf_page_id, &mut expected);
+        let (leaf_page_id, tree_path) = cursor.leaf_page_path_for_row_id(candidate).unwrap();
+        assert_eq!(leaf_page_id, target_leaf_page_id);
+        assert!(tree_path.len() >= 2);
+        assert_eq!(tree_path.last().unwrap().child_ref, ChildSlotRef::Rightmost);
+
+        let payload = split_test_table_payload(candidate);
+        cursor.insert(candidate, &payload).unwrap();
+        expected.insert(candidate);
+
+        let record = cursor.get(candidate).unwrap().expect("inserted row should remain reachable");
+        assert_eq!(record.row_id, candidate);
+        record.with_payload(|record_payload| assert_eq!(record_payload, payload.as_ref())).unwrap();
+
+        let mut scan = pager.open_table(cursor.root_page_id()).unwrap();
+        assert_eq!(collect_table_row_ids(&mut scan), expected.into_iter().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn index_insert_propagates_leaf_split_through_non_root_slot_child() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 32 }).unwrap();
+        let mut cursor = pager.create_index().unwrap();
+        let (mut expected, parent_page_id) =
+            grow_index_until_non_root_interior(&mut cursor, 10_000, 2);
+        let child_page_ids = index_interior_child_page_ids(&cursor, parent_page_id);
+        let target_leaf_page_id = child_page_ids[1];
+        let candidate = fill_index_leaf_until_full(&cursor, target_leaf_page_id, &mut expected);
+        let key = split_test_index_key(candidate);
+        let (leaf_page_id, tree_path) =
+            cursor.leaf_page_path_for_key_and_row_id(&key, candidate).unwrap();
+        assert_eq!(leaf_page_id, target_leaf_page_id);
+        assert!(tree_path.len() >= 2);
+        assert!(tree_path.iter().any(|frame| {
+            frame.page_id == parent_page_id && frame.child_ref == ChildSlotRef::Slot(1)
+        }));
+
+        cursor.insert(&key, candidate).unwrap();
+        expected.insert(candidate);
+
+        let entry =
+            cursor.get(&key, candidate).unwrap().expect("inserted entry should remain reachable");
+        assert_eq!(entry.row_id, candidate);
+        entry.with_key(|entry_key| assert_eq!(entry_key, key.as_ref())).unwrap();
+
+        let mut scan = pager.open_index(cursor.root_page_id()).unwrap();
+        assert_eq!(collect_index_row_ids(&mut scan), expected.into_iter().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn index_insert_propagates_leaf_split_through_non_root_rightmost_child() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 32 }).unwrap();
+        let mut cursor = pager.create_index().unwrap();
+        let (mut expected, _) = grow_index_until_non_root_interior(&mut cursor, 10_000, 2);
+        let target_leaf_page_id =
+            find_index_leaf_page_for_child_ref(&cursor, ChildSlotRef::Rightmost)
+                .expect("tree should contain a non-root rightmost leaf child");
+        let candidate = fill_index_leaf_until_full(&cursor, target_leaf_page_id, &mut expected);
+        let key = split_test_index_key(candidate);
+        let (leaf_page_id, tree_path) =
+            cursor.leaf_page_path_for_key_and_row_id(&key, candidate).unwrap();
+        assert_eq!(leaf_page_id, target_leaf_page_id);
+        assert!(tree_path.len() >= 2);
+        assert_eq!(tree_path.last().unwrap().child_ref, ChildSlotRef::Rightmost);
+
+        cursor.insert(&key, candidate).unwrap();
+        expected.insert(candidate);
+
+        let entry =
+            cursor.get(&key, candidate).unwrap().expect("inserted entry should remain reachable");
+        assert_eq!(entry.row_id, candidate);
+        entry.with_key(|entry_key| assert_eq!(entry_key, key.as_ref())).unwrap();
+
+        let mut scan = pager.open_index(cursor.root_page_id()).unwrap();
+        assert_eq!(collect_index_row_ids(&mut scan), expected.into_iter().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn table_insert_and_get_accept_empty_payloads_and_extreme_row_ids() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+        let mut cursor = pager.create_table().unwrap();
+        let max_row_id = u64::MAX;
+        let max_payload = split_test_table_payload(max_row_id);
+
+        cursor.insert(0, &[]).unwrap();
+        cursor.insert(max_row_id, &max_payload).unwrap();
+
+        let first = cursor.get(0).unwrap().expect("row id 0 should be retrievable");
+        assert_eq!(first.row_id, 0);
+        first.with_payload(|payload| assert!(payload.is_empty())).unwrap();
+
+        let last = cursor.get(max_row_id).unwrap().expect("max row id should be retrievable");
+        assert_eq!(last.row_id, max_row_id);
+        last.with_payload(|payload| assert_eq!(payload, max_payload.as_ref())).unwrap();
+
+        let mut scan = pager.open_table(cursor.root_page_id()).unwrap();
+        assert_eq!(collect_table_row_ids(&mut scan), vec![0, max_row_id]);
+    }
+
+    #[test]
+    fn index_insert_and_get_accept_empty_keys_and_extreme_row_ids() {
+        let file = NamedTempFile::new().unwrap();
+        let pager =
+            Pager::open_with_options(file.path(), PagerOptions { cache_frames: 16 }).unwrap();
+        let mut cursor = pager.create_index().unwrap();
+        let max_row_id = u64::MAX;
+
+        cursor.insert(&[], 0).unwrap();
+        cursor.insert(&[], max_row_id).unwrap();
+
+        let first = cursor
+            .get(&[], 0)
+            .unwrap()
+            .expect("row id 0 under the empty key should be retrievable");
+        assert_eq!(first.row_id, 0);
+        first.with_key(|key| assert!(key.is_empty())).unwrap();
+
+        let last = cursor
+            .get(&[], max_row_id)
+            .unwrap()
+            .expect("max row id under the empty key should be retrievable");
+        assert_eq!(last.row_id, max_row_id);
+        last.with_key(|key| assert!(key.is_empty())).unwrap();
+
+        let mut scan = pager.open_index(cursor.root_page_id()).unwrap();
+        assert_eq!(collect_index_row_ids_for_key(&mut scan, &[]), vec![0, max_row_id]);
     }
 }
