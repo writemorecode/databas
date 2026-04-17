@@ -9,88 +9,15 @@ use super::{
     index_interior, index_leaf, table_interior, table_leaf,
 };
 
-pub(crate) trait CellKind {
-    type Header: Clone + core::fmt::Debug;
-}
+pub(crate) trait CellKind {}
 
-/// Decoded header fields for a table leaf cell.
-///
-/// Exact on-page layout:
-///
-/// ```text
-/// [cell_len: u16][row_id: u64][payload bytes...]
-/// ```
-///
-/// The fixed-size prefix is `cell_len + row_id`. The payload bytes occupy the
-/// remainder of the already-sliced cell buffer after that prefix.
-#[derive(Debug, Clone)]
-pub(crate) struct TableLeafHeader {
-    row_id: RowId,
-}
+impl CellKind for (Leaf, Table) {}
 
-/// Decoded header fields for an index leaf cell.
-///
-/// Exact on-page layout:
-///
-/// ```text
-/// [cell_len: u16][row_id: u64][key bytes...]
-/// ```
-///
-/// The fixed-size prefix is `cell_len + row_id`. The key bytes occupy the
-/// remainder of the already-sliced cell buffer after that prefix.
-#[derive(Debug, Clone)]
-pub(crate) struct IndexLeafHeader {
-    row_id: RowId,
-}
+impl CellKind for (Leaf, Index) {}
 
-/// Decoded header fields for a table interior cell.
-///
-/// Exact on-page layout:
-///
-/// ```text
-/// [left_child: u64][row_id: u64]
-/// ```
-///
-/// This cell kind is entirely fixed-size, so there is no payload or key range.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct TableInteriorHeader {
-    left_child: PageId,
-    row_id: RowId,
-}
+impl CellKind for (Interior, Table) {}
 
-/// Decoded header fields for an index interior cell.
-///
-/// Exact on-page layout:
-///
-/// ```text
-/// [cell_len: u16][left_child: u64][key bytes...][row_id: u64]
-/// ```
-///
-/// This cell has fixed-size fields on both sides of the variable-sized key:
-/// the prefix is `cell_len + left_child`, and the suffix is `row_id`.
-/// The key bytes occupy the middle region between those fixed-size fields
-/// within the already-sliced cell buffer.
-#[derive(Debug, Clone)]
-pub(crate) struct IndexInteriorHeader {
-    left_child: PageId,
-    row_id: RowId,
-}
-
-impl CellKind for (Leaf, Table) {
-    type Header = TableLeafHeader;
-}
-
-impl CellKind for (Leaf, Index) {
-    type Header = IndexLeafHeader;
-}
-
-impl CellKind for (Interior, Table) {
-    type Header = TableInteriorHeader;
-}
-
-impl CellKind for (Interior, Index) {
-    type Header = IndexInteriorHeader;
-}
+impl CellKind for (Interior, Index) {}
 
 pub(super) fn checked_cell_end(
     cell_offset: usize,
@@ -118,6 +45,14 @@ pub(super) fn checked_variable_cell_bounds(
     }
     let cell_end = checked_cell_end(cell_offset, cell_len, slot_index)?;
     Ok((cell_len, cell_end))
+}
+
+fn row_id_suffix(bytes: &[u8]) -> RowId {
+    RowId::from_be_bytes(
+        bytes[bytes.len() - size_of::<RowId>()..]
+            .try_into()
+            .expect("row id suffix has fixed width"),
+    )
 }
 
 /// Shared immutable access to a cell-sized byte buffer.
@@ -169,7 +104,6 @@ where
     (N, T): CellKind,
 {
     access: A,
-    header: <(N, T) as CellKind>::Header,
     slot_index: SlotId,
     _marker: PhantomData<(N, T)>,
 }
@@ -179,8 +113,8 @@ where
     A: CellAccess,
     (N, T): CellKind,
 {
-    fn from_parts(access: A, header: <(N, T) as CellKind>::Header, slot_index: SlotId) -> Self {
-        Self { access, header, slot_index, _marker: PhantomData }
+    fn from_parts(access: A, slot_index: SlotId) -> Self {
+        Self { access, slot_index, _marker: PhantomData }
     }
 
     /// Returns the slot index that this cell view refers to.
@@ -207,14 +141,7 @@ impl<'a> Cell<CellRead<'a>, Leaf, Table> {
             table_leaf::LEAF_CELL_PREFIX_SIZE,
         )?;
 
-        let header = TableLeafHeader {
-            row_id: format::read_u64(page_bytes, cell_offset + CELL_LENGTH_SIZE),
-        };
-        Ok(Self::from_parts(
-            CellRead { bytes: &page_bytes[cell_offset..cell_end] },
-            header,
-            slot_index,
-        ))
+        Ok(Self::from_parts(CellRead { bytes: &page_bytes[cell_offset..cell_end] }, slot_index))
     }
 }
 
@@ -231,12 +158,8 @@ impl<'a> Cell<CellWrite<'a>, Leaf, Table> {
             table_leaf::LEAF_CELL_PREFIX_SIZE,
         )?;
 
-        let header = TableLeafHeader {
-            row_id: format::read_u64(page_bytes, cell_offset + CELL_LENGTH_SIZE),
-        };
         Ok(Self::from_parts(
             CellWrite { bytes: &mut page_bytes[cell_offset..cell_end] },
-            header,
             slot_index,
         ))
     }
@@ -248,7 +171,7 @@ where
 {
     /// Returns the row id stored in this leaf cell.
     pub fn row_id(&self) -> RowId {
-        self.header.row_id
+        read_u64_from_slice(self.access.bytes(), CELL_LENGTH_SIZE)
     }
 
     /// Returns the payload bytes stored in this leaf cell.
@@ -257,6 +180,11 @@ where
         let bytes = self.access.bytes();
         &bytes[table_leaf::LEAF_CELL_PREFIX_SIZE..cell_len]
     }
+}
+
+fn read_u64_from_slice(bytes: &[u8], offset: usize) -> u64 {
+    let x = bytes[offset..offset + size_of::<u64>()].as_array().expect("valid cell length");
+    u64::from_le_bytes(*x)
 }
 
 impl<A> Cell<A, Leaf, Table>
@@ -284,14 +212,7 @@ impl<'a> Cell<CellRead<'a>, Leaf, Index> {
             index_leaf::INDEX_LEAF_CELL_PREFIX_SIZE,
         )?;
 
-        let header = IndexLeafHeader {
-            row_id: format::read_u64(page_bytes, cell_offset + CELL_LENGTH_SIZE),
-        };
-        Ok(Self::from_parts(
-            CellRead { bytes: &page_bytes[cell_offset..cell_end] },
-            header,
-            slot_index,
-        ))
+        Ok(Self::from_parts(CellRead { bytes: &page_bytes[cell_offset..cell_end] }, slot_index))
     }
 }
 
@@ -308,12 +229,8 @@ impl<'a> Cell<CellWrite<'a>, Leaf, Index> {
             index_leaf::INDEX_LEAF_CELL_PREFIX_SIZE,
         )?;
 
-        let header = IndexLeafHeader {
-            row_id: format::read_u64(page_bytes, cell_offset + CELL_LENGTH_SIZE),
-        };
         Ok(Self::from_parts(
             CellWrite { bytes: &mut page_bytes[cell_offset..cell_end] },
-            header,
             slot_index,
         ))
     }
@@ -325,7 +242,7 @@ where
 {
     /// Returns the referenced row id stored in this leaf cell.
     pub fn row_id(&self) -> RowId {
-        self.header.row_id
+        read_u64_from_slice(self.access.bytes(), CELL_LENGTH_SIZE)
     }
 
     /// Returns the variable-sized key bytes stored in this leaf cell.
@@ -343,17 +260,9 @@ impl<'a> Cell<CellRead<'a>, Interior, Table> {
         slot_index: SlotId,
     ) -> PageResult<Self> {
         let cell_len = table_interior::INTERIOR_CELL_SIZE;
-        let cell_end = cell_offset + cell_len;
+        let cell_end = checked_cell_end(cell_offset, cell_len, slot_index)?;
 
-        let header = TableInteriorHeader {
-            left_child: format::read_u64(page_bytes, cell_offset),
-            row_id: format::read_u64(page_bytes, cell_offset + size_of::<PageId>()),
-        };
-        Ok(Self::from_parts(
-            CellRead { bytes: &page_bytes[cell_offset..cell_end] },
-            header,
-            slot_index,
-        ))
+        Ok(Self::from_parts(CellRead { bytes: &page_bytes[cell_offset..cell_end] }, slot_index))
     }
 }
 
@@ -364,15 +273,10 @@ impl<'a> Cell<CellWrite<'a>, Interior, Table> {
         slot_index: SlotId,
     ) -> PageResult<Self> {
         let cell_len = table_interior::INTERIOR_CELL_SIZE;
-        let cell_end = cell_offset + cell_len;
+        let cell_end = checked_cell_end(cell_offset, cell_len, slot_index)?;
 
-        let header = TableInteriorHeader {
-            left_child: format::read_u64(page_bytes, cell_offset),
-            row_id: format::read_u64(page_bytes, cell_offset + size_of::<PageId>()),
-        };
         Ok(Self::from_parts(
             CellWrite { bytes: &mut page_bytes[cell_offset..cell_end] },
-            header,
             slot_index,
         ))
     }
@@ -384,12 +288,12 @@ where
 {
     /// Returns the separator row id stored in this interior cell.
     pub fn row_id(&self) -> RowId {
-        self.header.row_id
+        read_u64_from_slice(self.access.bytes(), size_of::<PageId>())
     }
 
     /// Returns the left-child page id referenced by this interior cell.
     pub fn left_child(&self) -> PageId {
-        self.header.left_child
+        read_u64_from_slice(self.access.bytes(), 0)
     }
 }
 
@@ -400,7 +304,6 @@ where
     /// Updates the left-child page id stored in this interior cell.
     pub fn set_left_child(&mut self, page_id: PageId) {
         table_interior::write_left_child(self.access.bytes_mut(), page_id);
-        self.header.left_child = page_id;
     }
 }
 
@@ -417,18 +320,7 @@ impl<'a> Cell<CellRead<'a>, Interior, Index> {
             index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE + size_of::<RowId>(),
         )?;
 
-        let row_id_offset = cell_end - size_of::<RowId>();
-        let mut row_id_bytes = [0_u8; size_of::<RowId>()];
-        row_id_bytes.copy_from_slice(&page_bytes[row_id_offset..cell_end]);
-        let header = IndexInteriorHeader {
-            left_child: format::read_u64(page_bytes, cell_offset + CELL_LENGTH_SIZE),
-            row_id: RowId::from_be_bytes(row_id_bytes),
-        };
-        Ok(Self::from_parts(
-            CellRead { bytes: &page_bytes[cell_offset..cell_end] },
-            header,
-            slot_index,
-        ))
+        Ok(Self::from_parts(CellRead { bytes: &page_bytes[cell_offset..cell_end] }, slot_index))
     }
 }
 
@@ -445,16 +337,8 @@ impl<'a> Cell<CellWrite<'a>, Interior, Index> {
             index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE + size_of::<RowId>(),
         )?;
 
-        let row_id_offset = cell_end - size_of::<RowId>();
-        let mut row_id_bytes = [0_u8; size_of::<RowId>()];
-        row_id_bytes.copy_from_slice(&page_bytes[row_id_offset..cell_end]);
-        let header = IndexInteriorHeader {
-            left_child: format::read_u64(page_bytes, cell_offset + CELL_LENGTH_SIZE),
-            row_id: RowId::from_be_bytes(row_id_bytes),
-        };
         Ok(Self::from_parts(
             CellWrite { bytes: &mut page_bytes[cell_offset..cell_end] },
-            header,
             slot_index,
         ))
     }
@@ -466,19 +350,18 @@ where
 {
     /// Returns the separator row id stored in this interior cell payload suffix.
     pub fn row_id(&self) -> RowId {
-        self.header.row_id
+        row_id_suffix(self.access.bytes())
     }
 
     /// Returns the variable-sized key bytes stored in this interior cell.
     pub fn key(&self) -> &[u8] {
-        let cell_len = self.access.bytes().len();
         let bytes = self.access.bytes();
-        &bytes[index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE..cell_len - size_of::<RowId>()]
+        &bytes[index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE..bytes.len() - size_of::<RowId>()]
     }
 
     /// Returns the left-child page id referenced by this interior cell.
     pub fn left_child(&self) -> PageId {
-        self.header.left_child
+        read_u64_from_slice(self.access.bytes(), CELL_LENGTH_SIZE)
     }
 }
 
@@ -489,6 +372,99 @@ where
     /// Updates the left-child page id stored in this interior cell.
     pub fn set_left_child(&mut self, page_id: PageId) {
         index_interior::write_left_child(self.access.bytes_mut(), page_id);
-        self.header.left_child = page_id;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Page, Read, Write};
+    use super::*;
+
+    #[test]
+    fn table_leaf_cell_reads_row_id_and_payload_from_bytes() {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Leaf, Table>::init(&mut bytes);
+        page.insert(42, b"payload").unwrap();
+
+        let page = Page::<Read<'_>, Leaf, Table>::open(&bytes).unwrap();
+        let cell = page.cell(0).unwrap();
+
+        assert_eq!(cell.row_id(), 42);
+        assert_eq!(cell.payload(), b"payload");
+    }
+
+    #[test]
+    fn index_leaf_cell_reads_row_id_and_key_from_bytes() {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Leaf, Index>::init(&mut bytes);
+        page.insert(b"secondary-key", 17).unwrap();
+
+        let page = Page::<Read<'_>, Leaf, Index>::open(&bytes).unwrap();
+        let cell = page.cell(0).unwrap();
+
+        assert_eq!(cell.row_id(), 17);
+        assert_eq!(cell.key(), b"secondary-key");
+    }
+
+    #[test]
+    fn table_interior_left_child_reads_and_writes_cell_bytes() {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Interior, Table>::init(&mut bytes, 99);
+        page.insert(42, 7).unwrap();
+
+        {
+            let mut cell = page.cell_mut(0).unwrap();
+            assert_eq!(cell.left_child(), 7);
+            assert_eq!(cell.row_id(), 42);
+
+            cell.set_left_child(11);
+
+            assert_eq!(cell.left_child(), 11);
+            assert_eq!(cell.row_id(), 42);
+        }
+
+        let page = Page::<Read<'_>, Interior, Table>::open(&bytes).unwrap();
+        let cell = page.cell(0).unwrap();
+        assert_eq!(cell.left_child(), 11);
+        assert_eq!(cell.row_id(), 42);
+    }
+
+    #[test]
+    fn index_interior_reads_row_id_suffix_and_writes_left_child() {
+        let mut bytes = [0_u8; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Interior, Index>::init(&mut bytes, 123);
+        page.insert(b"separator", 88, 7).unwrap();
+
+        {
+            let mut cell = page.cell_mut(0).unwrap();
+            assert_eq!(cell.left_child(), 7);
+            assert_eq!(cell.key(), b"separator");
+            assert_eq!(cell.row_id(), 88);
+
+            cell.set_left_child(19);
+
+            assert_eq!(cell.left_child(), 19);
+            assert_eq!(cell.key(), b"separator");
+            assert_eq!(cell.row_id(), 88);
+        }
+
+        let page = Page::<Read<'_>, Interior, Index>::open(&bytes).unwrap();
+        let cell = page.cell(0).unwrap();
+        assert_eq!(cell.left_child(), 19);
+        assert_eq!(cell.key(), b"separator");
+        assert_eq!(cell.row_id(), 88);
+    }
+
+    #[test]
+    fn table_interior_new_rejects_cells_past_usable_space() {
+        let bytes = [0_u8; PAGE_SIZE];
+        let cell_offset = USABLE_SPACE_END - table_interior::INTERIOR_CELL_SIZE + 1;
+
+        let err = Cell::<CellRead<'_>, Interior, Table>::new(&bytes, cell_offset, 0).unwrap_err();
+
+        assert_eq!(
+            err,
+            PageError::CorruptCell { slot_index: 0, kind: CellCorruption::LengthOutOfBounds }
+        );
     }
 }
