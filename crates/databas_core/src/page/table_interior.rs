@@ -2,7 +2,7 @@ use crate::{PAGE_SIZE, PageId, RowId, SlotId};
 
 use super::{
     PageError, PageResult,
-    cell::{Cell, CellMut},
+    cell::{Cell, CellRead, CellWrite},
     core::{BoundResult, Interior, Page, PageAccess, PageAccessMut, SearchResult, Table},
     format::{self, RIGHTMOST_CHILD_OFFSET},
 };
@@ -38,7 +38,7 @@ where
     pub fn lower_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
         self.lower_bound_slots_by(|page, slot_index| {
             let cell_offset = page.slot_offset(slot_index)? as usize;
-            Ok(Cell::<Interior, Table>::new(page.bytes(), cell_offset, slot_index)?
+            Ok(Cell::<CellRead<'_>, Interior, Table>::new(page.bytes(), cell_offset, slot_index)?
                 .row_id()
                 .cmp(&row_id))
         })
@@ -48,7 +48,7 @@ where
     pub fn upper_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
         self.upper_bound_slots_by(|page, slot_index| {
             let cell_offset = page.slot_offset(slot_index)? as usize;
-            Ok(Cell::<Interior, Table>::new(page.bytes(), cell_offset, slot_index)?
+            Ok(Cell::<CellRead<'_>, Interior, Table>::new(page.bytes(), cell_offset, slot_index)?
                 .row_id()
                 .cmp(&row_id))
         })
@@ -66,20 +66,20 @@ where
     pub fn search(&self, row_id: RowId) -> PageResult<SearchResult> {
         self.search_slots_by(|page, slot_index| {
             let cell_offset = page.slot_offset(slot_index)? as usize;
-            Ok(Cell::<Interior, Table>::new(page.bytes(), cell_offset, slot_index)?
+            Ok(Cell::<CellRead<'_>, Interior, Table>::new(page.bytes(), cell_offset, slot_index)?
                 .row_id()
                 .cmp(&row_id))
         })
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Interior, Table>> {
+    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<CellRead<'_>, Interior, Table>> {
         let cell_offset = self.slot_offset(slot_index)? as usize;
-        Cell::<Interior, Table>::new(self.bytes(), cell_offset, slot_index)
+        Cell::<CellRead<'_>, Interior, Table>::new(self.bytes(), cell_offset, slot_index)
     }
 
     /// Looks up a separator key and returns its cell if present.
-    pub fn lookup(&self, row_id: RowId) -> PageResult<Option<Cell<'_, Interior, Table>>> {
+    pub fn lookup(&self, row_id: RowId) -> PageResult<Option<Cell<CellRead<'_>, Interior, Table>>> {
         match self.search(row_id)? {
             SearchResult::Found(slot_index) => self.cell(slot_index).map(Some),
             SearchResult::InsertAt(_) => Ok(None),
@@ -97,9 +97,12 @@ where
     }
 
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Interior, Table>> {
+    pub fn cell_mut(
+        &mut self,
+        slot_index: SlotId,
+    ) -> PageResult<Cell<CellWrite<'_>, Interior, Table>> {
         let cell_offset = self.slot_offset(slot_index)? as usize;
-        CellMut::<Interior, Table>::new(self.bytes_mut(), cell_offset, slot_index)
+        Cell::<CellWrite<'_>, Interior, Table>::new(self.bytes_mut(), cell_offset, slot_index)
     }
 
     /// Inserts a new separator key and its left-child pointer while preserving slot order.

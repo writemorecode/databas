@@ -1,7 +1,7 @@
-use core::marker::PhantomData;
+use core::{marker::PhantomData, mem::size_of};
 use std::cmp::Ordering;
 
-use crate::{PAGE_SIZE, PageId, SlotId};
+use crate::{PAGE_SIZE, PageId, RowId, SlotId};
 
 use super::{
     error::{PageCorruption, PageError, PageResult},
@@ -403,18 +403,32 @@ where
     {
         let cell_offset = self.slot_offset(slot_index)? as usize;
         match page_kind::<N, T>() {
-            format::PageKind::TableLeaf => {
-                super::cell::table_leaf_cell_len_at(self.bytes(), slot_index, cell_offset)
-            }
+            format::PageKind::TableLeaf => super::cell::checked_variable_cell_bounds(
+                self.bytes(),
+                cell_offset,
+                slot_index,
+                super::table_leaf::LEAF_CELL_PREFIX_SIZE,
+            )
+            .map(|(cell_len, _)| cell_len),
             format::PageKind::TableInterior => {
-                super::cell::table_interior_cell_len_at(self.bytes(), slot_index, cell_offset)
+                let cell_len = super::table_interior::INTERIOR_CELL_SIZE;
+                super::cell::checked_cell_end(cell_offset, cell_len, slot_index)?;
+                Ok(cell_len)
             }
-            format::PageKind::IndexLeaf => {
-                super::cell::index_leaf_cell_len_at(self.bytes(), slot_index, cell_offset)
-            }
-            format::PageKind::IndexInterior => {
-                super::cell::index_interior_cell_len_at(self.bytes(), slot_index, cell_offset)
-            }
+            format::PageKind::IndexLeaf => super::cell::checked_variable_cell_bounds(
+                self.bytes(),
+                cell_offset,
+                slot_index,
+                super::index_leaf::INDEX_LEAF_CELL_PREFIX_SIZE,
+            )
+            .map(|(cell_len, _)| cell_len),
+            format::PageKind::IndexInterior => super::cell::checked_variable_cell_bounds(
+                self.bytes(),
+                cell_offset,
+                slot_index,
+                super::index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE + size_of::<RowId>(),
+            )
+            .map(|(cell_len, _)| cell_len),
         }
     }
 }

@@ -4,7 +4,7 @@ use crate::{PAGE_SIZE, PageId, RowId, SlotId};
 
 use super::{
     PageError, PageResult,
-    cell::{Cell, CellMut},
+    cell::{Cell, CellRead, CellWrite},
     core::{BoundResult, Index, Interior, Page, PageAccess, PageAccessMut},
     format::{self, CELL_LENGTH_SIZE, RIGHTMOST_CHILD_OFFSET},
 };
@@ -52,7 +52,9 @@ where
     A: PageAccess,
 {
     let cell_offset = page.slot_offset(slot_index)? as usize;
-    Ok(Cell::<Interior, Index>::new(page.bytes(), cell_offset, slot_index)?.key().cmp(key))
+    Ok(Cell::<CellRead<'_>, Interior, Index>::new(page.bytes(), cell_offset, slot_index)?
+        .key()
+        .cmp(key))
 }
 
 fn compare_entry<A>(
@@ -65,7 +67,7 @@ where
     A: PageAccess,
 {
     let cell_offset = page.slot_offset(slot_index)? as usize;
-    let cell = Cell::<Interior, Index>::new(page.bytes(), cell_offset, slot_index)?;
+    let cell = Cell::<CellRead<'_>, Interior, Index>::new(page.bytes(), cell_offset, slot_index)?;
     let ordering = cell.key().cmp(key);
     Ok(if ordering == Ordering::Equal { cell.row_id().cmp(&row_id) } else { ordering })
 }
@@ -111,9 +113,9 @@ where
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Interior, Index>> {
+    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<CellRead<'_>, Interior, Index>> {
         let cell_offset = self.slot_offset(slot_index)? as usize;
-        Cell::<Interior, Index>::new(self.bytes(), cell_offset, slot_index)
+        Cell::<CellRead<'_>, Interior, Index>::new(self.bytes(), cell_offset, slot_index)
     }
 }
 
@@ -127,9 +129,12 @@ where
     }
 
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Interior, Index>> {
+    pub fn cell_mut(
+        &mut self,
+        slot_index: SlotId,
+    ) -> PageResult<Cell<CellWrite<'_>, Interior, Index>> {
         let cell_offset = self.slot_offset(slot_index)? as usize;
-        CellMut::<Interior, Index>::new(self.bytes_mut(), cell_offset, slot_index)
+        Cell::<CellWrite<'_>, Interior, Index>::new(self.bytes_mut(), cell_offset, slot_index)
     }
 
     /// Inserts a new separator key and its left-child pointer while preserving slot order.

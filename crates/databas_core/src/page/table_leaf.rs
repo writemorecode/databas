@@ -2,7 +2,7 @@ use crate::{PAGE_SIZE, RowId, SlotId};
 
 use super::{
     PageError, PageResult,
-    cell::{Cell, CellMut},
+    cell::{Cell, CellRead, CellWrite},
     core::{BoundResult, Leaf, Page, PageAccess, PageAccessMut, SearchResult, Table},
     format::{self, CELL_LENGTH_SIZE},
 };
@@ -34,7 +34,7 @@ where
     pub fn lower_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
         self.lower_bound_slots_by(|page, slot_index| {
             let cell_offset = page.slot_offset(slot_index)? as usize;
-            Ok(Cell::<Leaf, Table>::new(page.bytes(), cell_offset, slot_index)?
+            Ok(Cell::<CellRead<'_>, Leaf, Table>::new(page.bytes(), cell_offset, slot_index)?
                 .row_id()
                 .cmp(&row_id))
         })
@@ -44,7 +44,7 @@ where
     pub fn upper_bound(&self, row_id: RowId) -> PageResult<BoundResult> {
         self.upper_bound_slots_by(|page, slot_index| {
             let cell_offset = page.slot_offset(slot_index)? as usize;
-            Ok(Cell::<Leaf, Table>::new(page.bytes(), cell_offset, slot_index)?
+            Ok(Cell::<CellRead<'_>, Leaf, Table>::new(page.bytes(), cell_offset, slot_index)?
                 .row_id()
                 .cmp(&row_id))
         })
@@ -54,20 +54,20 @@ where
     pub fn search(&self, row_id: RowId) -> PageResult<SearchResult> {
         self.search_slots_by(|page, slot_index| {
             let cell_offset = page.slot_offset(slot_index)? as usize;
-            Ok(Cell::<Leaf, Table>::new(page.bytes(), cell_offset, slot_index)?
+            Ok(Cell::<CellRead<'_>, Leaf, Table>::new(page.bytes(), cell_offset, slot_index)?
                 .row_id()
                 .cmp(&row_id))
         })
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Leaf, Table>> {
+    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<CellRead<'_>, Leaf, Table>> {
         let cell_offset = self.slot_offset(slot_index)? as usize;
-        Cell::<Leaf, Table>::new(self.bytes(), cell_offset, slot_index)
+        Cell::<CellRead<'_>, Leaf, Table>::new(self.bytes(), cell_offset, slot_index)
     }
 
     /// Looks up a row id and returns its cell if present.
-    pub fn lookup(&self, row_id: RowId) -> PageResult<Option<Cell<'_, Leaf, Table>>> {
+    pub fn lookup(&self, row_id: RowId) -> PageResult<Option<Cell<CellRead<'_>, Leaf, Table>>> {
         match self.search(row_id)? {
             SearchResult::Found(slot_index) => self.cell(slot_index).map(Some),
             SearchResult::InsertAt(_) => Ok(None),
@@ -80,9 +80,9 @@ where
     A: PageAccessMut,
 {
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Leaf, Table>> {
+    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<Cell<CellWrite<'_>, Leaf, Table>> {
         let cell_offset = self.slot_offset(slot_index)? as usize;
-        CellMut::<Leaf, Table>::new(self.bytes_mut(), cell_offset, slot_index)
+        Cell::<CellWrite<'_>, Leaf, Table>::new(self.bytes_mut(), cell_offset, slot_index)
     }
 
     /// Inserts a new `(row_id, payload)` record while preserving slot order.

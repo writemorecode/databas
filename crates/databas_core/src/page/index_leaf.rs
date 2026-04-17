@@ -4,7 +4,7 @@ use crate::{PAGE_SIZE, RowId, SlotId};
 
 use super::{
     PageError, PageResult,
-    cell::{Cell, CellMut},
+    cell::{Cell, CellRead, CellWrite},
     core::{BoundResult, Index, Leaf, Page, PageAccess, PageAccessMut, SearchResult},
     format::{self, CELL_LENGTH_SIZE},
 };
@@ -37,7 +37,9 @@ where
     A: PageAccess,
 {
     let cell_offset = page.slot_offset(slot_index)? as usize;
-    Ok(Cell::<Leaf, Index>::new(page.bytes(), cell_offset, slot_index)?.key().cmp(key))
+    Ok(Cell::<CellRead<'_>, Leaf, Index>::new(page.bytes(), cell_offset, slot_index)?
+        .key()
+        .cmp(key))
 }
 
 fn compare_entry<A>(
@@ -50,7 +52,7 @@ where
     A: PageAccess,
 {
     let cell_offset = page.slot_offset(slot_index)? as usize;
-    let cell = Cell::<Leaf, Index>::new(page.bytes(), cell_offset, slot_index)?;
+    let cell = Cell::<CellRead<'_>, Leaf, Index>::new(page.bytes(), cell_offset, slot_index)?;
     let ordering = cell.key().cmp(key);
     Ok(if ordering == Ordering::Equal { cell.row_id().cmp(&row_id) } else { ordering })
 }
@@ -84,9 +86,9 @@ where
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Leaf, Index>> {
+    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<CellRead<'_>, Leaf, Index>> {
         let cell_offset = self.slot_offset(slot_index)? as usize;
-        Cell::<Leaf, Index>::new(self.bytes(), cell_offset, slot_index)
+        Cell::<CellRead<'_>, Leaf, Index>::new(self.bytes(), cell_offset, slot_index)
     }
 }
 
@@ -95,9 +97,9 @@ where
     A: PageAccessMut,
 {
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Leaf, Index>> {
+    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<Cell<CellWrite<'_>, Leaf, Index>> {
         let cell_offset = self.slot_offset(slot_index)? as usize;
-        CellMut::<Leaf, Index>::new(self.bytes_mut(), cell_offset, slot_index)
+        Cell::<CellWrite<'_>, Leaf, Index>::new(self.bytes_mut(), cell_offset, slot_index)
     }
 
     /// Inserts a new `(key, row_id)` entry while preserving lexicographic key order.

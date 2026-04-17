@@ -13,8 +13,9 @@
 //! invalid combinations harder to express.
 //!
 //! When the concrete page kind is not known ahead of time, use [`AnyPage`] to
-//! inspect an already-initialized byte buffer. [`Cell`] and [`CellMut`] provide
-//! typed access to individual slot entries after lookup.
+//! inspect an already-initialized byte buffer. [`Cell`] provides typed access to
+//! individual slot entries after lookup, parameterized by immutable or mutable
+//! access mode.
 //!
 //! Layout details that are part of the stable page format are re-exported from
 //! [`mod@format`], including header sizes, slot entry width, and the current
