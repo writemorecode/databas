@@ -768,16 +768,13 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
             return Err(PageError::MalformedPage(PageCorruption::CellLengthPrefixOutOfBounds));
         }
 
-        let cell_len = format::read_u16(bytes, slot_offset) as usize;
-        let min_len = match expected_kind.node_kind() {
-            format::NodeKind::Leaf => super::leaf::LEAF_CELL_PREFIX_SIZE,
-            format::NodeKind::Interior => super::interior::INTERIOR_CELL_PREFIX_SIZE,
-        };
-        if cell_len < min_len || slot_offset + cell_len > USABLE_SPACE_END {
-            return Err(PageError::MalformedPage(match expected_kind.node_kind() {
-                format::NodeKind::Leaf => PageCorruption::CellLengthPrefixOutOfBounds,
-                format::NodeKind::Interior => PageCorruption::InteriorCellOutOfBounds,
-            }));
+        match expected_kind.node_kind() {
+            format::NodeKind::Leaf => {
+                let _ = super::leaf::cell_len_at(bytes, slot_index, slot_offset)?;
+            }
+            format::NodeKind::Interior => {
+                let _ = super::interior::cell_len_at(bytes, slot_index, slot_offset)?;
+            }
         }
     }
 
