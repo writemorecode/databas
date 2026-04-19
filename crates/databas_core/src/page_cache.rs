@@ -25,7 +25,7 @@ use std::{
 use crate::{
     disk_manager::DiskManager,
     error::{PageCacheError, PageCacheResult},
-    page::{AnyPage, NodeMarker, Page, PageResult, Read, TreeMarker, Write},
+    page::{NodeMarker, Page, PageResult, Read, Write},
     page_replacement::ClockPolicy,
     {PAGE_SIZE, PageId},
 };
@@ -365,20 +365,6 @@ impl PageReadGuard<'_> {
     {
         Page::<Read<'_>, N>::open(self.page())
     }
-
-    /// Opens a typed immutable view over the page bytes for any node/tree pair.
-    pub(crate) fn open_typed<N, T>(&self) -> PageResult<Page<Read<'_>, N, T>>
-    where
-        N: NodeMarker,
-        T: TreeMarker,
-    {
-        Page::<Read<'_>, N, T>::open(self.page())
-    }
-
-    /// Opens an immutable typed page view based on the encoded page kind.
-    pub(crate) fn open_any(&self) -> PageResult<AnyPage<Read<'_>>> {
-        AnyPage::<Read<'_>>::try_from(self.page())
-    }
 }
 
 /// Mutable page-byte borrow for a pinned frame.
@@ -409,40 +395,12 @@ impl PageWriteGuard<'_> {
         Page::<Read<'_>, N>::open(self.page())
     }
 
-    /// Opens a typed immutable view over the page bytes for any node/tree pair.
-    pub(crate) fn open_typed<N, T>(&self) -> PageResult<Page<Read<'_>, N, T>>
-    where
-        N: NodeMarker,
-        T: TreeMarker,
-    {
-        Page::<Read<'_>, N, T>::open(self.page())
-    }
-
     /// Opens a typed mutable view over the page bytes.
     pub(crate) fn open_mut<N>(&mut self) -> PageResult<Page<Write<'_>, N>>
     where
         N: NodeMarker,
     {
         Page::<Write<'_>, N>::open(self.page_mut())
-    }
-
-    /// Opens a typed mutable view over the page bytes for any node/tree pair.
-    pub(crate) fn open_typed_mut<N, T>(&mut self) -> PageResult<Page<Write<'_>, N, T>>
-    where
-        N: NodeMarker,
-        T: TreeMarker,
-    {
-        Page::<Write<'_>, N, T>::open(self.page_mut())
-    }
-
-    /// Opens an immutable typed page view based on the encoded page kind.
-    pub(crate) fn open_any(&self) -> PageResult<AnyPage<Read<'_>>> {
-        AnyPage::<Read<'_>>::try_from(self.page())
-    }
-
-    /// Opens a mutable typed page view based on the encoded page kind.
-    pub(crate) fn open_any_mut(&mut self) -> PageResult<AnyPage<Write<'_>>> {
-        AnyPage::<Write<'_>>::try_from(self.page_mut())
     }
 }
 
@@ -454,7 +412,7 @@ mod tests {
 
     use super::*;
     use crate::page::format::PageKind;
-    use crate::page::{AnyPage, Leaf, Page, Write};
+    use crate::page::{Leaf, Page, Write};
 
     /// Generates a deterministic page payload from a seed byte.
     fn page_with_pattern(seed: u8) -> [u8; PAGE_SIZE] {
@@ -617,15 +575,12 @@ mod tests {
             let mut write = guard.write().unwrap();
             let _ = Page::<Write<'_>, Leaf>::init(write.page_mut());
 
-            assert_eq!(write.open::<Leaf>().unwrap().kind(), PageKind::TableLeaf);
-            assert!(matches!(write.open_any().unwrap(), AnyPage::TableLeaf(_)));
-            assert_eq!(write.open_mut::<Leaf>().unwrap().kind(), PageKind::TableLeaf);
-            assert!(matches!(write.open_any_mut().unwrap(), AnyPage::TableLeaf(_)));
+            assert_eq!(write.open::<Leaf>().unwrap().kind(), PageKind::RawLeaf);
+            assert_eq!(write.open_mut::<Leaf>().unwrap().kind(), PageKind::RawLeaf);
         }
 
         let read = guard.read().unwrap();
-        assert_eq!(read.open::<Leaf>().unwrap().kind(), PageKind::TableLeaf);
-        assert!(matches!(read.open_any().unwrap(), AnyPage::TableLeaf(_)));
+        assert_eq!(read.open::<Leaf>().unwrap().kind(), PageKind::RawLeaf);
     }
 
     #[test]

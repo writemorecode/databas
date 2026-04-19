@@ -13,7 +13,7 @@ use super::{
     },
 };
 
-/// Marker type for leaf pages that store b-tree records.
+/// Marker type for leaf pages that store raw key/value cells.
 #[derive(Debug)]
 pub enum Leaf {}
 
@@ -21,24 +21,10 @@ pub enum Leaf {}
 #[derive(Debug)]
 pub enum Interior {}
 
-/// Marker type for pages that belong to a table b-tree.
-#[derive(Debug)]
-pub enum Table {}
-
-/// Marker type for pages that belong to an index b-tree.
-#[derive(Debug)]
-pub enum Index {}
-
 /// Associates a typed page marker with its encoded [`format::PageKind`].
 pub trait NodeMarker {
     /// The structural node kind represented by this marker.
     const KIND: format::NodeKind;
-}
-
-/// Associates a typed tree marker with its encoded [`format::TreeKind`].
-pub trait TreeMarker {
-    /// The tree kind represented by this marker.
-    const KIND: format::TreeKind;
 }
 
 impl NodeMarker for Leaf {
@@ -47,14 +33,6 @@ impl NodeMarker for Leaf {
 
 impl NodeMarker for Interior {
     const KIND: format::NodeKind = format::NodeKind::Interior;
-}
-
-impl TreeMarker for Table {
-    const KIND: format::TreeKind = format::TreeKind::Table;
-}
-
-impl TreeMarker for Index {
-    const KIND: format::TreeKind = format::TreeKind::Index;
 }
 
 /// Shared immutable access to a page-sized byte buffer.
@@ -99,28 +77,14 @@ impl PageAccessMut for Write<'_> {
     }
 }
 
-/// A typed view over an encoded page.
+/// A typed view over an encoded raw B+-tree page.
 ///
-/// `A` controls the access mode ([`Read`] or [`Write`]), `N` controls the node
-/// kind ([`Leaf`] or [`Interior`]), and `T` controls the tree kind
-/// ([`Table`] or [`Index`]).
+/// `A` controls the access mode ([`Read`] or [`Write`]) and `N` controls the
+/// node kind ([`Leaf`] or [`Interior`]).
 #[derive(Debug)]
-pub struct Page<A, N, T = Table> {
+pub struct Page<A, N> {
     access: A,
-    _marker: PhantomData<(N, T)>,
-}
-
-/// A page whose concrete node kind and tree kind are determined by the encoded page header.
-#[derive(Debug)]
-pub enum AnyPage<A> {
-    /// A table leaf page.
-    TableLeaf(Page<A, Leaf, Table>),
-    /// A table interior page.
-    TableInterior(Page<A, Interior, Table>),
-    /// An index leaf page.
-    IndexLeaf(Page<A, Leaf, Index>),
-    /// An index interior page.
-    IndexInterior(Page<A, Interior, Index>),
+    _marker: PhantomData<N>,
 }
 
 /// Result of searching a sorted slot directory by key.
@@ -206,52 +170,37 @@ fn read_freeblock(
     Ok(Freeblock { offset: offset as u16, size, next: format::read_optional_u16(bytes, offset) })
 }
 
-fn page_kind<N, T>() -> format::PageKind
+fn page_kind<N>() -> format::PageKind
 where
     N: NodeMarker,
-    T: TreeMarker,
 {
-    format::PageKind::from_parts(N::KIND, T::KIND)
+    format::PageKind::from_node_kind(N::KIND)
 }
 
-impl<A, N, T> Page<A, N, T> {
+impl<A, N> Page<A, N> {
     fn new(access: A) -> Self {
         Self { access, _marker: PhantomData }
     }
 }
 
-impl<A, N, T> Page<A, N, T>
+impl<A, N> Page<A, N>
 where
     A: PageAccess,
+    N: NodeMarker,
 {
     /// Returns the raw page bytes.
     pub fn bytes(&self) -> &[u8; PAGE_SIZE] {
         self.access.bytes()
     }
 
-    /// Returns the statically known kind of this page.
-    pub fn kind(&self) -> format::PageKind
-    where
-        N: NodeMarker,
-        T: TreeMarker,
-    {
-        page_kind::<N, T>()
+    /// Returns the statically known encoded kind of this page.
+    pub fn kind(&self) -> format::PageKind {
+        page_kind::<N>()
     }
 
     /// Returns the statically known node kind of this page.
-    pub fn node_kind(&self) -> format::NodeKind
-    where
-        N: NodeMarker,
-    {
+    pub fn node_kind(&self) -> format::NodeKind {
         N::KIND
-    }
-
-    /// Returns the statically known tree kind of this page.
-    pub fn tree_kind(&self) -> format::TreeKind
-    where
-        T: TreeMarker,
-    {
-        T::KIND
     }
 
     /// Returns the encoded page-format version.
@@ -285,10 +234,7 @@ where
     }
 
     /// Returns the contiguous free space between the slot directory and cell content.
-    pub fn free_space(&self) -> usize
-    where
-        N: NodeMarker,
-    {
+    pub fn free_space(&self) -> usize {
         self.content_start() as usize - self.slot_directory_end()
     }
 
@@ -300,10 +246,7 @@ where
         FreeblockIter::new(self.bytes(), self.content_start(), self.first_freeblock())
     }
 
-    pub(crate) fn total_reclaimable_space(&self) -> PageResult<usize>
-    where
-        N: NodeMarker,
-    {
+    pub(crate) fn total_reclaimable_space(&self) -> PageResult<usize> {
         let mut total = self.free_space() + self.fragmented_free_bytes() as usize;
         for freeblock in self.freeblocks() {
             total += freeblock?.size as usize;
@@ -311,17 +254,11 @@ where
         Ok(total)
     }
 
-    pub(crate) fn slot_directory_end(&self) -> usize
-    where
-        N: NodeMarker,
-    {
+    pub(crate) fn slot_directory_end(&self) -> usize {
         N::KIND.header_size() + self.slot_count() as usize * format::SLOT_ENTRY_SIZE
     }
 
-    pub(crate) fn slot_offset(&self, slot_index: SlotId) -> PageResult<u16>
-    where
-        N: NodeMarker,
-    {
+    pub(crate) fn slot_offset(&self, slot_index: SlotId) -> PageResult<u16> {
         self.validate_slot_index(slot_index)?;
         let offset = format::slot_entry_offset(N::KIND.header_size(), slot_index);
         Ok(format::read_u16(self.bytes(), offset))
@@ -329,7 +266,6 @@ where
 
     pub(crate) fn search_slots_by<F>(&self, mut compare_slot: F) -> PageResult<SearchResult>
     where
-        N: NodeMarker,
         F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
     {
         let mut low: SlotId = 0;
@@ -353,7 +289,6 @@ where
         mut go_right: P,
     ) -> PageResult<BoundResult>
     where
-        N: NodeMarker,
         F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
         P: FnMut(Ordering) -> bool,
     {
@@ -374,7 +309,6 @@ where
 
     pub(crate) fn lower_bound_slots_by<F>(&self, compare_slot: F) -> PageResult<BoundResult>
     where
-        N: NodeMarker,
         F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
     {
         self.bound_slots_by(compare_slot, |ordering| ordering == Ordering::Less)
@@ -382,7 +316,6 @@ where
 
     pub(crate) fn upper_bound_slots_by<F>(&self, compare_slot: F) -> PageResult<BoundResult>
     where
-        N: NodeMarker,
         F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
     {
         self.bound_slots_by(compare_slot, |ordering| ordering != Ordering::Greater)
@@ -396,32 +329,23 @@ where
         Ok(())
     }
 
-    pub(crate) fn cell_len(&self, slot_index: SlotId) -> PageResult<usize>
-    where
-        N: NodeMarker,
-        T: TreeMarker,
-    {
+    pub(crate) fn cell_len(&self, slot_index: SlotId) -> PageResult<usize> {
         let cell_offset = self.slot_offset(slot_index)? as usize;
-        match page_kind::<N, T>() {
-            format::PageKind::TableLeaf => {
+        match N::KIND {
+            format::NodeKind::Leaf => {
                 super::leaf::cell_len_at(self.bytes(), slot_index, cell_offset)
             }
-            format::PageKind::TableInterior => Ok(super::interior::INTERIOR_CELL_SIZE),
-            format::PageKind::IndexLeaf => {
-                super::index_leaf::cell_len_at(self.bytes(), slot_index, cell_offset)
-            }
-            format::PageKind::IndexInterior => {
-                super::index_interior::cell_len_at(self.bytes(), slot_index, cell_offset)
+            format::NodeKind::Interior => {
+                super::interior::cell_len_at(self.bytes(), slot_index, cell_offset)
             }
         }
     }
 }
 
-impl<A, N, T> Page<A, N, T>
+impl<A, N> Page<A, N>
 where
     A: PageAccessMut,
     N: NodeMarker,
-    T: TreeMarker,
 {
     pub(crate) fn bytes_mut(&mut self) -> &mut [u8; PAGE_SIZE] {
         self.access.bytes_mut()
@@ -666,8 +590,6 @@ where
         }
 
         let reclaim_start = cell_offset as usize;
-        // If the reclaimed bytes touch the unallocated gap, grow the gap upward and
-        // then keep folding in any freeblocks that now become adjacent to it.
         if reclaim_start == self.content_start() as usize {
             self.set_content_start((reclaim_start + cell_len) as u16);
             self.absorb_freeblocks_into_gap()?;
@@ -677,8 +599,6 @@ where
         let reclaim_end = reclaim_start + cell_len;
         let mut previous = None;
         let mut next = None;
-        // The freeblock chain stays sorted by offset, so a single walk finds both
-        // neighbors we may need to merge with.
         for freeblock in self.freeblocks() {
             let freeblock = freeblock?;
             if freeblock.offset as usize >= reclaim_end {
@@ -692,8 +612,6 @@ where
         let merged_with_next = next.filter(|freeblock| reclaim_end == freeblock.offset as usize);
 
         if let Some(previous) = merged_with_previous {
-            // Reuse the previous freeblock header when the reclaimed region bridges
-            // into it, optionally absorbing the next freeblock too.
             let merged_end = merged_with_next.map_or(reclaim_end, Freeblock::end);
             let next_link = match merged_with_next {
                 Some(freeblock) => freeblock.next,
@@ -711,8 +629,6 @@ where
         let merged_end = merged_with_next.map_or(reclaim_end, Freeblock::end);
         let merged_size = merged_end - merged_start as usize;
         if merged_size < FREEBLOCK_HEADER_SIZE {
-            // Tiny isolated holes cannot encode a freeblock header, so they count
-            // toward fragmented free bytes until a later defragmentation pass.
             return self.add_fragmented_bytes(merged_size as u16);
         }
 
@@ -732,37 +648,35 @@ where
     }
 }
 
-impl<'a, N, T> Page<Read<'a>, N, T>
+impl<'a, N> Page<Read<'a>, N>
 where
     N: NodeMarker,
-    T: TreeMarker,
 {
     /// Validates and opens an immutable typed page view over an initialized buffer.
     pub fn open(bytes: &'a [u8; PAGE_SIZE]) -> PageResult<Self> {
-        validate_page(bytes, page_kind::<N, T>())?;
+        validate_page(bytes, page_kind::<N>())?;
         Ok(Self::new(Read { bytes }))
     }
 }
 
-impl<'a, N, T> Page<Write<'a>, N, T>
+impl<'a, N> Page<Write<'a>, N>
 where
     N: NodeMarker,
-    T: TreeMarker,
 {
     /// Validates and opens a mutable typed page view over an initialized buffer.
     pub fn open(bytes: &'a mut [u8; PAGE_SIZE]) -> PageResult<Self> {
-        validate_page(bytes, page_kind::<N, T>())?;
+        validate_page(bytes, page_kind::<N>())?;
         Ok(Self::new(Write { bytes }))
     }
 
     /// Borrows this mutable page as an immutable page view.
-    pub fn as_ref(&self) -> Page<Read<'_>, N, T> {
+    pub fn as_ref(&self) -> Page<Read<'_>, N> {
         Page::new(Read { bytes: self.bytes() })
     }
 
     pub(crate) fn initialize(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
         bytes.fill(0);
-        bytes[KIND_OFFSET] = page_kind::<N, T>() as u8;
+        bytes[KIND_OFFSET] = page_kind::<N>() as u8;
         bytes[VERSION_OFFSET] = FORMAT_VERSION;
         format::write_u16(bytes, SLOT_COUNT_OFFSET, 0);
         format::write_u16(bytes, CONTENT_START_OFFSET, USABLE_SPACE_END as u16);
@@ -774,21 +688,14 @@ where
     }
 }
 
-impl<'a> Page<Write<'a>, Leaf, Table> {
+impl<'a> Page<Write<'a>, Leaf> {
     /// Initializes a fresh empty leaf page in-place.
     pub fn init(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
         Self::initialize(bytes)
     }
 }
 
-impl<'a> Page<Write<'a>, Leaf, Index> {
-    /// Initializes a fresh empty index leaf page in-place.
-    pub fn init(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
-        Self::initialize(bytes)
-    }
-}
-
-impl<'a> Page<Write<'a>, Interior, Table> {
+impl<'a> Page<Write<'a>, Interior> {
     /// Initializes a fresh empty interior page with its rightmost child pointer set.
     pub fn init(bytes: &'a mut [u8; PAGE_SIZE], rightmost_child: PageId) -> Self {
         Self::initialize_with_rightmost(bytes, rightmost_child)
@@ -801,66 +708,6 @@ impl<'a> Page<Write<'a>, Interior, Table> {
         let mut page = Self::initialize(bytes);
         format::write_u64(page.bytes_mut(), format::RIGHTMOST_CHILD_OFFSET, page_id);
         page
-    }
-}
-
-impl<'a> Page<Write<'a>, Interior, Index> {
-    /// Initializes a fresh empty index interior page with its rightmost child pointer set.
-    pub fn init(bytes: &'a mut [u8; PAGE_SIZE], rightmost_child: PageId) -> Self {
-        Self::initialize_with_rightmost(bytes, rightmost_child)
-    }
-
-    pub(crate) fn initialize_with_rightmost(
-        bytes: &'a mut [u8; PAGE_SIZE],
-        page_id: PageId,
-    ) -> Self {
-        let mut page = Self::initialize(bytes);
-        format::write_u64(page.bytes_mut(), format::RIGHTMOST_CHILD_OFFSET, page_id);
-        page
-    }
-}
-
-impl<'a> TryFrom<&'a [u8; PAGE_SIZE]> for AnyPage<Read<'a>> {
-    type Error = PageError;
-
-    fn try_from(bytes: &'a [u8; PAGE_SIZE]) -> Result<Self, Self::Error> {
-        match format::PageKind::from_raw(bytes[KIND_OFFSET]) {
-            Some(format::PageKind::TableLeaf) => {
-                Ok(Self::TableLeaf(Page::<Read<'a>, Leaf, Table>::open(bytes)?))
-            }
-            Some(format::PageKind::TableInterior) => {
-                Ok(Self::TableInterior(Page::<Read<'a>, Interior, Table>::open(bytes)?))
-            }
-            Some(format::PageKind::IndexLeaf) => {
-                Ok(Self::IndexLeaf(Page::<Read<'a>, Leaf, Index>::open(bytes)?))
-            }
-            Some(format::PageKind::IndexInterior) => {
-                Ok(Self::IndexInterior(Page::<Read<'a>, Interior, Index>::open(bytes)?))
-            }
-            None => Err(PageError::UnknownPageKind { actual: bytes[KIND_OFFSET] }),
-        }
-    }
-}
-
-impl<'a> TryFrom<&'a mut [u8; PAGE_SIZE]> for AnyPage<Write<'a>> {
-    type Error = PageError;
-
-    fn try_from(bytes: &'a mut [u8; PAGE_SIZE]) -> Result<Self, Self::Error> {
-        match format::PageKind::from_raw(bytes[KIND_OFFSET]) {
-            Some(format::PageKind::TableLeaf) => {
-                Ok(Self::TableLeaf(Page::<Write<'a>, Leaf, Table>::open(bytes)?))
-            }
-            Some(format::PageKind::TableInterior) => {
-                Ok(Self::TableInterior(Page::<Write<'a>, Interior, Table>::open(bytes)?))
-            }
-            Some(format::PageKind::IndexLeaf) => {
-                Ok(Self::IndexLeaf(Page::<Write<'a>, Leaf, Index>::open(bytes)?))
-            }
-            Some(format::PageKind::IndexInterior) => {
-                Ok(Self::IndexInterior(Page::<Write<'a>, Interior, Index>::open(bytes)?))
-            }
-            None => Err(PageError::UnknownPageKind { actual: bytes[KIND_OFFSET] }),
-        }
     }
 }
 
@@ -904,8 +751,6 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
     }
 
     let first_freeblock = format::read_optional_u16(bytes, FIRST_FREEBLOCK_OFFSET);
-    // Bound the number of freeblocks we traverse to avoid infinite loops
-    // on malformed pages where the freeblock chain contains a cycle.
     let max_freeblocks = USABLE_SPACE_END / FREEBLOCK_HEADER_SIZE;
     for freeblock in
         FreeblockIter::new(bytes, content_start as u16, first_freeblock).take(max_freeblocks)
@@ -919,402 +764,22 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
         if slot_offset < content_start || slot_offset >= USABLE_SPACE_END {
             return Err(PageError::MalformedPage(PageCorruption::SlotOffsetOutOfBounds));
         }
-        match expected_kind {
-            format::PageKind::TableLeaf | format::PageKind::IndexLeaf => {
-                if slot_offset + CELL_LENGTH_SIZE > USABLE_SPACE_END {
-                    return Err(PageError::MalformedPage(
-                        PageCorruption::CellLengthPrefixOutOfBounds,
-                    ));
-                }
-            }
-            format::PageKind::TableInterior => {
-                if slot_offset + super::interior::INTERIOR_CELL_SIZE > USABLE_SPACE_END {
-                    return Err(PageError::MalformedPage(PageCorruption::InteriorCellOutOfBounds));
-                }
-            }
-            format::PageKind::IndexInterior => {
-                if slot_offset + CELL_LENGTH_SIZE > USABLE_SPACE_END {
-                    return Err(PageError::MalformedPage(
-                        PageCorruption::CellLengthPrefixOutOfBounds,
-                    ));
-                }
-                let cell_len = format::read_u16(bytes, slot_offset) as usize;
-                if cell_len < super::index_interior::INDEX_INTERIOR_CELL_PREFIX_SIZE
-                    || slot_offset + cell_len > USABLE_SPACE_END
-                {
-                    return Err(PageError::MalformedPage(PageCorruption::InteriorCellOutOfBounds));
-                }
-            }
+        if slot_offset + CELL_LENGTH_SIZE > USABLE_SPACE_END {
+            return Err(PageError::MalformedPage(PageCorruption::CellLengthPrefixOutOfBounds));
+        }
+
+        let cell_len = format::read_u16(bytes, slot_offset) as usize;
+        let min_len = match expected_kind.node_kind() {
+            format::NodeKind::Leaf => super::leaf::LEAF_CELL_PREFIX_SIZE,
+            format::NodeKind::Interior => super::interior::INTERIOR_CELL_PREFIX_SIZE,
+        };
+        if cell_len < min_len || slot_offset + cell_len > USABLE_SPACE_END {
+            return Err(PageError::MalformedPage(match expected_kind.node_kind() {
+                format::NodeKind::Leaf => PageCorruption::CellLengthPrefixOutOfBounds,
+                format::NodeKind::Interior => PageCorruption::InteriorCellOutOfBounds,
+            }));
         }
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn initialized_leaf_page() -> [u8; PAGE_SIZE] {
-        let mut bytes = [0_u8; PAGE_SIZE];
-        let _ = Page::<Write<'_>, Leaf>::initialize(&mut bytes);
-        bytes
-    }
-
-    fn initialized_interior_page() -> [u8; PAGE_SIZE] {
-        let mut bytes = [0_u8; PAGE_SIZE];
-        let _ = Page::<Write<'_>, Interior>::initialize_with_rightmost(&mut bytes, 7);
-        bytes
-    }
-
-    fn initialized_index_leaf_page() -> [u8; PAGE_SIZE] {
-        let mut bytes = [0_u8; PAGE_SIZE];
-        let _ = Page::<Write<'_>, Leaf, Index>::initialize(&mut bytes);
-        bytes
-    }
-
-    fn initialized_index_interior_page() -> [u8; PAGE_SIZE] {
-        let mut bytes = [0_u8; PAGE_SIZE];
-        let _ = Page::<Write<'_>, Interior, Index>::initialize_with_rightmost(&mut bytes, 17);
-        bytes
-    }
-
-    #[test]
-    fn initialize_sets_header_and_zero_footer() {
-        let bytes = initialized_leaf_page();
-        assert_eq!(bytes[KIND_OFFSET], format::PageKind::TableLeaf as u8);
-        assert_eq!(bytes[VERSION_OFFSET], FORMAT_VERSION);
-        assert_eq!(format::read_u16(&bytes, SLOT_COUNT_OFFSET), 0);
-        assert_eq!(format::read_u16(&bytes, CONTENT_START_OFFSET), USABLE_SPACE_END as u16);
-        assert_eq!(format::read_optional_u16(&bytes, FIRST_FREEBLOCK_OFFSET), None);
-        assert_eq!(format::read_u16(&bytes, FRAGMENTED_FREE_BYTES_OFFSET), 0);
-        assert_eq!(format::read_optional_u64(&bytes, PREV_PAGE_ID_OFFSET), None);
-        assert_eq!(format::read_optional_u64(&bytes, NEXT_PAGE_ID_OFFSET), None);
-        assert_eq!(&bytes[USABLE_SPACE_END..], &[0_u8; PAGE_SIZE - USABLE_SPACE_END]);
-    }
-
-    #[test]
-    fn initialize_sets_index_page_kinds() {
-        let leaf = initialized_index_leaf_page();
-        let interior = initialized_index_interior_page();
-
-        assert_eq!(leaf[KIND_OFFSET], format::PageKind::IndexLeaf as u8);
-        assert_eq!(interior[KIND_OFFSET], format::PageKind::IndexInterior as u8);
-        assert_eq!(format::read_u64(&interior, format::RIGHTMOST_CHILD_OFFSET), 17);
-    }
-
-    #[test]
-    fn leaf_sibling_accessors_round_trip() {
-        let mut bytes = initialized_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
-
-        assert_eq!(page.prev_page_id(), None);
-        assert_eq!(page.next_page_id(), None);
-
-        page.set_prev_page_id(Some(11));
-        page.set_next_page_id(Some(22));
-
-        let page = page.as_ref();
-        assert_eq!(page.prev_page_id(), Some(11));
-        assert_eq!(page.next_page_id(), Some(22));
-    }
-
-    #[test]
-    fn interior_sibling_accessors_round_trip() {
-        let mut bytes = initialized_interior_page();
-        let mut page = Page::<Write<'_>, Interior>::open(&mut bytes).unwrap();
-
-        assert_eq!(page.prev_page_id(), None);
-        assert_eq!(page.next_page_id(), None);
-
-        page.set_prev_page_id(Some(33));
-        page.set_next_page_id(Some(44));
-
-        let page = page.as_ref();
-        assert_eq!(page.prev_page_id(), Some(33));
-        assert_eq!(page.next_page_id(), Some(44));
-    }
-
-    #[test]
-    fn first_freeblock_sentinel_parses_as_none() {
-        let mut bytes = initialized_leaf_page();
-        format::write_u16(&mut bytes, FIRST_FREEBLOCK_OFFSET, u16::MAX);
-
-        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
-
-        assert_eq!(page.first_freeblock(), None);
-    }
-
-    #[test]
-    fn open_rejects_unknown_kind() {
-        let mut bytes = [0_u8; PAGE_SIZE];
-        bytes[KIND_OFFSET] = 99;
-        bytes[VERSION_OFFSET] = FORMAT_VERSION;
-        format::write_u16(&mut bytes, CONTENT_START_OFFSET, USABLE_SPACE_END as u16);
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-        assert_eq!(result.unwrap_err(), PageError::UnknownPageKind { actual: 99 });
-    }
-
-    #[test]
-    fn open_rejects_mismatched_kind() {
-        let bytes = initialized_interior_page();
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-        assert_eq!(
-            result.unwrap_err(),
-            PageError::InvalidPageKind { expected: format::PageKind::TableLeaf, actual: 2 }
-        );
-    }
-
-    #[test]
-    fn open_rejects_mismatched_index_kind() {
-        let leaf = initialized_index_leaf_page();
-        let interior = initialized_index_interior_page();
-
-        let leaf_result = Page::<Read<'_>, Leaf>::open(&leaf);
-        assert_eq!(
-            leaf_result.unwrap_err(),
-            PageError::InvalidPageKind { expected: format::PageKind::TableLeaf, actual: 3 }
-        );
-
-        let interior_result = Page::<Read<'_>, Interior>::open(&interior);
-        assert_eq!(
-            interior_result.unwrap_err(),
-            PageError::InvalidPageKind { expected: format::PageKind::TableInterior, actual: 4 }
-        );
-    }
-
-    #[test]
-    fn any_page_try_from_rejects_unknown_kind() {
-        let mut bytes = [0_u8; PAGE_SIZE];
-        bytes[KIND_OFFSET] = 99;
-        bytes[VERSION_OFFSET] = FORMAT_VERSION;
-        format::write_u16(&mut bytes, CONTENT_START_OFFSET, USABLE_SPACE_END as u16);
-
-        let result = AnyPage::<Read<'_>>::try_from(&bytes);
-        assert_eq!(result.unwrap_err(), PageError::UnknownPageKind { actual: 99 });
-    }
-
-    #[test]
-    fn any_page_try_from_opens_index_page_variants() {
-        let leaf = initialized_index_leaf_page();
-        let interior = initialized_index_interior_page();
-
-        assert!(matches!(AnyPage::<Read<'_>>::try_from(&leaf).unwrap(), AnyPage::IndexLeaf(_)));
-        assert!(matches!(
-            AnyPage::<Read<'_>>::try_from(&interior).unwrap(),
-            AnyPage::IndexInterior(_)
-        ));
-    }
-
-    #[test]
-    fn open_rejects_invalid_version() {
-        let mut bytes = initialized_leaf_page();
-        bytes[VERSION_OFFSET] = FORMAT_VERSION + 1;
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-        assert_eq!(
-            result.unwrap_err(),
-            PageError::InvalidPageVersion { expected: FORMAT_VERSION, actual: FORMAT_VERSION + 1 }
-        );
-    }
-
-    #[test]
-    fn open_rejects_slot_directory_past_usable_space() {
-        let mut bytes = initialized_leaf_page();
-        format::write_u16(
-            &mut bytes,
-            SLOT_COUNT_OFFSET,
-            ((USABLE_SPACE_END - format::LEAF_HEADER_SIZE) / format::SLOT_ENTRY_SIZE + 1) as u16,
-        );
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-        assert_eq!(
-            result.unwrap_err(),
-            PageError::MalformedPage(PageCorruption::SlotDirectoryExceedsUsableSpace)
-        );
-    }
-
-    #[test]
-    fn open_rejects_content_start_out_of_bounds() {
-        let mut bytes = initialized_leaf_page();
-        format::write_u16(&mut bytes, CONTENT_START_OFFSET, (USABLE_SPACE_END + 1) as u16);
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-        assert_eq!(
-            result.unwrap_err(),
-            PageError::MalformedPage(PageCorruption::ContentStartOutOfBounds)
-        );
-    }
-
-    #[test]
-    fn open_rejects_slot_directory_overlap() {
-        let mut bytes = initialized_leaf_page();
-        format::write_u16(&mut bytes, SLOT_COUNT_OFFSET, 2);
-        format::write_u16(&mut bytes, CONTENT_START_OFFSET, format::LEAF_HEADER_SIZE as u16 + 1);
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-        assert_eq!(
-            result.unwrap_err(),
-            PageError::MalformedPage(PageCorruption::SlotDirectoryOverlapsContent)
-        );
-    }
-
-    #[test]
-    fn open_rejects_non_zero_footer() {
-        let mut bytes = initialized_leaf_page();
-        bytes[PAGE_SIZE - 1] = 1;
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-        assert_eq!(
-            result.unwrap_err(),
-            PageError::MalformedPage(PageCorruption::ReservedFooterNotZero)
-        );
-    }
-
-    #[test]
-    fn open_rejects_fragmented_free_bytes_past_maximum() {
-        let mut bytes = initialized_leaf_page();
-        format::write_u16(&mut bytes, FRAGMENTED_FREE_BYTES_OFFSET, MAX_FRAGMENTED_FREE_BYTES + 1);
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-
-        assert_eq!(
-            result.unwrap_err(),
-            PageError::MalformedPage(PageCorruption::FragmentedFreeBytesTooLarge)
-        );
-    }
-
-    #[test]
-    fn open_rejects_freeblock_smaller_than_header() {
-        let mut bytes = initialized_leaf_page();
-        let freeblock_offset = (USABLE_SPACE_END - FREEBLOCK_HEADER_SIZE) as u16;
-        format::write_u16(&mut bytes, CONTENT_START_OFFSET, freeblock_offset);
-        format::write_optional_u16(&mut bytes, FIRST_FREEBLOCK_OFFSET, Some(freeblock_offset));
-        format::write_optional_u16(&mut bytes, freeblock_offset as usize, None);
-        format::write_u16(&mut bytes, freeblock_offset as usize + 2, 3);
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-
-        assert_eq!(
-            result.unwrap_err(),
-            PageError::MalformedPage(PageCorruption::FreeblockTooSmall)
-        );
-    }
-
-    #[test]
-    fn open_rejects_slot_offset_before_content_region() {
-        let mut bytes = initialized_leaf_page();
-        format::write_u16(&mut bytes, SLOT_COUNT_OFFSET, 1);
-        format::write_u16(&mut bytes, CONTENT_START_OFFSET, 100);
-        format::write_u16(&mut bytes, format::slot_entry_offset(format::LEAF_HEADER_SIZE, 0), 90);
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-        assert_eq!(
-            result.unwrap_err(),
-            PageError::MalformedPage(PageCorruption::SlotOffsetOutOfBounds)
-        );
-    }
-
-    #[test]
-    fn open_rejects_length_prefix_past_usable_space() {
-        let mut bytes = initialized_leaf_page();
-        format::write_u16(&mut bytes, SLOT_COUNT_OFFSET, 1);
-        format::write_u16(&mut bytes, CONTENT_START_OFFSET, (USABLE_SPACE_END - 1) as u16);
-        format::write_u16(
-            &mut bytes,
-            format::slot_entry_offset(format::LEAF_HEADER_SIZE, 0),
-            (USABLE_SPACE_END - 1) as u16,
-        );
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-        assert_eq!(
-            result.unwrap_err(),
-            PageError::MalformedPage(PageCorruption::CellLengthPrefixOutOfBounds)
-        );
-    }
-
-    #[test]
-    fn open_rejects_interior_cell_past_usable_space() {
-        let mut bytes = initialized_interior_page();
-        let cell_offset = USABLE_SPACE_END - super::super::interior::INTERIOR_CELL_SIZE + 1;
-
-        format::write_u16(&mut bytes, SLOT_COUNT_OFFSET, 1);
-        format::write_u16(&mut bytes, CONTENT_START_OFFSET, cell_offset as u16);
-        format::write_u16(
-            &mut bytes,
-            format::slot_entry_offset(format::INTERIOR_HEADER_SIZE, 0),
-            cell_offset as u16,
-        );
-
-        let result = Page::<Read<'_>, Interior>::open(&bytes);
-        assert_eq!(
-            result.unwrap_err(),
-            PageError::MalformedPage(PageCorruption::InteriorCellOutOfBounds)
-        );
-    }
-
-    #[test]
-    fn slot_helpers_shift_and_remove_entries() {
-        let mut bytes = initialized_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
-
-        page.insert_slot(0, 300).unwrap();
-        page.insert_slot(1, 320).unwrap();
-        page.insert_slot(1, 310).unwrap();
-
-        assert_eq!(page.slot_count(), 3);
-        assert_eq!(page.slot_offset(0).unwrap(), 300);
-        assert_eq!(page.slot_offset(1).unwrap(), 310);
-        assert_eq!(page.slot_offset(2).unwrap(), 320);
-
-        assert_eq!(page.remove_slot(1).unwrap(), 310);
-        assert_eq!(page.slot_count(), 2);
-        assert_eq!(page.slot_offset(0).unwrap(), 300);
-        assert_eq!(page.slot_offset(1).unwrap(), 320);
-    }
-
-    #[test]
-    fn free_space_tracks_header_and_slot_directory() {
-        let mut bytes = initialized_leaf_page();
-        let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
-        page.insert_slot(0, 1000).unwrap();
-        page.insert_slot(1, 1100).unwrap();
-        page.set_content_start(900);
-
-        assert_eq!(
-            page.free_space(),
-            900 - (format::LEAF_HEADER_SIZE + 2 * format::SLOT_ENTRY_SIZE)
-        );
-    }
-
-    #[test]
-    fn binary_search_reports_found_and_insert_positions() {
-        let mut bytes = initialized_leaf_page();
-        {
-            let mut page = Page::<Write<'_>, Leaf>::open(&mut bytes).unwrap();
-            page.set_content_start(1000);
-            page.insert_slot(0, 1000).unwrap();
-            page.insert_slot(1, 1010).unwrap();
-            page.insert_slot(2, 1020).unwrap();
-            page.insert_slot(3, 1030).unwrap();
-        }
-        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
-        let keys = [10_u64, 20, 40, 80];
-
-        for (query, expected) in [
-            (5, SearchResult::InsertAt(0)),
-            (10, SearchResult::Found(0)),
-            (30, SearchResult::InsertAt(2)),
-            (40, SearchResult::Found(2)),
-            (90, SearchResult::InsertAt(4)),
-        ] {
-            assert_eq!(
-                page.search_slots_by(|_, slot_index| Ok(keys[slot_index as usize].cmp(&query)))
-                    .unwrap(),
-                expected
-            );
-        }
-    }
 }

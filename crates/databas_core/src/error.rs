@@ -267,10 +267,8 @@ impl From<PageError> for StorageError {
 
 fn page_kind_name(kind: crate::page::format::PageKind) -> &'static str {
     match kind {
-        crate::page::format::PageKind::TableLeaf => "table leaf",
-        crate::page::format::PageKind::TableInterior => "table interior",
-        crate::page::format::PageKind::IndexLeaf => "index leaf",
-        crate::page::format::PageKind::IndexInterior => "index interior",
+        crate::page::format::PageKind::RawLeaf => "raw leaf",
+        crate::page::format::PageKind::RawInterior => "raw interior",
     }
 }
 
