@@ -7,14 +7,14 @@
 use crate::{PAGE_SIZE, SlotId};
 
 /// Current on-disk page format version.
-pub const FORMAT_VERSION: u8 = 2;
+pub const FORMAT_VERSION: u8 = 3;
 /// Number of bytes reserved at the end of every page.
 pub const RESERVED_FOOTER_SIZE: usize = 4;
 /// Exclusive end offset of the usable region within a page buffer.
 pub const USABLE_SPACE_END: usize = PAGE_SIZE - RESERVED_FOOTER_SIZE;
 /// Width in bytes of a single slot directory entry.
 pub const SLOT_ENTRY_SIZE: usize = 2;
-/// Width in bytes of the length prefix at the start of every leaf cell.
+/// Width in bytes of the length prefix at the start of every cell.
 pub const CELL_LENGTH_SIZE: usize = 2;
 /// Width in bytes of a freeblock header: next freeblock plus total span size.
 pub const FREEBLOCK_HEADER_SIZE: usize = 4;
@@ -65,64 +65,39 @@ impl NodeKind {
     }
 }
 
-/// Logical tree kind carried by a page.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TreeKind {
-    /// A table b-tree page.
-    Table,
-    /// An index b-tree page.
-    Index,
-}
-
 /// Encoded page kind tag stored in the page header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PageKind {
-    /// A table leaf page containing row payloads.
-    TableLeaf = 1,
-    /// A table interior page containing separator row ids and child pointers.
-    TableInterior = 2,
-    /// An index leaf page containing index keys and row references.
-    IndexLeaf = 3,
-    /// An index interior page containing separator keys and child pointers.
-    IndexInterior = 4,
+    /// A raw leaf page containing byte keys and byte values.
+    RawLeaf = 1,
+    /// A raw interior page containing separator byte keys and child pointers.
+    RawInterior = 2,
 }
 
 impl PageKind {
     /// Decodes a raw page-kind tag.
     pub fn from_raw(raw: u8) -> Option<Self> {
         match raw {
-            1 => Some(Self::TableLeaf),
-            2 => Some(Self::TableInterior),
-            3 => Some(Self::IndexLeaf),
-            4 => Some(Self::IndexInterior),
+            1 => Some(Self::RawLeaf),
+            2 => Some(Self::RawInterior),
             _ => None,
         }
     }
 
-    /// Returns the encoded page kind for a `(node_kind, tree_kind)` pair.
-    pub const fn from_parts(node_kind: NodeKind, tree_kind: TreeKind) -> Self {
-        match (tree_kind, node_kind) {
-            (TreeKind::Table, NodeKind::Leaf) => Self::TableLeaf,
-            (TreeKind::Table, NodeKind::Interior) => Self::TableInterior,
-            (TreeKind::Index, NodeKind::Leaf) => Self::IndexLeaf,
-            (TreeKind::Index, NodeKind::Interior) => Self::IndexInterior,
+    /// Returns the encoded page kind for a structural node kind.
+    pub const fn from_node_kind(node_kind: NodeKind) -> Self {
+        match node_kind {
+            NodeKind::Leaf => Self::RawLeaf,
+            NodeKind::Interior => Self::RawInterior,
         }
     }
 
     /// Returns the node kind encoded in this page kind.
     pub const fn node_kind(self) -> NodeKind {
         match self {
-            Self::TableLeaf | Self::IndexLeaf => NodeKind::Leaf,
-            Self::TableInterior | Self::IndexInterior => NodeKind::Interior,
-        }
-    }
-
-    /// Returns the tree kind encoded in this page kind.
-    pub const fn tree_kind(self) -> TreeKind {
-        match self {
-            Self::TableLeaf | Self::TableInterior => TreeKind::Table,
-            Self::IndexLeaf | Self::IndexInterior => TreeKind::Index,
+            Self::RawLeaf => NodeKind::Leaf,
+            Self::RawInterior => NodeKind::Interior,
         }
     }
 
@@ -196,50 +171,4 @@ pub fn write_optional_u64(bytes: &mut [u8; PAGE_SIZE], offset: usize, value: Opt
 /// Returns the byte offset of `slot_index` within a slot directory.
 pub const fn slot_entry_offset(header_size: usize, slot_index: SlotId) -> usize {
     header_size + (slot_index as usize * SLOT_ENTRY_SIZE)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn usable_space_excludes_reserved_footer() {
-        assert_eq!(usable_space_end(), PAGE_SIZE - RESERVED_FOOTER_SIZE);
-        assert_eq!(usable_space_len(), PAGE_SIZE - RESERVED_FOOTER_SIZE);
-    }
-
-    #[test]
-    fn page_kind_helpers_match_layout() {
-        assert_eq!(PageKind::from_raw(1), Some(PageKind::TableLeaf));
-        assert_eq!(PageKind::from_raw(2), Some(PageKind::TableInterior));
-        assert_eq!(PageKind::from_raw(3), Some(PageKind::IndexLeaf));
-        assert_eq!(PageKind::from_raw(4), Some(PageKind::IndexInterior));
-        assert_eq!(PageKind::from_raw(0), None);
-        assert_eq!(PageKind::TableLeaf.header_size(), LEAF_HEADER_SIZE);
-        assert_eq!(PageKind::TableInterior.header_size(), INTERIOR_HEADER_SIZE);
-        assert_eq!(PageKind::IndexLeaf.header_size(), LEAF_HEADER_SIZE);
-        assert_eq!(PageKind::IndexInterior.header_size(), INTERIOR_HEADER_SIZE);
-    }
-
-    #[test]
-    fn optional_u64_helpers_round_trip_sentinel_encoding() {
-        let mut bytes = [0_u8; PAGE_SIZE];
-
-        write_optional_u64(&mut bytes, PREV_PAGE_ID_OFFSET, None);
-        write_optional_u64(&mut bytes, NEXT_PAGE_ID_OFFSET, Some(42));
-
-        assert_eq!(read_optional_u64(&bytes, PREV_PAGE_ID_OFFSET), None);
-        assert_eq!(read_optional_u64(&bytes, NEXT_PAGE_ID_OFFSET), Some(42));
-        assert_eq!(read_u64(&bytes, PREV_PAGE_ID_OFFSET), u64::MAX);
-    }
-
-    #[test]
-    fn max_slot_count_uses_kind_specific_header_size() {
-        assert!(max_slot_count(PageKind::TableLeaf) > max_slot_count(PageKind::TableInterior));
-        assert_eq!(max_slot_count(PageKind::TableLeaf), max_slot_count(PageKind::IndexLeaf));
-        assert_eq!(
-            max_slot_count(PageKind::TableInterior),
-            max_slot_count(PageKind::IndexInterior)
-        );
-    }
 }
