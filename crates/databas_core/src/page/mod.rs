@@ -13,9 +13,8 @@
 //! invalid combinations harder to express.
 //!
 //! When the concrete page kind is not known ahead of time, use [`AnyPage`] to
-//! inspect an already-initialized byte buffer. [`Cell`] provides typed access to
-//! individual slot entries after lookup, parameterized by immutable or mutable
-//! access mode.
+//! inspect an already-initialized byte buffer. [`Cell`] and [`CellMut`] provide
+//! typed access to individual slot entries after lookup.
 //!
 //! Layout details that are part of the stable page format are re-exported from
 //! [`mod@format`], including header sizes, slot entry width, and the current
@@ -27,14 +26,11 @@ mod error;
 pub mod format;
 mod index_interior;
 mod index_leaf;
-mod table_interior;
-mod table_leaf;
+mod interior;
+mod leaf;
 
 /// Page handles, marker types, access traits, and search helpers for typed page access.
-pub use core::{
-    AnyPage, BoundResult, Index, Interior, Leaf, NodeMarker, Page, Read, SearchResult, Table,
-    TreeMarker, Write,
-};
+pub use core::{AnyPage, Index, Interior, Leaf, NodeMarker, Page, Read, Table, TreeMarker, Write};
 /// Errors returned while validating or manipulating encoded pages and cells.
 pub(crate) use error::{CellCorruption, PageCorruption, PageError, PageResult};
 
