@@ -7,13 +7,14 @@
 use std::{cell::Cell, fmt, ops::Range, rc::Rc};
 
 use crate::{
-    PAGE_SIZE, PageId,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
     page::{
-        self, BoundResult, PageError, RawInterior, RawLeaf, Read, SearchResult, Write,
-        format::{KIND_OFFSET, PageKind},
+        self,
+        format::{PageKind, KIND_OFFSET},
+        BoundResult, PageError, RawInterior, RawLeaf, Read, SearchResult, Write,
     },
     page_cache::{PageCache, PinGuard},
+    PageId, PAGE_SIZE,
 };
 
 const LEAF_CELL_PREFIX_SIZE: usize = 2 + 2 + 2;
@@ -1094,5 +1095,144 @@ fn expect_page_kind(
             page_id: Some(page_id),
             kind: CorruptionKind::InvalidPageKind { expected: expected_name, actual: raw_kind },
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use fastrand::Rng;
+    use tempfile::NamedTempFile;
+
+    use super::*;
+    use crate::disk_manager::DiskManager;
+    use crate::page::format::USABLE_SPACE_END;
+
+    const KEY_LEN_RANGE: std::ops::RangeInclusive<usize> = 8..=192;
+    const VALUE_LEN_RANGE: std::ops::RangeInclusive<usize> = 8..=512;
+    const MAX_RECORDS: usize = 10_000;
+
+    fn random_bytes(rng: &mut Rng, len: usize) -> Vec<u8> {
+        let mut bytes = vec![0; len];
+        rng.fill(&mut bytes);
+        bytes
+    }
+
+    fn random_unique_cell(
+        rng: &mut Rng,
+        expected: &HashMap<Vec<u8>, Vec<u8>>,
+    ) -> (Vec<u8>, Vec<u8>) {
+        loop {
+            let key_len = rng.usize(KEY_LEN_RANGE);
+            let value_len = rng.usize(VALUE_LEN_RANGE);
+            let key = random_bytes(rng, key_len);
+            if expected.contains_key(&key) {
+                continue;
+            }
+
+            let value = random_bytes(rng, value_len);
+            return (key, value);
+        }
+    }
+
+    fn assert_inline_cell(key: &[u8], value: &[u8]) {
+        let leaf_cell_len = LEAF_CELL_PREFIX_SIZE + key.len() + value.len();
+        let leaf_max_cell_len = USABLE_SPACE_END - PageKind::RawLeaf.header_size();
+        assert!(
+            leaf_cell_len <= leaf_max_cell_len,
+            "leaf cell should fit inline: len={leaf_cell_len}, max={leaf_max_cell_len}"
+        );
+
+        let interior_cell_len = INTERIOR_CELL_PREFIX_SIZE + key.len();
+        let interior_max_cell_len = USABLE_SPACE_END - PageKind::RawInterior.header_size();
+        assert!(
+            interior_cell_len <= interior_max_cell_len,
+            "interior separator should fit inline: len={interior_cell_len}, \
+             max={interior_max_cell_len}"
+        );
+    }
+
+    fn tree_height(cursor: &TreeCursor) -> StorageResult<usize> {
+        let mut height = 1;
+        let mut page_id = cursor.root_page_id();
+
+        loop {
+            let pin = cursor.page_cache.fetch_page(page_id)?;
+            let next_page_id = {
+                let page = pin.read()?;
+                match read_page_kind(page.page(), page_id)? {
+                    PageKind::RawLeaf => {
+                        let _ = RawLeaf::<Read<'_>>::open(page.page())?;
+                        return Ok(height);
+                    }
+                    PageKind::RawInterior => {
+                        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+                        if interior.slot_count() == 0 {
+                            interior.rightmost_child()
+                        } else {
+                            interior.cell(0)?.left_child()?
+                        }
+                    }
+                }
+            };
+
+            height += 1;
+            page_id = next_page_id;
+        }
+    }
+
+    #[test]
+    fn random_insert_get_simulation_reaches_three_levels() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let page_cache = PageCache::new(disk_manager, 256).unwrap();
+        let root_page_id = initialize_empty_root(&page_cache).unwrap();
+        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut rng = Rng::with_seed(0xd47a_ba5e_b7ee_2026);
+        let mut expected = HashMap::new();
+        let mut cells = Vec::new();
+        let mut previous_height = tree_height(&cursor).unwrap();
+        let mut saw_leaf_root_split = false;
+        let mut saw_interior_root_split = false;
+
+        assert_eq!(previous_height, 1);
+
+        for _ in 0..MAX_RECORDS {
+            let (key, value) = random_unique_cell(&mut rng, &expected);
+            assert_inline_cell(&key, &value);
+
+            cursor.insert(&key, &value).unwrap();
+            assert!(expected.insert(key.clone(), value.clone()).is_none());
+            cells.push((key, value));
+
+            let height = tree_height(&cursor).unwrap();
+            saw_leaf_root_split |= previous_height == 1 && height == 2;
+            saw_interior_root_split |= previous_height == 2 && height == 3;
+            previous_height = height;
+
+            if height == 3 {
+                break;
+            }
+        }
+
+        assert!(saw_leaf_root_split, "tree should split the root leaf");
+        assert!(saw_interior_root_split, "tree should split an interior root");
+        assert_eq!(
+            previous_height, 3,
+            "simulation should reach three tree levels within {MAX_RECORDS} inserts"
+        );
+
+        for (key, value) in cells {
+            assert_eq!(expected.get(&key).map(Vec::as_slice), Some(value.as_slice()));
+
+            let record = cursor.get(&key).unwrap().expect("inserted tree key should be present");
+            record
+                .with_key_value(|actual_key, actual_value| {
+                    assert_eq!(actual_key, key.as_slice());
+                    assert_eq!(actual_value, value.as_slice());
+                })
+                .unwrap();
+        }
     }
 }
