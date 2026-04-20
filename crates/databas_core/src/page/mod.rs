@@ -26,3 +26,90 @@ pub use cell::{Cell, CellMut};
 pub use core::{BoundResult, Interior, Leaf, NodeMarker, Page, Read, SearchResult, Write};
 /// Errors returned while validating or manipulating encoded pages and cells.
 pub(crate) use error::{CellCorruption, PageCorruption, PageError, PageResult};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PAGE_SIZE;
+
+    #[test]
+    fn leaf_insert_can_be_read_with_lookup() {
+        // Verifies that inserting one leaf cell makes it readable by key lookup.
+        let mut bytes = [0; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
+
+        page.insert(b"alpha", b"value").unwrap();
+
+        let cell = page.lookup(b"alpha").unwrap().unwrap();
+        assert_eq!(cell.key().unwrap(), b"alpha");
+        assert_eq!(cell.value().unwrap(), b"value");
+    }
+
+    #[test]
+    fn leaf_lookup_reads_inserted_cells_by_key() {
+        // Verifies that leaf lookup returns each inserted cell by its key.
+        let mut bytes = [0; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
+
+        page.insert(b"bravo", b"two").unwrap();
+        page.insert(b"alpha", b"one").unwrap();
+        page.insert(b"charlie", b"three").unwrap();
+
+        assert_eq!(page.lookup(b"alpha").unwrap().unwrap().value().unwrap(), b"one");
+        assert_eq!(page.lookup(b"bravo").unwrap().unwrap().value().unwrap(), b"two");
+        assert_eq!(page.lookup(b"charlie").unwrap().unwrap().value().unwrap(), b"three");
+    }
+
+    #[test]
+    fn leaf_update_replaces_value_for_existing_key() {
+        // Verifies that updating a leaf cell replaces the value found by lookup.
+        let mut bytes = [0; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
+
+        page.insert(b"alpha", b"old").unwrap();
+        page.update(b"alpha", b"new").unwrap();
+
+        let cell = page.lookup(b"alpha").unwrap().unwrap();
+        assert_eq!(cell.key().unwrap(), b"alpha");
+        assert_eq!(cell.value().unwrap(), b"new");
+    }
+
+    #[test]
+    fn leaf_delete_removes_existing_key() {
+        // Verifies that deleting a leaf cell removes it from key lookup.
+        let mut bytes = [0; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
+
+        page.insert(b"alpha", b"value").unwrap();
+        page.delete(b"alpha").unwrap();
+
+        assert!(page.lookup(b"alpha").unwrap().is_none());
+    }
+
+    #[test]
+    fn interior_insert_can_be_read_with_lookup() {
+        // Verifies that inserting one interior cell makes it readable by key lookup.
+        let mut bytes = [0; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Interior>::init(&mut bytes, 99);
+
+        page.insert(b"middle", 7).unwrap();
+
+        let cell = page.lookup(b"middle").unwrap().unwrap();
+        assert_eq!(cell.key().unwrap(), b"middle");
+        assert_eq!(cell.left_child().unwrap(), 7);
+    }
+
+    #[test]
+    fn interior_update_replaces_left_child_for_existing_key() {
+        // Verifies that updating an interior cell replaces the child found by lookup.
+        let mut bytes = [0; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Interior>::init(&mut bytes, 99);
+
+        page.insert(b"middle", 7).unwrap();
+        page.update(b"middle", 11).unwrap();
+
+        let cell = page.lookup(b"middle").unwrap().unwrap();
+        assert_eq!(cell.key().unwrap(), b"middle");
+        assert_eq!(cell.left_child().unwrap(), 11);
+    }
+}
