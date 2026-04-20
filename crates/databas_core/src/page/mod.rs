@@ -27,9 +27,14 @@ mod table;
 /// Cell views returned by typed page accessors.
 pub use cell::{Cell, CellMut};
 /// Page handles, marker types, access traits, and search helpers for typed page access.
-pub use core::{Interior, Leaf, NodeMarker, Page, Read, SearchResult, Write};
+pub use core::{BoundResult, Interior, Leaf, NodeMarker, Page, Read, SearchResult, Write};
 /// Errors returned while validating or manipulating encoded pages and cells.
 pub(crate) use error::{CellCorruption, PageCorruption, PageError, PageResult};
+
+/// Raw B+-tree leaf page storing byte keys and byte values.
+pub type RawLeaf<A> = Page<A, Leaf>;
+/// Raw B+-tree interior page storing separator byte keys and child pointers.
+pub type RawInterior<A> = Page<A, Interior>;
 
 #[cfg(test)]
 mod tests {
