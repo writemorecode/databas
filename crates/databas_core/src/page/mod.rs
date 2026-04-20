@@ -1,4 +1,4 @@
-//! Slotted raw B+-tree page types and format constants.
+//! Slotted B+-tree page types and format constants.
 //!
 //! This module exposes the typed page API used by the storage layer to read and
 //! mutate fixed-size on-disk pages. Pages are split by structural node kind:
@@ -8,6 +8,8 @@
 //! The main entry point is [`Page`]. A page is parameterized both by access mode
 //! ([`Read`] or [`Write`]) and node kind ([`Leaf`] or [`Interior`]). [`Cell`]
 //! and [`CellMut`] provide typed access to individual slot entries after lookup.
+//! [`TablePage`] and [`IndexPage`] wrap the raw page API with table- and
+//! index-specific key/value interpretation.
 //!
 //! Layout details that are part of the stable page format are re-exported from
 //! [`mod@format`], including header sizes, slot entry width, and the current
@@ -17,8 +19,10 @@ mod cell;
 mod core;
 mod error;
 pub mod format;
+mod index;
 mod interior;
 mod leaf;
+mod table;
 
 /// Cell views returned by typed page accessors.
 pub use cell::{Cell, CellMut};
@@ -26,6 +30,16 @@ pub use cell::{Cell, CellMut};
 pub use core::{BoundResult, Interior, Leaf, NodeMarker, Page, Read, SearchResult, Write};
 /// Errors returned while validating or manipulating encoded pages and cells.
 pub(crate) use error::{CellCorruption, PageCorruption, PageError, PageResult};
+/// Index-specific page and cell wrappers over raw B+-tree pages.
+pub use index::{
+    IndexCell, IndexCellMut, IndexInteriorCell, IndexInteriorCellMut, IndexInteriorPage,
+    IndexLeafCell, IndexLeafCellMut, IndexLeafPage, IndexPage,
+};
+/// Table-specific page and cell wrappers over raw B+-tree pages.
+pub use table::{
+    TableCell, TableCellMut, TableInteriorCell, TableInteriorCellMut, TableInteriorPage,
+    TableLeafCell, TableLeafCellMut, TableLeafPage, TablePage,
+};
 
 #[cfg(test)]
 mod tests {
