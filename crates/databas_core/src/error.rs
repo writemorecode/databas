@@ -79,6 +79,10 @@ pub enum CorruptionKind {
     CellLengthTooSmall,
     #[error("cell length runs past the usable page bounds")]
     CellLengthOutOfBounds,
+    #[error("table row-id key has invalid length {actual}")]
+    InvalidTableRowIdKeyLength { actual: usize },
+    #[error("index row-id value has invalid length {actual}")]
+    InvalidIndexRowIdValueLength { actual: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -296,6 +300,12 @@ fn map_cell_corruption(kind: CellCorruption) -> CorruptionKind {
     match kind {
         CellCorruption::LengthTooSmall => CorruptionKind::CellLengthTooSmall,
         CellCorruption::LengthOutOfBounds => CorruptionKind::CellLengthOutOfBounds,
+        CellCorruption::InvalidTableRowIdKeyLength { actual } => {
+            CorruptionKind::InvalidTableRowIdKeyLength { actual }
+        }
+        CellCorruption::InvalidIndexRowIdValueLength { actual } => {
+            CorruptionKind::InvalidIndexRowIdValueLength { actual }
+        }
     }
 }
 
