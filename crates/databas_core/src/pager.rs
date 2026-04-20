@@ -1,27 +1,8 @@
-//! Public pager API for the storage engine.
-//!
-//! [`Pager`] owns the single-threaded page cache and acts as the top-level
-//! entry point for opening an existing database file or creating new table and
-//! index trees. It returns typed tree cursors anchored at the root page of the
-//! requested tree, while page-kind validation remains inside the pager so
-//! callers do not need to reason about low-level page formats.
-//!
-//! At this stage the caller is still responsible for persisting tree root page
-//! ids somewhere higher in the database catalog or file header. That metadata
-//! layer is intentionally left outside this initial API skeleton.
-
 use std::path::{Path, PathBuf};
 
-use crate::{
-    PageId,
-    btree::{
-        Index, IndexCursor, Table, TableCursor, TreeCursor, TreeKindExt, initialize_empty_root,
-        validate_root_page,
-    },
-    disk_manager::DiskManager,
-    error::StorageResult,
-    page_cache::PageCache,
-};
+use crate::{disk_manager::DiskManager, error::StorageResult, page_cache::PageCache};
+
+const DEFAULT_PAGE_CACHE_SIZE: usize = 64;
 
 /// Configuration for [`Pager`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +13,7 @@ pub struct PagerOptions {
 
 impl Default for PagerOptions {
     fn default() -> Self {
-        Self { cache_frames: 64 }
+        Self { cache_frames: DEFAULT_PAGE_CACHE_SIZE }
     }
 }
 
@@ -75,49 +56,5 @@ impl Pager {
     pub fn flush(&self) -> StorageResult<()> {
         self.page_cache.flush_all()?;
         Ok(())
-    }
-
-    /// Opens an existing table tree rooted at `root_page_id`.
-    ///
-    /// The returned cursor starts anchored at the root page.
-    pub fn open_table(&self, root_page_id: PageId) -> StorageResult<TableCursor> {
-        self.open_tree::<Table>(root_page_id)
-    }
-
-    /// Opens an existing index tree rooted at `root_page_id`.
-    ///
-    /// The returned cursor starts anchored at the root page.
-    pub fn open_index(&self, root_page_id: PageId) -> StorageResult<IndexCursor> {
-        self.open_tree::<Index>(root_page_id)
-    }
-
-    /// Allocates and initializes a new empty table tree.
-    ///
-    /// The returned tree starts as a single leaf root page.
-    pub fn create_table(&self) -> StorageResult<TableCursor> {
-        self.create_tree::<Table>()
-    }
-
-    /// Allocates and initializes a new empty index tree.
-    ///
-    /// The returned tree starts as a single leaf root page.
-    pub fn create_index(&self) -> StorageResult<IndexCursor> {
-        self.create_tree::<Index>()
-    }
-
-    fn open_tree<K>(&self, root_page_id: PageId) -> StorageResult<TreeCursor<K>>
-    where
-        K: TreeKindExt,
-    {
-        validate_root_page::<K>(&self.page_cache, root_page_id)?;
-        Ok(TreeCursor::new(self.page_cache.clone(), root_page_id))
-    }
-
-    fn create_tree<K>(&self) -> StorageResult<TreeCursor<K>>
-    where
-        K: TreeKindExt,
-    {
-        let root_page_id = initialize_empty_root::<K>(&self.page_cache)?;
-        Ok(TreeCursor::new(self.page_cache.clone(), root_page_id))
     }
 }

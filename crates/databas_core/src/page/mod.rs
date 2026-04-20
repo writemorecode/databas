@@ -27,19 +27,9 @@ mod table;
 /// Cell views returned by typed page accessors.
 pub use cell::{Cell, CellMut};
 /// Page handles, marker types, access traits, and search helpers for typed page access.
-pub use core::{BoundResult, Interior, Leaf, NodeMarker, Page, Read, SearchResult, Write};
+pub use core::{Interior, Leaf, NodeMarker, Page, Read, SearchResult, Write};
 /// Errors returned while validating or manipulating encoded pages and cells.
 pub(crate) use error::{CellCorruption, PageCorruption, PageError, PageResult};
-/// Index-specific page and cell wrappers over raw B+-tree pages.
-pub use index::{
-    IndexCell, IndexCellMut, IndexInteriorCell, IndexInteriorCellMut, IndexInteriorPage,
-    IndexLeafCell, IndexLeafCellMut, IndexLeafPage, IndexPage,
-};
-/// Table-specific page and cell wrappers over raw B+-tree pages.
-pub use table::{
-    TableCell, TableCellMut, TableInteriorCell, TableInteriorCellMut, TableInteriorPage,
-    TableLeafCell, TableLeafCellMut, TableLeafPage, TablePage,
-};
 
 #[cfg(test)]
 mod tests {
