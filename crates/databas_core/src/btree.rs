@@ -7,14 +7,13 @@
 use std::{cell::Cell, fmt, ops::Range, rc::Rc};
 
 use crate::{
+    PAGE_SIZE, PageId,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
     page::{
-        self,
-        format::{PageKind, KIND_OFFSET},
-        BoundResult, PageError, RawInterior, RawLeaf, Read, SearchResult, Write,
+        self, BoundResult, PageError, RawInterior, RawLeaf, Read, SearchResult, Write,
+        format::{KIND_OFFSET, PageKind},
     },
     page_cache::{PageCache, PinGuard},
-    PageId, PAGE_SIZE,
 };
 
 const LEAF_CELL_PREFIX_SIZE: usize = 2 + 2 + 2;
@@ -1100,7 +1099,7 @@ fn expect_page_kind(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     use fastrand::Rng;
     use tempfile::NamedTempFile;
@@ -1111,7 +1110,8 @@ mod tests {
 
     const KEY_LEN_RANGE: std::ops::RangeInclusive<usize> = 8..=192;
     const VALUE_LEN_RANGE: std::ops::RangeInclusive<usize> = 8..=512;
-    const MAX_RECORDS: usize = 10_000;
+    const TARGET_HEIGHT: usize = 4;
+    const MAX_RECORDS: usize = 50_000;
 
     fn random_bytes(rng: &mut Rng, len: usize) -> Vec<u8> {
         let mut bytes = vec![0; len];
@@ -1121,7 +1121,7 @@ mod tests {
 
     fn random_unique_cell(
         rng: &mut Rng,
-        expected: &HashMap<Vec<u8>, Vec<u8>>,
+        expected: &BTreeMap<Vec<u8>, Vec<u8>>,
     ) -> (Vec<u8>, Vec<u8>) {
         loop {
             let key_len = rng.usize(KEY_LEN_RANGE);
@@ -1183,18 +1183,22 @@ mod tests {
     }
 
     #[test]
-    fn random_insert_get_simulation_reaches_three_levels() {
+    // Builds a four-level raw B+ tree from deterministic random inline cells,
+    // proving leaf splits, repeated interior split propagation, exact-key
+    // lookups, and forward/backward sorted cursor scans.
+    fn random_insert_get_simulation_reaches_four_levels() {
         let file = NamedTempFile::new().unwrap();
         let disk_manager = DiskManager::new(file.path()).unwrap();
         let page_cache = PageCache::new(disk_manager, 256).unwrap();
         let root_page_id = initialize_empty_root(&page_cache).unwrap();
         let mut cursor = TreeCursor::new(page_cache, root_page_id);
         let mut rng = Rng::with_seed(0xd47a_ba5e_b7ee_2026);
-        let mut expected = HashMap::new();
+        let mut expected = BTreeMap::new();
         let mut cells = Vec::new();
         let mut previous_height = tree_height(&cursor).unwrap();
         let mut saw_leaf_root_split = false;
-        let mut saw_interior_root_split = false;
+        let mut saw_first_interior_root_split = false;
+        let mut saw_repeated_interior_split_propagation = false;
 
         assert_eq!(previous_height, 1);
 
@@ -1208,31 +1212,82 @@ mod tests {
 
             let height = tree_height(&cursor).unwrap();
             saw_leaf_root_split |= previous_height == 1 && height == 2;
-            saw_interior_root_split |= previous_height == 2 && height == 3;
+            saw_first_interior_root_split |= previous_height == 2 && height == 3;
+            saw_repeated_interior_split_propagation |= previous_height == 3 && height == 4;
             previous_height = height;
 
-            if height == 3 {
+            if height == TARGET_HEIGHT {
                 break;
             }
         }
 
         assert!(saw_leaf_root_split, "tree should split the root leaf");
-        assert!(saw_interior_root_split, "tree should split an interior root");
+        assert!(saw_first_interior_root_split, "tree should split an interior root");
+        assert!(
+            saw_repeated_interior_split_propagation,
+            "tree should propagate an interior split through an existing interior level"
+        );
         assert_eq!(
-            previous_height, 3,
-            "simulation should reach three tree levels within {MAX_RECORDS} inserts"
+            previous_height, TARGET_HEIGHT,
+            "simulation should reach {TARGET_HEIGHT} tree levels within {MAX_RECORDS} inserts"
         );
 
-        for (key, value) in cells {
-            assert_eq!(expected.get(&key).map(Vec::as_slice), Some(value.as_slice()));
+        for (key, value) in &cells {
+            assert_eq!(expected.get(key).map(Vec::as_slice), Some(value.as_slice()));
 
             let record = cursor.get(&key).unwrap().expect("inserted tree key should be present");
-            record
-                .with_key_value(|actual_key, actual_value| {
-                    assert_eq!(actual_key, key.as_slice());
-                    assert_eq!(actual_value, value.as_slice());
-                })
-                .unwrap();
+            assert_record_matches(&record, key, value);
         }
+
+        assert_forward_scan_matches(&mut cursor, &expected);
+        assert_reverse_scan_matches(&mut cursor, &expected);
+        assert_eq!(expected.len(), cells.len());
+    }
+
+    fn assert_record_matches(record: &Record, expected_key: &[u8], expected_value: &[u8]) {
+        record
+            .with_key_value(|actual_key, actual_value| {
+                assert_eq!(actual_key, expected_key);
+                assert_eq!(actual_value, expected_value);
+            })
+            .unwrap();
+    }
+
+    fn assert_forward_scan_matches(cursor: &mut TreeCursor, expected: &BTreeMap<Vec<u8>, Vec<u8>>) {
+        assert!(cursor.seek_to_first().unwrap(), "tree should not be empty");
+
+        let mut expected_entries = expected.iter();
+        let (first_key, first_value) = expected_entries.next().unwrap();
+        let first_record = cursor.current().unwrap().expect("seek_to_first should position cursor");
+        assert_record_matches(&first_record, first_key, first_value);
+
+        let mut scanned = 1;
+        for (key, value) in expected_entries {
+            let record = cursor.next_record().unwrap().expect("forward scan ended early");
+            assert_record_matches(&record, key, value);
+            scanned += 1;
+        }
+
+        assert!(cursor.next_record().unwrap().is_none());
+        assert_eq!(scanned, expected.len());
+    }
+
+    fn assert_reverse_scan_matches(cursor: &mut TreeCursor, expected: &BTreeMap<Vec<u8>, Vec<u8>>) {
+        let (last_key, _) = expected.iter().next_back().unwrap();
+        let last_record = cursor.get(last_key).unwrap().expect("last key should be present");
+
+        let mut expected_entries = expected.iter().rev();
+        let (key, value) = expected_entries.next().unwrap();
+        assert_record_matches(&last_record, key, value);
+
+        let mut scanned = 1;
+        for (key, value) in expected_entries {
+            let record = cursor.prev_record().unwrap().expect("reverse scan ended early");
+            assert_record_matches(&record, key, value);
+            scanned += 1;
+        }
+
+        assert!(cursor.prev_record().unwrap().is_none());
+        assert_eq!(scanned, expected.len());
     }
 }
