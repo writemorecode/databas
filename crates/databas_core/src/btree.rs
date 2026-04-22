@@ -4,20 +4,21 @@
 //! only with raw byte keys and raw byte values stored in `RawLeaf` pages
 //! and separator byte keys stored in `RawInterior` pages.
 
-use std::{cell::Cell, fmt, ops::Range, rc::Rc};
+use std::{cell::Cell, fmt, rc::Rc};
 
 use crate::{
     PAGE_SIZE, PageId,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
+    overflow,
     page::{
         self, BoundResult, PageError, RawInterior, RawLeaf, Read, SearchResult, Write,
-        format::{KIND_OFFSET, PageKind},
+        format::{KIND_OFFSET, MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, PageKind},
     },
-    page_cache::{PageCache, PageWriteGuard, PinGuard},
+    page_cache::{PageCache, PageWriteGuard},
 };
 
-const LEAF_CELL_PREFIX_SIZE: usize = 2 + 2 + 2;
-const INTERIOR_CELL_PREFIX_SIZE: usize = 2 + 8 + 2;
+const LEAF_CELL_PREFIX_SIZE: usize = 2 + 8 + 2 + 2;
+const INTERIOR_CELL_PREFIX_SIZE: usize = 2 + 8 + 8 + 2;
 
 /// Outcome of trying to position a scan within or beyond one leaf page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,21 +104,23 @@ impl ScanDirection {
     }
 }
 
-/// Guard-backed raw record view returned by tree reads and cursor iteration.
+/// Materialized raw record view returned by tree reads and cursor iteration.
 pub struct Record {
-    pin: PinGuard,
+    page_id: PageId,
     slot_index: u16,
+    key: Vec<u8>,
+    value: Vec<u8>,
 }
 
 impl Record {
-    /// Builds a record view from one pinned raw leaf-page slot.
-    pub(crate) fn new(pin: PinGuard, slot_index: u16) -> StorageResult<Self> {
-        {
-            let page = pin.read()?;
-            let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
-            let _ = leaf.cell(slot_index)?;
-        }
-        Ok(Self { pin, slot_index })
+    /// Builds a record view from one raw leaf-page slot.
+    pub(crate) fn new(
+        page_cache: &PageCache,
+        page_id: PageId,
+        slot_index: u16,
+    ) -> StorageResult<Self> {
+        let (key, value) = read_leaf_cell(page_cache, page_id, slot_index)?;
+        Ok(Self { page_id, slot_index, key, value })
     }
 
     /// Returns the slot index that this record refers to within its leaf page.
@@ -125,38 +128,26 @@ impl Record {
         self.slot_index
     }
 
-    /// Executes `f` with a borrowed view of the record key while the backing
-    /// page remains pinned and immutably borrowed.
+    /// Executes `f` with a borrowed view of the record key.
     pub fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
-        let page = self.pin.read()?;
-        let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
-        let cell = leaf.cell(self.slot_index)?;
-        Ok(f(cell.key()?))
+        Ok(f(&self.key))
     }
 
-    /// Executes `f` with a borrowed view of the record value while the backing
-    /// page remains pinned and immutably borrowed.
+    /// Executes `f` with a borrowed view of the record value.
     pub fn with_value<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
-        let page = self.pin.read()?;
-        let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
-        let cell = leaf.cell(self.slot_index)?;
-        Ok(f(cell.value()?))
+        Ok(f(&self.value))
     }
 
-    /// Executes `f` with borrowed views of the key and value while the backing
-    /// page remains pinned and immutably borrowed.
+    /// Executes `f` with borrowed views of the key and value.
     pub fn with_key_value<R>(&self, f: impl FnOnce(&[u8], &[u8]) -> R) -> StorageResult<R> {
-        let page = self.pin.read()?;
-        let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
-        let cell = leaf.cell(self.slot_index)?;
-        Ok(f(cell.key()?, cell.value()?))
+        Ok(f(&self.key, &self.value))
     }
 }
 
 impl fmt::Debug for Record {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Record")
-            .field("page_id", &self.pin.page_id())
+            .field("page_id", &self.page_id)
             .field("slot_index", &self.slot_index)
             .finish_non_exhaustive()
     }
@@ -220,99 +211,165 @@ struct PendingSplit {
 
 /// Temporary description of one leaf cell while rebuilding split pages.
 #[derive(Debug, Clone)]
-enum LeafSplitCell<'c> {
-    /// An existing cell borrowed from the pre-split page snapshot.
-    Snapshot { key_range: Range<usize>, value_range: Range<usize> },
-    /// The newly inserted cell that triggered the split.
-    Incoming { key: &'c [u8], value: &'c [u8] },
+struct LeafSplitCell {
+    key: Vec<u8>,
+    value: Vec<u8>,
 }
 
 /// Temporary description of one interior cell while rebuilding split pages.
 #[derive(Debug, Clone)]
-enum InteriorSplitCell<'c> {
-    /// An existing cell borrowed from the pre-split page snapshot.
-    Snapshot { left_child: PageId, key_range: Range<usize> },
-    /// The newly inserted separator cell that triggered the split.
-    Incoming { left_child: PageId, key: &'c [u8] },
+struct InteriorSplitCell {
+    left_child: PageId,
+    key: Vec<u8>,
 }
 
-impl<'c> LeafSplitCell<'c> {
+impl LeafSplitCell {
     /// Returns the key length this cell will occupy after the split.
     fn key_len(&self) -> usize {
-        match self {
-            Self::Snapshot { key_range, .. } => key_range.len(),
-            Self::Incoming { key, .. } => key.len(),
-        }
+        self.key.len()
     }
 
     /// Returns the value length this cell will occupy after the split.
     fn value_len(&self) -> usize {
-        match self {
-            Self::Snapshot { value_range, .. } => value_range.len(),
-            Self::Incoming { value, .. } => value.len(),
-        }
+        self.value.len()
     }
 
     /// Returns the total encoded size of the cell including fixed fields.
     fn encoded_size(&self) -> usize {
-        LEAF_CELL_PREFIX_SIZE + self.key_len() + self.value_len()
+        LEAF_CELL_PREFIX_SIZE + local_payload_len(self.key_len() + self.value_len())
     }
 
     /// Returns the key bytes from either the page snapshot or owned storage.
-    fn key<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE]) -> &'a [u8] {
-        match self {
-            Self::Snapshot { key_range, .. } => &snapshot[key_range.clone()],
-            Self::Incoming { key, .. } => key,
-        }
+    fn key(&self) -> &[u8] {
+        &self.key
     }
 
     /// Returns the value bytes from either the page snapshot or owned storage.
-    fn value<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE]) -> &'a [u8] {
-        match self {
-            Self::Snapshot { value_range, .. } => &snapshot[value_range.clone()],
-            Self::Incoming { value, .. } => value,
-        }
+    fn value(&self) -> &[u8] {
+        &self.value
     }
 }
 
-impl<'c> InteriorSplitCell<'c> {
+impl InteriorSplitCell {
     /// Returns the left child page referenced by this interior cell.
     fn left_child(&self) -> PageId {
-        match self {
-            Self::Snapshot { left_child, .. } | Self::Incoming { left_child, .. } => *left_child,
-        }
+        self.left_child
     }
 
     /// Returns the key length this cell will occupy after the split.
     fn key_len(&self) -> usize {
-        match self {
-            Self::Snapshot { key_range, .. } => key_range.len(),
-            Self::Incoming { key, .. } => key.len(),
-        }
+        self.key.len()
     }
 
     /// Returns the total encoded size of the cell including fixed fields.
     fn encoded_size(&self) -> usize {
-        INTERIOR_CELL_PREFIX_SIZE + self.key_len()
+        INTERIOR_CELL_PREFIX_SIZE + local_payload_len(self.key_len())
     }
 
     /// Returns the separator key bytes from either the page snapshot or incoming storage.
-    fn key<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE]) -> &'a [u8] {
-        match self {
-            Self::Snapshot { key_range, .. } => &snapshot[key_range.clone()],
-            Self::Incoming { key, .. } => key,
-        }
+    fn key(&self) -> &[u8] {
+        &self.key
     }
 
     /// Replaces the left-child pointer while preserving the cell key storage.
     fn with_left_child(&self, left_child: PageId) -> Self {
-        match self {
-            Self::Snapshot { key_range, .. } => {
-                Self::Snapshot { left_child, key_range: key_range.clone() }
-            }
-            Self::Incoming { key, .. } => Self::Incoming { left_child, key },
-        }
+        Self { left_child, key: self.key.clone() }
     }
+}
+
+fn payload_uses_overflow(payload_len: usize) -> bool {
+    payload_len > MAX_INLINE_OVERFLOW_PAYLOAD_BYTES
+}
+
+fn local_payload_len(payload_len: usize) -> usize {
+    if payload_uses_overflow(payload_len) { MAX_INLINE_OVERFLOW_PAYLOAD_BYTES } else { payload_len }
+}
+
+fn cell_corruption(page_id: PageId, kind: CorruptionKind) -> StorageError {
+    StorageError::Corruption(CorruptionError {
+        component: CorruptionComponent::Cell,
+        page_id: Some(page_id),
+        kind,
+    })
+}
+
+fn materialize_payload(
+    page_cache: &PageCache,
+    page_id: PageId,
+    inline_payload: Vec<u8>,
+    first_overflow_page_id: Option<PageId>,
+    payload_len: usize,
+) -> StorageResult<Vec<u8>> {
+    if inline_payload.len() > payload_len {
+        return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
+    }
+
+    let mut payload = inline_payload;
+    match first_overflow_page_id {
+        Some(first_overflow_page_id) => {
+            let remaining = payload_len - payload.len();
+            payload.extend(overflow::read_chain(page_cache, first_overflow_page_id, remaining)?);
+        }
+        None if payload.len() != payload_len => {
+            return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
+        }
+        None => {}
+    }
+
+    if payload.len() != payload_len {
+        return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
+    }
+    Ok(payload)
+}
+
+fn read_leaf_cell(
+    page_cache: &PageCache,
+    page_id: PageId,
+    slot_index: u16,
+) -> StorageResult<(Vec<u8>, Vec<u8>)> {
+    let pin = page_cache.fetch_page(page_id)?;
+    let (key_len, value_len, first_overflow_page_id, inline_payload) = {
+        let page = pin.read()?;
+        let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+        let (key_len, value_len, first_overflow_page_id, inline_range) =
+            leaf.cell_payload_parts(slot_index)?;
+        (key_len, value_len, first_overflow_page_id, page.page()[inline_range].to_vec())
+    };
+    drop(pin);
+
+    let payload = materialize_payload(
+        page_cache,
+        page_id,
+        inline_payload,
+        first_overflow_page_id,
+        key_len + value_len,
+    )?;
+    if payload.len() < key_len {
+        return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
+    }
+    let key = payload[..key_len].to_vec();
+    let value = payload[key_len..].to_vec();
+    Ok((key, value))
+}
+
+fn read_interior_cell(
+    page_cache: &PageCache,
+    page_id: PageId,
+    slot_index: u16,
+) -> StorageResult<(PageId, Vec<u8>)> {
+    let pin = page_cache.fetch_page(page_id)?;
+    let (left_child, key_len, first_overflow_page_id, inline_payload) = {
+        let page = pin.read()?;
+        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        let (left_child, key_len, first_overflow_page_id, inline_range) =
+            interior.cell_payload_parts(slot_index)?;
+        (left_child, key_len, first_overflow_page_id, page.page()[inline_range].to_vec())
+    };
+    drop(pin);
+
+    let key =
+        materialize_payload(page_cache, page_id, inline_payload, first_overflow_page_id, key_len)?;
+    Ok((left_child, key))
 }
 
 impl TreeCursor {
@@ -372,8 +429,89 @@ impl TreeCursor {
 
     /// Materializes one record from a positioned raw leaf slot.
     fn record_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<Record> {
+        Record::new(&self.page_cache, page_id, slot_index)
+    }
+
+    fn raw_leaf_slot_count(&self, page_id: PageId) -> StorageResult<u16> {
         let pin = self.page_cache.fetch_page(page_id)?;
-        Record::new(pin, slot_index)
+        let page = pin.read()?;
+        let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+        Ok(leaf.slot_count())
+    }
+
+    fn raw_interior_slot_count(&self, page_id: PageId) -> StorageResult<u16> {
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let page = pin.read()?;
+        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        Ok(interior.slot_count())
+    }
+
+    fn search_leaf_slot(&self, page_id: PageId, key: &[u8]) -> StorageResult<SearchResult> {
+        let mut low: u16 = 0;
+        let mut high = self.raw_leaf_slot_count(page_id)?;
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let (cell_key, _) = read_leaf_cell(&self.page_cache, page_id, mid)?;
+            match cell_key.as_slice().cmp(key) {
+                std::cmp::Ordering::Less => low = mid + 1,
+                std::cmp::Ordering::Greater => high = mid,
+                std::cmp::Ordering::Equal => return Ok(SearchResult::Found(mid)),
+            }
+        }
+
+        Ok(SearchResult::InsertAt(low))
+    }
+
+    fn lower_bound_leaf_slot(&self, page_id: PageId, key: &[u8]) -> StorageResult<BoundResult> {
+        let mut low: u16 = 0;
+        let slot_count = self.raw_leaf_slot_count(page_id)?;
+        let mut high = slot_count;
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let (cell_key, _) = read_leaf_cell(&self.page_cache, page_id, mid)?;
+            if cell_key.as_slice() < key {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        if low == slot_count { Ok(BoundResult::PastEnd) } else { Ok(BoundResult::At(low)) }
+    }
+
+    fn lower_bound_interior_slot(&self, page_id: PageId, key: &[u8]) -> StorageResult<BoundResult> {
+        let mut low: u16 = 0;
+        let slot_count = self.raw_interior_slot_count(page_id)?;
+        let mut high = slot_count;
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let (_, cell_key) = read_interior_cell(&self.page_cache, page_id, mid)?;
+            if cell_key.as_slice() < key {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        if low == slot_count { Ok(BoundResult::PastEnd) } else { Ok(BoundResult::At(low)) }
+    }
+
+    fn interior_child_for_key(&self, page_id: PageId, key: &[u8]) -> StorageResult<PageId> {
+        match self.lower_bound_interior_slot(page_id, key)? {
+            BoundResult::At(slot_index) => {
+                let (left_child, _) = read_interior_cell(&self.page_cache, page_id, slot_index)?;
+                Ok(left_child)
+            }
+            BoundResult::PastEnd => {
+                let pin = self.page_cache.fetch_page(page_id)?;
+                let page = pin.read()?;
+                let interior = RawInterior::<Read<'_>>::open(page.page())?;
+                Ok(interior.rightmost_child())
+            }
+        }
     }
 
     /// Follows leftmost children from `start_page_id` until reaching a leaf.
@@ -440,8 +578,9 @@ impl TreeCursor {
                         return Ok(page_id);
                     }
                     PageKind::RawInterior => {
-                        let interior = RawInterior::<Read<'_>>::open(page.page())?;
-                        interior.child_for(key)?
+                        drop(page);
+                        drop(pin);
+                        self.interior_child_for_key(page_id, key)?
                     }
                 }
             };
@@ -464,10 +603,12 @@ impl TreeCursor {
                         return Ok((page_id, path));
                     }
                     PageKind::RawInterior => {
-                        let interior = RawInterior::<Read<'_>>::open(page.page())?;
-                        match interior.lower_bound(key)? {
+                        drop(page);
+                        drop(pin);
+                        match self.lower_bound_interior_slot(page_id, key)? {
                             BoundResult::At(slot_index) => {
-                                let child_page_id = interior.cell(slot_index)?.left_child()?;
+                                let (child_page_id, _) =
+                                    read_interior_cell(&self.page_cache, page_id, slot_index)?;
                                 path.push(PathFrame {
                                     page_id,
                                     child_ref: ChildSlotRef::Slot(slot_index),
@@ -479,6 +620,9 @@ impl TreeCursor {
                                     page_id,
                                     child_ref: ChildSlotRef::Rightmost,
                                 });
+                                let pin = self.page_cache.fetch_page(page_id)?;
+                                let page = pin.read()?;
+                                let interior = RawInterior::<Read<'_>>::open(page.page())?;
                                 interior.rightmost_child()
                             }
                         }
@@ -510,7 +654,7 @@ impl TreeCursor {
             match seek {
                 LeafSeek::Positioned(slot_index) => {
                     self.set_positioned_state(page_id, slot_index);
-                    return Record::new(pin, slot_index).map(Some);
+                    return self.record_at(page_id, slot_index).map(Some);
                 }
                 LeafSeek::Advance(next_page_id) => page_id = next_page_id,
                 LeafSeek::Exhausted => {
@@ -541,7 +685,7 @@ impl TreeCursor {
                 match seek {
                     LeafSeek::Positioned(next_slot) => {
                         self.set_positioned_state(page_id, next_slot);
-                        Record::new(pin, next_slot).map(Some)
+                        self.record_at(page_id, next_slot).map(Some)
                     }
                     LeafSeek::Advance(next_page_id) => {
                         self.edge_record_from_leaf(next_page_id, direction)
@@ -561,17 +705,15 @@ impl TreeCursor {
     /// where `key` would be inserted when absent.
     pub fn get(&mut self, key: &[u8]) -> StorageResult<Option<Record>> {
         let page_id = self.leaf_page_for_key(key)?;
-        let pin = self.page_cache.fetch_page(page_id)?;
-        let slot_index = {
-            let page = pin.read()?;
-            let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
-            leaf.lookup(key)?.map(|cell| cell.slot_index())
+        let slot_index = match self.search_leaf_slot(page_id, key)? {
+            SearchResult::Found(slot_index) => Some(slot_index),
+            SearchResult::InsertAt(_) => None,
         };
 
         match slot_index {
             Some(slot_index) => {
                 self.set_positioned_state(page_id, slot_index);
-                Record::new(pin, slot_index).map(Some)
+                self.record_at(page_id, slot_index).map(Some)
             }
             None => {
                 self.set_page_state(page_id);
@@ -580,30 +722,103 @@ impl TreeCursor {
         }
     }
 
+    fn checked_payload_len(&self, payload_len: usize) -> StorageResult<()> {
+        if payload_len > u16::MAX as usize {
+            return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize }.into());
+        }
+        Ok(())
+    }
+
+    fn leaf_cell_local_size(&self, key: &[u8], value: &[u8]) -> StorageResult<usize> {
+        let payload_len = key.len() + value.len();
+        self.checked_payload_len(payload_len)?;
+        Ok(LEAF_CELL_PREFIX_SIZE + local_payload_len(payload_len))
+    }
+
+    fn interior_cell_local_size(&self, key: &[u8]) -> StorageResult<usize> {
+        self.checked_payload_len(key.len())?;
+        Ok(INTERIOR_CELL_PREFIX_SIZE + local_payload_len(key.len()))
+    }
+
+    fn payload_storage_parts(&self, payload: &[u8]) -> StorageResult<(Option<PageId>, Vec<u8>)> {
+        self.checked_payload_len(payload.len())?;
+        if !payload_uses_overflow(payload.len()) {
+            return Ok((None, payload.to_vec()));
+        }
+
+        let inline_payload = payload[..MAX_INLINE_OVERFLOW_PAYLOAD_BYTES].to_vec();
+        let first_overflow_page_id =
+            overflow::write_chain(&self.page_cache, &payload[MAX_INLINE_OVERFLOW_PAYLOAD_BYTES..])?
+                .ok_or_else(|| {
+                    cell_corruption(self.root_page_id(), CorruptionKind::CellLengthOutOfBounds)
+                })?;
+        Ok((Some(first_overflow_page_id), inline_payload))
+    }
+
+    fn insert_leaf_payload_at(
+        &self,
+        leaf: &mut RawLeaf<Write<'_>>,
+        slot_index: u16,
+        key: &[u8],
+        value: &[u8],
+    ) -> StorageResult<u16> {
+        let mut payload = Vec::with_capacity(key.len() + value.len());
+        payload.extend_from_slice(key);
+        payload.extend_from_slice(value);
+        let (first_overflow_page_id, inline_payload) = self.payload_storage_parts(&payload)?;
+        Ok(leaf.insert_payload_at(
+            slot_index,
+            key.len(),
+            value.len(),
+            first_overflow_page_id,
+            &inline_payload,
+        )?)
+    }
+
+    fn insert_interior_payload_at(
+        &self,
+        interior: &mut RawInterior<Write<'_>>,
+        slot_index: u16,
+        left_child: PageId,
+        key: &[u8],
+    ) -> StorageResult<u16> {
+        let (first_overflow_page_id, inline_payload) = self.payload_storage_parts(key)?;
+        Ok(interior.insert_payload_at(
+            slot_index,
+            left_child,
+            key.len(),
+            first_overflow_page_id,
+            &inline_payload,
+        )?)
+    }
+
     /// Inserts a new raw key/value record into the tree.
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
         let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
+        let slot_index = match self.search_leaf_slot(leaf_page_id, key)? {
+            SearchResult::Found(_) => return Err(PageError::DuplicateKey.into()),
+            SearchResult::InsertAt(slot_index) => slot_index,
+        };
         let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
         let mut leaf_guard = leaf_pin_guard.write()?;
-        let insert_result = {
-            let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
-            page.insert(key, value)
+        let has_capacity = {
+            let page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
+            let needed = self.leaf_cell_local_size(key, value)? + page::format::SLOT_ENTRY_SIZE;
+            page.total_reclaimable_space()? >= needed
         };
 
-        match insert_result {
-            Ok(slot_index) => {
-                self.set_positioned_state(leaf_page_id, slot_index);
-                Ok(())
-            }
-            Err(PageError::PageFull { .. }) => {
-                let pending =
-                    self.insert_with_leaf_page_split(leaf_page_id, &mut leaf_guard, key, value)?;
-                drop(leaf_guard);
-                drop(leaf_pin_guard);
-                self.propagate_split(&tree_path, pending)
-            }
-            Err(err) => Err(err.into()),
+        if has_capacity {
+            let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
+            let slot_index = self.insert_leaf_payload_at(&mut page, slot_index, key, value)?;
+            self.set_positioned_state(leaf_page_id, slot_index);
+            return Ok(());
         }
+
+        let pending =
+            self.insert_with_leaf_page_split(leaf_page_id, &mut leaf_guard, key, value)?;
+        drop(leaf_guard);
+        drop(leaf_pin_guard);
+        self.propagate_split(&tree_path, pending)
     }
 
     /// Replaces the value stored for an existing `key`.
@@ -628,7 +843,8 @@ impl TreeCursor {
         let seek = {
             let page = pin.read()?;
             let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
-            match leaf.lower_bound(key)? {
+            let bound = self.lower_bound_leaf_slot(page_id, key)?;
+            match bound {
                 BoundResult::At(slot_index) => LeafSeek::Positioned(slot_index),
                 BoundResult::PastEnd => match leaf.next_page_id() {
                     Some(next_page_id) => LeafSeek::Advance(next_page_id),
@@ -722,24 +938,46 @@ impl TreeCursor {
         parent_frame: PathFrame,
         pending: PendingSplit,
     ) -> StorageResult<Option<PendingSplit>> {
+        let insert_slot_index =
+            match self.lower_bound_interior_slot(parent_frame.page_id, &pending.separator)? {
+                BoundResult::At(slot_index) => {
+                    let (_, existing_key) =
+                        read_interior_cell(&self.page_cache, parent_frame.page_id, slot_index)?;
+                    if existing_key == pending.separator {
+                        return Err(PageError::DuplicateKey.into());
+                    }
+                    slot_index
+                }
+                BoundResult::PastEnd => self.raw_interior_slot_count(parent_frame.page_id)?,
+            };
         let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
         let mut interior_guard = interior_page_guard.write()?;
-        let mut interior_page = RawInterior::<Write<'_>>::open(interior_guard.page_mut())?;
+        let has_capacity = {
+            let page = RawInterior::<Write<'_>>::open(interior_guard.page_mut())?;
+            let needed =
+                self.interior_cell_local_size(&pending.separator)? + page::format::SLOT_ENTRY_SIZE;
+            page.total_reclaimable_space()? >= needed
+        };
 
-        match interior_page.insert(&pending.separator, pending.left_page_id) {
-            Ok(inserted_slot_index) => Self::update_interior_child_ref(
+        if has_capacity {
+            let mut interior_page = RawInterior::<Write<'_>>::open(interior_guard.page_mut())?;
+            let inserted_slot_index = self.insert_interior_payload_at(
+                &mut interior_page,
+                insert_slot_index,
+                pending.left_page_id,
+                &pending.separator,
+            )?;
+            Self::update_interior_child_ref(
                 &mut interior_page,
                 parent_frame.child_ref,
                 inserted_slot_index,
                 pending.right_page_id,
             )
-            .map(|()| None),
-            Err(PageError::PageFull { .. }) => {
-                drop(interior_guard);
-                drop(interior_page_guard);
-                self.insert_with_interior_page_split(parent_frame, pending).map(Some)
-            }
-            Err(err) => Err(err.into()),
+            .map(|()| None)
+        } else {
+            drop(interior_guard);
+            drop(interior_page_guard);
+            self.insert_with_interior_page_split(parent_frame, pending).map(Some)
         }
     }
 
@@ -807,15 +1045,26 @@ impl TreeCursor {
         let next_page_id = leaf_snapshot.next_page_id();
         let mut cells = Vec::with_capacity(leaf_snapshot.slot_count() as usize + 1);
         for slot_index in 0..leaf_snapshot.slot_count() {
-            let (key_range, value_range) = leaf_snapshot.cell_key_value_ranges(slot_index)?;
-            cells.push(LeafSplitCell::Snapshot { key_range, value_range });
+            let (key_len, value_len, first_overflow_page_id, inline_range) =
+                leaf_snapshot.cell_payload_parts(slot_index)?;
+            let payload = materialize_payload(
+                &self.page_cache,
+                leaf_page_id,
+                leaf_snapshot_bytes[inline_range].to_vec(),
+                first_overflow_page_id,
+                key_len + value_len,
+            )?;
+            cells.push(LeafSplitCell {
+                key: payload[..key_len].to_vec(),
+                value: payload[key_len..].to_vec(),
+            });
         }
 
-        let idx = match cells.binary_search_by(|cell| cell.key(&leaf_snapshot_bytes).cmp(key)) {
+        let idx = match cells.binary_search_by(|cell| cell.key().cmp(key)) {
             Ok(_) => return Err(PageError::DuplicateKey.into()),
             Err(insert_index) => insert_index,
         };
-        cells.insert(idx, LeafSplitCell::Incoming { key, value });
+        cells.insert(idx, LeafSplitCell { key: key.to_vec(), value: value.to_vec() });
 
         let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
         let mut right_guard = right_page_guard.write()?;
@@ -831,10 +1080,12 @@ impl TreeCursor {
         right_page.set_next_page_id(next_page_id);
 
         for cell in left_cells {
-            leaf_page.insert(cell.key(&leaf_snapshot_bytes), cell.value(&leaf_snapshot_bytes))?;
+            let slot_index = leaf_page.slot_count();
+            self.insert_leaf_payload_at(&mut leaf_page, slot_index, cell.key(), cell.value())?;
         }
         for cell in right_cells {
-            right_page.insert(cell.key(&leaf_snapshot_bytes), cell.value(&leaf_snapshot_bytes))?;
+            let slot_index = right_page.slot_count();
+            self.insert_leaf_payload_at(&mut right_page, slot_index, cell.key(), cell.value())?;
         }
 
         if let Some(next_page_id) = next_page_id {
@@ -844,21 +1095,15 @@ impl TreeCursor {
             next_page.set_prev_page_id(Some(right_page_id));
         }
 
-        let separator = left_cells
-            .last()
-            .expect("leaf split must leave a non-empty left page")
-            .key(&leaf_snapshot_bytes)
-            .to_vec();
+        let separator =
+            left_cells.last().expect("leaf split must leave a non-empty left page").key().to_vec();
 
         let target_page_id = if key <= separator.as_slice() { leaf_page_id } else { right_page_id };
-        let target_slot_index = match if target_page_id == leaf_page_id {
-            leaf_page.search(key)?
-        } else {
-            right_page.search(key)?
-        } {
-            SearchResult::Found(slot_index) => slot_index,
-            SearchResult::InsertAt(_) => unreachable!("split insert must place the new key"),
-        };
+        let target_cells = if target_page_id == leaf_page_id { left_cells } else { right_cells };
+        let target_slot_index = target_cells
+            .iter()
+            .position(|cell| cell.key() == key)
+            .expect("split insert must place the new key") as u16;
         self.set_positioned_state(target_page_id, target_slot_index);
 
         Ok(PendingSplit { separator, left_page_id: leaf_page_id, right_page_id })
@@ -929,9 +1174,16 @@ impl TreeCursor {
         let mut old_rightmost_child = interior_snapshot.rightmost_child();
         let mut cells = Vec::with_capacity(interior_snapshot.slot_count() as usize + 1);
         for slot_index in 0..interior_snapshot.slot_count() {
-            let (left_child, key_range) =
-                interior_snapshot.cell_left_child_key_range(slot_index)?;
-            cells.push(InteriorSplitCell::Snapshot { left_child, key_range });
+            let (left_child, key_len, first_overflow_page_id, inline_range) =
+                interior_snapshot.cell_payload_parts(slot_index)?;
+            let key = materialize_payload(
+                &self.page_cache,
+                parent_frame.page_id,
+                interior_snapshot_bytes[inline_range].to_vec(),
+                first_overflow_page_id,
+                key_len,
+            )?;
+            cells.push(InteriorSplitCell { left_child, key });
         }
 
         match parent_frame.child_ref {
@@ -944,18 +1196,13 @@ impl TreeCursor {
             }
         }
 
-        let idx = match cells
-            .binary_search_by(|cell| cell.key(&interior_snapshot_bytes).cmp(&pending.separator))
-        {
+        let idx = match cells.binary_search_by(|cell| cell.key().cmp(&pending.separator)) {
             Ok(_) => return Err(PageError::DuplicateKey.into()),
             Err(insert_index) => insert_index,
         };
         cells.insert(
             idx,
-            InteriorSplitCell::Incoming {
-                left_child: pending.left_page_id,
-                key: &pending.separator,
-            },
+            InteriorSplitCell { left_child: pending.left_page_id, key: pending.separator.clone() },
         );
 
         let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
@@ -978,10 +1225,22 @@ impl TreeCursor {
         right_page.set_next_page_id(next_page_id);
 
         for cell in left_cells {
-            interior_page.insert(cell.key(&interior_snapshot_bytes), cell.left_child())?;
+            let slot_index = interior_page.slot_count();
+            self.insert_interior_payload_at(
+                &mut interior_page,
+                slot_index,
+                cell.left_child(),
+                cell.key(),
+            )?;
         }
         for cell in right_cells {
-            right_page.insert(cell.key(&interior_snapshot_bytes), cell.left_child())?;
+            let slot_index = right_page.slot_count();
+            self.insert_interior_payload_at(
+                &mut right_page,
+                slot_index,
+                cell.left_child(),
+                cell.key(),
+            )?;
         }
 
         if let Some(next_page_id) = next_page_id {
@@ -994,7 +1253,7 @@ impl TreeCursor {
         let separator = left_cells
             .last()
             .expect("interior split must leave a non-empty left page")
-            .key(&interior_snapshot_bytes)
+            .key()
             .to_vec();
 
         Ok(PendingSplit { separator, left_page_id: parent_frame.page_id, right_page_id })
@@ -1008,7 +1267,12 @@ impl TreeCursor {
             root_guard.page_mut(),
             pending.right_page_id,
         );
-        root_page.insert(&pending.separator, pending.left_page_id)?;
+        self.insert_interior_payload_at(
+            &mut root_page,
+            0,
+            pending.left_page_id,
+            &pending.separator,
+        )?;
         self.root_page_id.set(root_page_id);
         Ok(())
     }
@@ -1079,10 +1343,10 @@ mod tests {
 
     use super::*;
     use crate::disk_manager::DiskManager;
-    use crate::page::format::USABLE_SPACE_END;
 
     const KEY_LEN_RANGE: std::ops::RangeInclusive<usize> = 8..=192;
-    const VALUE_LEN_RANGE: std::ops::RangeInclusive<usize> = 8..=512;
+    const VALUE_LEN_RANGE: std::ops::RangeInclusive<usize> = 8..=PAGE_SIZE * 3;
+    const INLINE_VALUE_LEN_RANGE: std::ops::RangeInclusive<usize> = 8..=512;
     const TARGET_HEIGHT: usize = 4;
     const MAX_RECORDS: usize = 50_000;
 
@@ -1098,7 +1362,11 @@ mod tests {
     ) -> (Vec<u8>, Vec<u8>) {
         loop {
             let key_len = rng.usize(KEY_LEN_RANGE);
-            let value_len = rng.usize(VALUE_LEN_RANGE);
+            let value_len = if rng.u8(0..32) == 0 {
+                rng.usize(VALUE_LEN_RANGE)
+            } else {
+                rng.usize(INLINE_VALUE_LEN_RANGE)
+            };
             let key = random_bytes(rng, key_len);
             if expected.contains_key(&key) {
                 continue;
@@ -1109,20 +1377,14 @@ mod tests {
         }
     }
 
-    fn assert_inline_cell(key: &[u8], value: &[u8]) {
-        let leaf_cell_len = LEAF_CELL_PREFIX_SIZE + key.len() + value.len();
-        let leaf_max_cell_len = USABLE_SPACE_END - PageKind::RawLeaf.header_size();
+    fn assert_supported_cell(key: &[u8], value: &[u8]) {
         assert!(
-            leaf_cell_len <= leaf_max_cell_len,
-            "leaf cell should fit inline: len={leaf_cell_len}, max={leaf_max_cell_len}"
+            key.len() + value.len() <= u16::MAX as usize,
+            "leaf payload should fit the current u16 payload-length field"
         );
-
-        let interior_cell_len = INTERIOR_CELL_PREFIX_SIZE + key.len();
-        let interior_max_cell_len = USABLE_SPACE_END - PageKind::RawInterior.header_size();
         assert!(
-            interior_cell_len <= interior_max_cell_len,
-            "interior separator should fit inline: len={interior_cell_len}, \
-             max={interior_max_cell_len}"
+            key.len() <= u16::MAX as usize,
+            "interior separator should fit the current u16 payload-length field"
         );
     }
 
@@ -1159,7 +1421,7 @@ mod tests {
     // Builds a four-level raw B+ tree from deterministic random inline cells,
     // proving leaf splits, repeated interior split propagation, exact-key
     // lookups, and forward/backward sorted cursor scans.
-    fn random_insert_get_simulation_reaches_four_levels() {
+    fn random_insert_get_simulation_with_oversized_values_reaches_four_levels() {
         let file = NamedTempFile::new().unwrap();
         let disk_manager = DiskManager::new(file.path()).unwrap();
         let page_cache = PageCache::new(disk_manager, 256).unwrap();
@@ -1177,7 +1439,7 @@ mod tests {
 
         for _ in 0..MAX_RECORDS {
             let (key, value) = random_unique_cell(&mut rng, &expected);
-            assert_inline_cell(&key, &value);
+            assert_supported_cell(&key, &value);
 
             cursor.insert(&key, &value).unwrap();
             assert!(expected.insert(key.clone(), value.clone()).is_none());
@@ -1215,6 +1477,40 @@ mod tests {
         assert_forward_scan_matches(&mut cursor, &expected);
         assert_reverse_scan_matches(&mut cursor, &expected);
         assert_eq!(expected.len(), cells.len());
+    }
+
+    fn oversized_key(index: u16) -> Vec<u8> {
+        let mut key = vec![0; PAGE_SIZE + 256];
+        key[..2].copy_from_slice(&index.to_be_bytes());
+        for byte in &mut key[2..] {
+            *byte = (index % 251) as u8;
+        }
+        key
+    }
+
+    #[test]
+    fn insert_get_supports_oversized_keys_promoted_to_interior_pages() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let page_cache = PageCache::new(disk_manager, 256).unwrap();
+        let root_page_id = initialize_empty_root(&page_cache).unwrap();
+        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut expected = BTreeMap::new();
+
+        for index in 0..48 {
+            let key = oversized_key(index);
+            let value = format!("value-{index}").into_bytes();
+            assert_supported_cell(&key, &value);
+            cursor.insert(&key, &value).unwrap();
+            expected.insert(key, value);
+        }
+
+        assert!(tree_height(&cursor).unwrap() >= 2, "large keys should force a root split");
+        for (key, value) in &expected {
+            let record = cursor.get(key).unwrap().expect("inserted oversized key should exist");
+            assert_record_matches(&record, key, value);
+        }
+        assert_forward_scan_matches(&mut cursor, &expected);
     }
 
     fn assert_record_matches(record: &Record, expected_key: &[u8], expected_value: &[u8]) {
