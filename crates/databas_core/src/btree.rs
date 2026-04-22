@@ -229,11 +229,11 @@ enum LeafSplitCell<'c> {
 
 /// Temporary description of one interior cell while rebuilding split pages.
 #[derive(Debug, Clone)]
-enum InteriorSplitCell {
+enum InteriorSplitCell<'c> {
     /// An existing cell borrowed from the pre-split page snapshot.
     Snapshot { left_child: PageId, key_range: Range<usize> },
     /// The newly inserted separator cell that triggered the split.
-    Incoming { left_child: PageId, key: Box<[u8]> },
+    Incoming { left_child: PageId, key: &'c [u8] },
 }
 
 impl<'c> LeafSplitCell<'c> {
@@ -275,7 +275,7 @@ impl<'c> LeafSplitCell<'c> {
     }
 }
 
-impl InteriorSplitCell {
+impl<'c> InteriorSplitCell<'c> {
     /// Returns the left child page referenced by this interior cell.
     fn left_child(&self) -> PageId {
         match self {
@@ -296,7 +296,7 @@ impl InteriorSplitCell {
         INTERIOR_CELL_PREFIX_SIZE + self.key_len()
     }
 
-    /// Returns the separator key bytes from either the page snapshot or owned storage.
+    /// Returns the separator key bytes from either the page snapshot or incoming storage.
     fn key<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE]) -> &'a [u8] {
         match self {
             Self::Snapshot { key_range, .. } => &snapshot[key_range.clone()],
@@ -310,7 +310,7 @@ impl InteriorSplitCell {
             Self::Snapshot { key_range, .. } => {
                 Self::Snapshot { left_child, key_range: key_range.clone() }
             }
-            Self::Incoming { key, .. } => Self::Incoming { left_child, key: key.clone() },
+            Self::Incoming { key, .. } => Self::Incoming { left_child, key },
         }
     }
 }
@@ -942,18 +942,19 @@ impl TreeCursor {
             }
         }
 
-        match cells
+        let idx = match cells
             .binary_search_by(|cell| cell.key(&interior_snapshot_bytes).cmp(&pending.separator))
         {
             Ok(_) => return Err(PageError::DuplicateKey.into()),
-            Err(insert_index) => cells.insert(
-                insert_index,
-                InteriorSplitCell::Incoming {
-                    left_child: pending.left_page_id,
-                    key: pending.separator.into_boxed_slice(),
-                },
-            ),
-        }
+            Err(insert_index) => insert_index,
+        };
+        cells.insert(
+            idx,
+            InteriorSplitCell::Incoming {
+                left_child: pending.left_page_id,
+                key: &pending.separator,
+            },
+        );
 
         let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
         let mut right_guard = right_page_guard.write()?;
