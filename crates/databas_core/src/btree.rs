@@ -224,7 +224,7 @@ enum LeafSplitCell {
     /// An existing cell borrowed from the pre-split page snapshot.
     Snapshot { key_range: Range<usize>, value_range: Range<usize> },
     /// The newly inserted cell that triggered the split.
-    Incoming { key_len: usize, value_len: usize },
+    Incoming { key: Box<[u8]>, value: Box<[u8]> },
 }
 
 /// Temporary description of one interior cell while rebuilding split pages.
@@ -241,7 +241,7 @@ impl LeafSplitCell {
     fn key_len(&self) -> usize {
         match self {
             Self::Snapshot { key_range, .. } => key_range.len(),
-            Self::Incoming { key_len, .. } => *key_len,
+            Self::Incoming { key, .. } => key.len(),
         }
     }
 
@@ -249,7 +249,7 @@ impl LeafSplitCell {
     fn value_len(&self) -> usize {
         match self {
             Self::Snapshot { value_range, .. } => value_range.len(),
-            Self::Incoming { value_len, .. } => *value_len,
+            Self::Incoming { value, .. } => value.len(),
         }
     }
 
@@ -258,25 +258,19 @@ impl LeafSplitCell {
         LEAF_CELL_PREFIX_SIZE + self.key_len() + self.value_len()
     }
 
-    /// Returns the key bytes from either the page snapshot or the incoming value.
-    fn key<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE], incoming_key: &'a [u8]) -> &'a [u8] {
+    /// Returns the key bytes from either the page snapshot or owned storage.
+    fn key<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE]) -> &'a [u8] {
         match self {
             Self::Snapshot { key_range, .. } => &snapshot[key_range.clone()],
-            Self::Incoming { key_len, .. } => {
-                debug_assert_eq!(*key_len, incoming_key.len());
-                incoming_key
-            }
+            Self::Incoming { key, .. } => key,
         }
     }
 
-    /// Returns the value bytes from either the page snapshot or the incoming value.
-    fn value<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE], incoming_value: &'a [u8]) -> &'a [u8] {
+    /// Returns the value bytes from either the page snapshot or owned storage.
+    fn value<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE]) -> &'a [u8] {
         match self {
             Self::Snapshot { value_range, .. } => &snapshot[value_range.clone()],
-            Self::Incoming { value_len, .. } => {
-                debug_assert_eq!(*value_len, incoming_value.len());
-                incoming_value
-            }
+            Self::Incoming { value, .. } => value,
         }
     }
 }
@@ -302,7 +296,7 @@ impl InteriorSplitCell {
         INTERIOR_CELL_PREFIX_SIZE + self.key_len()
     }
 
-    /// Returns the separator key bytes from either the snapshot or owned storage.
+    /// Returns the separator key bytes from either the page snapshot or owned storage.
     fn key<'a>(&'a self, snapshot: &'a [u8; PAGE_SIZE]) -> &'a [u8] {
         match self {
             Self::Snapshot { key_range, .. } => &snapshot[key_range.clone()],
@@ -811,25 +805,15 @@ impl TreeCursor {
         let next_page_id = leaf_snapshot.next_page_id();
         let mut cells = Vec::with_capacity(leaf_snapshot.slot_count() as usize + 1);
         for slot_index in 0..leaf_snapshot.slot_count() {
-            let cell = leaf_snapshot.cell(slot_index)?;
-            let key_bytes = cell.key()?;
-            let value_bytes = cell.value()?;
-            cells.push(LeafSplitCell::Snapshot {
-                key_range: key_bytes.as_ptr_range().start as usize
-                    - leaf_snapshot_bytes.as_ptr() as usize
-                    ..key_bytes.as_ptr_range().end as usize - leaf_snapshot_bytes.as_ptr() as usize,
-                value_range: value_bytes.as_ptr_range().start as usize
-                    - leaf_snapshot_bytes.as_ptr() as usize
-                    ..value_bytes.as_ptr_range().end as usize
-                        - leaf_snapshot_bytes.as_ptr() as usize,
-            });
+            let (key_range, value_range) = leaf_snapshot.cell_key_value_ranges(slot_index)?;
+            cells.push(LeafSplitCell::Snapshot { key_range, value_range });
         }
 
-        match cells.binary_search_by(|cell| cell.key(&leaf_snapshot_bytes, key).cmp(key)) {
+        match cells.binary_search_by(|cell| cell.key(&leaf_snapshot_bytes).cmp(key)) {
             Ok(_) => return Err(PageError::DuplicateKey.into()),
             Err(insert_index) => cells.insert(
                 insert_index,
-                LeafSplitCell::Incoming { key_len: key.len(), value_len: value.len() },
+                LeafSplitCell::Incoming { key: key.into(), value: value.into() },
             ),
         }
 
@@ -847,16 +831,10 @@ impl TreeCursor {
         right_page.set_next_page_id(next_page_id);
 
         for cell in left_cells {
-            leaf_page.insert(
-                cell.key(&leaf_snapshot_bytes, key),
-                cell.value(&leaf_snapshot_bytes, value),
-            )?;
+            leaf_page.insert(cell.key(&leaf_snapshot_bytes), cell.value(&leaf_snapshot_bytes))?;
         }
         for cell in right_cells {
-            right_page.insert(
-                cell.key(&leaf_snapshot_bytes, key),
-                cell.value(&leaf_snapshot_bytes, value),
-            )?;
+            right_page.insert(cell.key(&leaf_snapshot_bytes), cell.value(&leaf_snapshot_bytes))?;
         }
 
         if let Some(next_page_id) = next_page_id {
@@ -869,7 +847,7 @@ impl TreeCursor {
         let separator = left_cells
             .last()
             .expect("leaf split must leave a non-empty left page")
-            .key(&leaf_snapshot_bytes, key)
+            .key(&leaf_snapshot_bytes)
             .to_vec();
 
         let target_page_id = if key <= separator.as_slice() { leaf_page_id } else { right_page_id };
@@ -951,15 +929,9 @@ impl TreeCursor {
         let mut old_rightmost_child = interior_snapshot.rightmost_child();
         let mut cells = Vec::with_capacity(interior_snapshot.slot_count() as usize + 1);
         for slot_index in 0..interior_snapshot.slot_count() {
-            let cell = interior_snapshot.cell(slot_index)?;
-            let key_bytes = cell.key()?;
-            cells.push(InteriorSplitCell::Snapshot {
-                left_child: cell.left_child()?,
-                key_range: key_bytes.as_ptr_range().start as usize
-                    - interior_snapshot_bytes.as_ptr() as usize
-                    ..key_bytes.as_ptr_range().end as usize
-                        - interior_snapshot_bytes.as_ptr() as usize,
-            });
+            let (left_child, key_range) =
+                interior_snapshot.cell_left_child_key_range(slot_index)?;
+            cells.push(InteriorSplitCell::Snapshot { left_child, key_range });
         }
 
         match parent_frame.child_ref {

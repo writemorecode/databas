@@ -137,6 +137,20 @@ where
         Ok(Cell::new_leaf(cell_bytes, parsed.parts, slot_index))
     }
 
+    /// Returns page-relative byte ranges for the key and value in one cell.
+    pub(crate) fn cell_key_value_ranges(
+        &self,
+        slot_index: SlotId,
+    ) -> PageResult<(Range<usize>, Range<usize>)> {
+        let parsed = cell_parts(self, slot_index)?;
+        let cell_offset = parsed.cell_offset;
+        let key_range =
+            cell_offset + parsed.parts.key_range.start..cell_offset + parsed.parts.key_range.end;
+        let value_range = cell_offset + parsed.parts.value_range.start
+            ..cell_offset + parsed.parts.value_range.end;
+        Ok((key_range, value_range))
+    }
+
     /// Looks up a key and returns its cell if present.
     pub fn lookup(&self, key: &[u8]) -> PageResult<Option<Cell<'_, Leaf>>> {
         match self.search(key)? {
