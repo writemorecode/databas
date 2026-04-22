@@ -220,11 +220,11 @@ struct PendingSplit {
 
 /// Temporary description of one leaf cell while rebuilding split pages.
 #[derive(Debug, Clone)]
-enum LeafSplitCell {
+enum LeafSplitCell<'c> {
     /// An existing cell borrowed from the pre-split page snapshot.
     Snapshot { key_range: Range<usize>, value_range: Range<usize> },
     /// The newly inserted cell that triggered the split.
-    Incoming { key: Box<[u8]>, value: Box<[u8]> },
+    Incoming { key: &'c [u8], value: &'c [u8] },
 }
 
 /// Temporary description of one interior cell while rebuilding split pages.
@@ -236,7 +236,7 @@ enum InteriorSplitCell {
     Incoming { left_child: PageId, key: Box<[u8]> },
 }
 
-impl LeafSplitCell {
+impl<'c> LeafSplitCell<'c> {
     /// Returns the key length this cell will occupy after the split.
     fn key_len(&self) -> usize {
         match self {
@@ -809,13 +809,11 @@ impl TreeCursor {
             cells.push(LeafSplitCell::Snapshot { key_range, value_range });
         }
 
-        match cells.binary_search_by(|cell| cell.key(&leaf_snapshot_bytes).cmp(key)) {
+        let idx = match cells.binary_search_by(|cell| cell.key(&leaf_snapshot_bytes).cmp(key)) {
             Ok(_) => return Err(PageError::DuplicateKey.into()),
-            Err(insert_index) => cells.insert(
-                insert_index,
-                LeafSplitCell::Incoming { key: key.into(), value: value.into() },
-            ),
-        }
+            Err(insert_index) => insert_index,
+        };
+        cells.insert(idx, LeafSplitCell::Incoming { key, value });
 
         let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
         let mut right_guard = right_page_guard.write()?;
