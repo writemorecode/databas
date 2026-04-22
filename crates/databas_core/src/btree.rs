@@ -13,7 +13,7 @@ use crate::{
         self, BoundResult, PageError, RawInterior, RawLeaf, Read, SearchResult, Write,
         format::{KIND_OFFSET, PageKind},
     },
-    page_cache::{PageCache, PinGuard},
+    page_cache::{PageCache, PageWriteGuard, PinGuard},
 };
 
 const LEAF_CELL_PREFIX_SIZE: usize = 2 + 2 + 2;
@@ -583,10 +583,10 @@ impl TreeCursor {
     /// Inserts a new raw key/value record into the tree.
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
         let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
+        let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
+        let mut leaf_guard = leaf_pin_guard.write()?;
         let insert_result = {
-            let pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
-            let mut write_guard = pin_guard.write()?;
-            let mut page = RawLeaf::<Write<'_>>::open(write_guard.page_mut())?;
+            let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
             page.insert(key, value)
         };
 
@@ -596,7 +596,10 @@ impl TreeCursor {
                 Ok(())
             }
             Err(PageError::PageFull { .. }) => {
-                let pending = self.insert_with_leaf_page_split(leaf_page_id, key, value)?;
+                let pending =
+                    self.insert_with_leaf_page_split(leaf_page_id, &mut leaf_guard, key, value)?;
+                drop(leaf_guard);
+                drop(leaf_pin_guard);
                 self.propagate_split(&tree_path, pending)
             }
             Err(err) => Err(err.into()),
@@ -793,11 +796,10 @@ impl TreeCursor {
     fn insert_with_leaf_page_split(
         &mut self,
         leaf_page_id: PageId,
+        leaf_guard: &mut PageWriteGuard<'_>,
         key: &[u8],
         value: &[u8],
     ) -> StorageResult<PendingSplit> {
-        let leaf_page_guard = self.page_cache.fetch_page(leaf_page_id)?;
-        let mut leaf_guard = leaf_page_guard.write()?;
         let leaf_snapshot_bytes = *leaf_guard.page();
         let leaf_snapshot = RawLeaf::<Read<'_>>::open(&leaf_snapshot_bytes)?;
 
