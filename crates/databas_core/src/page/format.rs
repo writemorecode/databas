@@ -4,10 +4,10 @@
 //! upward from the header, a packed cell-content region that grows downward
 //! from the end of usable space, and a zeroed reserved footer.
 
-use crate::{PAGE_SIZE, SlotId};
+use crate::{PAGE_SIZE, PageId, SlotId};
 
 /// Current on-disk page format version.
-pub const FORMAT_VERSION: u8 = 3;
+pub const FORMAT_VERSION: u8 = 4;
 /// Number of bytes reserved at the end of every page.
 pub const RESERVED_FOOTER_SIZE: usize = 4;
 /// Exclusive end offset of the usable region within a page buffer.
@@ -16,6 +16,16 @@ pub const USABLE_SPACE_END: usize = PAGE_SIZE - RESERVED_FOOTER_SIZE;
 pub const SLOT_ENTRY_SIZE: usize = 2;
 /// Width in bytes of the length prefix at the start of every cell.
 pub const CELL_LENGTH_SIZE: usize = 2;
+/// Width in bytes of the first-overflow-page field stored in every cell.
+pub const CELL_OVERFLOW_PAGE_ID_SIZE: usize = 8;
+/// Sentinel page id stored when a cell has no overflow chain.
+pub const NO_OVERFLOW_PAGE_ID: PageId = PageId::MAX;
+/// Minimum number of logical payload bytes an overflow cell must keep inline.
+pub const MIN_INLINE_OVERFLOW_PAYLOAD_BYTES: usize = 64;
+/// Maximum number of logical payload bytes an overflow cell may keep inline.
+pub const MAX_INLINE_OVERFLOW_PAYLOAD_BYTES: usize = 512;
+/// Width in bytes of the next-page field at the start of every overflow page.
+pub const OVERFLOW_NEXT_PAGE_ID_SIZE: usize = 8;
 /// Width in bytes of a freeblock header: next freeblock plus total span size.
 pub const FREEBLOCK_HEADER_SIZE: usize = 4;
 /// Maximum fragmented free bytes permitted on a page before defragmentation.
