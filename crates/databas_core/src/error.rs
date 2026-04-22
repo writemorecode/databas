@@ -37,6 +37,7 @@ pub struct CorruptionError {
 pub enum CorruptionComponent {
     DatabaseFile,
     DiskPage,
+    OverflowPage,
     Page,
     LeafPage,
     InteriorPage,
@@ -83,6 +84,10 @@ pub enum CorruptionKind {
     InvalidTableRowIdKeyLength { actual: usize },
     #[error("index row-id value has invalid length {actual}")]
     InvalidIndexRowIdValueLength { actual: usize },
+    #[error("overflow chain ended before {expected} bytes could be read")]
+    OverflowChainTooShort { expected: usize, actual: usize },
+    #[error("overflow chain has extra pages after {expected} bytes were read")]
+    OverflowChainTooLong { expected: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -314,6 +319,7 @@ impl fmt::Display for CorruptionComponent {
         match self {
             Self::DatabaseFile => write!(f, "database file"),
             Self::DiskPage => write!(f, "disk page"),
+            Self::OverflowPage => write!(f, "overflow page"),
             Self::Page => write!(f, "page"),
             Self::LeafPage => write!(f, "leaf page"),
             Self::InteriorPage => write!(f, "interior page"),
