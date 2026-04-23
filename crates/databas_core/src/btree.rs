@@ -4,7 +4,7 @@
 //! only with raw byte keys and raw byte values stored in `RawLeaf` pages
 //! and separator byte keys stored in `RawInterior` pages.
 
-use std::{cell::Cell, fmt, ops::Range, rc::Rc};
+use std::{cell::Cell, cmp::Ordering, fmt, ops::Range, rc::Rc};
 
 use crate::{
     PAGE_SIZE, PageId,
@@ -531,6 +531,56 @@ fn read_interior_cell(
     Ok((left_child, key))
 }
 
+fn compare_key_prefix(
+    page_id: PageId,
+    inline_key: &[u8],
+    key_len: usize,
+    key: &[u8],
+) -> StorageResult<Option<Ordering>> {
+    if inline_key.len() > key_len {
+        return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
+    }
+
+    if key.len() <= inline_key.len() {
+        let ordering = inline_key[..key.len()].cmp(key);
+        if ordering != Ordering::Equal {
+            return Ok(Some(ordering));
+        }
+        return Ok(Some(key_len.cmp(&key.len())));
+    }
+
+    let ordering = inline_key.cmp(&key[..inline_key.len()]);
+    if ordering != Ordering::Equal {
+        return Ok(Some(ordering));
+    }
+
+    if inline_key.len() == key_len {
+        return Ok(Some(Ordering::Less));
+    }
+
+    Ok(None)
+}
+
+fn materialize_overflow_key(
+    page_cache: &PageCache,
+    page_id: PageId,
+    mut inline_key: Vec<u8>,
+    first_overflow_page_id: Option<PageId>,
+    key_len: usize,
+) -> StorageResult<Vec<u8>> {
+    let first_overflow_page_id = first_overflow_page_id
+        .ok_or_else(|| cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds))?;
+    inline_key.extend(overflow::read_chain_prefix(
+        page_cache,
+        first_overflow_page_id,
+        key_len - inline_key.len(),
+    )?);
+    if inline_key.len() != key_len {
+        return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
+    }
+    Ok(inline_key)
+}
+
 impl TreeCursor {
     /// Creates a cursor anchored at `root_page_id` in page-level state.
     pub(crate) fn new(page_cache: PageCache, root_page_id: PageId) -> Self {
@@ -605,17 +655,84 @@ impl TreeCursor {
         Ok(interior.slot_count())
     }
 
+    fn compare_leaf_key(
+        &self,
+        page_id: PageId,
+        slot_index: u16,
+        key: &[u8],
+    ) -> StorageResult<Ordering> {
+        let (inline_key, first_overflow_page_id, key_len) = {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let page = pin.read()?;
+            let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+            let (key_len, _, first_overflow_page_id, inline_range) =
+                leaf.cell_payload_parts(slot_index)?;
+            let inline_key_len = key_len.min(inline_range.len());
+            let inline_key = &page.page()[inline_range.start..inline_range.start + inline_key_len];
+            if let Some(ordering) = compare_key_prefix(page_id, inline_key, key_len, key)? {
+                return Ok(ordering);
+            }
+            (inline_key.to_vec(), first_overflow_page_id, key_len)
+        };
+
+        let materialized_key = materialize_overflow_key(
+            &self.page_cache,
+            page_id,
+            inline_key,
+            first_overflow_page_id,
+            key_len,
+        )?;
+        Ok(materialized_key.as_slice().cmp(key))
+    }
+
+    fn compare_interior_key(
+        &self,
+        page_id: PageId,
+        slot_index: u16,
+        key: &[u8],
+    ) -> StorageResult<Ordering> {
+        let (inline_key, first_overflow_page_id, key_len) = {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let page = pin.read()?;
+            let interior = RawInterior::<Read<'_>>::open(page.page())?;
+            let (_, key_len, first_overflow_page_id, inline_range) =
+                interior.cell_payload_parts(slot_index)?;
+            let inline_key_len = key_len.min(inline_range.len());
+            let inline_key = &page.page()[inline_range.start..inline_range.start + inline_key_len];
+            if let Some(ordering) = compare_key_prefix(page_id, inline_key, key_len, key)? {
+                return Ok(ordering);
+            }
+            (inline_key.to_vec(), first_overflow_page_id, key_len)
+        };
+
+        let materialized_key = materialize_overflow_key(
+            &self.page_cache,
+            page_id,
+            inline_key,
+            first_overflow_page_id,
+            key_len,
+        )?;
+        Ok(materialized_key.as_slice().cmp(key))
+    }
+
+    fn read_interior_left_child(&self, page_id: PageId, slot_index: u16) -> StorageResult<PageId> {
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let page = pin.read()?;
+        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
+        Ok(left_child)
+    }
+
     fn search_leaf_slot(&self, page_id: PageId, key: &[u8]) -> StorageResult<SearchResult> {
         let mut low: u16 = 0;
         let mut high = self.raw_leaf_slot_count(page_id)?;
 
         while low < high {
             let mid = low + (high - low) / 2;
-            let (cell_key, _) = read_leaf_cell(&self.page_cache, page_id, mid)?;
-            match cell_key.as_slice().cmp(key) {
-                std::cmp::Ordering::Less => low = mid + 1,
-                std::cmp::Ordering::Greater => high = mid,
-                std::cmp::Ordering::Equal => return Ok(SearchResult::Found(mid)),
+            match self.compare_leaf_key(page_id, mid, key)? {
+                Ordering::Less => low = mid + 1,
+                Ordering::Greater => high = mid,
+                Ordering::Equal => return Ok(SearchResult::Found(mid)),
             }
         }
 
@@ -629,8 +746,7 @@ impl TreeCursor {
 
         while low < high {
             let mid = low + (high - low) / 2;
-            let (cell_key, _) = read_leaf_cell(&self.page_cache, page_id, mid)?;
-            if cell_key.as_slice() < key {
+            if self.compare_leaf_key(page_id, mid, key)? == Ordering::Less {
                 low = mid + 1;
             } else {
                 high = mid;
@@ -647,8 +763,7 @@ impl TreeCursor {
 
         while low < high {
             let mid = low + (high - low) / 2;
-            let (_, cell_key) = read_interior_cell(&self.page_cache, page_id, mid)?;
-            if cell_key.as_slice() < key {
+            if self.compare_interior_key(page_id, mid, key)? == Ordering::Less {
                 low = mid + 1;
             } else {
                 high = mid;
@@ -660,10 +775,7 @@ impl TreeCursor {
 
     fn interior_child_for_key(&self, page_id: PageId, key: &[u8]) -> StorageResult<PageId> {
         match self.lower_bound_interior_slot(page_id, key)? {
-            BoundResult::At(slot_index) => {
-                let (left_child, _) = read_interior_cell(&self.page_cache, page_id, slot_index)?;
-                Ok(left_child)
-            }
+            BoundResult::At(slot_index) => self.read_interior_left_child(page_id, slot_index),
             BoundResult::PastEnd => {
                 let pin = self.page_cache.fetch_page(page_id)?;
                 let page = pin.read()?;
@@ -766,8 +878,8 @@ impl TreeCursor {
                         drop(pin);
                         match self.lower_bound_interior_slot(page_id, key)? {
                             BoundResult::At(slot_index) => {
-                                let (child_page_id, _) =
-                                    read_interior_cell(&self.page_cache, page_id, slot_index)?;
+                                let child_page_id =
+                                    self.read_interior_left_child(page_id, slot_index)?;
                                 path.push(PathFrame {
                                     page_id,
                                     child_ref: ChildSlotRef::Slot(slot_index),
@@ -1120,9 +1232,12 @@ impl TreeCursor {
         let insert_slot_index =
             match self.lower_bound_interior_slot(parent_frame.page_id, &pending.separator)? {
                 BoundResult::At(slot_index) => {
-                    let (_, existing_key) =
-                        read_interior_cell(&self.page_cache, parent_frame.page_id, slot_index)?;
-                    if existing_key == pending.separator {
+                    if self.compare_interior_key(
+                        parent_frame.page_id,
+                        slot_index,
+                        &pending.separator,
+                    )? == Ordering::Equal
+                    {
                         return Err(PageError::DuplicateKey.into());
                     }
                     slot_index
@@ -1740,6 +1855,64 @@ mod tests {
             .to_owned_record()
             .unwrap();
         assert_owned_record_matches(&owned, b"alpha", b"value");
+    }
+
+    #[test]
+    fn binary_search_supports_inline_key_with_overflow_value() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let page_cache = PageCache::new(disk_manager, 8).unwrap();
+        let root_page_id = initialize_empty_root(&page_cache).unwrap();
+        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let value = vec![7; PAGE_SIZE];
+
+        cursor.insert(b"alpha", b"small").unwrap();
+        cursor.insert(b"bravo", &value).unwrap();
+        cursor.insert(b"charlie", b"small").unwrap();
+
+        let record = cursor.get(b"bravo").unwrap().expect("overflow value key should exist");
+        assert_record_matches(&record, b"bravo", &value);
+        assert!(cursor.get(b"between").unwrap().is_none());
+    }
+
+    #[test]
+    fn binary_search_supports_oversized_key_with_overflow_value() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let page_cache = PageCache::new(disk_manager, 16).unwrap();
+        let root_page_id = initialize_empty_root(&page_cache).unwrap();
+        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let key = oversized_key(7);
+        let value = vec![11; PAGE_SIZE];
+
+        cursor.insert(&key, &value).unwrap();
+
+        let record = cursor.get(&key).unwrap().expect("oversized key should exist");
+        assert_record_matches(&record, &key, &value);
+    }
+
+    #[test]
+    fn binary_search_supports_oversized_interior_separator_keys() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let page_cache = PageCache::new(disk_manager, 256).unwrap();
+        let root_page_id = initialize_empty_root(&page_cache).unwrap();
+        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut expected = BTreeMap::new();
+
+        for index in 0..48 {
+            let key = oversized_key(index);
+            let value = format!("value-{index}").into_bytes();
+            cursor.insert(&key, &value).unwrap();
+            expected.insert(key, value);
+        }
+
+        assert!(tree_height(&cursor).unwrap() >= 2, "large keys should force interior routing");
+        for (key, value) in &expected {
+            assert!(cursor.seek_to_key(key).unwrap(), "seek_to_key should find oversized key");
+            let record = cursor.current().unwrap().expect("seek_to_key should position cursor");
+            assert_record_matches(&record, key, value);
+        }
     }
 
     fn assert_record_matches(record: &Record, expected_key: &[u8], expected_value: &[u8]) {

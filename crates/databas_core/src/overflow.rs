@@ -110,3 +110,50 @@ pub(crate) fn read_chain(
 
     Ok(payload)
 }
+
+/// Reads the first `expected_len` bytes from an overflow chain.
+///
+/// Unlike [`read_chain`], this helper does not require the chain to end after
+/// the requested bytes. It is used by key comparisons that only need the key
+/// suffix from a larger overflow payload.
+pub(crate) fn read_chain_prefix(
+    page_cache: &PageCache,
+    first_page_id: PageId,
+    expected_len: usize,
+) -> StorageResult<Vec<u8>> {
+    let mut page_id = Some(first_page_id);
+    let mut payload = Vec::with_capacity(expected_len);
+
+    while payload.len() < expected_len {
+        let Some(current_page_id) = page_id else {
+            return Err(overflow_corruption(
+                None,
+                CorruptionKind::OverflowChainTooShort {
+                    expected: expected_len,
+                    actual: payload.len(),
+                },
+            ));
+        };
+
+        if current_page_id == NO_OVERFLOW_PAGE_ID {
+            return Err(overflow_corruption(
+                Some(current_page_id),
+                CorruptionKind::OverflowChainTooShort {
+                    expected: expected_len,
+                    actual: payload.len(),
+                },
+            ));
+        }
+
+        let pin = page_cache.fetch_page(current_page_id)?;
+        let page = pin.read()?;
+        let remaining = expected_len - payload.len();
+        let take = remaining.min(OVERFLOW_PAYLOAD_SIZE);
+        payload.extend_from_slice(
+            &page.page()[OVERFLOW_NEXT_PAGE_ID_SIZE..OVERFLOW_NEXT_PAGE_ID_SIZE + take],
+        );
+        page_id = read_next_page_id(page.page());
+    }
+
+    Ok(payload)
+}
