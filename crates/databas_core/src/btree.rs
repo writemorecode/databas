@@ -4,7 +4,7 @@
 //! only with raw byte keys and raw byte values stored in `RawLeaf` pages
 //! and separator byte keys stored in `RawInterior` pages.
 
-use std::{cell::Cell, fmt, rc::Rc};
+use std::{cell::Cell, fmt, ops::Range, rc::Rc};
 
 use crate::{
     PAGE_SIZE, PageId,
@@ -14,7 +14,7 @@ use crate::{
         self, BoundResult, PageError, RawInterior, RawLeaf, Read, SearchResult, Write,
         format::{KIND_OFFSET, MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, PageKind},
     },
-    page_cache::{PageCache, PageWriteGuard},
+    page_cache::{PageCache, PageWriteGuard, PinGuard},
 };
 
 const LEAF_CELL_PREFIX_SIZE: usize = 2 + 8 + 2 + 2;
@@ -104,12 +104,56 @@ impl ScanDirection {
     }
 }
 
-/// Materialized raw record view returned by tree reads and cursor iteration.
+enum RecordStorage {
+    PageResident { pin: PinGuard, key_range: Range<usize>, value_range: Range<usize> },
+    Materialized { key: Box<[u8]>, value: Box<[u8]> },
+}
+
+/// Raw record returned by tree reads and cursor iteration.
+///
+/// Records for cells that fit entirely in their leaf page borrow the page
+/// through an internal pin and only expose byte slices during accessor
+/// callbacks. Records for cells with overflow payload are materialized into
+/// fixed-size heap allocations. Use [`OwnedRecord`] when a stable snapshot is
+/// needed across later tree mutations.
 pub struct Record {
     page_id: PageId,
     slot_index: u16,
-    key: Vec<u8>,
-    value: Vec<u8>,
+    storage: RecordStorage,
+}
+
+/// Stable, owned raw record snapshot.
+pub struct OwnedRecord {
+    key: Box<[u8]>,
+    value: Box<[u8]>,
+}
+
+/// Borrowed record view valid only for the callback that receives it.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordView<'a> {
+    key: &'a [u8],
+    value: &'a [u8],
+}
+
+impl<'a> RecordView<'a> {
+    fn new(key: &'a [u8], value: &'a [u8]) -> Self {
+        Self { key, value }
+    }
+
+    /// Returns the record key bytes.
+    pub fn key(&self) -> &'a [u8] {
+        self.key
+    }
+
+    /// Returns the record value bytes.
+    pub fn value(&self) -> &'a [u8] {
+        self.value
+    }
+
+    /// Returns the record key and value bytes.
+    pub fn key_value(&self) -> (&'a [u8], &'a [u8]) {
+        (self.key, self.value)
+    }
 }
 
 impl Record {
@@ -119,8 +163,47 @@ impl Record {
         page_id: PageId,
         slot_index: u16,
     ) -> StorageResult<Self> {
-        let (key, value) = read_leaf_cell(page_cache, page_id, slot_index)?;
-        Ok(Self { page_id, slot_index, key, value })
+        let pin = page_cache.fetch_page(page_id)?;
+        let (key_len, value_len, first_overflow_page_id, inline_range) = {
+            let page = pin.read()?;
+            let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+            leaf.cell_payload_parts(slot_index)?
+        };
+
+        let storage = match first_overflow_page_id {
+            None => {
+                if inline_range.len() != key_len + value_len {
+                    return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
+                }
+
+                let key_start = inline_range.start;
+                let value_start = key_start + key_len;
+                RecordStorage::PageResident {
+                    pin,
+                    key_range: key_start..value_start,
+                    value_range: value_start..inline_range.end,
+                }
+            }
+            Some(first_overflow_page_id) => {
+                let inline_payload = {
+                    let page = pin.read()?;
+                    page.page()[inline_range].to_vec()
+                };
+                drop(pin);
+
+                let (key, value) = materialize_leaf_cell(
+                    page_cache,
+                    page_id,
+                    inline_payload,
+                    first_overflow_page_id,
+                    key_len,
+                    value_len,
+                )?;
+                RecordStorage::Materialized { key, value }
+            }
+        };
+
+        Ok(Self { page_id, slot_index, storage })
     }
 
     /// Returns the slot index that this record refers to within its leaf page.
@@ -128,19 +211,72 @@ impl Record {
         self.slot_index
     }
 
+    /// Executes `f` with a borrowed view of this record.
+    pub fn with_view<R>(&self, f: impl FnOnce(RecordView<'_>) -> R) -> StorageResult<R> {
+        match &self.storage {
+            RecordStorage::PageResident { pin, key_range, value_range } => {
+                let page = pin.read()?;
+                let key = &page.page()[key_range.clone()];
+                let value = &page.page()[value_range.clone()];
+                Ok(f(RecordView::new(key, value)))
+            }
+            RecordStorage::Materialized { key, value } => {
+                Ok(f(RecordView::new(key.as_ref(), value.as_ref())))
+            }
+        }
+    }
+
+    /// Returns a stable, owned snapshot of this record.
+    pub fn to_owned_record(&self) -> StorageResult<OwnedRecord> {
+        self.with_key_value(|key, value| OwnedRecord::new(key.into(), value.into()))
+    }
+
     /// Executes `f` with a borrowed view of the record key.
     pub fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
-        Ok(f(&self.key))
+        self.with_view(|record| f(record.key()))
     }
 
     /// Executes `f` with a borrowed view of the record value.
     pub fn with_value<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
-        Ok(f(&self.value))
+        self.with_view(|record| f(record.value()))
     }
 
     /// Executes `f` with borrowed views of the key and value.
     pub fn with_key_value<R>(&self, f: impl FnOnce(&[u8], &[u8]) -> R) -> StorageResult<R> {
-        Ok(f(&self.key, &self.value))
+        self.with_view(|record| {
+            let (key, value) = record.key_value();
+            f(key, value)
+        })
+    }
+}
+
+impl OwnedRecord {
+    fn new(key: Box<[u8]>, value: Box<[u8]>) -> Self {
+        Self { key, value }
+    }
+
+    /// Executes `f` with a borrowed view of the record key.
+    pub fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        f(&self.key)
+    }
+
+    /// Executes `f` with a borrowed view of the record value.
+    pub fn with_value<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        f(&self.value)
+    }
+
+    /// Executes `f` with borrowed views of the key and value.
+    pub fn with_key_value<R>(&self, f: impl FnOnce(&[u8], &[u8]) -> R) -> R {
+        f(&self.key, &self.value)
+    }
+}
+
+impl fmt::Debug for OwnedRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OwnedRecord")
+            .field("key_len", &self.key.len())
+            .field("value_len", &self.value.len())
+            .finish()
     }
 }
 
@@ -320,6 +456,29 @@ fn materialize_payload(
         return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
     }
     Ok(payload)
+}
+
+fn materialize_leaf_cell(
+    page_cache: &PageCache,
+    page_id: PageId,
+    inline_payload: Vec<u8>,
+    first_overflow_page_id: PageId,
+    key_len: usize,
+    value_len: usize,
+) -> StorageResult<(Box<[u8]>, Box<[u8]>)> {
+    let mut payload = materialize_payload(
+        page_cache,
+        page_id,
+        inline_payload,
+        Some(first_overflow_page_id),
+        key_len + value_len,
+    )?;
+    if payload.len() < key_len {
+        return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
+    }
+
+    let value = payload.split_off(key_len);
+    Ok((payload.into_boxed_slice(), value.into_boxed_slice()))
 }
 
 fn read_leaf_cell(
@@ -722,6 +881,11 @@ impl TreeCursor {
         }
     }
 
+    /// Searches the raw tree for `key` and returns a stable owned record snapshot.
+    pub fn get_owned(&mut self, key: &[u8]) -> StorageResult<Option<OwnedRecord>> {
+        self.get(key)?.map(|record| record.to_owned_record()).transpose()
+    }
+
     fn checked_payload_len(&self, payload_len: usize) -> StorageResult<()> {
         if payload_len > u16::MAX as usize {
             return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize }.into());
@@ -885,14 +1049,29 @@ impl TreeCursor {
         }
     }
 
+    /// Reads the currently selected record as a stable owned snapshot, if any.
+    pub fn current_owned(&self) -> StorageResult<Option<OwnedRecord>> {
+        self.current()?.map(|record| record.to_owned_record()).transpose()
+    }
+
     /// Advances to the next record in sorted key order.
     pub fn next_record(&mut self) -> StorageResult<Option<Record>> {
         self.step_record(ScanDirection::Forward)
     }
 
+    /// Advances to the next record and returns a stable owned snapshot.
+    pub fn next_owned_record(&mut self) -> StorageResult<Option<OwnedRecord>> {
+        self.next_record()?.map(|record| record.to_owned_record()).transpose()
+    }
+
     /// Moves to the previous record in sorted key order.
     pub fn prev_record(&mut self) -> StorageResult<Option<Record>> {
         self.step_record(ScanDirection::Backward)
+    }
+
+    /// Moves to the previous record and returns a stable owned snapshot.
+    pub fn prev_owned_record(&mut self) -> StorageResult<Option<OwnedRecord>> {
+        self.prev_record()?.map(|record| record.to_owned_record()).transpose()
     }
 
     /// Bubbles one pending split up the recorded tree path until it lands.
@@ -1513,6 +1692,56 @@ mod tests {
         assert_forward_scan_matches(&mut cursor, &expected);
     }
 
+    #[test]
+    fn inline_record_is_page_resident() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let page_cache = PageCache::new(disk_manager, 4).unwrap();
+        let root_page_id = initialize_empty_root(&page_cache).unwrap();
+        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+
+        cursor.insert(b"alpha", b"value").unwrap();
+
+        let record = cursor.get(b"alpha").unwrap().expect("inline record should exist");
+        assert!(matches!(record.storage, RecordStorage::PageResident { .. }));
+        assert_record_matches(&record, b"alpha", b"value");
+    }
+
+    #[test]
+    fn overflow_record_is_materialized() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let page_cache = PageCache::new(disk_manager, 4).unwrap();
+        let root_page_id = initialize_empty_root(&page_cache).unwrap();
+        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let value = vec![42; PAGE_SIZE];
+
+        cursor.insert(b"alpha", &value).unwrap();
+
+        let record = cursor.get(b"alpha").unwrap().expect("overflow record should exist");
+        assert!(matches!(record.storage, RecordStorage::Materialized { .. }));
+        assert_record_matches(&record, b"alpha", &value);
+    }
+
+    #[test]
+    fn inline_record_converts_to_owned_snapshot() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let page_cache = PageCache::new(disk_manager, 4).unwrap();
+        let root_page_id = initialize_empty_root(&page_cache).unwrap();
+        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+
+        cursor.insert(b"alpha", b"value").unwrap();
+
+        let owned = cursor
+            .get(b"alpha")
+            .unwrap()
+            .expect("inline record should exist")
+            .to_owned_record()
+            .unwrap();
+        assert_owned_record_matches(&owned, b"alpha", b"value");
+    }
+
     fn assert_record_matches(record: &Record, expected_key: &[u8], expected_value: &[u8]) {
         record
             .with_key_value(|actual_key, actual_value| {
@@ -1520,6 +1749,17 @@ mod tests {
                 assert_eq!(actual_value, expected_value);
             })
             .unwrap();
+    }
+
+    fn assert_owned_record_matches(
+        record: &OwnedRecord,
+        expected_key: &[u8],
+        expected_value: &[u8],
+    ) {
+        record.with_key_value(|actual_key, actual_value| {
+            assert_eq!(actual_key, expected_key);
+            assert_eq!(actual_value, expected_value);
+        });
     }
 
     fn assert_forward_scan_matches(cursor: &mut TreeCursor, expected: &BTreeMap<Vec<u8>, Vec<u8>>) {
