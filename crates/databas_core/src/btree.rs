@@ -20,6 +20,8 @@ use crate::{
 const LEAF_CELL_PREFIX_SIZE: usize = 2 + 8 + 2 + 2;
 const INTERIOR_CELL_PREFIX_SIZE: usize = 2 + 8 + 8 + 2;
 
+type MaterializedLeafCell = (Box<[u8]>, Box<[u8]>);
+
 /// Outcome of trying to position a scan within or beyond one leaf page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LeafSeek {
@@ -481,7 +483,7 @@ fn materialize_leaf_cell(
     first_overflow_page_id: PageId,
     key_len: usize,
     value_len: usize,
-) -> StorageResult<(Box<[u8]>, Box<[u8]>)> {
+) -> StorageResult<MaterializedLeafCell> {
     let mut payload = materialize_payload(
         page_cache,
         page_id,
