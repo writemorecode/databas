@@ -12,6 +12,7 @@ pub(crate) mod page_store;
 pub mod pager;
 
 pub use btree::{CursorState, OwnedRecord, Record, RecordView, TreeCursor};
+pub use page_store::PageStore;
 pub use pager::{Pager, PagerOptions};
 
 pub(crate) const PAGE_SIZE: usize = 4096;

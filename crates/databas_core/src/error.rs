@@ -149,7 +149,7 @@ pub(crate) enum DiskManagerError {
 pub(crate) type DiskManagerResult<T> = Result<T, DiskManagerError>;
 
 #[derive(Debug, Error)]
-pub(crate) enum PageStoreError {
+pub enum PageStoreError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("invalid page id: {page_id}")]
@@ -158,7 +158,7 @@ pub(crate) enum PageStoreError {
     InvalidFileSize { size: u64 },
 }
 
-pub(crate) type PageStoreResult<T> = Result<T, PageStoreError>;
+pub type PageStoreResult<T> = Result<T, PageStoreError>;
 
 #[derive(Debug, Error)]
 pub(crate) enum PageCacheError {
