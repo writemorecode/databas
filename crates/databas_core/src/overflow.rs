@@ -5,6 +5,7 @@ use crate::{
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
     page::format::{self, NO_OVERFLOW_PAGE_ID, OVERFLOW_NEXT_PAGE_ID_SIZE},
     page_cache::PageCache,
+    page_store::PageStore,
 };
 
 pub(crate) const OVERFLOW_PAYLOAD_SIZE: usize = PAGE_SIZE - OVERFLOW_NEXT_PAGE_ID_SIZE;
@@ -26,7 +27,10 @@ fn overflow_corruption(page_id: Option<PageId>, kind: CorruptionKind) -> Storage
 }
 
 /// Writes `payload` into a newly allocated overflow chain.
-pub(crate) fn write_chain(page_cache: &PageCache, payload: &[u8]) -> StorageResult<Option<PageId>> {
+pub(crate) fn write_chain<S: PageStore>(
+    page_cache: &PageCache<S>,
+    payload: &[u8],
+) -> StorageResult<Option<PageId>> {
     if payload.is_empty() {
         return Ok(None);
     }
@@ -63,7 +67,7 @@ pub(crate) fn write_chain(page_cache: &PageCache, payload: &[u8]) -> StorageResu
 
 /// Reads exactly `expected_len` bytes from an overflow chain.
 pub(crate) fn read_chain(
-    page_cache: &PageCache,
+    page_cache: &PageCache<impl PageStore>,
     first_page_id: PageId,
     expected_len: usize,
 ) -> StorageResult<Vec<u8>> {
@@ -117,7 +121,7 @@ pub(crate) fn read_chain(
 /// the requested bytes. It is used by key comparisons that only need the key
 /// suffix from a larger overflow payload.
 pub(crate) fn read_chain_prefix(
-    page_cache: &PageCache,
+    page_cache: &PageCache<impl PageStore>,
     first_page_id: PageId,
     expected_len: usize,
 ) -> StorageResult<Vec<u8>> {
