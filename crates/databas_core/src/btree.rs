@@ -8,7 +8,6 @@ use std::{cell::Cell, cmp::Ordering, fmt, ops::Range, rc::Rc};
 
 use crate::{
     PAGE_SIZE, PageId,
-    disk_manager::DiskManager,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
     overflow,
     page::{
@@ -108,7 +107,7 @@ impl ScanDirection {
     }
 }
 
-enum RecordStorage<S: PageStore = DiskManager> {
+enum RecordStorage<S: PageStore> {
     PageResident { pin: PinGuard<S>, key_range: Range<usize>, value_range: Range<usize> },
     Materialized { key: Box<[u8]>, value: Box<[u8]> },
 }
@@ -120,7 +119,7 @@ enum RecordStorage<S: PageStore = DiskManager> {
 /// callbacks. Records for cells with overflow payload are materialized into
 /// fixed-size heap allocations. Use [`OwnedRecord`] when a stable snapshot is
 /// needed across later tree mutations.
-pub struct Record<S: PageStore = DiskManager> {
+pub struct Record<S: PageStore> {
     page_id: PageId,
     slot_index: u16,
     storage: RecordStorage<S>,
@@ -314,7 +313,7 @@ pub enum CursorState {
 
 /// Public handle to a single raw B+-tree rooted at `root_page_id`.
 #[derive(Clone)]
-pub struct TreeCursor<S: PageStore = DiskManager> {
+pub struct TreeCursor<S: PageStore> {
     page_cache: PageCache<S>,
     root_page_id: Rc<Cell<PageId>>,
     state: CursorState,

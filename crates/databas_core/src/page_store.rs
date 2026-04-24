@@ -4,7 +4,7 @@ use crate::{
 };
 
 /// Backend abstraction for fixed-size page allocation and I/O.
-pub(crate) trait PageStore {
+pub trait PageStore {
     /// Allocates a new page and returns its page ID.
     fn new_page(&mut self) -> PageStoreResult<PageId>;
 
