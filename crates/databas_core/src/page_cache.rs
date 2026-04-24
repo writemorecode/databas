@@ -27,6 +27,7 @@ use crate::{
     error::{PageCacheError, PageCacheResult},
     page::{NodeMarker, Page, PageResult, Read, Write},
     page_replacement::ClockPolicy,
+    page_store::PageStore,
     {PAGE_SIZE, PageId},
 };
 
@@ -57,16 +58,16 @@ struct CacheMeta {
     replacement: ClockPolicy,
 }
 
-struct PageCacheInner {
-    disk_manager: RefCell<DiskManager>,
+struct PageCacheInner<S: PageStore> {
+    store: RefCell<S>,
     meta: RefCell<CacheMeta>,
     frames: Vec<Frame>,
 }
 
-impl PageCacheInner {
+impl<S: PageStore> PageCacheInner<S> {
     /// Attempts to flush all dirty unpinned frames and ignores write errors.
     fn flush_best_effort_on_drop(&mut self) {
-        let disk_manager = self.disk_manager.get_mut();
+        let store = self.store.get_mut();
         for frame in &mut self.frames {
             if !frame.dirty.get() || frame.pin_count.get() > 0 {
                 continue;
@@ -76,14 +77,14 @@ impl PageCacheInner {
                 continue;
             };
 
-            if disk_manager.write_page(page_id, frame.data.get_mut()).is_ok() {
+            if store.write_page(page_id, frame.data.get_mut()).is_ok() {
                 frame.dirty.set(false);
             }
         }
     }
 }
 
-impl Drop for PageCacheInner {
+impl<S: PageStore> Drop for PageCacheInner<S> {
     /// Performs best-effort flushing for dirty unpinned frames when the last
     /// cache handle and all outstanding pins have been dropped.
     fn drop(&mut self) {
@@ -98,23 +99,28 @@ impl Drop for PageCacheInner {
 /// cache operations. Use [`PinGuard`] to keep pages resident and use
 /// [`PageReadGuard`] or [`PageWriteGuard`] for temporary access to the page
 /// bytes.
-#[derive(Clone)]
-pub(crate) struct PageCache {
-    inner: Rc<PageCacheInner>,
+pub(crate) struct PageCache<S: PageStore = DiskManager> {
+    inner: Rc<PageCacheInner<S>>,
 }
 
-impl PageCache {
+impl<S: PageStore> Clone for PageCache<S> {
+    fn clone(&self) -> Self {
+        Self { inner: Rc::clone(&self.inner) }
+    }
+}
+
+impl<S: PageStore> PageCache<S> {
     /// Creates a new page cache with a fixed number of preallocated frames.
     ///
     /// Returns an error when `frame_count` is zero.
-    pub(crate) fn new(disk_manager: DiskManager, frame_count: usize) -> PageCacheResult<Self> {
+    pub(crate) fn new(store: S, frame_count: usize) -> PageCacheResult<Self> {
         if frame_count == 0 {
             return Err(PageCacheError::InvalidFrameCount { frame_count });
         }
 
         Ok(Self {
             inner: Rc::new(PageCacheInner {
-                disk_manager: RefCell::new(disk_manager),
+                store: RefCell::new(store),
                 meta: RefCell::new(CacheMeta {
                     page_table: HashMap::new(),
                     replacement: ClockPolicy::new(frame_count),
@@ -128,7 +134,7 @@ impl PageCache {
     ///
     /// Cache hits update replacement state and increment pin count.
     /// Cache misses use CLOCK replacement and may evict a dirty page.
-    pub(crate) fn fetch_page(&self, page_id: PageId) -> PageCacheResult<PinGuard> {
+    pub(crate) fn fetch_page(&self, page_id: PageId) -> PageCacheResult<PinGuard<S>> {
         if let Some(frame_id) = self.resident_frame_id(page_id)? {
             let frame = &self.inner.frames[frame_id];
             frame.pin_count.set(frame.pin_count.get().checked_add(1).expect("pin count overflow"));
@@ -145,9 +151,9 @@ impl PageCache {
     ///
     /// A victim frame is selected before allocation so a full pinned cache
     /// returns `NoEvictableFrame` without growing the file.
-    pub(crate) fn new_page(&self) -> PageCacheResult<(PageId, PinGuard)> {
+    pub(crate) fn new_page(&self) -> PageCacheResult<(PageId, PinGuard<S>)> {
         let frame_id = self.select_victim_frame().ok_or(PageCacheError::NoEvictableFrame)?;
-        let page_id = self.inner.disk_manager.borrow_mut().new_page()?;
+        let page_id = self.inner.store.borrow_mut().new_page()?;
         self.replace_frame(frame_id, page_id)?;
         Ok((page_id, PinGuard::new(Rc::clone(&self.inner), frame_id, page_id)))
     }
@@ -232,7 +238,7 @@ impl PageCache {
         let old_page_id = frame.page_id.get();
 
         let mut data = [0u8; PAGE_SIZE];
-        self.inner.disk_manager.borrow_mut().read_page(new_page_id, &mut data)?;
+        self.inner.store.borrow_mut().read_page(new_page_id, &mut data)?;
 
         {
             let mut frame_data = frame.data.try_borrow_mut().map_err(|_| {
@@ -271,7 +277,7 @@ impl PageCache {
             .data
             .try_borrow()
             .map_err(|_| PageCacheError::PageImmutableBorrowConflict { page_id })?;
-        self.inner.disk_manager.borrow_mut().write_page(page_id, &page)?;
+        self.inner.store.borrow_mut().write_page(page_id, &page)?;
         frame.dirty.set(false);
         Ok(())
     }
@@ -285,15 +291,15 @@ impl PageCache {
 /// borrow the page contents temporarily.
 ///
 /// Dropping the guard decrements the frame pin count.
-pub(crate) struct PinGuard {
-    page_cache: Rc<PageCacheInner>,
+pub(crate) struct PinGuard<S: PageStore = DiskManager> {
+    page_cache: Rc<PageCacheInner<S>>,
     frame_id: FrameId,
     page_id: PageId,
 }
 
-impl PinGuard {
+impl<S: PageStore> PinGuard<S> {
     /// Creates a new pin guard for a specific frame.
-    fn new(page_cache: Rc<PageCacheInner>, frame_id: FrameId, page_id: PageId) -> Self {
+    fn new(page_cache: Rc<PageCacheInner<S>>, frame_id: FrameId, page_id: PageId) -> Self {
         Self { page_cache, frame_id, page_id }
     }
 
@@ -331,7 +337,7 @@ impl PinGuard {
     }
 }
 
-impl Drop for PinGuard {
+impl<S: PageStore> Drop for PinGuard<S> {
     /// Decrements the frame pin count when the guard leaves scope.
     fn drop(&mut self) {
         let frame = &self.page_cache.frames[self.frame_id];
