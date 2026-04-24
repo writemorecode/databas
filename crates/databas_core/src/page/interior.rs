@@ -319,6 +319,14 @@ where
         Ok(slot_index)
     }
 
+    /// Deletes one separator cell by slot index and reclaims its local page space.
+    pub(crate) fn delete_slot(&mut self, slot_index: SlotId) -> PageResult<()> {
+        let cell_offset = self.slot_offset(slot_index)?;
+        let cell_len = self.cell_len(slot_index)?;
+        self.remove_slot(slot_index)?;
+        self.reclaim_space(cell_offset, cell_len)
+    }
+
     /// Rewrites the left-child pointer for an existing separator key.
     pub fn update(&mut self, key: &[u8], left_child: PageId) -> PageResult<()> {
         let slot_index = match self.search(key)? {
