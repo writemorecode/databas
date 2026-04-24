@@ -2453,6 +2453,7 @@ mod tests {
     use super::*;
     use crate::disk_manager::DiskManager;
     use crate::error::LimitExceededError;
+    use crate::memory_page_store::MemoryPageStore;
 
     const KEY_LEN_RANGE: std::ops::RangeInclusive<usize> = 8..=192;
     const VALUE_LEN_RANGE: std::ops::RangeInclusive<usize> = 8..=PAGE_SIZE * 3;
@@ -2498,7 +2499,13 @@ mod tests {
         );
     }
 
-    fn tree_height(cursor: &TreeCursor) -> StorageResult<usize> {
+    fn memory_tree_cursor(cache_frames: usize) -> TreeCursor<MemoryPageStore> {
+        let page_cache = PageCache::new(MemoryPageStore::new(), cache_frames).unwrap();
+        let root_page_id = initialize_empty_root(&page_cache).unwrap();
+        TreeCursor::new(page_cache, root_page_id)
+    }
+
+    fn tree_height<S: PageStore>(cursor: &TreeCursor<S>) -> StorageResult<usize> {
         let mut height = 1;
         let mut page_id = cursor.root_page_id();
 
@@ -2532,11 +2539,7 @@ mod tests {
     // proving leaf splits, repeated interior split propagation, exact-key
     // lookups, and forward/backward sorted cursor scans.
     fn random_insert_get_simulation_with_oversized_values_reaches_four_levels() {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
-        let page_cache = PageCache::new(disk_manager, 256).unwrap();
-        let root_page_id = initialize_empty_root(&page_cache).unwrap();
-        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut cursor = memory_tree_cursor(256);
         let mut rng = Rng::with_seed(0xd47a_ba5e_b7ee_2026);
         let mut expected = BTreeMap::new();
         let mut cells = Vec::new();
@@ -2591,11 +2594,7 @@ mod tests {
 
     #[test]
     fn random_insert_delete_simulation_empties_tree_after_random_delete_order() {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
-        let page_cache = PageCache::new(disk_manager, 256).unwrap();
-        let root_page_id = initialize_empty_root(&page_cache).unwrap();
-        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut cursor = memory_tree_cursor(256);
         let mut rng = Rng::with_seed(0x9dd0_c312_741f_2026);
         let mut expected = BTreeMap::new();
 
@@ -2637,11 +2636,7 @@ mod tests {
 
     #[test]
     fn insert_get_supports_oversized_keys_promoted_to_interior_pages() {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
-        let page_cache = PageCache::new(disk_manager, 256).unwrap();
-        let root_page_id = initialize_empty_root(&page_cache).unwrap();
-        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut cursor = memory_tree_cursor(256);
         let mut expected = BTreeMap::new();
 
         for index in 0..48 {
@@ -2662,9 +2657,7 @@ mod tests {
 
     #[test]
     fn failed_interior_rewrite_leaves_page_unchanged() {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
-        let page_cache = PageCache::new(disk_manager, 16).unwrap();
+        let page_cache = PageCache::new(MemoryPageStore::new(), 16).unwrap();
         let (page_id, pin) = page_cache.new_page().unwrap();
         {
             let mut guard = pin.write().unwrap();
@@ -2731,11 +2724,7 @@ mod tests {
 
     #[test]
     fn inline_record_is_page_resident() {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
-        let page_cache = PageCache::new(disk_manager, 4).unwrap();
-        let root_page_id = initialize_empty_root(&page_cache).unwrap();
-        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut cursor = memory_tree_cursor(4);
 
         cursor.insert(b"alpha", b"value").unwrap();
 
@@ -2746,11 +2735,7 @@ mod tests {
 
     #[test]
     fn overflow_record_is_materialized() {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
-        let page_cache = PageCache::new(disk_manager, 4).unwrap();
-        let root_page_id = initialize_empty_root(&page_cache).unwrap();
-        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut cursor = memory_tree_cursor(4);
         let value = vec![42; PAGE_SIZE];
 
         cursor.insert(b"alpha", &value).unwrap();
@@ -2762,11 +2747,7 @@ mod tests {
 
     #[test]
     fn inline_record_converts_to_owned_snapshot() {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
-        let page_cache = PageCache::new(disk_manager, 4).unwrap();
-        let root_page_id = initialize_empty_root(&page_cache).unwrap();
-        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut cursor = memory_tree_cursor(4);
 
         cursor.insert(b"alpha", b"value").unwrap();
 
@@ -2781,11 +2762,7 @@ mod tests {
 
     #[test]
     fn binary_search_supports_inline_key_with_overflow_value() {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
-        let page_cache = PageCache::new(disk_manager, 8).unwrap();
-        let root_page_id = initialize_empty_root(&page_cache).unwrap();
-        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut cursor = memory_tree_cursor(8);
         let value = vec![7; PAGE_SIZE];
 
         cursor.insert(b"alpha", b"small").unwrap();
@@ -2799,11 +2776,7 @@ mod tests {
 
     #[test]
     fn binary_search_supports_oversized_key_with_overflow_value() {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
-        let page_cache = PageCache::new(disk_manager, 16).unwrap();
-        let root_page_id = initialize_empty_root(&page_cache).unwrap();
-        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut cursor = memory_tree_cursor(16);
         let key = oversized_key(7);
         let value = vec![11; PAGE_SIZE];
 
@@ -2815,11 +2788,7 @@ mod tests {
 
     #[test]
     fn binary_search_supports_oversized_interior_separator_keys() {
-        let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
-        let page_cache = PageCache::new(disk_manager, 256).unwrap();
-        let root_page_id = initialize_empty_root(&page_cache).unwrap();
-        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut cursor = memory_tree_cursor(256);
         let mut expected = BTreeMap::new();
 
         for index in 0..48 {
@@ -2837,7 +2806,11 @@ mod tests {
         }
     }
 
-    fn assert_record_matches(record: &Record, expected_key: &[u8], expected_value: &[u8]) {
+    fn assert_record_matches<S: PageStore>(
+        record: &Record<S>,
+        expected_key: &[u8],
+        expected_value: &[u8],
+    ) {
         record
             .with_key_value(|actual_key, actual_value| {
                 assert_eq!(actual_key, expected_key);
@@ -2857,7 +2830,10 @@ mod tests {
         });
     }
 
-    fn assert_forward_scan_matches(cursor: &mut TreeCursor, expected: &BTreeMap<Vec<u8>, Vec<u8>>) {
+    fn assert_forward_scan_matches<S: PageStore>(
+        cursor: &mut TreeCursor<S>,
+        expected: &BTreeMap<Vec<u8>, Vec<u8>>,
+    ) {
         assert!(cursor.seek_to_first().unwrap(), "tree should not be empty");
 
         let mut expected_entries = expected.iter();
@@ -2876,7 +2852,10 @@ mod tests {
         assert_eq!(scanned, expected.len());
     }
 
-    fn assert_reverse_scan_matches(cursor: &mut TreeCursor, expected: &BTreeMap<Vec<u8>, Vec<u8>>) {
+    fn assert_reverse_scan_matches<S: PageStore>(
+        cursor: &mut TreeCursor<S>,
+        expected: &BTreeMap<Vec<u8>, Vec<u8>>,
+    ) {
         let (last_key, _) = expected.iter().next_back().unwrap();
         let last_record = cursor.get(last_key).unwrap().expect("last key should be present");
 
