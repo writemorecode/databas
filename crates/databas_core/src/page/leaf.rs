@@ -317,6 +317,7 @@ where
         let cell_offset = self.slot_offset(slot_index)?;
         let cell_len = self.cell_len(slot_index)?;
         self.remove_slot(slot_index)?;
+        // Do we need to reclaim space after every cell delete?
         self.reclaim_space(cell_offset, cell_len)?;
         Ok(slot_index)
     }
@@ -342,5 +343,40 @@ where
         self.set_slot_offset(slot_index, new_offset)?;
         self.reclaim_space(old_offset, old_len)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::page::Write;
+
+    use super::*;
+
+    #[test]
+    fn test_page_underoccupied() {
+        let mut bytes = [0; PAGE_SIZE];
+        let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
+
+        assert!(page.is_underoccupied().unwrap(), "An empty leaf page should be underoccupied.");
+
+        const N: usize = USABLE_SPACE_END / 5;
+        let (k, v) = ([1_u8; N], [2_u8; N]);
+        page.insert(&k, &v).unwrap();
+
+        assert!(
+            page.is_underoccupied().unwrap(),
+            "An empty leaf page should still be underoccupied after a 'small' insert."
+        );
+
+        let (k, v) = ([3_u8; N], [4_u8; N]);
+        page.insert(&k, &v).unwrap();
+
+        assert!(
+            !page.is_underoccupied().unwrap(),
+            "An empty leaf page should not be underoccupied after more than half the page is full. free {} {} {}",
+            page.total_reclaimable_space().unwrap(),
+            USABLE_SPACE_END,
+            USABLE_SPACE_END / 4
+        );
     }
 }
