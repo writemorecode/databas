@@ -254,6 +254,22 @@ where
         Ok(total)
     }
 
+    pub(crate) fn live_cell_bytes(&self) -> PageResult<usize> {
+        let mut total = 0;
+        for slot_index in 0..self.slot_count() {
+            total += self.cell_len(slot_index)?;
+        }
+        Ok(total)
+    }
+
+    pub fn is_underoccupied(&self) -> PageResult<bool> {
+        let header_size = N::KIND.header_size();
+        let slot_bytes = self.slot_count() as usize * format::SLOT_ENTRY_SIZE;
+        let occupied_variable_bytes = slot_bytes + self.live_cell_bytes()?;
+        let usable_variable_bytes = USABLE_SPACE_END - header_size;
+        Ok(occupied_variable_bytes * 2 < usable_variable_bytes)
+    }
+
     pub(crate) fn slot_directory_end(&self) -> usize {
         N::KIND.header_size() + self.slot_count() as usize * format::SLOT_ENTRY_SIZE
     }
