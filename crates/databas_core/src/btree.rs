@@ -2583,6 +2583,43 @@ mod tests {
         assert_eq!(expected.len(), cells.len());
     }
 
+    #[test]
+    fn random_insert_delete_simulation_empties_tree_after_random_delete_order() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let page_cache = PageCache::new(disk_manager, 256).unwrap();
+        let root_page_id = initialize_empty_root(&page_cache).unwrap();
+        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut rng = Rng::with_seed(0x9dd0_c312_741f_2026);
+        let mut expected = BTreeMap::new();
+
+        const INSERT_COUNT: usize = 200;
+        for _ in 0..INSERT_COUNT {
+            let (key, value) = random_unique_cell(&mut rng, &expected);
+            assert_supported_cell(&key, &value);
+            cursor.insert(&key, &value).unwrap();
+            expected.insert(key, value);
+        }
+        assert!(!expected.is_empty(), "simulation should create at least one record");
+
+        let mut delete_order: Vec<Vec<u8>> = expected.keys().cloned().collect();
+        let sorted_order = delete_order.clone();
+        rng.shuffle(&mut delete_order);
+        while delete_order == sorted_order {
+            rng.shuffle(&mut delete_order);
+        }
+
+        for key in &delete_order {
+            cursor.delete(key).unwrap();
+        }
+
+        assert!(!cursor.seek_to_first().unwrap(), "tree should be empty after deleting all keys");
+        assert!(cursor.current().unwrap().is_none(), "empty tree cursor should have no current");
+        for key in expected.keys() {
+            assert!(cursor.get(key).unwrap().is_none(), "deleted key should not be found");
+        }
+    }
+
     fn oversized_key(index: u16) -> Vec<u8> {
         let mut key = vec![0; PAGE_SIZE + 256];
         key[..2].copy_from_slice(&index.to_be_bytes());
@@ -2615,6 +2652,75 @@ mod tests {
             assert_record_matches(&record, key, value);
         }
         assert_forward_scan_matches(&mut cursor, &expected);
+    }
+
+    #[test]
+    fn failed_interior_rewrite_leaves_page_unchanged() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let page_cache = PageCache::new(disk_manager, 16).unwrap();
+        let (page_id, pin) = page_cache.new_page().unwrap();
+        {
+            let mut guard = pin.write().unwrap();
+            let mut interior =
+                RawInterior::<Write<'_>>::initialize_with_rightmost(guard.page_mut(), 2);
+            interior.insert(b"stable", 0).unwrap();
+        }
+        drop(pin);
+
+        let cursor = TreeCursor::new(page_cache.clone(), page_id);
+        let original_page = {
+            let pin = page_cache.fetch_page(page_id).unwrap();
+            let page = pin.read().unwrap();
+            *page.page()
+        };
+        let children: Vec<_> = (0..16)
+            .map(|index| ChildEntry {
+                page_id: 100 + index,
+                max_key: Some(vec![index as u8; PAGE_SIZE]),
+            })
+            .collect();
+
+        let result = cursor.rewrite_interior_page(page_id, &children, None, None);
+
+        assert!(matches!(
+            result,
+            Err(StorageError::LimitExceeded(LimitExceededError::PageFull { .. }))
+        ));
+        let rewritten_page = {
+            let pin = page_cache.fetch_page(page_id).unwrap();
+            let page = pin.read().unwrap();
+            *page.page()
+        };
+        assert_eq!(rewritten_page, original_page);
+    }
+
+    #[test]
+    fn unchanged_path_separator_refresh_does_not_grow_file() {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let page_cache = PageCache::new(disk_manager, 256).unwrap();
+        let root_page_id = initialize_empty_root(&page_cache).unwrap();
+        let mut cursor = TreeCursor::new(page_cache, root_page_id);
+        let mut expected = BTreeMap::new();
+
+        for index in 0..96 {
+            let key = oversized_key(index);
+            let value = format!("value-{index}").into_bytes();
+            cursor.insert(&key, &value).unwrap();
+            expected.insert(key, value);
+        }
+
+        let key = expected.keys().next().expect("test setup should create records");
+        let (_, tree_path) = cursor.leaf_page_path_for_key(key).unwrap();
+        assert!(!tree_path.is_empty(), "large keys should force interior separators");
+        cursor.refresh_path_separators(&tree_path).unwrap();
+        let file_len_before = file.path().metadata().unwrap().len();
+
+        cursor.refresh_path_separators(&tree_path).unwrap();
+
+        let file_len_after = file.path().metadata().unwrap().len();
+        assert_eq!(file_len_after, file_len_before);
     }
 
     #[test]
