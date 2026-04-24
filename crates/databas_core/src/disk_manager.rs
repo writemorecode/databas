@@ -5,7 +5,8 @@ use std::{
 };
 
 use crate::{
-    error::{DiskManagerError, DiskManagerResult},
+    error::{DiskManagerError, DiskManagerResult, PageStoreResult},
+    page_store::PageStore,
     {PAGE_SIZE, PageId},
 };
 
@@ -84,6 +85,24 @@ impl DiskManager {
     /// Calculate disk offset for page `page_id`.
     fn page_offset(page_id: PageId) -> u64 {
         page_id * (PAGE_SIZE as u64)
+    }
+}
+
+impl PageStore for DiskManager {
+    fn new_page(&mut self) -> PageStoreResult<PageId> {
+        Self::new_page(self).map_err(Into::into)
+    }
+
+    fn read_page(&mut self, page_id: PageId, buf: &mut [u8; PAGE_SIZE]) -> PageStoreResult<()> {
+        Self::read_page(self, page_id, buf).map_err(Into::into)
+    }
+
+    fn write_page(&mut self, page_id: PageId, buf: &[u8; PAGE_SIZE]) -> PageStoreResult<()> {
+        Self::write_page(self, page_id, buf).map_err(Into::into)
+    }
+
+    fn sync(&mut self) -> PageStoreResult<()> {
+        self.file.sync_all().map_err(Into::into)
     }
 }
 
