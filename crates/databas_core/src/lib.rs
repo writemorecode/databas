@@ -7,6 +7,7 @@ pub(crate) mod overflow;
 pub(crate) mod page;
 pub(crate) mod page_cache;
 pub(crate) mod page_replacement;
+pub(crate) mod page_store;
 pub mod pager;
 
 pub use btree::{CursorState, OwnedRecord, Record, RecordView, TreeCursor};
