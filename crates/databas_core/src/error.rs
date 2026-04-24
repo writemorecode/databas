@@ -162,8 +162,8 @@ pub(crate) type PageStoreResult<T> = Result<T, PageStoreError>;
 
 #[derive(Debug, Error)]
 pub(crate) enum PageCacheError {
-    #[error("disk manager error: {0}")]
-    Disk(#[from] DiskManagerError),
+    #[error("page store error: {0}")]
+    Store(#[from] PageStoreError),
     #[error("no evictable frame available")]
     NoEvictableFrame,
     #[error("page {page_id} is pinned")]
@@ -227,7 +227,7 @@ impl From<DiskManagerError> for PageStoreError {
 impl From<PageCacheError> for StorageError {
     fn from(err: PageCacheError) -> Self {
         match err {
-            PageCacheError::Disk(err) => err.into(),
+            PageCacheError::Store(err) => err.into(),
             PageCacheError::NoEvictableFrame => {
                 Self::LimitExceeded(LimitExceededError::CacheCapacityExhausted)
             }
