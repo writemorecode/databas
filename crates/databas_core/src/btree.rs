@@ -8,6 +8,7 @@ use std::{cell::Cell, cmp::Ordering, fmt, ops::Range, rc::Rc};
 
 use crate::{
     PAGE_SIZE, PageId,
+    disk_manager::DiskManager,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
     overflow,
     page::{
@@ -15,6 +16,7 @@ use crate::{
         format::{KIND_OFFSET, MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, PageKind},
     },
     page_cache::{PageCache, PageWriteGuard, PinGuard},
+    page_store::PageStore,
 };
 
 const LEAF_CELL_PREFIX_SIZE: usize = 2 + 8 + 2 + 2;
@@ -44,9 +46,9 @@ enum ScanDirection {
 
 impl ScanDirection {
     /// Descends from `start_page_id` to the leaf at the edge implied by `self`.
-    fn descend_to_edge_leaf(
+    fn descend_to_edge_leaf<S: PageStore>(
         self,
-        cursor: &TreeCursor,
+        cursor: &TreeCursor<S>,
         start_page_id: PageId,
     ) -> StorageResult<PageId> {
         match self {
@@ -106,8 +108,8 @@ impl ScanDirection {
     }
 }
 
-enum RecordStorage {
-    PageResident { pin: PinGuard, key_range: Range<usize>, value_range: Range<usize> },
+enum RecordStorage<S: PageStore = DiskManager> {
+    PageResident { pin: PinGuard<S>, key_range: Range<usize>, value_range: Range<usize> },
     Materialized { key: Box<[u8]>, value: Box<[u8]> },
 }
 
@@ -118,10 +120,10 @@ enum RecordStorage {
 /// callbacks. Records for cells with overflow payload are materialized into
 /// fixed-size heap allocations. Use [`OwnedRecord`] when a stable snapshot is
 /// needed across later tree mutations.
-pub struct Record {
+pub struct Record<S: PageStore = DiskManager> {
     page_id: PageId,
     slot_index: u16,
-    storage: RecordStorage,
+    storage: RecordStorage<S>,
 }
 
 /// Stable, owned raw record snapshot.
@@ -158,10 +160,10 @@ impl<'a> RecordView<'a> {
     }
 }
 
-impl Record {
+impl<S: PageStore> Record<S> {
     /// Builds a record view from one raw leaf-page slot.
     pub(crate) fn new(
-        page_cache: &PageCache,
+        page_cache: &PageCache<S>,
         page_id: PageId,
         slot_index: u16,
     ) -> StorageResult<Self> {
@@ -282,7 +284,7 @@ impl fmt::Debug for OwnedRecord {
     }
 }
 
-impl fmt::Debug for Record {
+impl<S: PageStore> fmt::Debug for Record<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Record")
             .field("page_id", &self.page_id)
@@ -312,8 +314,8 @@ pub enum CursorState {
 
 /// Public handle to a single raw B+-tree rooted at `root_page_id`.
 #[derive(Clone)]
-pub struct TreeCursor {
-    page_cache: PageCache,
+pub struct TreeCursor<S: PageStore = DiskManager> {
+    page_cache: PageCache<S>,
     root_page_id: Rc<Cell<PageId>>,
     state: CursorState,
 }
@@ -447,8 +449,8 @@ fn cell_corruption(page_id: PageId, kind: CorruptionKind) -> StorageError {
     })
 }
 
-fn materialize_payload(
-    page_cache: &PageCache,
+fn materialize_payload<S: PageStore>(
+    page_cache: &PageCache<S>,
     page_id: PageId,
     inline_payload: Vec<u8>,
     first_overflow_page_id: Option<PageId>,
@@ -476,8 +478,8 @@ fn materialize_payload(
     Ok(payload)
 }
 
-fn materialize_leaf_cell(
-    page_cache: &PageCache,
+fn materialize_leaf_cell<S: PageStore>(
+    page_cache: &PageCache<S>,
     page_id: PageId,
     inline_payload: Vec<u8>,
     first_overflow_page_id: PageId,
@@ -499,8 +501,8 @@ fn materialize_leaf_cell(
     Ok((payload.into_boxed_slice(), value.into_boxed_slice()))
 }
 
-fn read_leaf_cell(
-    page_cache: &PageCache,
+fn read_leaf_cell<S: PageStore>(
+    page_cache: &PageCache<S>,
     page_id: PageId,
     slot_index: u16,
 ) -> StorageResult<(Vec<u8>, Vec<u8>)> {
@@ -529,8 +531,8 @@ fn read_leaf_cell(
     Ok((key, value))
 }
 
-fn read_interior_cell(
-    page_cache: &PageCache,
+fn read_interior_cell<S: PageStore>(
+    page_cache: &PageCache<S>,
     page_id: PageId,
     slot_index: u16,
 ) -> StorageResult<(PageId, Vec<u8>)> {
@@ -579,8 +581,8 @@ fn compare_key_prefix(
     Ok(None)
 }
 
-fn materialize_overflow_key(
-    page_cache: &PageCache,
+fn materialize_overflow_key<S: PageStore>(
+    page_cache: &PageCache<S>,
     page_id: PageId,
     mut inline_key: Vec<u8>,
     first_overflow_page_id: Option<PageId>,
@@ -599,9 +601,9 @@ fn materialize_overflow_key(
     Ok(inline_key)
 }
 
-impl TreeCursor {
+impl<S: PageStore> TreeCursor<S> {
     /// Creates a cursor anchored at `root_page_id` in page-level state.
-    pub(crate) fn new(page_cache: PageCache, root_page_id: PageId) -> Self {
+    pub(crate) fn new(page_cache: PageCache<S>, root_page_id: PageId) -> Self {
         Self {
             page_cache,
             root_page_id: Rc::new(Cell::new(root_page_id)),
@@ -655,7 +657,7 @@ impl TreeCursor {
     }
 
     /// Materializes one record from a positioned raw leaf slot.
-    fn record_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<Record> {
+    fn record_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<Record<S>> {
         Record::new(&self.page_cache, page_id, slot_index)
     }
 
@@ -928,7 +930,7 @@ impl TreeCursor {
         &mut self,
         start_page_id: PageId,
         direction: ScanDirection,
-    ) -> StorageResult<Option<Record>> {
+    ) -> StorageResult<Option<Record<S>>> {
         let mut page_id = start_page_id;
 
         loop {
@@ -955,7 +957,7 @@ impl TreeCursor {
     }
 
     /// Advances or rewinds the cursor by one logical record.
-    fn step_record(&mut self, direction: ScanDirection) -> StorageResult<Option<Record>> {
+    fn step_record(&mut self, direction: ScanDirection) -> StorageResult<Option<Record<S>>> {
         match self.state {
             CursorState::Exhausted => Ok(None),
             CursorState::Page { page_id } => {
@@ -992,7 +994,7 @@ impl TreeCursor {
     ///
     /// The cursor ends on the matching record when found, or on the leaf page
     /// where `key` would be inserted when absent.
-    pub fn get(&mut self, key: &[u8]) -> StorageResult<Option<Record>> {
+    pub fn get(&mut self, key: &[u8]) -> StorageResult<Option<Record<S>>> {
         let page_id = self.leaf_page_for_key(key)?;
         let slot_index = match self.search_leaf_slot(page_id, key)? {
             SearchResult::Found(slot_index) => Some(slot_index),
@@ -1899,7 +1901,7 @@ impl TreeCursor {
     }
 
     /// Replaces the value stored for an existing `key`.
-    pub fn update(&mut self, key: &[u8], value: &[u8]) -> StorageResult<Record> {
+    pub fn update(&mut self, key: &[u8], value: &[u8]) -> StorageResult<Record<S>> {
         let _ = &self.page_cache;
         let _ = (key, value);
         todo!("tree update is not implemented yet")
@@ -1963,7 +1965,7 @@ impl TreeCursor {
     }
 
     /// Reads the currently selected record, if any.
-    pub fn current(&self) -> StorageResult<Option<Record>> {
+    pub fn current(&self) -> StorageResult<Option<Record<S>>> {
         match self.state {
             CursorState::Positioned { page_id, slot_index } => {
                 self.record_at(page_id, slot_index).map(Some)
@@ -1978,7 +1980,7 @@ impl TreeCursor {
     }
 
     /// Advances to the next record in sorted key order.
-    pub fn next_record(&mut self) -> StorageResult<Option<Record>> {
+    pub fn next_record(&mut self) -> StorageResult<Option<Record<S>>> {
         self.step_record(ScanDirection::Forward)
     }
 
@@ -1988,7 +1990,7 @@ impl TreeCursor {
     }
 
     /// Moves to the previous record in sorted key order.
-    pub fn prev_record(&mut self) -> StorageResult<Option<Record>> {
+    pub fn prev_record(&mut self) -> StorageResult<Option<Record<S>>> {
         self.step_record(ScanDirection::Backward)
     }
 
@@ -2384,7 +2386,9 @@ impl TreeCursor {
 }
 
 /// Allocates and initializes a brand-new empty raw root leaf page.
-pub(crate) fn initialize_empty_root(page_cache: &PageCache) -> StorageResult<PageId> {
+pub(crate) fn initialize_empty_root<S: PageStore>(
+    page_cache: &PageCache<S>,
+) -> StorageResult<PageId> {
     let (page_id, pin) = page_cache.new_page()?;
     let mut page = pin.write()?;
     let _ = RawLeaf::<Write<'_>>::initialize(page.page_mut());
@@ -2393,7 +2397,7 @@ pub(crate) fn initialize_empty_root(page_cache: &PageCache) -> StorageResult<Pag
 
 /// Verifies that `root_page_id` names a raw leaf or raw interior page.
 pub(crate) fn validate_root_page(
-    page_cache: &PageCache,
+    page_cache: &PageCache<impl PageStore>,
     root_page_id: PageId,
 ) -> StorageResult<()> {
     let pin = page_cache.fetch_page(root_page_id)?;
