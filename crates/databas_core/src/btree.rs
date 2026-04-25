@@ -2804,6 +2804,69 @@ mod tests {
         }
     }
 
+    #[test]
+    fn random_insert_update_simulation_replaces_values_for_all_keys() {
+        let mut cursor = memory_tree_cursor(256);
+        let mut rng = Rng::with_seed(0xa11d_47e5_2026_0425);
+        let mut expected = BTreeMap::new();
+
+        const INSERT_COUNT: usize = 200;
+        const OVERSIZED_EVERY_NTH: usize = 9;
+
+        for index in 0..INSERT_COUNT {
+            let (key, mut value) = random_unique_cell(&mut rng, &expected);
+            if index % OVERSIZED_EVERY_NTH == 0 {
+                let oversized_len = PAGE_SIZE + rng.usize(1..=PAGE_SIZE);
+                value = random_bytes(&mut rng, oversized_len);
+            }
+
+            assert_supported_cell(&key, &value);
+            cursor.insert(&key, &value).unwrap();
+            expected.insert(key, value);
+        }
+
+        assert!(
+            expected.values().any(|value| value.len() > PAGE_SIZE),
+            "simulation setup should include oversized values"
+        );
+
+        let mut keys: Vec<Vec<u8>> = expected.keys().cloned().collect();
+        rng.shuffle(&mut keys);
+        let mut updated = BTreeMap::new();
+        for (index, key) in keys.iter().enumerate() {
+            let old_value = expected.get(key).unwrap();
+            let new_value = loop {
+                let value_len = if index % OVERSIZED_EVERY_NTH == 0 {
+                    PAGE_SIZE + rng.usize(1..=PAGE_SIZE)
+                } else {
+                    rng.usize(INLINE_VALUE_LEN_RANGE)
+                };
+                let candidate = random_bytes(&mut rng, value_len);
+                if candidate != *old_value {
+                    break candidate;
+                }
+            };
+
+            assert_supported_cell(key, &new_value);
+            cursor.update(key, &new_value).unwrap();
+            updated.insert(key.clone(), new_value);
+        }
+
+        assert_eq!(updated.len(), expected.len());
+        assert!(
+            updated.values().any(|value| value.len() > PAGE_SIZE),
+            "updated values should include oversized entries"
+        );
+
+        for (key, value) in &updated {
+            let record = cursor.get(key).unwrap().expect("updated key should still exist");
+            assert_record_matches(&record, key, value);
+        }
+
+        assert_forward_scan_matches(&mut cursor, &updated);
+        assert_reverse_scan_matches(&mut cursor, &updated);
+    }
+
     fn oversized_key(index: u16) -> Vec<u8> {
         let mut key = vec![0; PAGE_SIZE + 256];
         key[..2].copy_from_slice(&index.to_be_bytes());
