@@ -1178,13 +1178,12 @@ impl<S: PageStore> TreeCursor<S> {
         Ok(INTERIOR_CELL_PREFIX_SIZE + local_payload_len(key.len()))
     }
 
-    fn insert_leaf_payload_at(
+    /// Builds the local leaf payload bytes and optional overflow chain for one key/value cell.
+    fn prepare_leaf_payload(
         &self,
-        leaf: &mut RawLeaf<Write<'_>>,
-        slot_index: u16,
         key: &[u8],
         value: &[u8],
-    ) -> StorageResult<u16> {
+    ) -> StorageResult<(Option<PageId>, Vec<u8>)> {
         let payload_len = key.len() + value.len();
         self.checked_payload_len(payload_len)?;
         let mut inline_payload = [0; MAX_INLINE_OVERFLOW_PAYLOAD_BYTES];
@@ -1222,13 +1221,42 @@ impl<S: PageStore> TreeCursor<S> {
             inline_payload[key.len()..payload_len].copy_from_slice(value);
             None
         };
-        let inline_payload = &inline_payload[..local_payload_len(payload_len)];
+        let inline_payload = inline_payload[..local_payload_len(payload_len)].to_vec();
+        Ok((first_overflow_page_id, inline_payload))
+    }
+
+    fn insert_leaf_payload_at(
+        &self,
+        leaf: &mut RawLeaf<Write<'_>>,
+        slot_index: u16,
+        key: &[u8],
+        value: &[u8],
+    ) -> StorageResult<u16> {
+        let (first_overflow_page_id, inline_payload) = self.prepare_leaf_payload(key, value)?;
         Ok(leaf.insert_payload_at(
             slot_index,
             key.len(),
             value.len(),
             first_overflow_page_id,
-            inline_payload,
+            &inline_payload,
+        )?)
+    }
+
+    /// Rewrites one existing leaf slot using the same overflow layout as tree inserts.
+    fn update_leaf_payload_at(
+        &self,
+        leaf: &mut RawLeaf<Write<'_>>,
+        slot_index: u16,
+        key: &[u8],
+        value: &[u8],
+    ) -> StorageResult<u16> {
+        let (first_overflow_page_id, inline_payload) = self.prepare_leaf_payload(key, value)?;
+        Ok(leaf.update_payload_at(
+            slot_index,
+            key.len(),
+            value.len(),
+            first_overflow_page_id,
+            &inline_payload,
         )?)
     }
 
@@ -2082,9 +2110,32 @@ impl<S: PageStore> TreeCursor<S> {
 
     /// Replaces the value stored for an existing `key`.
     pub fn update(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
-        self.delete(key)?;
-        self.insert(key, value)?;
-        Ok(())
+        let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
+        let slot_index = match self.search_leaf_slot(leaf_page_id, key)? {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound.into()),
+        };
+        let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
+        let mut leaf_guard = leaf_pin_guard.write()?;
+        let has_capacity = {
+            let page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
+            let old_len = page.cell_len(slot_index)?;
+            let needed = self.leaf_cell_local_size(key, value)?;
+            page.total_reclaimable_space()? + old_len >= needed
+        };
+
+        if has_capacity {
+            let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
+            let slot_index = self.update_leaf_payload_at(&mut page, slot_index, key, value)?;
+            self.set_positioned_state(leaf_page_id, slot_index);
+            return Ok(());
+        }
+
+        let pending =
+            self.update_with_leaf_page_split(leaf_page_id, &mut leaf_guard, slot_index, value)?;
+        drop(leaf_guard);
+        drop(leaf_pin_guard);
+        self.propagate_split(&tree_path, pending)
     }
 
     /// Deletes the record identified by `key`.
@@ -2317,20 +2368,14 @@ impl<S: PageStore> TreeCursor<S> {
         }
     }
 
-    /// Splits a full leaf page and returns the separator to propagate upward.
-    fn insert_with_leaf_page_split(
-        &mut self,
+    /// Materializes all leaf cells from a stable page snapshot.
+    fn read_leaf_cells_from_snapshot(
+        &self,
         leaf_page_id: PageId,
-        leaf_guard: &mut PageWriteGuard<'_>,
-        key: &[u8],
-        value: &[u8],
-    ) -> StorageResult<PendingSplit> {
-        let leaf_snapshot_bytes = *leaf_guard.page();
-        let leaf_snapshot = RawLeaf::<Read<'_>>::open(&leaf_snapshot_bytes)?;
-
-        let prev_page_id = leaf_snapshot.prev_page_id();
-        let next_page_id = leaf_snapshot.next_page_id();
-        let mut cells = Vec::with_capacity(leaf_snapshot.slot_count() as usize + 1);
+        leaf_snapshot_bytes: &[u8; PAGE_SIZE],
+        leaf_snapshot: &RawLeaf<Read<'_>>,
+    ) -> StorageResult<Vec<LeafSplitCell>> {
+        let mut cells = Vec::with_capacity(leaf_snapshot.slot_count() as usize);
         for slot_index in 0..leaf_snapshot.slot_count() {
             let (key_len, value_len, first_overflow_page_id, inline_range) =
                 leaf_snapshot.cell_payload_parts(slot_index)?;
@@ -2347,19 +2392,25 @@ impl<S: PageStore> TreeCursor<S> {
             let value = payload.split_off(key_len);
             cells.push(LeafSplitCell { key: payload, value });
         }
+        Ok(cells)
+    }
 
-        let idx = match cells.binary_search_by(|cell| cell.key().cmp(key)) {
-            Ok(_) => return Err(PageError::DuplicateKey.into()),
-            Err(insert_index) => insert_index,
-        };
-        cells.insert(idx, LeafSplitCell { key: key.to_vec(), value: value.to_vec() });
+    /// Rebuilds a split leaf pair from ordered materialized cells.
+    fn split_leaf_cells(
+        &mut self,
+        leaf_page_id: PageId,
+        leaf_guard: &mut PageWriteGuard<'_>,
+        prev_page_id: Option<PageId>,
+        next_page_id: Option<PageId>,
+        cells: &[LeafSplitCell],
+        target_key: &[u8],
+    ) -> StorageResult<PendingSplit> {
+        let split_index = Self::choose_leaf_split_index(cells)?;
+        let (left_cells, right_cells) = cells.split_at(split_index);
 
         let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
         let mut right_guard = right_page_guard.write()?;
         let mut right_page = RawLeaf::<Write<'_>>::initialize(right_guard.page_mut());
-
-        let split_index = Self::choose_leaf_split_index(&cells)?;
-        let (left_cells, right_cells) = cells.split_at(split_index);
 
         let mut leaf_page = RawLeaf::<Write<'_>>::initialize(leaf_guard.page_mut());
         leaf_page.set_prev_page_id(prev_page_id);
@@ -2386,15 +2437,72 @@ impl<S: PageStore> TreeCursor<S> {
         let separator =
             left_cells.last().expect("leaf split must leave a non-empty left page").key().to_vec();
 
-        let target_page_id = if key <= separator.as_slice() { leaf_page_id } else { right_page_id };
+        let target_page_id =
+            if target_key <= separator.as_slice() { leaf_page_id } else { right_page_id };
         let target_cells = if target_page_id == leaf_page_id { left_cells } else { right_cells };
         let target_slot_index = target_cells
             .iter()
-            .position(|cell| cell.key() == key)
-            .expect("split insert must place the new key") as u16;
+            .position(|cell| cell.key() == target_key)
+            .expect("leaf split must retain the target key") as u16;
         self.set_positioned_state(target_page_id, target_slot_index);
 
         Ok(PendingSplit { separator, left_page_id: leaf_page_id, right_page_id })
+    }
+
+    /// Splits a full leaf page while inserting a new key/value cell.
+    fn insert_with_leaf_page_split(
+        &mut self,
+        leaf_page_id: PageId,
+        leaf_guard: &mut PageWriteGuard<'_>,
+        key: &[u8],
+        value: &[u8],
+    ) -> StorageResult<PendingSplit> {
+        let leaf_snapshot_bytes = *leaf_guard.page();
+        let leaf_snapshot = RawLeaf::<Read<'_>>::open(&leaf_snapshot_bytes)?;
+
+        let prev_page_id = leaf_snapshot.prev_page_id();
+        let next_page_id = leaf_snapshot.next_page_id();
+        let mut cells =
+            self.read_leaf_cells_from_snapshot(leaf_page_id, &leaf_snapshot_bytes, &leaf_snapshot)?;
+
+        let idx = match cells.binary_search_by(|cell| cell.key().cmp(key)) {
+            Ok(_) => return Err(PageError::DuplicateKey.into()),
+            Err(insert_index) => insert_index,
+        };
+        cells.insert(idx, LeafSplitCell { key: key.to_vec(), value: value.to_vec() });
+
+        self.split_leaf_cells(leaf_page_id, leaf_guard, prev_page_id, next_page_id, &cells, key)
+    }
+
+    /// Splits a full leaf page while replacing one existing cell value.
+    fn update_with_leaf_page_split(
+        &mut self,
+        leaf_page_id: PageId,
+        leaf_guard: &mut PageWriteGuard<'_>,
+        slot_index: u16,
+        value: &[u8],
+    ) -> StorageResult<PendingSplit> {
+        let leaf_snapshot_bytes = *leaf_guard.page();
+        let leaf_snapshot = RawLeaf::<Read<'_>>::open(&leaf_snapshot_bytes)?;
+
+        let prev_page_id = leaf_snapshot.prev_page_id();
+        let next_page_id = leaf_snapshot.next_page_id();
+        let mut cells =
+            self.read_leaf_cells_from_snapshot(leaf_page_id, &leaf_snapshot_bytes, &leaf_snapshot)?;
+        let target = cells
+            .get_mut(slot_index as usize)
+            .ok_or_else(|| cell_corruption(leaf_page_id, CorruptionKind::CellLengthOutOfBounds))?;
+        target.value = value.to_vec();
+        let target_key = target.key.clone();
+
+        self.split_leaf_cells(
+            leaf_page_id,
+            leaf_guard,
+            prev_page_id,
+            next_page_id,
+            &cells,
+            &target_key,
+        )
     }
 
     /// Returns whether the provided interior cells fit into one interior page.

@@ -159,6 +159,32 @@ pub(crate) fn write_cell_with_payload(
     bytes[payload_start..payload_start + inline_payload.len()].copy_from_slice(inline_payload);
 }
 
+/// Validates raw leaf payload lengths and returns the total logical payload length.
+fn validate_payload_parts(
+    key_len: usize,
+    value_len: usize,
+    first_overflow_page_id: Option<PageId>,
+    inline_payload: &[u8],
+) -> PageResult<usize> {
+    let payload_len = key_len + value_len;
+    if key_len > u16::MAX as usize
+        || value_len > u16::MAX as usize
+        || payload_len > u16::MAX as usize
+    {
+        return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize });
+    }
+    let Some(expected_inline_len) = inline_payload_len(payload_len, first_overflow_page_id) else {
+        return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize });
+    };
+    if inline_payload.len() != expected_inline_len {
+        return Err(PageError::CellTooLarge {
+            len: LEAF_CELL_PREFIX_SIZE + inline_payload.len(),
+            max: LEAF_CELL_PREFIX_SIZE + expected_inline_len,
+        });
+    }
+    Ok(payload_len)
+}
+
 fn compare_key<A>(
     page: &Page<A, Leaf>,
     slot_index: SlotId,
@@ -272,23 +298,7 @@ where
         first_overflow_page_id: Option<PageId>,
         inline_payload: &[u8],
     ) -> PageResult<SlotId> {
-        let payload_len = key_len + value_len;
-        if key_len > u16::MAX as usize
-            || value_len > u16::MAX as usize
-            || payload_len > u16::MAX as usize
-        {
-            return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize });
-        }
-        let Some(expected_inline_len) = inline_payload_len(payload_len, first_overflow_page_id)
-        else {
-            return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize });
-        };
-        if inline_payload.len() != expected_inline_len {
-            return Err(PageError::CellTooLarge {
-                len: LEAF_CELL_PREFIX_SIZE + inline_payload.len(),
-                max: LEAF_CELL_PREFIX_SIZE + expected_inline_len,
-            });
-        }
+        validate_payload_parts(key_len, value_len, first_overflow_page_id, inline_payload)?;
         if slot_index > self.slot_count() {
             return Err(PageError::InvalidSlotIndex { slot_index, slot_count: self.slot_count() });
         }
@@ -305,6 +315,50 @@ where
         );
         self.insert_slot(slot_index, cell_offset)?;
         Ok(slot_index)
+    }
+
+    /// Rewrites an existing leaf cell payload without changing its slot order.
+    pub(crate) fn update_payload_at(
+        &mut self,
+        slot_index: SlotId,
+        key_len: usize,
+        value_len: usize,
+        first_overflow_page_id: Option<PageId>,
+        inline_payload: &[u8],
+    ) -> PageResult<SlotId> {
+        validate_payload_parts(key_len, value_len, first_overflow_page_id, inline_payload)?;
+        self.validate_slot_index(slot_index)?;
+
+        let cell_len = LEAF_CELL_PREFIX_SIZE + inline_payload.len();
+        let old_len = self.cell_len(slot_index)?;
+        if old_len == cell_len {
+            let old_offset = self.slot_offset(slot_index)?;
+            write_cell_with_payload(
+                self.bytes_mut(),
+                old_offset as usize,
+                key_len,
+                value_len,
+                first_overflow_page_id,
+                inline_payload,
+            );
+            return Ok(slot_index);
+        }
+
+        let available = self.total_reclaimable_space()? + old_len;
+        if available < cell_len {
+            return Err(PageError::PageFull { needed: cell_len, available });
+        }
+
+        let old_offset = self.slot_offset(slot_index)?;
+        self.remove_slot(slot_index)?;
+        self.reclaim_space(old_offset, old_len)?;
+        self.insert_payload_at(
+            slot_index,
+            key_len,
+            value_len,
+            first_overflow_page_id,
+            inline_payload,
+        )
     }
 
     /// Deletes an existing key/value cell and re-packs the page.
