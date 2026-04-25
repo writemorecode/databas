@@ -2081,10 +2081,10 @@ impl<S: PageStore> TreeCursor<S> {
     }
 
     /// Replaces the value stored for an existing `key`.
-    pub fn update(&mut self, key: &[u8], value: &[u8]) -> StorageResult<Record<S>> {
-        let _ = &self.page_cache;
-        let _ = (key, value);
-        todo!("tree update is not implemented yet")
+    pub fn update(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
+        self.delete(key)?;
+        self.insert(key, value)?;
+        Ok(())
     }
 
     /// Deletes the record identified by `key`.
