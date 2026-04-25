@@ -12,7 +12,10 @@ use crate::{
     overflow,
     page::{
         self, BoundResult, PageError, RawInterior, RawLeaf, Read, SearchResult, Write,
-        format::{KIND_OFFSET, MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, PageKind},
+        format::{
+            KIND_OFFSET, MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, NO_OVERFLOW_PAGE_ID,
+            OVERFLOW_NEXT_PAGE_ID_SIZE, PageKind,
+        },
     },
     page_cache::{PageCache, PageWriteGuard, PinGuard},
     page_store::PageStore,
@@ -188,20 +191,19 @@ impl<S: PageStore> Record<S> {
                 }
             }
             Some(first_overflow_page_id) => {
-                let inline_payload = {
+                let (key, value) = {
                     let page = pin.read()?;
-                    page.page()[inline_range].to_vec()
+                    materialize_leaf_cell(
+                        page_cache,
+                        page_id,
+                        &page.page()[inline_range],
+                        first_overflow_page_id,
+                        key_len,
+                        value_len,
+                    )?
                 };
                 drop(pin);
 
-                let (key, value) = materialize_leaf_cell(
-                    page_cache,
-                    page_id,
-                    inline_payload,
-                    first_overflow_page_id,
-                    key_len,
-                    value_len,
-                )?;
                 RecordStorage::Materialized { key, value }
             }
         };
@@ -369,15 +371,6 @@ struct ChildEntry {
     max_key: Option<Vec<u8>>,
 }
 
-/// Fully prepared interior cell payload for an atomic page rewrite.
-#[derive(Debug, Clone)]
-struct PreparedInteriorCell {
-    left_child: PageId,
-    key_len: usize,
-    first_overflow_page_id: Option<PageId>,
-    inline_payload: Vec<u8>,
-}
-
 impl LeafSplitCell {
     /// Returns the key length this cell will occupy after the split.
     fn key_len(&self) -> usize {
@@ -425,11 +418,6 @@ impl InteriorSplitCell {
     fn key(&self) -> &[u8] {
         &self.key
     }
-
-    /// Replaces the left-child pointer while preserving the cell key storage.
-    fn with_left_child(&self, left_child: PageId) -> Self {
-        Self { left_child, key: self.key.clone() }
-    }
 }
 
 fn payload_uses_overflow(payload_len: usize) -> bool {
@@ -448,10 +436,120 @@ fn cell_corruption(page_id: PageId, kind: CorruptionKind) -> StorageError {
     })
 }
 
+fn overflow_corruption(page_id: Option<PageId>, kind: CorruptionKind) -> StorageError {
+    StorageError::Corruption(CorruptionError {
+        component: CorruptionComponent::OverflowPage,
+        page_id,
+        kind,
+    })
+}
+
+fn read_overflow_next_page_id(page: &[u8; PAGE_SIZE]) -> Option<PageId> {
+    page::format::read_optional_u64(page, 0)
+}
+
+fn write_overflow_chain_from_slices<S: PageStore>(
+    page_cache: &PageCache<S>,
+    mut first: &[u8],
+    mut second: &[u8],
+) -> StorageResult<Option<PageId>> {
+    if first.is_empty() && second.is_empty() {
+        return Ok(None);
+    }
+
+    let mut first_page_id = None;
+    let mut previous_page_id = None;
+    while !first.is_empty() || !second.is_empty() {
+        let (page_id, pin) = page_cache.new_page()?;
+        {
+            let mut page = pin.write()?;
+            page.page_mut().fill(0);
+            page::format::write_optional_u64(page.page_mut(), 0, None);
+
+            let mut write_offset = OVERFLOW_NEXT_PAGE_ID_SIZE;
+            while write_offset < PAGE_SIZE && (!first.is_empty() || !second.is_empty()) {
+                let source = if !first.is_empty() { first } else { second };
+                let take = source.len().min(PAGE_SIZE - write_offset);
+                page.page_mut()[write_offset..write_offset + take].copy_from_slice(&source[..take]);
+                write_offset += take;
+                if !first.is_empty() {
+                    first = &first[take..];
+                } else {
+                    second = &second[take..];
+                }
+            }
+        }
+        drop(pin);
+
+        if first_page_id.is_none() {
+            first_page_id = Some(page_id);
+        }
+        if let Some(previous_page_id) = previous_page_id {
+            let previous_pin = page_cache.fetch_page(previous_page_id)?;
+            let mut previous_page = previous_pin.write()?;
+            page::format::write_optional_u64(previous_page.page_mut(), 0, Some(page_id));
+        }
+        previous_page_id = Some(page_id);
+    }
+
+    Ok(first_page_id)
+}
+
+fn append_overflow_chain_exact<S: PageStore>(
+    page_cache: &PageCache<S>,
+    first_overflow_page_id: PageId,
+    payload: &mut Vec<u8>,
+    total_payload_len: usize,
+) -> StorageResult<()> {
+    let initial_len = payload.len();
+    let expected_overflow_len = total_payload_len - initial_len;
+    let mut page_id = Some(first_overflow_page_id);
+
+    while payload.len() < total_payload_len {
+        let Some(current_page_id) = page_id else {
+            return Err(overflow_corruption(
+                None,
+                CorruptionKind::OverflowChainTooShort {
+                    expected: expected_overflow_len,
+                    actual: payload.len() - initial_len,
+                },
+            ));
+        };
+
+        if current_page_id == NO_OVERFLOW_PAGE_ID {
+            return Err(overflow_corruption(
+                Some(current_page_id),
+                CorruptionKind::OverflowChainTooShort {
+                    expected: expected_overflow_len,
+                    actual: payload.len() - initial_len,
+                },
+            ));
+        }
+
+        let pin = page_cache.fetch_page(current_page_id)?;
+        let page = pin.read()?;
+        let remaining = total_payload_len - payload.len();
+        let take = remaining.min(overflow::OVERFLOW_PAYLOAD_SIZE);
+        payload.extend_from_slice(
+            &page.page()[OVERFLOW_NEXT_PAGE_ID_SIZE..OVERFLOW_NEXT_PAGE_ID_SIZE + take],
+        );
+        page_id = read_overflow_next_page_id(page.page());
+    }
+
+    if page_id.is_some() {
+        return Err(overflow_corruption(
+            page_id,
+            CorruptionKind::OverflowChainTooLong { expected: expected_overflow_len },
+        ));
+    }
+
+    Ok(())
+}
+
 fn materialize_payload<S: PageStore>(
     page_cache: &PageCache<S>,
     page_id: PageId,
-    inline_payload: Vec<u8>,
+    inline_payload: &[u8],
     first_overflow_page_id: Option<PageId>,
     payload_len: usize,
 ) -> StorageResult<Vec<u8>> {
@@ -459,12 +557,15 @@ fn materialize_payload<S: PageStore>(
         return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
     }
 
-    let mut payload = inline_payload;
+    let mut payload = Vec::with_capacity(payload_len);
+    payload.extend_from_slice(inline_payload);
     match first_overflow_page_id {
-        Some(first_overflow_page_id) => {
-            let remaining = payload_len - payload.len();
-            payload.extend(overflow::read_chain(page_cache, first_overflow_page_id, remaining)?);
-        }
+        Some(first_overflow_page_id) => append_overflow_chain_exact(
+            page_cache,
+            first_overflow_page_id,
+            &mut payload,
+            payload_len,
+        )?,
         None if payload.len() != payload_len => {
             return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
         }
@@ -480,7 +581,7 @@ fn materialize_payload<S: PageStore>(
 fn materialize_leaf_cell<S: PageStore>(
     page_cache: &PageCache<S>,
     page_id: PageId,
-    inline_payload: Vec<u8>,
+    inline_payload: &[u8],
     first_overflow_page_id: PageId,
     key_len: usize,
     value_len: usize,
@@ -506,28 +607,26 @@ fn read_leaf_cell<S: PageStore>(
     slot_index: u16,
 ) -> StorageResult<(Vec<u8>, Vec<u8>)> {
     let pin = page_cache.fetch_page(page_id)?;
-    let (key_len, value_len, first_overflow_page_id, inline_payload) = {
+    let payload = {
         let page = pin.read()?;
         let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
         let (key_len, value_len, first_overflow_page_id, inline_range) =
             leaf.cell_payload_parts(slot_index)?;
-        (key_len, value_len, first_overflow_page_id, page.page()[inline_range].to_vec())
+        let mut payload = materialize_payload(
+            page_cache,
+            page_id,
+            &page.page()[inline_range],
+            first_overflow_page_id,
+            key_len + value_len,
+        )?;
+        if payload.len() < key_len {
+            return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
+        }
+        let value = payload.split_off(key_len);
+        (payload, value)
     };
     drop(pin);
-
-    let payload = materialize_payload(
-        page_cache,
-        page_id,
-        inline_payload,
-        first_overflow_page_id,
-        key_len + value_len,
-    )?;
-    if payload.len() < key_len {
-        return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
-    }
-    let key = payload[..key_len].to_vec();
-    let value = payload[key_len..].to_vec();
-    Ok((key, value))
+    Ok(payload)
 }
 
 fn read_interior_cell<S: PageStore>(
@@ -536,17 +635,22 @@ fn read_interior_cell<S: PageStore>(
     slot_index: u16,
 ) -> StorageResult<(PageId, Vec<u8>)> {
     let pin = page_cache.fetch_page(page_id)?;
-    let (left_child, key_len, first_overflow_page_id, inline_payload) = {
+    let (left_child, key) = {
         let page = pin.read()?;
         let interior = RawInterior::<Read<'_>>::open(page.page())?;
         let (left_child, key_len, first_overflow_page_id, inline_range) =
             interior.cell_payload_parts(slot_index)?;
-        (left_child, key_len, first_overflow_page_id, page.page()[inline_range].to_vec())
+        let key = materialize_payload(
+            page_cache,
+            page_id,
+            &page.page()[inline_range],
+            first_overflow_page_id,
+            key_len,
+        )?;
+        (left_child, key)
     };
     drop(pin);
 
-    let key =
-        materialize_payload(page_cache, page_id, inline_payload, first_overflow_page_id, key_len)?;
     Ok((left_child, key))
 }
 
@@ -580,24 +684,63 @@ fn compare_key_prefix(
     Ok(None)
 }
 
-fn materialize_overflow_key<S: PageStore>(
+fn compare_overflow_key<S: PageStore>(
     page_cache: &PageCache<S>,
     page_id: PageId,
-    mut inline_key: Vec<u8>,
+    key: &[u8],
+    inline_key_len: usize,
     first_overflow_page_id: Option<PageId>,
     key_len: usize,
-) -> StorageResult<Vec<u8>> {
-    let first_overflow_page_id = first_overflow_page_id
-        .ok_or_else(|| cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds))?;
-    inline_key.extend(overflow::read_chain_prefix(
-        page_cache,
-        first_overflow_page_id,
-        key_len - inline_key.len(),
-    )?);
-    if inline_key.len() != key_len {
+) -> StorageResult<Ordering> {
+    if inline_key_len > key_len {
         return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
     }
-    Ok(inline_key)
+
+    let first_overflow_page_id = first_overflow_page_id
+        .ok_or_else(|| cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds))?;
+
+    let mut page_id = Some(first_overflow_page_id);
+    let mut compared = inline_key_len;
+    while compared < key_len {
+        let Some(current_page_id) = page_id else {
+            return Err(overflow_corruption(
+                None,
+                CorruptionKind::OverflowChainTooShort {
+                    expected: key_len - inline_key_len,
+                    actual: compared - inline_key_len,
+                },
+            ));
+        };
+
+        if current_page_id == NO_OVERFLOW_PAGE_ID {
+            return Err(overflow_corruption(
+                Some(current_page_id),
+                CorruptionKind::OverflowChainTooShort {
+                    expected: key_len - inline_key_len,
+                    actual: compared - inline_key_len,
+                },
+            ));
+        }
+
+        let pin = page_cache.fetch_page(current_page_id)?;
+        let page = pin.read()?;
+        let remaining = key_len - compared;
+        let take = remaining.min(overflow::OVERFLOW_PAYLOAD_SIZE);
+        if compared < key.len() {
+            let compare_len = (key.len() - compared).min(take);
+            let ordering = page.page()
+                [OVERFLOW_NEXT_PAGE_ID_SIZE..OVERFLOW_NEXT_PAGE_ID_SIZE + compare_len]
+                .cmp(&key[compared..compared + compare_len]);
+            if ordering != Ordering::Equal {
+                return Ok(ordering);
+            }
+        }
+
+        compared += take;
+        page_id = read_overflow_next_page_id(page.page());
+    }
+
+    Ok(key_len.cmp(&key.len()))
 }
 
 impl<S: PageStore> TreeCursor<S> {
@@ -680,7 +823,7 @@ impl<S: PageStore> TreeCursor<S> {
         slot_index: u16,
         key: &[u8],
     ) -> StorageResult<Ordering> {
-        let (inline_key, first_overflow_page_id, key_len) = {
+        let (inline_key_len, first_overflow_page_id, key_len) = {
             let pin = self.page_cache.fetch_page(page_id)?;
             let page = pin.read()?;
             let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
@@ -691,17 +834,17 @@ impl<S: PageStore> TreeCursor<S> {
             if let Some(ordering) = compare_key_prefix(page_id, inline_key, key_len, key)? {
                 return Ok(ordering);
             }
-            (inline_key.to_vec(), first_overflow_page_id, key_len)
+            (inline_key_len, first_overflow_page_id, key_len)
         };
 
-        let materialized_key = materialize_overflow_key(
+        compare_overflow_key(
             &self.page_cache,
             page_id,
-            inline_key,
+            key,
+            inline_key_len,
             first_overflow_page_id,
             key_len,
-        )?;
-        Ok(materialized_key.as_slice().cmp(key))
+        )
     }
 
     fn compare_interior_key(
@@ -710,7 +853,7 @@ impl<S: PageStore> TreeCursor<S> {
         slot_index: u16,
         key: &[u8],
     ) -> StorageResult<Ordering> {
-        let (inline_key, first_overflow_page_id, key_len) = {
+        let (inline_key_len, first_overflow_page_id, key_len) = {
             let pin = self.page_cache.fetch_page(page_id)?;
             let page = pin.read()?;
             let interior = RawInterior::<Read<'_>>::open(page.page())?;
@@ -721,17 +864,17 @@ impl<S: PageStore> TreeCursor<S> {
             if let Some(ordering) = compare_key_prefix(page_id, inline_key, key_len, key)? {
                 return Ok(ordering);
             }
-            (inline_key.to_vec(), first_overflow_page_id, key_len)
+            (inline_key_len, first_overflow_page_id, key_len)
         };
 
-        let materialized_key = materialize_overflow_key(
+        compare_overflow_key(
             &self.page_cache,
             page_id,
-            inline_key,
+            key,
+            inline_key_len,
             first_overflow_page_id,
             key_len,
-        )?;
-        Ok(materialized_key.as_slice().cmp(key))
+        )
     }
 
     fn read_interior_left_child(&self, page_id: PageId, slot_index: u16) -> StorageResult<PageId> {
@@ -1035,21 +1178,6 @@ impl<S: PageStore> TreeCursor<S> {
         Ok(INTERIOR_CELL_PREFIX_SIZE + local_payload_len(key.len()))
     }
 
-    fn payload_storage_parts(&self, payload: &[u8]) -> StorageResult<(Option<PageId>, Vec<u8>)> {
-        self.checked_payload_len(payload.len())?;
-        if !payload_uses_overflow(payload.len()) {
-            return Ok((None, payload.to_vec()));
-        }
-
-        let inline_payload = payload[..MAX_INLINE_OVERFLOW_PAYLOAD_BYTES].to_vec();
-        let first_overflow_page_id =
-            overflow::write_chain(&self.page_cache, &payload[MAX_INLINE_OVERFLOW_PAYLOAD_BYTES..])?
-                .ok_or_else(|| {
-                    cell_corruption(self.root_page_id(), CorruptionKind::CellLengthOutOfBounds)
-                })?;
-        Ok((Some(first_overflow_page_id), inline_payload))
-    }
-
     fn insert_leaf_payload_at(
         &self,
         leaf: &mut RawLeaf<Write<'_>>,
@@ -1057,16 +1185,50 @@ impl<S: PageStore> TreeCursor<S> {
         key: &[u8],
         value: &[u8],
     ) -> StorageResult<u16> {
-        let mut payload = Vec::with_capacity(key.len() + value.len());
-        payload.extend_from_slice(key);
-        payload.extend_from_slice(value);
-        let (first_overflow_page_id, inline_payload) = self.payload_storage_parts(&payload)?;
+        let payload_len = key.len() + value.len();
+        self.checked_payload_len(payload_len)?;
+        let mut inline_payload = [0; MAX_INLINE_OVERFLOW_PAYLOAD_BYTES];
+
+        let first_overflow_page_id = if payload_uses_overflow(payload_len) {
+            if key.len() >= MAX_INLINE_OVERFLOW_PAYLOAD_BYTES {
+                inline_payload.copy_from_slice(&key[..MAX_INLINE_OVERFLOW_PAYLOAD_BYTES]);
+                Some(
+                    write_overflow_chain_from_slices(
+                        &self.page_cache,
+                        &key[MAX_INLINE_OVERFLOW_PAYLOAD_BYTES..],
+                        value,
+                    )?
+                    .ok_or_else(|| {
+                        cell_corruption(self.root_page_id(), CorruptionKind::CellLengthOutOfBounds)
+                    })?,
+                )
+            } else {
+                inline_payload[..key.len()].copy_from_slice(key);
+                let value_prefix_len = MAX_INLINE_OVERFLOW_PAYLOAD_BYTES - key.len();
+                inline_payload[key.len()..MAX_INLINE_OVERFLOW_PAYLOAD_BYTES]
+                    .copy_from_slice(&value[..value_prefix_len]);
+                Some(
+                    overflow::write_chain(&self.page_cache, &value[value_prefix_len..])?
+                        .ok_or_else(|| {
+                            cell_corruption(
+                                self.root_page_id(),
+                                CorruptionKind::CellLengthOutOfBounds,
+                            )
+                        })?,
+                )
+            }
+        } else {
+            inline_payload[..key.len()].copy_from_slice(key);
+            inline_payload[key.len()..payload_len].copy_from_slice(value);
+            None
+        };
+        let inline_payload = &inline_payload[..local_payload_len(payload_len)];
         Ok(leaf.insert_payload_at(
             slot_index,
             key.len(),
             value.len(),
             first_overflow_page_id,
-            &inline_payload,
+            inline_payload,
         )?)
     }
 
@@ -1077,13 +1239,33 @@ impl<S: PageStore> TreeCursor<S> {
         left_child: PageId,
         key: &[u8],
     ) -> StorageResult<u16> {
-        let (first_overflow_page_id, inline_payload) = self.payload_storage_parts(key)?;
+        self.checked_payload_len(key.len())?;
+        let (first_overflow_page_id, inline_payload): (Option<PageId>, &[u8]) =
+            if payload_uses_overflow(key.len()) {
+                (
+                    Some(
+                        overflow::write_chain(
+                            &self.page_cache,
+                            &key[MAX_INLINE_OVERFLOW_PAYLOAD_BYTES..],
+                        )?
+                        .ok_or_else(|| {
+                            cell_corruption(
+                                self.root_page_id(),
+                                CorruptionKind::CellLengthOutOfBounds,
+                            )
+                        })?,
+                    ),
+                    &key[..MAX_INLINE_OVERFLOW_PAYLOAD_BYTES],
+                )
+            } else {
+                (None, key)
+            };
         Ok(interior.insert_payload_at(
             slot_index,
             left_child,
             key.len(),
             first_overflow_page_id,
-            &inline_payload,
+            inline_payload,
         )?)
     }
 
@@ -1158,7 +1340,16 @@ impl<S: PageStore> TreeCursor<S> {
         parent_page_id: PageId,
         child_page_id: PageId,
     ) -> StorageResult<bool> {
-        Ok(self.read_interior_child_page_ids(parent_page_id)?.contains(&child_page_id))
+        let pin = self.page_cache.fetch_page(parent_page_id)?;
+        let page = pin.read()?;
+        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        for slot_index in 0..interior.slot_count() {
+            let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
+            if left_child == child_page_id {
+                return Ok(true);
+            }
+        }
+        Ok(interior.rightmost_child() == child_page_id)
     }
 
     /// Returns the largest key reachable from the subtree rooted at `page_id`.
@@ -1201,16 +1392,23 @@ impl<S: PageStore> TreeCursor<S> {
         parent_page_id: PageId,
         child_page_id: PageId,
     ) -> StorageResult<usize> {
-        self.read_interior_child_page_ids(parent_page_id)?
-            .iter()
-            .position(|&candidate| candidate == child_page_id)
-            .ok_or({
-                StorageError::Corruption(CorruptionError {
-                    component: CorruptionComponent::InteriorPage,
-                    page_id: Some(parent_page_id),
-                    kind: CorruptionKind::CellLengthOutOfBounds,
-                })
-            })
+        let pin = self.page_cache.fetch_page(parent_page_id)?;
+        let page = pin.read()?;
+        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        for slot_index in 0..interior.slot_count() {
+            let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
+            if left_child == child_page_id {
+                return Ok(slot_index as usize);
+            }
+        }
+        if interior.rightmost_child() == child_page_id {
+            return Ok(interior.slot_count() as usize);
+        }
+        Err(StorageError::Corruption(CorruptionError {
+            component: CorruptionComponent::InteriorPage,
+            page_id: Some(parent_page_id),
+            kind: CorruptionKind::CellLengthOutOfBounds,
+        }))
     }
 
     /// Reinitializes a leaf page with `cells` and updated sibling links.
@@ -1265,21 +1463,6 @@ impl<S: PageStore> TreeCursor<S> {
             .into());
         }
 
-        let mut prepared_cells = Vec::with_capacity(children.len() - 1);
-        for child in &children[..children.len() - 1] {
-            let key = child
-                .max_key
-                .as_deref()
-                .ok_or_else(|| Self::missing_child_max_key_error(page_id))?;
-            let (first_overflow_page_id, inline_payload) = self.payload_storage_parts(key)?;
-            prepared_cells.push(PreparedInteriorCell {
-                left_child: child.page_id,
-                key_len: key.len(),
-                first_overflow_page_id,
-                inline_payload,
-            });
-        }
-
         let mut page_image = [0; PAGE_SIZE];
         {
             let mut interior = RawInterior::<Write<'_>>::initialize_with_rightmost(
@@ -1288,15 +1471,13 @@ impl<S: PageStore> TreeCursor<S> {
             );
             interior.set_prev_page_id(prev_page_id);
             interior.set_next_page_id(next_page_id);
-            for cell in &prepared_cells {
+            for child in &children[..children.len() - 1] {
+                let key = child
+                    .max_key
+                    .as_deref()
+                    .ok_or_else(|| Self::missing_child_max_key_error(page_id))?;
                 let slot_index = interior.slot_count();
-                interior.insert_payload_at(
-                    slot_index,
-                    cell.left_child,
-                    cell.key_len,
-                    cell.first_overflow_page_id,
-                    &cell.inline_payload,
-                )?;
+                self.insert_interior_payload_at(&mut interior, slot_index, child.page_id, key)?;
             }
         }
 
@@ -1810,21 +1991,21 @@ impl<S: PageStore> TreeCursor<S> {
             return Ok(());
         }
 
-        let mut reachable = Vec::with_capacity(tree_path.len());
+        let mut reachable_depth = 0;
         for (depth, frame) in tree_path.iter().enumerate() {
             let is_reachable = if depth == 0 {
                 frame.page_id == self.root_page_id()
             } else {
-                reachable[depth - 1]
-                    && self.interior_page_has_child(tree_path[depth - 1].page_id, frame.page_id)?
+                self.interior_page_has_child(tree_path[depth - 1].page_id, frame.page_id)?
             };
-            reachable.push(is_reachable);
+            if !is_reachable {
+                break;
+            }
+            reachable_depth += 1;
         }
 
-        for (frame, is_reachable) in tree_path.iter().zip(reachable).rev() {
-            if is_reachable {
-                self.refresh_interior_page_separators(frame.page_id)?;
-            }
+        for frame in tree_path[..reachable_depth].iter().rev() {
+            self.refresh_interior_page_separators(frame.page_id)?;
         }
 
         Ok(())
@@ -2153,17 +2334,18 @@ impl<S: PageStore> TreeCursor<S> {
         for slot_index in 0..leaf_snapshot.slot_count() {
             let (key_len, value_len, first_overflow_page_id, inline_range) =
                 leaf_snapshot.cell_payload_parts(slot_index)?;
-            let payload = materialize_payload(
+            let mut payload = materialize_payload(
                 &self.page_cache,
                 leaf_page_id,
-                leaf_snapshot_bytes[inline_range].to_vec(),
+                &leaf_snapshot_bytes[inline_range],
                 first_overflow_page_id,
                 key_len + value_len,
             )?;
-            cells.push(LeafSplitCell {
-                key: payload[..key_len].to_vec(),
-                value: payload[key_len..].to_vec(),
-            });
+            if payload.len() < key_len {
+                return Err(cell_corruption(leaf_page_id, CorruptionKind::CellLengthOutOfBounds));
+            }
+            let value = payload.split_off(key_len);
+            cells.push(LeafSplitCell { key: payload, value });
         }
 
         let idx = match cells.binary_search_by(|cell| cell.key().cmp(key)) {
@@ -2270,6 +2452,8 @@ impl<S: PageStore> TreeCursor<S> {
         parent_frame: PathFrame,
         pending: PendingSplit,
     ) -> StorageResult<PendingSplit> {
+        let PendingSplit { separator, left_page_id, right_page_id: incoming_right_page_id } =
+            pending;
         let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
         let mut interior_guard = interior_page_guard.write()?;
         let interior_snapshot_bytes = *interior_guard.page();
@@ -2285,7 +2469,7 @@ impl<S: PageStore> TreeCursor<S> {
             let key = materialize_payload(
                 &self.page_cache,
                 parent_frame.page_id,
-                interior_snapshot_bytes[inline_range].to_vec(),
+                &interior_snapshot_bytes[inline_range],
                 first_overflow_page_id,
                 key_len,
             )?;
@@ -2294,22 +2478,18 @@ impl<S: PageStore> TreeCursor<S> {
 
         match parent_frame.child_ref {
             ChildSlotRef::Slot(slot_index) => {
-                let cell = cells[slot_index as usize].with_left_child(pending.right_page_id);
-                cells[slot_index as usize] = cell;
+                cells[slot_index as usize].left_child = incoming_right_page_id;
             }
             ChildSlotRef::Rightmost => {
-                old_rightmost_child = pending.right_page_id;
+                old_rightmost_child = incoming_right_page_id;
             }
         }
 
-        let idx = match cells.binary_search_by(|cell| cell.key().cmp(&pending.separator)) {
+        let idx = match cells.binary_search_by(|cell| cell.key().cmp(&separator)) {
             Ok(_) => return Err(PageError::DuplicateKey.into()),
             Err(insert_index) => insert_index,
         };
-        cells.insert(
-            idx,
-            InteriorSplitCell { left_child: pending.left_page_id, key: pending.separator.clone() },
-        );
+        cells.insert(idx, InteriorSplitCell { left_child: left_page_id, key: separator });
 
         let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
         let mut right_guard = right_page_guard.write()?;
