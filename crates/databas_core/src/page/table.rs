@@ -216,11 +216,6 @@ where
     pub fn delete(&mut self, row_id: RowId) -> PageResult<SlotId> {
         self.raw.delete(&encode_row_id(row_id))
     }
-
-    /// Replaces the record bytes for an existing row id.
-    pub fn update(&mut self, row_id: RowId, record: &[u8]) -> PageResult<()> {
-        self.raw.update(&encode_row_id(row_id), record)
-    }
 }
 
 impl<A> TablePage<A, Interior>
@@ -283,11 +278,6 @@ where
     /// Inserts a separator row id and its left-child pointer.
     pub fn insert(&mut self, row_id: RowId, left_child: PageId) -> PageResult<SlotId> {
         self.raw.insert(&encode_row_id(row_id), left_child)
-    }
-
-    /// Rewrites the left-child pointer for an existing separator row id.
-    pub fn update(&mut self, row_id: RowId, left_child: PageId) -> PageResult<()> {
-        self.raw.update(&encode_row_id(row_id), left_child)
     }
 }
 

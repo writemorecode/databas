@@ -70,13 +70,18 @@ mod tests {
     }
 
     #[test]
-    fn leaf_update_replaces_value_for_existing_key() {
-        // Verifies that updating a leaf cell replaces the value found by lookup.
+    fn leaf_cell_mut_replaces_value_for_existing_key() {
+        // Verifies that mutating a leaf cell value updates the value found by lookup.
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
 
         page.insert(b"alpha", b"old").unwrap();
-        page.update(b"alpha", b"new").unwrap();
+        let slot_index = match page.search(b"alpha").unwrap() {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::InsertAt(_) => panic!("expected inserted key to be found"),
+        };
+        let mut cell = page.cell_mut(slot_index).unwrap();
+        cell.value_mut().unwrap().copy_from_slice(b"new");
 
         let cell = page.lookup(b"alpha").unwrap().unwrap();
         assert_eq!(cell.key().unwrap(), b"alpha");
@@ -108,14 +113,14 @@ mod tests {
     }
 
     #[test]
-    fn leaf_update_rejects_missing_key() {
-        // Verifies that updating a missing leaf key returns a key-not-found error.
+    fn leaf_cell_mut_rejects_missing_slot() {
+        // Verifies that opening a mutable view for a missing leaf slot fails.
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
 
-        let result = page.update(b"missing", b"value");
+        let result = page.cell_mut(0);
 
-        assert!(matches!(result, Err(PageError::KeyNotFound)));
+        assert!(matches!(result, Err(PageError::InvalidSlotIndex { .. })));
     }
 
     #[test]
@@ -173,13 +178,18 @@ mod tests {
     }
 
     #[test]
-    fn interior_update_replaces_left_child_for_existing_key() {
-        // Verifies that updating an interior cell replaces the child found by lookup.
+    fn interior_cell_mut_replaces_left_child_for_existing_key() {
+        // Verifies that mutating an interior cell updates the child found by lookup.
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Interior>::init(&mut bytes, 99);
 
         page.insert(b"middle", 7).unwrap();
-        page.update(b"middle", 11).unwrap();
+        let slot_index = match page.search(b"middle").unwrap() {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::InsertAt(_) => panic!("expected inserted key to be found"),
+        };
+        let mut cell = page.cell_mut(slot_index).unwrap();
+        cell.set_left_child(11).unwrap();
 
         let cell = page.lookup(b"middle").unwrap().unwrap();
         assert_eq!(cell.key().unwrap(), b"middle");
@@ -199,14 +209,14 @@ mod tests {
     }
 
     #[test]
-    fn interior_update_rejects_missing_key() {
-        // Verifies that updating a missing interior key returns a key-not-found error.
+    fn interior_cell_mut_rejects_missing_slot() {
+        // Verifies that opening a mutable view for a missing interior slot fails.
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Interior>::init(&mut bytes, 99);
 
-        let result = page.update(b"missing", 7);
+        let result = page.cell_mut(0);
 
-        assert!(matches!(result, Err(PageError::KeyNotFound)));
+        assert!(matches!(result, Err(PageError::InvalidSlotIndex { .. })));
     }
 
     #[test]

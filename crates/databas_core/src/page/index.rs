@@ -216,11 +216,6 @@ where
     pub fn delete(&mut self, key: &[u8]) -> PageResult<SlotId> {
         self.raw.delete(key)
     }
-
-    /// Replaces the row id for an existing index key.
-    pub fn update(&mut self, key: &[u8], row_id: RowId) -> PageResult<()> {
-        self.raw.update(key, &encode_row_id(row_id))
-    }
 }
 
 impl<A> IndexPage<A, Interior>
@@ -283,11 +278,6 @@ where
     /// Inserts a separator key and its left-child pointer.
     pub fn insert(&mut self, key: &[u8], left_child: PageId) -> PageResult<SlotId> {
         self.raw.insert(key, left_child)
-    }
-
-    /// Rewrites the left-child pointer for an existing separator key.
-    pub fn update(&mut self, key: &[u8], left_child: PageId) -> PageResult<()> {
-        self.raw.update(key, left_child)
     }
 }
 
