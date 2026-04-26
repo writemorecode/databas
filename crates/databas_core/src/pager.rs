@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     PageId,
-    btree::{TreeCursor, validate_root_page},
+    btree::{TreeCursor, initialize_empty_root, validate_root_page},
     cursor::{IndexCursor, TableCursor},
     disk_manager::DiskManager,
     error::StorageResult,
@@ -63,6 +63,18 @@ impl Pager {
     pub fn flush(&self) -> StorageResult<()> {
         self.page_cache.flush_all()?;
         Ok(())
+    }
+
+    /// Creates a new empty table tree and returns a cursor rooted at it.
+    pub fn create_table(&self) -> StorageResult<TableCursor> {
+        let root_page_id = initialize_empty_root(&self.page_cache)?;
+        Ok(TableCursor::new(TreeCursor::new(self.page_cache.clone(), root_page_id)))
+    }
+
+    /// Creates a new empty secondary-index tree and returns a cursor rooted at it.
+    pub fn create_index(&self) -> StorageResult<IndexCursor> {
+        let root_page_id = initialize_empty_root(&self.page_cache)?;
+        Ok(IndexCursor::new(TreeCursor::new(self.page_cache.clone(), root_page_id)))
     }
 
     /// Returns a typed cursor rooted at an existing table tree.
