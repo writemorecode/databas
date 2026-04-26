@@ -13,7 +13,9 @@ pub(crate) mod page_store;
 pub mod pager;
 
 pub use btree::{CursorState, OwnedRecord, Record, RecordView, TreeCursor};
-pub use cursor::{IndexCursor, IndexEntry, TableCursor, TableRecord};
+pub use cursor::{
+    IndexCursor, IndexEntry, IndexEntryRef, TableCursor, TableRecord, TableRecordRef,
+};
 pub use page_store::PageStore;
 pub use pager::{Pager, PagerOptions};
 

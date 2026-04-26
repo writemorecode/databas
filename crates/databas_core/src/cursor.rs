@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::{
     RowId,
-    btree::{CursorState, OwnedRecord, TreeCursor},
+    btree::{CursorState, OwnedRecord, Record, TreeCursor},
     disk_manager::DiskManager,
     error::StorageResult,
     page::{CellCorruption, PageError},
@@ -55,6 +55,24 @@ pub struct IndexEntry {
     pub row_id: RowId,
 }
 
+/// Non-owned table record returned by borrowed [`TableCursor`] lookups.
+///
+/// Inline records keep the backing page pinned internally and expose bytes only
+/// through callbacks. Overflow records may still be materialized by the raw tree.
+pub struct TableRecordRef<S: PageStore = DiskManager> {
+    row_id: RowId,
+    raw: Record<S>,
+}
+
+/// Non-owned secondary-index entry returned by borrowed [`IndexCursor`] lookups.
+///
+/// Inline entries keep the backing page pinned internally and expose key bytes
+/// only through callbacks. Overflow keys may still be materialized by the raw tree.
+pub struct IndexEntryRef<S: PageStore = DiskManager> {
+    row_id: RowId,
+    raw: Record<S>,
+}
+
 /// Typed cursor for a table B+-tree keyed by row id.
 #[derive(Clone)]
 pub struct TableCursor<S: PageStore = DiskManager> {
@@ -101,6 +119,11 @@ impl<S: PageStore> TableCursor<S> {
     /// Looks up a table record by row id.
     pub fn get(&mut self, row_id: RowId) -> StorageResult<Option<TableRecord>> {
         self.inner.get_owned(&encode_table_row_id(row_id))?.map(TableRecord::try_from).transpose()
+    }
+
+    /// Looks up a table record by row id without eagerly copying page-resident bytes.
+    pub fn get_record(&mut self, row_id: RowId) -> StorageResult<Option<TableRecordRef<S>>> {
+        self.inner.get(&encode_table_row_id(row_id))?.map(TableRecordRef::try_from).transpose()
     }
 
     /// Replaces the encoded record bytes stored for an existing `row_id`.
@@ -150,6 +173,11 @@ impl<S: PageStore> IndexCursor<S> {
         self.inner.get_owned(key)?.map(IndexEntry::try_from).transpose()
     }
 
+    /// Looks up an index entry by key without eagerly copying page-resident bytes.
+    pub fn get_entry(&mut self, key: &[u8]) -> StorageResult<Option<IndexEntryRef<S>>> {
+        self.inner.get(key)?.map(IndexEntryRef::try_from).transpose()
+    }
+
     /// Replaces the row id stored for an existing index `key`.
     pub fn update(&mut self, key: &[u8], row_id: RowId) -> StorageResult<()> {
         self.inner.update(key, &encode_index_row_id(row_id))
@@ -158,6 +186,40 @@ impl<S: PageStore> IndexCursor<S> {
     /// Deletes the index entry identified by `key`.
     pub fn delete(&mut self, key: &[u8]) -> StorageResult<()> {
         self.inner.delete(key)
+    }
+}
+
+impl<S: PageStore> TableRecordRef<S> {
+    /// Returns the row id that identifies this table record.
+    pub fn row_id(&self) -> RowId {
+        self.row_id
+    }
+
+    /// Executes `f` with a borrowed view of the encoded table record bytes.
+    pub fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
+        self.raw.with_value(f)
+    }
+
+    /// Returns a stable, owned snapshot of this table record.
+    pub fn to_owned_record(&self) -> StorageResult<TableRecord> {
+        self.raw.to_owned_record()?.try_into()
+    }
+}
+
+impl<S: PageStore> IndexEntryRef<S> {
+    /// Returns the table row id referenced by this secondary-index key.
+    pub fn row_id(&self) -> RowId {
+        self.row_id
+    }
+
+    /// Executes `f` with a borrowed view of the encoded secondary-index key bytes.
+    pub fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
+        self.raw.with_key(f)
+    }
+
+    /// Returns a stable, owned snapshot of this index entry.
+    pub fn to_owned_entry(&self) -> StorageResult<IndexEntry> {
+        self.raw.to_owned_record()?.try_into()
     }
 }
 
@@ -179,6 +241,24 @@ impl<S: PageStore> fmt::Debug for IndexCursor<S> {
     }
 }
 
+impl<S: PageStore> fmt::Debug for TableRecordRef<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TableRecordRef")
+            .field("row_id", &self.row_id)
+            .field("raw", &self.raw)
+            .finish()
+    }
+}
+
+impl<S: PageStore> fmt::Debug for IndexEntryRef<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IndexEntryRef")
+            .field("row_id", &self.row_id)
+            .field("raw", &self.raw)
+            .finish()
+    }
+}
+
 impl TryFrom<OwnedRecord> for TableRecord {
     type Error = crate::error::StorageError;
 
@@ -186,6 +266,24 @@ impl TryFrom<OwnedRecord> for TableRecord {
         raw.with_key_value(|key, value| {
             Ok(Self { row_id: decode_table_row_id(key)?, record: value.into() })
         })
+    }
+}
+
+impl<S: PageStore> TryFrom<Record<S>> for TableRecordRef<S> {
+    type Error = crate::error::StorageError;
+
+    fn try_from(raw: Record<S>) -> Result<Self, Self::Error> {
+        let row_id = raw.with_key(decode_table_row_id)??;
+        Ok(Self { row_id, raw })
+    }
+}
+
+impl<S: PageStore> TryFrom<Record<S>> for IndexEntryRef<S> {
+    type Error = crate::error::StorageError;
+
+    fn try_from(raw: Record<S>) -> Result<Self, Self::Error> {
+        let row_id = raw.with_value(decode_index_row_id)??;
+        Ok(Self { row_id, raw })
     }
 }
 
@@ -243,6 +341,22 @@ mod tests {
     }
 
     #[test]
+    fn table_cursor_get_record_returns_non_owned_record_view() {
+        let mut cursor = memory_table_cursor(8);
+
+        cursor.insert(42, b"record bytes").unwrap();
+        let record = cursor.get_record(42).unwrap().expect("record should exist");
+
+        assert_eq!(record.row_id(), 42);
+        assert_eq!(record.with_record(|bytes| bytes.to_vec()).unwrap(), b"record bytes");
+        assert_eq!(
+            record.to_owned_record().unwrap(),
+            TableRecord { row_id: 42, record: Box::from(&b"record bytes"[..]) }
+        );
+        assert!(cursor.get_record(404).unwrap().is_none());
+    }
+
+    #[test]
     fn index_cursor_insert_get_update_delete_round_trips_owned_entries() {
         let mut cursor = memory_index_cursor(8);
 
@@ -260,6 +374,23 @@ mod tests {
 
         cursor.delete(b"email:ada@example.test").unwrap();
         assert_eq!(cursor.get(b"email:ada@example.test").unwrap(), None);
+    }
+
+    #[test]
+    fn index_cursor_get_entry_returns_non_owned_entry_view() {
+        let mut cursor = memory_index_cursor(8);
+
+        cursor.insert(b"email:ada@example.test", 7).unwrap();
+        let entry =
+            cursor.get_entry(b"email:ada@example.test").unwrap().expect("entry should exist");
+
+        assert_eq!(entry.row_id(), 7);
+        assert_eq!(entry.with_key(|key| key.to_vec()).unwrap(), b"email:ada@example.test");
+        assert_eq!(
+            entry.to_owned_entry().unwrap(),
+            IndexEntry { key: Box::from(&b"email:ada@example.test"[..]), row_id: 7 }
+        );
+        assert!(cursor.get_entry(b"missing").unwrap().is_none());
     }
 
     #[test]
@@ -319,5 +450,22 @@ mod tests {
             index.get(&large_key).unwrap(),
             Some(IndexEntry { key: large_key.into_boxed_slice(), row_id: 900 })
         );
+    }
+
+    #[test]
+    fn typed_borrowed_get_preserves_overflow_support() {
+        let mut table = memory_table_cursor(16);
+        let large_record = vec![0xaa; PAGE_SIZE * 2];
+        table.insert(500, &large_record).unwrap();
+        let record = table.get_record(500).unwrap().expect("large table record should exist");
+        assert_eq!(record.row_id(), 500);
+        assert_eq!(record.with_record(|bytes| bytes.to_vec()).unwrap(), large_record);
+
+        let mut index = memory_index_cursor(16);
+        let large_key = vec![0xbb; PAGE_SIZE * 2];
+        index.insert(&large_key, 900).unwrap();
+        let entry = index.get_entry(&large_key).unwrap().expect("large index entry should exist");
+        assert_eq!(entry.row_id(), 900);
+        assert_eq!(entry.with_key(|key| key.to_vec()).unwrap(), large_key);
     }
 }
