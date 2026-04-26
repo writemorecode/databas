@@ -7,6 +7,7 @@ use crate::{
     btree::{CursorState, OwnedRecord, TreeCursor},
     disk_manager::DiskManager,
     error::StorageResult,
+    page::{CellCorruption, PageError},
     page_store::PageStore,
 };
 
@@ -16,20 +17,24 @@ fn encode_table_row_id(row_id: RowId) -> [u8; ROW_ID_SIZE] {
     row_id.to_be_bytes()
 }
 
-fn decode_table_row_id(key: &[u8]) -> RowId {
-    let bytes: [u8; ROW_ID_SIZE] =
-        key.try_into().expect("owned table record has invalid row-id key length");
-    RowId::from_be_bytes(bytes)
+fn decode_table_row_id(key: &[u8]) -> StorageResult<RowId> {
+    let bytes: [u8; ROW_ID_SIZE] = key.try_into().map_err(|_| PageError::CorruptCell {
+        slot_index: 0,
+        kind: CellCorruption::InvalidTableRowIdKeyLength { actual: key.len() },
+    })?;
+    Ok(RowId::from_be_bytes(bytes))
 }
 
 fn encode_index_row_id(row_id: RowId) -> [u8; ROW_ID_SIZE] {
     row_id.to_le_bytes()
 }
 
-fn decode_index_row_id(value: &[u8]) -> RowId {
-    let bytes: [u8; ROW_ID_SIZE] =
-        value.try_into().expect("owned index entry has invalid row-id value length");
-    RowId::from_le_bytes(bytes)
+fn decode_index_row_id(value: &[u8]) -> StorageResult<RowId> {
+    let bytes: [u8; ROW_ID_SIZE] = value.try_into().map_err(|_| PageError::CorruptCell {
+        slot_index: 0,
+        kind: CellCorruption::InvalidIndexRowIdValueLength { actual: value.len() },
+    })?;
+    Ok(RowId::from_le_bytes(bytes))
 }
 
 /// Owned table record returned by [`TableCursor`] lookups.
@@ -95,7 +100,7 @@ impl<S: PageStore> TableCursor<S> {
 
     /// Looks up a table record by row id.
     pub fn get(&mut self, row_id: RowId) -> StorageResult<Option<TableRecord>> {
-        Ok(self.inner.get_owned(&encode_table_row_id(row_id))?.map(TableRecord::from))
+        self.inner.get_owned(&encode_table_row_id(row_id))?.map(TableRecord::try_from).transpose()
     }
 
     /// Replaces the encoded record bytes stored for an existing `row_id`.
@@ -142,7 +147,7 @@ impl<S: PageStore> IndexCursor<S> {
 
     /// Looks up an index entry by key.
     pub fn get(&mut self, key: &[u8]) -> StorageResult<Option<IndexEntry>> {
-        Ok(self.inner.get_owned(key)?.map(IndexEntry::from))
+        self.inner.get_owned(key)?.map(IndexEntry::try_from).transpose()
     }
 
     /// Replaces the row id stored for an existing index `key`.
@@ -174,20 +179,22 @@ impl<S: PageStore> fmt::Debug for IndexCursor<S> {
     }
 }
 
-impl From<OwnedRecord> for TableRecord {
-    fn from(raw: OwnedRecord) -> Self {
-        raw.with_key_value(|key, value| Self {
-            row_id: decode_table_row_id(key),
-            record: value.into(),
+impl TryFrom<OwnedRecord> for TableRecord {
+    type Error = crate::error::StorageError;
+
+    fn try_from(raw: OwnedRecord) -> Result<Self, Self::Error> {
+        raw.with_key_value(|key, value| {
+            Ok(Self { row_id: decode_table_row_id(key)?, record: value.into() })
         })
     }
 }
 
-impl From<OwnedRecord> for IndexEntry {
-    fn from(raw: OwnedRecord) -> Self {
-        raw.with_key_value(|key, value| Self {
-            key: key.into(),
-            row_id: decode_index_row_id(value),
+impl TryFrom<OwnedRecord> for IndexEntry {
+    type Error = crate::error::StorageError;
+
+    fn try_from(raw: OwnedRecord) -> Result<Self, Self::Error> {
+        raw.with_key_value(|key, value| {
+            Ok(Self { key: key.into(), row_id: decode_index_row_id(value)? })
         })
     }
 }
