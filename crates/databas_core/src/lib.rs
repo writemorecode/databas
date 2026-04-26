@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod btree;
 pub mod cursor;
 pub mod disk_manager;
