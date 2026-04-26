@@ -1,6 +1,13 @@
 use std::path::{Path, PathBuf};
 
-use crate::{disk_manager::DiskManager, error::StorageResult, page_cache::PageCache};
+use crate::{
+    PageId,
+    btree::{TreeCursor, validate_root_page},
+    cursor::{IndexCursor, TableCursor},
+    disk_manager::DiskManager,
+    error::StorageResult,
+    page_cache::PageCache,
+};
 
 const DEFAULT_PAGE_CACHE_SIZE: usize = 64;
 
@@ -56,5 +63,17 @@ impl Pager {
     pub fn flush(&self) -> StorageResult<()> {
         self.page_cache.flush_all()?;
         Ok(())
+    }
+
+    /// Returns a typed cursor rooted at an existing table tree.
+    pub fn table_cursor(&self, root_page_id: PageId) -> StorageResult<TableCursor> {
+        validate_root_page(&self.page_cache, root_page_id)?;
+        Ok(TableCursor::new(TreeCursor::new(self.page_cache.clone(), root_page_id)))
+    }
+
+    /// Returns a typed cursor rooted at an existing secondary-index tree.
+    pub fn index_cursor(&self, root_page_id: PageId) -> StorageResult<IndexCursor> {
+        validate_root_page(&self.page_cache, root_page_id)?;
+        Ok(IndexCursor::new(TreeCursor::new(self.page_cache.clone(), root_page_id)))
     }
 }

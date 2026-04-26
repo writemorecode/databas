@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 pub mod btree;
-pub(crate) mod disk_manager;
+pub mod cursor;
+pub mod disk_manager;
 pub mod error;
 pub(crate) mod memory_page_store;
 pub(crate) mod overflow;
@@ -12,6 +13,7 @@ pub(crate) mod page_store;
 pub mod pager;
 
 pub use btree::{CursorState, OwnedRecord, Record, RecordView, TreeCursor};
+pub use cursor::{IndexCursor, IndexEntry, TableCursor, TableRecord};
 pub use page_store::PageStore;
 pub use pager::{Pager, PagerOptions};
 
