@@ -11,7 +11,7 @@ use crate::{
 };
 
 /// Reads and writes pages to and from a database file.
-pub(crate) struct DiskManager {
+pub struct DiskManager {
     file: File,
     page_count: u64,
 }
