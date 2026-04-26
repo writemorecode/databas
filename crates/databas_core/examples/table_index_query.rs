@@ -15,19 +15,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     users_by_email.insert(email, row_id)?;
 
     let index_entry =
-        users_by_email.get(email)?.expect("email index should contain the inserted user");
+        users_by_email.get_entry(email)?.expect("email index should contain the inserted user");
     let user = users
-        .get(index_entry.row_id)?
+        .get_record(index_entry.row_id())?
         .expect("table should contain the row referenced by the index");
 
-    assert_eq!(index_entry.row_id, row_id);
-    assert_eq!(user.row_id, row_id);
-    assert_eq!(user.record.as_ref(), encoded_user);
+    assert_eq!(index_entry.row_id(), row_id);
+    assert_eq!(user.row_id(), row_id);
+    assert_eq!(user.with_record(|record| record == encoded_user)?, true);
 
     println!(
         "found row {} via email index: {}",
-        user.row_id,
-        String::from_utf8_lossy(&user.record)
+        user.row_id(),
+        user.with_record(|record| String::from_utf8_lossy(record).into_owned())?
     );
 
     Ok(())
