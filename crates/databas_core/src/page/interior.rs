@@ -326,16 +326,4 @@ where
         self.remove_slot(slot_index)?;
         self.reclaim_space(cell_offset, cell_len)
     }
-
-    /// Rewrites the left-child pointer for an existing separator key.
-    pub fn update(&mut self, key: &[u8], left_child: PageId) -> PageResult<()> {
-        let slot_index = match self.search(key)? {
-            SearchResult::Found(slot_index) => slot_index,
-            SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound),
-        };
-
-        let cell_offset = self.slot_offset(slot_index)? as usize;
-        write_cell(self.bytes_mut(), cell_offset, left_child, key);
-        Ok(())
-    }
 }

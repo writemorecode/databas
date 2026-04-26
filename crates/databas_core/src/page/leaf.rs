@@ -375,29 +375,6 @@ where
         self.reclaim_space(cell_offset, cell_len)?;
         Ok(slot_index)
     }
-
-    /// Replaces the value for an existing key.
-    pub fn update(&mut self, key: &[u8], value: &[u8]) -> PageResult<()> {
-        let cell_len = encoded_len(key.len(), value.len())?;
-        let slot_index = match self.search(key)? {
-            SearchResult::Found(slot_index) => slot_index,
-            SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound),
-        };
-
-        let old_len = self.cell_len(slot_index)?;
-        if old_len == cell_len {
-            let old_offset = self.slot_offset(slot_index)? as usize;
-            write_cell(self.bytes_mut(), old_offset, key, value);
-            return Ok(());
-        }
-
-        let new_offset = self.reserve_space_for_rewrite(cell_len)?;
-        let old_offset = self.slot_offset(slot_index)?;
-        write_cell(self.bytes_mut(), new_offset as usize, key, value);
-        self.set_slot_offset(slot_index, new_offset)?;
-        self.reclaim_space(old_offset, old_len)?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
