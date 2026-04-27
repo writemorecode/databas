@@ -393,17 +393,6 @@ where
         format::write_u16(self.bytes_mut(), FRAGMENTED_FREE_BYTES_OFFSET, fragmented_free_bytes);
     }
 
-    pub(crate) fn set_slot_offset(
-        &mut self,
-        slot_index: SlotId,
-        cell_offset: u16,
-    ) -> PageResult<()> {
-        self.validate_slot_index(slot_index)?;
-        let offset = format::slot_entry_offset(N::KIND.header_size(), slot_index);
-        format::write_u16(self.bytes_mut(), offset, cell_offset);
-        Ok(())
-    }
-
     pub(crate) fn insert_slot(&mut self, slot_index: SlotId, cell_offset: u16) -> PageResult<()> {
         let slot_count = self.slot_count();
         if slot_index > slot_count {
@@ -467,10 +456,6 @@ where
 
     pub(crate) fn reserve_space_for_insert(&mut self, cell_len: usize) -> PageResult<u16> {
         self.reserve_space(cell_len, format::SLOT_ENTRY_SIZE)
-    }
-
-    pub(crate) fn reserve_space_for_rewrite(&mut self, cell_len: usize) -> PageResult<u16> {
-        self.reserve_space(cell_len, 0)
     }
 
     fn reserve_space(&mut self, cell_len: usize, extra_bytes: usize) -> PageResult<u16> {

@@ -211,18 +211,6 @@ where
         Ok(Cell::new_interior(cell_bytes, parsed.parts, slot_index))
     }
 
-    /// Returns the left child and page-relative separator-key byte range for one cell.
-    pub(crate) fn cell_left_child_key_range(
-        &self,
-        slot_index: SlotId,
-    ) -> PageResult<(PageId, Range<usize>)> {
-        let parsed = cell_parts(self, slot_index)?;
-        let cell_offset = parsed.cell_offset;
-        let key_range =
-            cell_offset + parsed.parts.key_range.start..cell_offset + parsed.parts.key_range.end;
-        Ok((parsed.parts.left_child, key_range))
-    }
-
     /// Returns full payload metadata and the page-relative inline payload range for one cell.
     pub(crate) fn cell_payload_parts(
         &self,

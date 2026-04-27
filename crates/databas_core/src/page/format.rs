@@ -117,21 +117,6 @@ impl PageKind {
     }
 }
 
-/// Returns the exclusive end offset of the usable page region.
-pub const fn usable_space_end() -> usize {
-    USABLE_SPACE_END
-}
-
-/// Returns the total number of usable bytes in the page.
-pub const fn usable_space_len() -> usize {
-    USABLE_SPACE_END
-}
-
-/// Returns the maximum number of slot entries a page of `kind` can address.
-pub const fn max_slot_count(kind: PageKind) -> usize {
-    (usable_space_len() - kind.header_size()) / SLOT_ENTRY_SIZE
-}
-
 /// Reads a little-endian `u16` from `bytes` at `offset`.
 pub fn read_u16(bytes: &[u8; PAGE_SIZE], offset: usize) -> u16 {
     u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
