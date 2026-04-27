@@ -5,7 +5,7 @@ use crate::{PAGE_SIZE, PageId, SlotId};
 use super::{
     CellCorruption, PageError, PageResult,
     cell::{Cell, CellMut},
-    core::{BoundResult, Leaf, Page, PageAccess, PageAccessMut, SearchResult},
+    core::{Leaf, Page, PageAccess, PageAccessMut, SearchResult},
     format::{
         self, CELL_LENGTH_SIZE, CELL_OVERFLOW_PAGE_ID_SIZE, LEAF_CELL_PREFIX_SIZE,
         MIN_INLINE_OVERFLOW_PAYLOAD_BYTES, USABLE_SPACE_END,
@@ -185,16 +185,6 @@ impl<A> Page<A, Leaf>
 where
     A: PageAccess,
 {
-    /// Returns the first slot whose key is greater than or equal to `key`.
-    pub fn lower_bound(&self, key: &[u8]) -> PageResult<BoundResult> {
-        self.lower_bound_slots_by(|page, slot_index| compare_key(page, slot_index, key))
-    }
-
-    /// Returns the first slot whose key is strictly greater than `key`.
-    pub fn upper_bound(&self, key: &[u8]) -> PageResult<BoundResult> {
-        self.upper_bound_slots_by(|page, slot_index| compare_key(page, slot_index, key))
-    }
-
     /// Searches the leaf page for `key`.
     pub fn search(&self, key: &[u8]) -> PageResult<SearchResult> {
         self.search_slots_by(|page, slot_index| compare_key(page, slot_index, key))

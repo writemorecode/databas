@@ -299,44 +299,6 @@ where
         Ok(SearchResult::InsertAt(low))
     }
 
-    pub(crate) fn bound_slots_by<F, P>(
-        &self,
-        mut compare_slot: F,
-        mut go_right: P,
-    ) -> PageResult<BoundResult>
-    where
-        F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
-        P: FnMut(Ordering) -> bool,
-    {
-        let mut low: SlotId = 0;
-        let mut high = self.slot_count();
-
-        while low < high {
-            let mid = low + (high - low) / 2;
-            if go_right(compare_slot(self, mid)?) {
-                low = mid + 1;
-            } else {
-                high = mid;
-            }
-        }
-
-        if low == self.slot_count() { Ok(BoundResult::PastEnd) } else { Ok(BoundResult::At(low)) }
-    }
-
-    pub(crate) fn lower_bound_slots_by<F>(&self, compare_slot: F) -> PageResult<BoundResult>
-    where
-        F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
-    {
-        self.bound_slots_by(compare_slot, |ordering| ordering == Ordering::Less)
-    }
-
-    pub(crate) fn upper_bound_slots_by<F>(&self, compare_slot: F) -> PageResult<BoundResult>
-    where
-        F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
-    {
-        self.bound_slots_by(compare_slot, |ordering| ordering != Ordering::Greater)
-    }
-
     pub(crate) fn validate_slot_index(&self, slot_index: SlotId) -> PageResult<()> {
         let slot_count = self.slot_count();
         if slot_index >= slot_count {

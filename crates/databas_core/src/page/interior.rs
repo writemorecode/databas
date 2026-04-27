@@ -5,7 +5,7 @@ use crate::{PAGE_SIZE, PageId, SlotId};
 use super::{
     CellCorruption, PageError, PageResult,
     cell::{Cell, CellMut},
-    core::{BoundResult, Interior, Page, PageAccess, PageAccessMut, SearchResult},
+    core::{Interior, Page, PageAccess, PageAccessMut, SearchResult},
     format::{
         self, CELL_LENGTH_SIZE, CELL_OVERFLOW_PAGE_ID_SIZE, INTERIOR_CELL_PREFIX_SIZE,
         MIN_INLINE_OVERFLOW_PAYLOAD_BYTES, RIGHTMOST_CHILD_OFFSET, USABLE_SPACE_END,
@@ -160,24 +160,6 @@ where
     /// Returns the page id stored in the rightmost-child header field.
     pub fn rightmost_child(&self) -> PageId {
         format::read_u64(self.bytes(), RIGHTMOST_CHILD_OFFSET)
-    }
-
-    /// Returns the first slot whose separator key is greater than or equal to `key`.
-    pub fn lower_bound(&self, key: &[u8]) -> PageResult<BoundResult> {
-        self.lower_bound_slots_by(|page, slot_index| compare_key(page, slot_index, key))
-    }
-
-    /// Returns the first slot whose separator key is strictly greater than `key`.
-    pub fn upper_bound(&self, key: &[u8]) -> PageResult<BoundResult> {
-        self.upper_bound_slots_by(|page, slot_index| compare_key(page, slot_index, key))
-    }
-
-    /// Returns the child page that may contain `key`.
-    pub fn child_for(&self, key: &[u8]) -> PageResult<PageId> {
-        match self.lower_bound(key)? {
-            BoundResult::At(slot_index) => Ok(cell_parts(self, slot_index)?.parts.left_child),
-            BoundResult::PastEnd => Ok(self.rightmost_child()),
-        }
     }
 
     /// Searches the interior page for `key`.
