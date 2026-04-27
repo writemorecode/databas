@@ -198,16 +198,6 @@ where
         page_kind::<N>()
     }
 
-    /// Returns the statically known node kind of this page.
-    pub fn node_kind(&self) -> format::NodeKind {
-        N::KIND
-    }
-
-    /// Returns the encoded page-format version.
-    pub fn version(&self) -> u8 {
-        self.bytes()[VERSION_OFFSET]
-    }
-
     /// Returns the number of live slots in the slot directory.
     pub fn slot_count(&self) -> u16 {
         format::read_u16(self.bytes(), SLOT_COUNT_OFFSET)
@@ -630,11 +620,6 @@ where
     pub fn open(bytes: &'a mut [u8; PAGE_SIZE]) -> PageResult<Self> {
         validate_page(bytes, page_kind::<N>())?;
         Ok(Self::new(Write { bytes }))
-    }
-
-    /// Borrows this mutable page as an immutable page view.
-    pub fn as_ref(&self) -> Page<Read<'_>, N> {
-        Page::new(Read { bytes: self.bytes() })
     }
 
     pub(crate) fn initialize(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {

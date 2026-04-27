@@ -194,7 +194,7 @@ where
     pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Leaf>> {
         let parsed = cell_parts(self, slot_index)?;
         let cell_bytes = &self.bytes()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
-        Ok(Cell::new_leaf(cell_bytes, parsed.parts, slot_index))
+        Ok(Cell::new_leaf(cell_bytes, parsed.parts))
     }
 
     /// Returns full payload metadata and the page-relative inline payload range for one cell.
@@ -230,7 +230,7 @@ where
         let parsed = cell_parts(self, slot_index)?;
         let cell_bytes =
             &mut self.bytes_mut()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
-        Ok(CellMut::new_leaf(cell_bytes, parsed.parts, slot_index))
+        Ok(CellMut::new_leaf(cell_bytes, parsed.parts))
     }
 
     /// Inserts a new `(key, value)` cell while preserving key order.
