@@ -288,10 +288,7 @@ impl From<PageError> for StorageError {
                 ))
             }
             PageError::MalformedPage(kind) => Self::Corruption(CorruptionError {
-                component: match kind {
-                    PageCorruption::InteriorCellOutOfBounds => CorruptionComponent::InteriorPage,
-                    _ => CorruptionComponent::Page,
-                },
+                component: CorruptionComponent::Page,
                 page_id: None,
                 kind: map_page_corruption(kind),
             }),
@@ -335,7 +332,6 @@ fn map_page_corruption(kind: PageCorruption) -> CorruptionKind {
         PageCorruption::FreeblockOutOfBounds => CorruptionKind::FreeblockOutOfBounds,
         PageCorruption::SlotOffsetOutOfBounds => CorruptionKind::SlotOffsetOutOfBounds,
         PageCorruption::CellLengthPrefixOutOfBounds => CorruptionKind::CellLengthPrefixOutOfBounds,
-        PageCorruption::InteriorCellOutOfBounds => CorruptionKind::InteriorCellOutOfBounds,
     }
 }
 

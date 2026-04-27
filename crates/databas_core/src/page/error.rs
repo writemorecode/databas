@@ -78,9 +78,6 @@ pub enum PageCorruption {
     /// A cell's length prefix would read past page bounds.
     #[error("cell length prefix runs past the usable page bounds")]
     CellLengthPrefixOutOfBounds,
-    /// A fixed-size interior cell would read past page bounds.
-    #[error("interior cell runs past the usable page bounds")]
-    InteriorCellOutOfBounds,
 }
 
 /// Cell-level corruption detected while decoding a page cell.
@@ -92,10 +89,10 @@ pub enum CellCorruption {
     /// The encoded cell length runs past the usable page region.
     #[error("cell length runs past the usable page bounds")]
     LengthOutOfBounds,
-    /// A table wrapper encountered a row-id key with the wrong encoded length.
+    /// A table row-id key had the wrong encoded length.
     #[error("table row-id key has invalid length {actual}")]
     InvalidTableRowIdKeyLength { actual: usize },
-    /// An index wrapper encountered a row-id value with the wrong encoded length.
+    /// An index row-id value had the wrong encoded length.
     #[error("index row-id value has invalid length {actual}")]
     InvalidIndexRowIdValueLength { actual: usize },
 }
