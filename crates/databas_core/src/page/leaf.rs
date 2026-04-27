@@ -7,19 +7,15 @@ use super::{
     cell::{Cell, CellMut},
     core::{BoundResult, Leaf, Page, PageAccess, PageAccessMut, SearchResult},
     format::{
-        self, CELL_LENGTH_SIZE, CELL_OVERFLOW_PAGE_ID_SIZE, MAX_INLINE_OVERFLOW_PAYLOAD_BYTES,
+        self, CELL_LENGTH_SIZE, CELL_OVERFLOW_PAGE_ID_SIZE, LEAF_CELL_PREFIX_SIZE,
         MIN_INLINE_OVERFLOW_PAYLOAD_BYTES, USABLE_SPACE_END,
     },
 };
 
 const KEY_LENGTH_SIZE: usize = 2;
-const VALUE_LENGTH_SIZE: usize = 2;
 const FIRST_OVERFLOW_PAGE_ID_OFFSET: usize = CELL_LENGTH_SIZE;
 const KEY_LENGTH_OFFSET: usize = FIRST_OVERFLOW_PAGE_ID_OFFSET + CELL_OVERFLOW_PAGE_ID_SIZE;
 const VALUE_LENGTH_OFFSET: usize = KEY_LENGTH_OFFSET + KEY_LENGTH_SIZE;
-/// The fixed-size prefix of a raw leaf cell.
-pub const LEAF_CELL_PREFIX_SIZE: usize =
-    CELL_LENGTH_SIZE + CELL_OVERFLOW_PAGE_ID_SIZE + KEY_LENGTH_SIZE + VALUE_LENGTH_SIZE;
 
 #[derive(Debug, Clone)]
 pub(crate) struct LeafCellParts {
@@ -35,21 +31,6 @@ pub(crate) struct ParsedLeafCell {
     pub(crate) cell_offset: usize,
     pub(crate) cell_len: usize,
     pub(crate) parts: LeafCellParts,
-}
-
-pub(crate) fn inline_payload_len(
-    payload_len: usize,
-    first_overflow_page_id: Option<PageId>,
-) -> Option<usize> {
-    match first_overflow_page_id {
-        None => Some(payload_len),
-        Some(_) => {
-            if payload_len <= MAX_INLINE_OVERFLOW_PAYLOAD_BYTES {
-                return None;
-            }
-            Some(MAX_INLINE_OVERFLOW_PAYLOAD_BYTES)
-        }
-    }
 }
 
 pub(crate) fn cell_len_at(
@@ -70,7 +51,8 @@ pub(crate) fn cell_len_at(
         return Err(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthOutOfBounds });
     }
 
-    let Some(inline_payload_len) = inline_payload_len(payload_len, first_overflow_page_id) else {
+    let Some(inline_payload_len) = format::inline_payload_len(payload_len, first_overflow_page_id)
+    else {
         return Err(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthOutOfBounds });
     };
     if first_overflow_page_id.is_some() && inline_payload_len < MIN_INLINE_OVERFLOW_PAYLOAD_BYTES {
@@ -88,7 +70,6 @@ pub(crate) fn cell_parts<A>(page: &Page<A, Leaf>, slot_index: SlotId) -> PageRes
 where
     A: PageAccess,
 {
-    page.validate_slot_index(slot_index)?;
     let cell_offset = page.slot_offset(slot_index)? as usize;
     let cell_len = cell_len_at(page.bytes(), slot_index, cell_offset)?;
     let payload_len = format::read_u16(page.bytes(), cell_offset) as usize;
@@ -173,7 +154,8 @@ fn validate_payload_parts(
     {
         return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize });
     }
-    let Some(expected_inline_len) = inline_payload_len(payload_len, first_overflow_page_id) else {
+    let Some(expected_inline_len) = format::inline_payload_len(payload_len, first_overflow_page_id)
+    else {
         return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize });
     };
     if inline_payload.len() != expected_inline_len {

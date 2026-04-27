@@ -7,19 +7,15 @@ use super::{
     cell::{Cell, CellMut},
     core::{BoundResult, Interior, Page, PageAccess, PageAccessMut, SearchResult},
     format::{
-        self, CELL_LENGTH_SIZE, CELL_OVERFLOW_PAGE_ID_SIZE, MAX_INLINE_OVERFLOW_PAYLOAD_BYTES,
+        self, CELL_LENGTH_SIZE, CELL_OVERFLOW_PAGE_ID_SIZE, INTERIOR_CELL_PREFIX_SIZE,
         MIN_INLINE_OVERFLOW_PAYLOAD_BYTES, RIGHTMOST_CHILD_OFFSET, USABLE_SPACE_END,
     },
 };
 
 const PAGE_ID_SIZE: usize = 8;
-const KEY_LENGTH_SIZE: usize = 2;
 const FIRST_OVERFLOW_PAGE_ID_OFFSET: usize = CELL_LENGTH_SIZE;
 const LEFT_CHILD_OFFSET: usize = FIRST_OVERFLOW_PAGE_ID_OFFSET + CELL_OVERFLOW_PAGE_ID_SIZE;
 const KEY_LENGTH_OFFSET: usize = LEFT_CHILD_OFFSET + PAGE_ID_SIZE;
-/// The fixed-size prefix of a raw interior cell.
-pub const INTERIOR_CELL_PREFIX_SIZE: usize =
-    CELL_LENGTH_SIZE + CELL_OVERFLOW_PAGE_ID_SIZE + PAGE_ID_SIZE + KEY_LENGTH_SIZE;
 
 #[derive(Debug, Clone)]
 pub(crate) struct InteriorCellParts {
@@ -35,21 +31,6 @@ pub(crate) struct ParsedInteriorCell {
     pub(crate) cell_offset: usize,
     pub(crate) cell_len: usize,
     pub(crate) parts: InteriorCellParts,
-}
-
-pub(crate) fn inline_payload_len(
-    payload_len: usize,
-    first_overflow_page_id: Option<PageId>,
-) -> Option<usize> {
-    match first_overflow_page_id {
-        None => Some(payload_len),
-        Some(_) => {
-            if payload_len <= MAX_INLINE_OVERFLOW_PAYLOAD_BYTES {
-                return None;
-            }
-            Some(MAX_INLINE_OVERFLOW_PAYLOAD_BYTES)
-        }
-    }
 }
 
 pub(crate) fn cell_len_at(
@@ -69,7 +50,8 @@ pub(crate) fn cell_len_at(
         return Err(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthOutOfBounds });
     }
 
-    let Some(inline_payload_len) = inline_payload_len(payload_len, first_overflow_page_id) else {
+    let Some(inline_payload_len) = format::inline_payload_len(payload_len, first_overflow_page_id)
+    else {
         return Err(PageError::CorruptCell { slot_index, kind: CellCorruption::LengthOutOfBounds });
     };
     if first_overflow_page_id.is_some() && inline_payload_len < MIN_INLINE_OVERFLOW_PAYLOAD_BYTES {
@@ -90,7 +72,6 @@ pub(crate) fn cell_parts<A>(
 where
     A: PageAccess,
 {
-    page.validate_slot_index(slot_index)?;
     let cell_offset = page.slot_offset(slot_index)? as usize;
     let cell_len = cell_len_at(page.bytes(), slot_index, cell_offset)?;
     let payload_len = format::read_u16(page.bytes(), cell_offset) as usize;
@@ -280,7 +261,8 @@ where
         if key_len > u16::MAX as usize {
             return Err(PageError::CellTooLarge { len: key_len, max: u16::MAX as usize });
         }
-        let Some(expected_inline_len) = inline_payload_len(key_len, first_overflow_page_id) else {
+        let Some(expected_inline_len) = format::inline_payload_len(key_len, first_overflow_page_id)
+        else {
             return Err(PageError::CellTooLarge { len: key_len, max: u16::MAX as usize });
         };
         if inline_payload.len() != expected_inline_len {
