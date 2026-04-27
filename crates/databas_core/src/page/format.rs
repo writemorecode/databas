@@ -18,6 +18,12 @@ pub const SLOT_ENTRY_SIZE: usize = 2;
 pub const CELL_LENGTH_SIZE: usize = 2;
 /// Width in bytes of the first-overflow-page field stored in every cell.
 pub const CELL_OVERFLOW_PAGE_ID_SIZE: usize = 8;
+/// Fixed-size prefix of a raw leaf cell before its inline payload.
+pub const LEAF_CELL_PREFIX_SIZE: usize =
+    CELL_LENGTH_SIZE + CELL_OVERFLOW_PAGE_ID_SIZE + size_of::<u16>() + size_of::<u16>();
+/// Fixed-size prefix of a raw interior cell before its inline payload.
+pub const INTERIOR_CELL_PREFIX_SIZE: usize =
+    CELL_LENGTH_SIZE + CELL_OVERFLOW_PAGE_ID_SIZE + size_of::<PageId>() + size_of::<u16>();
 /// Sentinel page id stored when a cell has no overflow chain.
 pub const NO_OVERFLOW_PAGE_ID: PageId = PageId::MAX;
 /// Minimum number of logical payload bytes an overflow cell must keep inline.
@@ -114,6 +120,19 @@ impl PageKind {
     /// Returns the total header size for this page kind.
     pub const fn header_size(self) -> usize {
         self.node_kind().header_size()
+    }
+}
+
+pub(crate) fn inline_payload_len(
+    payload_len: usize,
+    first_overflow_page_id: Option<PageId>,
+) -> Option<usize> {
+    match first_overflow_page_id {
+        None => Some(payload_len),
+        Some(_) if payload_len > MAX_INLINE_OVERFLOW_PAYLOAD_BYTES => {
+            Some(MAX_INLINE_OVERFLOW_PAYLOAD_BYTES)
+        }
+        Some(_) => None,
     }
 }
 

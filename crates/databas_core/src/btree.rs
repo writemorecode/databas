@@ -13,16 +13,14 @@ use crate::{
     page::{
         self, BoundResult, PageError, RawInterior, RawLeaf, Read, SearchResult, Write,
         format::{
-            KIND_OFFSET, MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, NO_OVERFLOW_PAGE_ID,
-            OVERFLOW_NEXT_PAGE_ID_SIZE, PageKind,
+            INTERIOR_CELL_PREFIX_SIZE, KIND_OFFSET, LEAF_CELL_PREFIX_SIZE,
+            MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, NO_OVERFLOW_PAGE_ID, OVERFLOW_NEXT_PAGE_ID_SIZE,
+            PageKind,
         },
     },
     page_cache::{PageCache, PageWriteGuard, PinGuard},
     page_store::PageStore,
 };
-
-const LEAF_CELL_PREFIX_SIZE: usize = 2 + 8 + 2 + 2;
-const INTERIOR_CELL_PREFIX_SIZE: usize = 2 + 8 + 8 + 2;
 
 type MaterializedLeafCell = (Box<[u8]>, Box<[u8]>);
 
