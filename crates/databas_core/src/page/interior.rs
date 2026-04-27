@@ -171,7 +171,7 @@ where
     pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Interior>> {
         let parsed = cell_parts(self, slot_index)?;
         let cell_bytes = &self.bytes()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
-        Ok(Cell::new_interior(cell_bytes, parsed.parts, slot_index))
+        Ok(Cell::new_interior(cell_bytes, parsed.parts))
     }
 
     /// Returns full payload metadata and the page-relative inline payload range for one cell.
@@ -214,7 +214,7 @@ where
         let parsed = cell_parts(self, slot_index)?;
         let cell_bytes =
             &mut self.bytes_mut()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
-        Ok(CellMut::new_interior(cell_bytes, parsed.parts, slot_index))
+        Ok(CellMut::new_interior(cell_bytes, parsed.parts))
     }
 
     /// Inserts a new separator key and its left-child pointer while preserving slot order.
@@ -269,13 +269,5 @@ where
         );
         self.insert_slot(slot_index, cell_offset)?;
         Ok(slot_index)
-    }
-
-    /// Deletes one separator cell by slot index and reclaims its local page space.
-    pub(crate) fn delete_slot(&mut self, slot_index: SlotId) -> PageResult<()> {
-        let cell_offset = self.slot_offset(slot_index)?;
-        let cell_len = self.cell_len(slot_index)?;
-        self.remove_slot(slot_index)?;
-        self.reclaim_space(cell_offset, cell_len)
     }
 }

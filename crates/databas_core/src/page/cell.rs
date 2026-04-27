@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 use std::ops::Range;
 
-use crate::{PageId, SlotId};
+use crate::PageId;
 
 use super::{
     PageResult,
@@ -13,7 +13,6 @@ use super::{
 #[derive(Debug)]
 pub struct Cell<'a, N> {
     bytes: &'a [u8],
-    slot_index: SlotId,
     key_range: Range<usize>,
     value_range: Option<Range<usize>>,
     left_child: Option<PageId>,
@@ -24,7 +23,6 @@ pub struct Cell<'a, N> {
 #[derive(Debug)]
 pub struct CellMut<'a, N> {
     bytes: &'a mut [u8],
-    slot_index: SlotId,
     key_range: Range<usize>,
     value_range: Option<Range<usize>>,
     left_child: Option<PageId>,
@@ -32,14 +30,9 @@ pub struct CellMut<'a, N> {
 }
 
 impl<'a, N> Cell<'a, N> {
-    pub(crate) fn new_leaf(
-        bytes: &'a [u8],
-        parts: leaf::LeafCellParts,
-        slot_index: SlotId,
-    ) -> Self {
+    pub(crate) fn new_leaf(bytes: &'a [u8], parts: leaf::LeafCellParts) -> Self {
         Self {
             bytes,
-            slot_index,
             key_range: parts.key_range,
             value_range: Some(parts.value_range),
             left_child: None,
@@ -47,24 +40,14 @@ impl<'a, N> Cell<'a, N> {
         }
     }
 
-    pub(crate) fn new_interior(
-        bytes: &'a [u8],
-        parts: interior::InteriorCellParts,
-        slot_index: SlotId,
-    ) -> Self {
+    pub(crate) fn new_interior(bytes: &'a [u8], parts: interior::InteriorCellParts) -> Self {
         Self {
             bytes,
-            slot_index,
             key_range: parts.key_range,
             value_range: None,
             left_child: Some(parts.left_child),
             _marker: PhantomData,
         }
-    }
-
-    /// Returns the slot index that this cell view refers to.
-    pub fn slot_index(&self) -> SlotId {
-        self.slot_index
     }
 
     fn bytes_for(&self, range: Range<usize>) -> &[u8] {
@@ -73,14 +56,9 @@ impl<'a, N> Cell<'a, N> {
 }
 
 impl<'a, N> CellMut<'a, N> {
-    pub(crate) fn new_leaf(
-        bytes: &'a mut [u8],
-        parts: leaf::LeafCellParts,
-        slot_index: SlotId,
-    ) -> Self {
+    pub(crate) fn new_leaf(bytes: &'a mut [u8], parts: leaf::LeafCellParts) -> Self {
         Self {
             bytes,
-            slot_index,
             key_range: parts.key_range,
             value_range: Some(parts.value_range),
             left_child: None,
@@ -88,34 +66,12 @@ impl<'a, N> CellMut<'a, N> {
         }
     }
 
-    pub(crate) fn new_interior(
-        bytes: &'a mut [u8],
-        parts: interior::InteriorCellParts,
-        slot_index: SlotId,
-    ) -> Self {
+    pub(crate) fn new_interior(bytes: &'a mut [u8], parts: interior::InteriorCellParts) -> Self {
         Self {
             bytes,
-            slot_index,
             key_range: parts.key_range,
             value_range: None,
             left_child: Some(parts.left_child),
-            _marker: PhantomData,
-        }
-    }
-
-    /// Returns the slot index that this cell view refers to.
-    pub fn slot_index(&self) -> SlotId {
-        self.slot_index
-    }
-
-    /// Borrows this mutable cell as an immutable cell view.
-    pub fn as_ref(&self) -> Cell<'_, N> {
-        Cell {
-            bytes: self.bytes,
-            slot_index: self.slot_index,
-            key_range: self.key_range.clone(),
-            value_range: self.value_range.clone(),
-            left_child: self.left_child,
             _marker: PhantomData,
         }
     }
