@@ -8,8 +8,6 @@
 //! The main entry point is [`Page`]. A page is parameterized both by access mode
 //! ([`Read`] or [`Write`]) and node kind ([`Leaf`] or [`Interior`]). [`Cell`]
 //! and [`CellMut`] provide typed access to individual slot entries after lookup.
-//! [`TablePage`] and [`IndexPage`] wrap the raw page API with table- and
-//! index-specific key/value interpretation.
 //!
 //! Layout details that are part of the stable page format are re-exported from
 //! [`mod@format`], including header sizes, slot entry width, and the current
@@ -19,10 +17,8 @@ mod cell;
 mod core;
 mod error;
 pub mod format;
-mod index;
 mod interior;
 mod leaf;
-mod table;
 
 /// Cell views returned by typed page accessors.
 pub use cell::{Cell, CellMut};
