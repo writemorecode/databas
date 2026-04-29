@@ -355,13 +355,6 @@ struct LeafSplitCell {
     value: Vec<u8>,
 }
 
-/// Temporary description of one interior cell while rebuilding split pages.
-#[derive(Debug, Clone)]
-struct InteriorSplitCell {
-    left_child: PageId,
-    key: Vec<u8>,
-}
-
 /// Child pointer plus the maximum key reachable through that child.
 #[derive(Debug, Clone)]
 struct ChildEntry {
@@ -393,28 +386,6 @@ impl LeafSplitCell {
     /// Returns the value bytes from either the page snapshot or owned storage.
     fn value(&self) -> &[u8] {
         &self.value
-    }
-}
-
-impl InteriorSplitCell {
-    /// Returns the left child page referenced by this interior cell.
-    fn left_child(&self) -> PageId {
-        self.left_child
-    }
-
-    /// Returns the key length this cell will occupy after the split.
-    fn key_len(&self) -> usize {
-        self.key.len()
-    }
-
-    /// Returns the total encoded size of the cell including fixed fields.
-    fn encoded_size(&self) -> usize {
-        INTERIOR_CELL_PREFIX_SIZE + local_payload_len(self.key_len())
-    }
-
-    /// Returns the separator key bytes from either the page snapshot or incoming storage.
-    fn key(&self) -> &[u8] {
-        &self.key
     }
 }
 
@@ -1361,6 +1332,7 @@ impl<S: PageStore> TreeCursor<S> {
     }
 
     /// Returns whether `child_page_id` is still linked from `parent_page_id`.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn interior_page_has_child(
         &self,
         parent_page_id: PageId,
@@ -1794,6 +1766,10 @@ impl<S: PageStore> TreeCursor<S> {
         Ok(())
     }
 
+    fn sort_leaf_cells(cells: &mut [LeafSplitCell]) {
+        cells.sort_by(|left, right| left.key().cmp(right.key()));
+    }
+
     /// Rebalances an underoccupied leaf against siblings.
     ///
     /// Returns `true` when a merge removed one child from the parent page.
@@ -1809,6 +1785,7 @@ impl<S: PageStore> TreeCursor<S> {
             let left_page_id = parent_children[child_index - 1];
             let mut cells = self.read_leaf_cells(left_page_id)?;
             cells.extend(self.read_leaf_cells(leaf_page_id)?);
+            Self::sort_leaf_cells(&mut cells);
             if let Some(split_index) = Self::choose_leaf_rebalance_split(&cells) {
                 self.redistribute_leaf_pair(left_page_id, leaf_page_id, &cells, split_index)?;
                 return Ok(false);
@@ -1819,6 +1796,7 @@ impl<S: PageStore> TreeCursor<S> {
             let right_page_id = parent_children[child_index + 1];
             let mut cells = self.read_leaf_cells(leaf_page_id)?;
             cells.extend(self.read_leaf_cells(right_page_id)?);
+            Self::sort_leaf_cells(&mut cells);
             if let Some(split_index) = Self::choose_leaf_rebalance_split(&cells) {
                 self.redistribute_leaf_pair(leaf_page_id, right_page_id, &cells, split_index)?;
                 return Ok(false);
@@ -1829,6 +1807,7 @@ impl<S: PageStore> TreeCursor<S> {
             let left_page_id = parent_children[child_index - 1];
             let mut cells = self.read_leaf_cells(left_page_id)?;
             cells.extend(self.read_leaf_cells(leaf_page_id)?);
+            Self::sort_leaf_cells(&mut cells);
             if Self::leaf_cells_fit(&cells) {
                 self.merge_leaf_pages(left_page_id, leaf_page_id, &cells)?;
                 self.remove_child_from_parent(parent_page_id, leaf_page_id)?;
@@ -1845,6 +1824,7 @@ impl<S: PageStore> TreeCursor<S> {
             let right_page_id = parent_children[child_index + 1];
             let mut cells = self.read_leaf_cells(leaf_page_id)?;
             cells.extend(self.read_leaf_cells(right_page_id)?);
+            Self::sort_leaf_cells(&mut cells);
             if Self::leaf_cells_fit(&cells) {
                 self.merge_leaf_pages(leaf_page_id, right_page_id, &cells)?;
                 self.remove_child_from_parent(parent_page_id, right_page_id)?;
@@ -1903,6 +1883,35 @@ impl<S: PageStore> TreeCursor<S> {
             self.set_interior_prev_page_id(next_page_id, Some(survivor_page_id))?;
         }
         Ok(())
+    }
+
+    /// Splits an existing interior page after refreshed separators no longer fit.
+    fn split_existing_interior_page(
+        &mut self,
+        page_id: PageId,
+        children: &[ChildEntry],
+    ) -> StorageResult<PendingSplit> {
+        let (prev_page_id, next_page_id) = self.read_interior_page_links(page_id)?;
+        let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
+        drop(right_page_guard);
+
+        let split_index = Self::choose_interior_fitting_split(children)
+            .ok_or(PageError::PageFull { needed: PAGE_SIZE + 1, available: PAGE_SIZE })?;
+        let (left_children, right_children) = children.split_at(split_index);
+
+        let propagated_separator = left_children
+            .last()
+            .and_then(|child| child.max_key.clone())
+            .ok_or_else(|| Self::missing_child_max_key_error(page_id))?;
+
+        self.rewrite_interior_page(page_id, left_children, prev_page_id, Some(right_page_id))?;
+        self.rewrite_interior_page(right_page_id, right_children, Some(page_id), next_page_id)?;
+
+        if let Some(next_page_id) = next_page_id {
+            self.set_interior_prev_page_id(next_page_id, Some(right_page_id))?;
+        }
+
+        Ok(PendingSplit { separator: propagated_separator, left_page_id: page_id, right_page_id })
     }
 
     /// Rebalances an underoccupied interior page against siblings.
@@ -2012,6 +2021,7 @@ impl<S: PageStore> TreeCursor<S> {
     }
 
     /// Refreshes separators along the still-reachable delete path.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn refresh_path_separators(&self, tree_path: &[PathFrame]) -> StorageResult<()> {
         if tree_path.is_empty() {
             return Ok(());
@@ -2035,6 +2045,72 @@ impl<S: PageStore> TreeCursor<S> {
         }
 
         Ok(())
+    }
+
+    /// Refreshes separators throughout the reachable subtree rooted at the current root.
+    fn refresh_subtree_separators(&mut self) -> StorageResult<()> {
+        loop {
+            let root_page_id = self.root_page_id();
+            let Some(pending) = self.refresh_subtree_separators_once(root_page_id)? else {
+                return Ok(());
+            };
+            self.install_new_root(pending)?;
+        }
+    }
+
+    /// Refreshes one subtree and returns a split that must be inserted by its parent.
+    fn refresh_subtree_separators_once(
+        &mut self,
+        page_id: PageId,
+    ) -> StorageResult<Option<PendingSplit>> {
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let is_interior = {
+            let page = pin.read()?;
+            match read_page_kind(page.page(), page_id)? {
+                PageKind::RawLeaf => false,
+                PageKind::RawInterior => true,
+            }
+        };
+        drop(pin);
+        if !is_interior {
+            return Ok(None);
+        }
+
+        let mut child_index = 0;
+        loop {
+            let child_page_ids = self.read_interior_child_page_ids(page_id)?;
+            let Some(&child_page_id) = child_page_ids.get(child_index) else {
+                break;
+            };
+
+            if let Some(pending) = self.refresh_subtree_separators_once(child_page_id)? {
+                let child_ref = if child_index + 1 == child_page_ids.len() {
+                    ChildSlotRef::Rightmost
+                } else {
+                    ChildSlotRef::Slot(child_index as u16)
+                };
+                let parent_frame = PathFrame { page_id, child_ref };
+                if let Some(parent_pending) = self.insert_into_parent(parent_frame, pending)? {
+                    return Ok(Some(parent_pending));
+                }
+                child_index += 2;
+            } else {
+                child_index += 1;
+            }
+        }
+
+        let children = self.read_interior_child_entries(page_id)?;
+        if self.interior_page_matches_children(page_id, &children)? {
+            return Ok(None);
+        }
+
+        if Self::interior_children_fit(&children) {
+            let (prev_page_id, next_page_id) = self.read_interior_page_links(page_id)?;
+            self.rewrite_interior_page(page_id, &children, prev_page_id, next_page_id)?;
+            return Ok(None);
+        }
+
+        self.split_existing_interior_page(page_id, &children).map(Some)
     }
 
     /// Runs post-delete rebalancing from the modified leaf toward the root.
@@ -2096,6 +2172,10 @@ impl<S: PageStore> TreeCursor<S> {
             let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
             let slot_index = self.insert_leaf_payload_at(&mut page, slot_index, key, value)?;
             self.set_positioned_state(leaf_page_id, slot_index);
+            drop(page);
+            drop(leaf_guard);
+            drop(leaf_pin_guard);
+            self.refresh_subtree_separators()?;
             return Ok(());
         }
 
@@ -2103,7 +2183,8 @@ impl<S: PageStore> TreeCursor<S> {
             self.insert_with_leaf_page_split(leaf_page_id, &mut leaf_guard, key, value)?;
         drop(leaf_guard);
         drop(leaf_pin_guard);
-        self.propagate_split(&tree_path, pending)
+        self.propagate_split(&tree_path, pending)?;
+        self.refresh_subtree_separators()
     }
 
     /// Replaces the value stored for an existing `key`.
@@ -2126,6 +2207,10 @@ impl<S: PageStore> TreeCursor<S> {
             let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
             let slot_index = self.update_leaf_payload_at(&mut page, slot_index, key, value)?;
             self.set_positioned_state(leaf_page_id, slot_index);
+            drop(page);
+            drop(leaf_guard);
+            drop(leaf_pin_guard);
+            self.refresh_path_separators(&tree_path)?;
             return Ok(());
         }
 
@@ -2133,7 +2218,8 @@ impl<S: PageStore> TreeCursor<S> {
             self.update_with_leaf_page_split(leaf_page_id, &mut leaf_guard, slot_index, value)?;
         drop(leaf_guard);
         drop(leaf_pin_guard);
-        self.propagate_split(&tree_path, pending)
+        self.propagate_split(&tree_path, pending)?;
+        self.refresh_subtree_separators()
     }
 
     /// Deletes the record identified by `key`.
@@ -2148,8 +2234,8 @@ impl<S: PageStore> TreeCursor<S> {
 
         self.set_page_state(leaf_page_id);
         self.rebalance_after_leaf_delete(leaf_page_id, &tree_path)?;
-        self.refresh_path_separators(&tree_path)?;
         self.shrink_root_if_empty()?;
+        self.refresh_subtree_separators()?;
         Ok(())
     }
 
@@ -2271,21 +2357,10 @@ impl<S: PageStore> TreeCursor<S> {
         parent_frame: PathFrame,
         pending: PendingSplit,
     ) -> StorageResult<Option<PendingSplit>> {
-        let insert_slot_index =
-            match self.lower_bound_interior_slot(parent_frame.page_id, &pending.separator)? {
-                BoundResult::At(slot_index) => {
-                    if self.compare_interior_key(
-                        parent_frame.page_id,
-                        slot_index,
-                        &pending.separator,
-                    )? == Ordering::Equal
-                    {
-                        return Err(PageError::DuplicateKey.into());
-                    }
-                    slot_index
-                }
-                BoundResult::PastEnd => self.raw_interior_slot_count(parent_frame.page_id)?,
-            };
+        let insert_slot_index = match parent_frame.child_ref {
+            ChildSlotRef::Slot(slot_index) => slot_index,
+            ChildSlotRef::Rightmost => self.raw_interior_slot_count(parent_frame.page_id)?,
+        };
         let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
         let mut interior_guard = interior_page_guard.write()?;
         let has_capacity = {
@@ -2503,55 +2578,6 @@ impl<S: PageStore> TreeCursor<S> {
         )
     }
 
-    /// Returns whether the provided interior cells fit into one interior page.
-    fn interior_cells_fit(cells: &[InteriorSplitCell]) -> bool {
-        let used_bytes = PageKind::RawInterior.header_size()
-            + cells.len() * page::format::SLOT_ENTRY_SIZE
-            + cells.iter().map(InteriorSplitCell::encoded_size).sum::<usize>();
-        used_bytes <= page::format::USABLE_SPACE_END
-    }
-
-    /// Chooses the interior split point with the smallest byte imbalance.
-    fn choose_interior_split_index(cells: &[InteriorSplitCell]) -> StorageResult<usize> {
-        debug_assert!(cells.len() >= 2, "interior splits need at least two cells");
-
-        let total_cell_len = cells.iter().map(InteriorSplitCell::encoded_size).sum::<usize>();
-        let mut left_cell_len = 0;
-        let mut best = None;
-
-        for split_index in 1..cells.len() {
-            left_cell_len += cells[split_index - 1].encoded_size();
-            if !Self::interior_cells_fit(&cells[..split_index])
-                || !Self::interior_cells_fit(&cells[split_index..])
-            {
-                continue;
-            }
-
-            let right_cell_len = total_cell_len - left_cell_len;
-            let imbalance = left_cell_len.abs_diff(right_cell_len);
-            let is_better = match best {
-                Some((best_imbalance, best_left_cell_len, _)) => {
-                    imbalance < best_imbalance
-                        || (imbalance == best_imbalance && left_cell_len > best_left_cell_len)
-                }
-                None => true,
-            };
-
-            if is_better {
-                best = Some((imbalance, left_cell_len, split_index));
-            }
-        }
-
-        match best {
-            Some((_, _, split_index)) => Ok(split_index),
-            None => Err(PageError::PageFull {
-                needed: total_cell_len,
-                available: total_cell_len.saturating_sub(1),
-            }
-            .into()),
-        }
-    }
-
     /// Splits a full interior page while inserting a propagated separator.
     fn insert_with_interior_page_split(
         &mut self,
@@ -2560,80 +2586,43 @@ impl<S: PageStore> TreeCursor<S> {
     ) -> StorageResult<PendingSplit> {
         let PendingSplit { separator, left_page_id, right_page_id: incoming_right_page_id } =
             pending;
-        let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
-        let mut interior_guard = interior_page_guard.write()?;
-        let interior_snapshot_bytes = *interior_guard.page();
-        let interior_snapshot = RawInterior::<Read<'_>>::open(&interior_snapshot_bytes)?;
-
-        let prev_page_id = interior_snapshot.prev_page_id();
-        let next_page_id = interior_snapshot.next_page_id();
-        let mut old_rightmost_child = interior_snapshot.rightmost_child();
-        let mut cells = Vec::with_capacity(interior_snapshot.slot_count() as usize + 1);
-        for slot_index in 0..interior_snapshot.slot_count() {
-            let (left_child, key_len, first_overflow_page_id, inline_range) =
-                interior_snapshot.cell_payload_parts(slot_index)?;
-            let key = materialize_payload(
-                &self.page_cache,
-                parent_frame.page_id,
-                &interior_snapshot_bytes[inline_range],
-                first_overflow_page_id,
-                key_len,
-            )?;
-            cells.push(InteriorSplitCell { left_child, key });
-        }
-
-        match parent_frame.child_ref {
-            ChildSlotRef::Slot(slot_index) => {
-                cells[slot_index as usize].left_child = incoming_right_page_id;
-            }
-            ChildSlotRef::Rightmost => {
-                old_rightmost_child = incoming_right_page_id;
-            }
-        }
-
-        let idx = match cells.binary_search_by(|cell| cell.key().cmp(&separator)) {
-            Ok(_) => return Err(PageError::DuplicateKey.into()),
-            Err(insert_index) => insert_index,
+        let (prev_page_id, next_page_id) = self.read_interior_page_links(parent_frame.page_id)?;
+        let mut children = self.read_interior_child_entries(parent_frame.page_id)?;
+        let child_index = match parent_frame.child_ref {
+            ChildSlotRef::Slot(slot_index) => slot_index as usize,
+            ChildSlotRef::Rightmost => children.len() - 1,
         };
-        cells.insert(idx, InteriorSplitCell { left_child: left_page_id, key: separator });
+        let original_max_key = children[child_index].max_key.take();
+        children[child_index] = ChildEntry { page_id: left_page_id, max_key: Some(separator) };
+        children.insert(
+            child_index + 1,
+            ChildEntry { page_id: incoming_right_page_id, max_key: original_max_key },
+        );
 
         let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
-        let mut right_guard = right_page_guard.write()?;
-        let mut right_page = RawInterior::<Write<'_>>::initialize(right_guard.page_mut());
+        drop(right_page_guard);
 
-        let split_index = Self::choose_interior_split_index(&cells)?;
-        let (left_cells, right_cells) = cells.split_at(split_index);
-        let left_rightmost_child =
-            right_cells.first().map(InteriorSplitCell::left_child).unwrap_or(old_rightmost_child);
+        let split_index = Self::choose_interior_fitting_split(&children)
+            .ok_or(PageError::PageFull { needed: PAGE_SIZE + 1, available: PAGE_SIZE })?;
+        let (left_children, right_children) = children.split_at(split_index);
 
-        let mut interior_page = RawInterior::<Write<'_>>::initialize_with_rightmost(
-            interior_guard.page_mut(),
-            left_rightmost_child,
-        );
-        interior_page.set_prev_page_id(prev_page_id);
-        interior_page.set_next_page_id(Some(right_page_id));
-        right_page.set_rightmost_child(old_rightmost_child);
-        right_page.set_prev_page_id(Some(parent_frame.page_id));
-        right_page.set_next_page_id(next_page_id);
+        let propagated_separator = left_children
+            .last()
+            .and_then(|child| child.max_key.clone())
+            .ok_or_else(|| Self::missing_child_max_key_error(parent_frame.page_id))?;
 
-        for cell in left_cells {
-            let slot_index = interior_page.slot_count();
-            self.insert_interior_payload_at(
-                &mut interior_page,
-                slot_index,
-                cell.left_child(),
-                cell.key(),
-            )?;
-        }
-        for cell in right_cells {
-            let slot_index = right_page.slot_count();
-            self.insert_interior_payload_at(
-                &mut right_page,
-                slot_index,
-                cell.left_child(),
-                cell.key(),
-            )?;
-        }
+        self.rewrite_interior_page(
+            parent_frame.page_id,
+            left_children,
+            prev_page_id,
+            Some(right_page_id),
+        )?;
+        self.rewrite_interior_page(
+            right_page_id,
+            right_children,
+            Some(parent_frame.page_id),
+            next_page_id,
+        )?;
 
         if let Some(next_page_id) = next_page_id {
             let next_page_guard = self.page_cache.fetch_page(next_page_id)?;
@@ -2642,13 +2631,11 @@ impl<S: PageStore> TreeCursor<S> {
             next_page.set_prev_page_id(Some(right_page_id));
         }
 
-        let separator = left_cells
-            .last()
-            .expect("interior split must leave a non-empty left page")
-            .key()
-            .to_vec();
-
-        Ok(PendingSplit { separator, left_page_id: parent_frame.page_id, right_page_id })
+        Ok(PendingSplit {
+            separator: propagated_separator,
+            left_page_id: parent_frame.page_id,
+            right_page_id,
+        })
     }
 
     /// Creates a fresh root page after the old root split.
@@ -2973,6 +2960,84 @@ mod tests {
         assert_reverse_scan_matches(&mut cursor, &updated);
     }
 
+    #[test]
+    fn random_mixed_operation_simulation_matches_btreemap_model() {
+        let mut cursor = memory_tree_cursor(256);
+        let mut rng = Rng::with_seed(0x741e_5afe_2026_0429);
+        let mut expected = BTreeMap::new();
+
+        const STEPS: usize = 3_000;
+        const MIN_LIVE_KEYS: usize = 128;
+        const VERIFY_EVERY_NTH: usize = 50;
+        const OVERSIZED_EVERY_NTH: usize = 31;
+
+        for step in 0..STEPS {
+            let operation = if expected.len() < MIN_LIVE_KEYS { 0 } else { rng.u8(0..100) };
+            match operation {
+                0..=34 => {
+                    let (key, mut value) = random_unique_cell(&mut rng, &expected);
+                    if step % OVERSIZED_EVERY_NTH == 0 {
+                        let oversized_len = PAGE_SIZE + rng.usize(1..=PAGE_SIZE);
+                        value = random_bytes(&mut rng, oversized_len);
+                    }
+
+                    assert_supported_cell(&key, &value);
+                    cursor.insert(&key, &value).unwrap();
+                    assert!(expected.insert(key.clone(), value.clone()).is_none());
+                    let record = cursor.get(&key).unwrap().expect("inserted key should be found");
+                    assert_record_matches(&record, &key, &value);
+                }
+                35..=64 => {
+                    if expected.is_empty() || rng.bool() {
+                        let (key, _) = random_unique_cell(&mut rng, &expected);
+                        assert!(cursor.get(&key).unwrap().is_none());
+                    } else {
+                        let key = random_existing_key(&mut rng, &expected);
+                        let expected_value = expected.get(key).unwrap();
+                        let record = cursor
+                            .get(key)
+                            .unwrap()
+                            .unwrap_or_else(|| panic!("model key should exist at step {step}"));
+                        assert_record_matches(&record, key, expected_value);
+                    }
+                }
+                65..=84 => {
+                    let key = random_existing_key(&mut rng, &expected).to_vec();
+                    let old_value = expected.get(&key).unwrap();
+                    let new_value = loop {
+                        let value_len = if step % OVERSIZED_EVERY_NTH == 0 {
+                            PAGE_SIZE + rng.usize(1..=PAGE_SIZE)
+                        } else {
+                            rng.usize(INLINE_VALUE_LEN_RANGE)
+                        };
+                        let candidate = random_bytes(&mut rng, value_len);
+                        if candidate != *old_value {
+                            break candidate;
+                        }
+                    };
+
+                    assert_supported_cell(&key, &new_value);
+                    cursor.update(&key, &new_value).unwrap();
+                    expected.insert(key.clone(), new_value.clone());
+                    let record = cursor.get(&key).unwrap().expect("updated key should still exist");
+                    assert_record_matches(&record, &key, &new_value);
+                }
+                _ => {
+                    let key = random_existing_key(&mut rng, &expected).to_vec();
+                    cursor.delete(&key).unwrap();
+                    assert!(expected.remove(&key).is_some());
+                    assert!(cursor.get(&key).unwrap().is_none(), "deleted key should not be found");
+                }
+            }
+
+            if step % VERIFY_EVERY_NTH == 0 {
+                assert_tree_gets_match_model(&mut cursor, &expected);
+            }
+        }
+
+        assert_tree_gets_match_model(&mut cursor, &expected);
+    }
+
     fn oversized_key(index: u16) -> Vec<u8> {
         let mut key = vec![0; PAGE_SIZE + 256];
         key[..2].copy_from_slice(&index.to_be_bytes());
@@ -3176,6 +3241,33 @@ mod tests {
             assert_eq!(actual_key, expected_key);
             assert_eq!(actual_value, expected_value);
         });
+    }
+
+    fn random_existing_key<'a>(
+        rng: &mut Rng,
+        expected: &'a BTreeMap<Vec<u8>, Vec<u8>>,
+    ) -> &'a Vec<u8> {
+        let index = rng.usize(0..expected.len());
+        expected.keys().nth(index).expect("model should contain keys")
+    }
+
+    fn assert_tree_gets_match_model<S: PageStore>(
+        cursor: &mut TreeCursor<S>,
+        expected: &BTreeMap<Vec<u8>, Vec<u8>>,
+    ) {
+        if expected.is_empty() {
+            assert!(!cursor.seek_to_first().unwrap(), "empty model should match empty tree");
+            assert!(
+                cursor.current().unwrap().is_none(),
+                "empty tree cursor should have no current"
+            );
+            return;
+        }
+
+        for (key, value) in expected {
+            let record = cursor.get(key).unwrap().expect("model key should exist in tree");
+            assert_record_matches(&record, key, value);
+        }
     }
 
     fn assert_forward_scan_matches<S: PageStore>(
