@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::TryReserveError, fmt};
 use thiserror::Error;
 
 use crate::{
@@ -118,6 +118,8 @@ pub enum LimitExceededError {
 pub enum InternalError {
     #[error("{0}")]
     InvariantViolation(#[source] InvariantViolation),
+    #[error("allocation failed: {0}")]
+    AllocationFailed(#[source] TryReserveError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -174,6 +176,8 @@ pub(crate) enum PageCacheError {
     PageMutableBorrowConflict { page_id: PageId },
     #[error("invalid frame count: {frame_count}")]
     InvalidFrameCount { frame_count: usize },
+    #[error("failed to allocate {frame_count} page cache frames: {source}")]
+    FrameAllocationFailed { frame_count: usize, source: TryReserveError },
     #[error(
         "corrupt page table entry: page {page_id} maps to invalid frame {frame_id} (frame count: {frame_count})"
     )]
@@ -246,6 +250,9 @@ impl From<PageCacheError> for StorageError {
                 Self::Internal(InternalError::InvariantViolation(
                     InvariantViolation::InvalidFrameCount { frame_count },
                 ))
+            }
+            PageCacheError::FrameAllocationFailed { source, .. } => {
+                Self::Internal(InternalError::AllocationFailed(source))
             }
             PageCacheError::CorruptPageTableEntry { page_id, frame_id, frame_count } => {
                 Self::Internal(InternalError::InvariantViolation(

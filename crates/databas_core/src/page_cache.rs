@@ -118,6 +118,12 @@ impl<S: PageStore> PageCache<S> {
             return Err(PageCacheError::InvalidFrameCount { frame_count });
         }
 
+        let mut frames = Vec::new();
+        frames
+            .try_reserve_exact(frame_count)
+            .map_err(|source| PageCacheError::FrameAllocationFailed { frame_count, source })?;
+        frames.extend((0..frame_count).map(|_| Frame::empty()));
+
         Ok(Self {
             inner: Rc::new(PageCacheInner {
                 store: RefCell::new(store),
@@ -125,7 +131,7 @@ impl<S: PageStore> PageCache<S> {
                     page_table: HashMap::new(),
                     replacement: ClockPolicy::new(frame_count),
                 }),
-                frames: (0..frame_count).map(|_| Frame::empty()).collect(),
+                frames,
             }),
         })
     }
