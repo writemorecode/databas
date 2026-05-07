@@ -7,7 +7,6 @@ use token_kind::{NumberKind, TokenKind};
 
 #[derive(Debug)]
 pub struct Lexer<'a> {
-    pub source: &'a str,
     pub rest: &'a str,
     pub position: usize,
 
@@ -16,7 +15,7 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a str) -> Self {
-        Self { source, rest: source, position: 0, peeked: None }
+        Self { rest: source, position: 0, peeked: None }
     }
 
     pub fn expect_where(
