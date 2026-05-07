@@ -186,12 +186,12 @@ where
     A: PageAccess,
 {
     /// Searches the leaf page for `key`.
-    pub fn search(&self, key: &[u8]) -> PageResult<SearchResult> {
+    pub(crate) fn search(&self, key: &[u8]) -> PageResult<SearchResult> {
         self.search_slots_by(|page, slot_index| compare_key(page, slot_index, key))
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Leaf>> {
+    pub(crate) fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Leaf>> {
         let parsed = cell_parts(self, slot_index)?;
         let cell_bytes = &self.bytes()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
         Ok(Cell::new_leaf(cell_bytes, parsed.parts))
@@ -213,7 +213,7 @@ where
     }
 
     /// Looks up a key and returns its cell if present.
-    pub fn lookup(&self, key: &[u8]) -> PageResult<Option<Cell<'_, Leaf>>> {
+    pub(crate) fn lookup(&self, key: &[u8]) -> PageResult<Option<Cell<'_, Leaf>>> {
         match self.search(key)? {
             SearchResult::Found(slot_index) => self.cell(slot_index).map(Some),
             SearchResult::InsertAt(_) => Ok(None),
@@ -226,7 +226,7 @@ where
     A: PageAccessMut,
 {
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Leaf>> {
+    pub(crate) fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Leaf>> {
         let parsed = cell_parts(self, slot_index)?;
         let cell_bytes =
             &mut self.bytes_mut()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
@@ -234,7 +234,7 @@ where
     }
 
     /// Inserts a new `(key, value)` cell while preserving key order.
-    pub fn insert(&mut self, key: &[u8], value: &[u8]) -> PageResult<SlotId> {
+    pub(crate) fn insert(&mut self, key: &[u8], value: &[u8]) -> PageResult<SlotId> {
         let cell_len = encoded_len(key.len(), value.len())?;
         let slot_index = match self.search(key)? {
             SearchResult::Found(_) => return Err(PageError::DuplicateKey),

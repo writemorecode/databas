@@ -15,14 +15,14 @@ use super::{
 
 /// Marker type for leaf pages that store raw key/value cells.
 #[derive(Debug)]
-pub enum Leaf {}
+pub(crate) enum Leaf {}
 
 /// Marker type for interior pages that store separators and child pointers.
 #[derive(Debug)]
-pub enum Interior {}
+pub(crate) enum Interior {}
 
 /// Associates a typed page marker with its encoded [`format::PageKind`].
-pub trait NodeMarker {
+pub(crate) trait NodeMarker {
     /// The structural node kind represented by this marker.
     const KIND: format::NodeKind;
 }
@@ -37,24 +37,24 @@ impl NodeMarker for Interior {
 
 /// Shared immutable access to a page-sized byte buffer.
 #[derive(Debug, Clone, Copy)]
-pub struct Read<'a> {
+pub(crate) struct Read<'a> {
     pub(crate) bytes: &'a [u8; PAGE_SIZE],
 }
 
 /// Shared mutable access to a page-sized byte buffer.
 #[derive(Debug)]
-pub struct Write<'a> {
+pub(crate) struct Write<'a> {
     pub(crate) bytes: &'a mut [u8; PAGE_SIZE],
 }
 
 /// Abstraction over page access modes that can expose immutable bytes.
-pub trait PageAccess {
+pub(crate) trait PageAccess {
     /// Returns the underlying fixed-size page buffer.
     fn bytes(&self) -> &[u8; PAGE_SIZE];
 }
 
 /// Extension of [`PageAccess`] for access modes that can mutate the page buffer.
-pub trait PageAccessMut: PageAccess {
+pub(crate) trait PageAccessMut: PageAccess {
     /// Returns the underlying page buffer mutably.
     fn bytes_mut(&mut self) -> &mut [u8; PAGE_SIZE];
 }
@@ -82,14 +82,14 @@ impl PageAccessMut for Write<'_> {
 /// `A` controls the access mode ([`Read`] or [`Write`]) and `N` controls the
 /// node kind ([`Leaf`] or [`Interior`]).
 #[derive(Debug)]
-pub struct Page<A, N> {
+pub(crate) struct Page<A, N> {
     access: A,
     _marker: PhantomData<N>,
 }
 
 /// Result of searching a sorted slot directory by key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchResult {
+pub(crate) enum SearchResult {
     /// The key already exists at the returned slot index.
     Found(SlotId),
     /// The key is absent and should be inserted at the returned slot index.
@@ -98,7 +98,7 @@ pub enum SearchResult {
 
 /// Result of locating a bound within a sorted slot directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BoundResult {
+pub(crate) enum BoundResult {
     /// The bound resolves to an existing slot index.
     At(SlotId),
     /// The bound lies past the last slot on the page.
@@ -189,42 +189,42 @@ where
     N: NodeMarker,
 {
     /// Returns the raw page bytes.
-    pub fn bytes(&self) -> &[u8; PAGE_SIZE] {
+    pub(crate) fn bytes(&self) -> &[u8; PAGE_SIZE] {
         self.access.bytes()
     }
 
     /// Returns the statically known encoded kind of this page.
-    pub fn kind(&self) -> format::PageKind {
+    pub(crate) fn kind(&self) -> format::PageKind {
         page_kind::<N>()
     }
 
     /// Returns the number of live slots in the slot directory.
-    pub fn slot_count(&self) -> u16 {
+    pub(crate) fn slot_count(&self) -> u16 {
         format::read_u16(self.bytes(), SLOT_COUNT_OFFSET)
     }
 
     /// Returns the start offset of the packed cell-content region.
-    pub fn content_start(&self) -> u16 {
+    pub(crate) fn content_start(&self) -> u16 {
         format::read_u16(self.bytes(), CONTENT_START_OFFSET)
     }
 
     /// Returns the first freeblock on the page, if one exists.
-    pub fn first_freeblock(&self) -> Option<u16> {
+    pub(crate) fn first_freeblock(&self) -> Option<u16> {
         format::read_optional_u16(self.bytes(), FIRST_FREEBLOCK_OFFSET)
     }
 
     /// Returns the previous sibling page id on the same tree level, if present.
-    pub fn prev_page_id(&self) -> Option<PageId> {
+    pub(crate) fn prev_page_id(&self) -> Option<PageId> {
         format::read_optional_u64(self.bytes(), PREV_PAGE_ID_OFFSET)
     }
 
     /// Returns the next sibling page id on the same tree level, if present.
-    pub fn next_page_id(&self) -> Option<PageId> {
+    pub(crate) fn next_page_id(&self) -> Option<PageId> {
         format::read_optional_u64(self.bytes(), NEXT_PAGE_ID_OFFSET)
     }
 
     /// Returns the contiguous free space between the slot directory and cell content.
-    pub fn free_space(&self) -> usize {
+    pub(crate) fn free_space(&self) -> usize {
         self.content_start() as usize - self.slot_directory_end()
     }
 
@@ -252,7 +252,7 @@ where
         Ok(total)
     }
 
-    pub fn is_underoccupied(&self) -> PageResult<bool> {
+    pub(crate) fn is_underoccupied(&self) -> PageResult<bool> {
         let header_size = N::KIND.header_size();
         let slot_bytes = self.slot_count() as usize * format::SLOT_ENTRY_SIZE;
         let occupied_variable_bytes = slot_bytes + self.live_cell_bytes()?;
@@ -332,12 +332,12 @@ where
     }
 
     /// Updates the previous sibling page id stored in the page header.
-    pub fn set_prev_page_id(&mut self, page_id: Option<PageId>) {
+    pub(crate) fn set_prev_page_id(&mut self, page_id: Option<PageId>) {
         format::write_optional_u64(self.bytes_mut(), PREV_PAGE_ID_OFFSET, page_id);
     }
 
     /// Updates the next sibling page id stored in the page header.
-    pub fn set_next_page_id(&mut self, page_id: Option<PageId>) {
+    pub(crate) fn set_next_page_id(&mut self, page_id: Option<PageId>) {
         format::write_optional_u64(self.bytes_mut(), NEXT_PAGE_ID_OFFSET, page_id);
     }
 
@@ -606,7 +606,7 @@ where
     N: NodeMarker,
 {
     /// Validates and opens an immutable typed page view over an initialized buffer.
-    pub fn open(bytes: &'a [u8; PAGE_SIZE]) -> PageResult<Self> {
+    pub(crate) fn open(bytes: &'a [u8; PAGE_SIZE]) -> PageResult<Self> {
         validate_page(bytes, page_kind::<N>())?;
         Ok(Self::new(Read { bytes }))
     }
@@ -617,7 +617,7 @@ where
     N: NodeMarker,
 {
     /// Validates and opens a mutable typed page view over an initialized buffer.
-    pub fn open(bytes: &'a mut [u8; PAGE_SIZE]) -> PageResult<Self> {
+    pub(crate) fn open(bytes: &'a mut [u8; PAGE_SIZE]) -> PageResult<Self> {
         validate_page(bytes, page_kind::<N>())?;
         Ok(Self::new(Write { bytes }))
     }
@@ -638,14 +638,14 @@ where
 
 impl<'a> Page<Write<'a>, Leaf> {
     /// Initializes a fresh empty leaf page in-place.
-    pub fn init(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
+    pub(crate) fn init(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
         Self::initialize(bytes)
     }
 }
 
 impl<'a> Page<Write<'a>, Interior> {
     /// Initializes a fresh empty interior page with its rightmost child pointer set.
-    pub fn init(bytes: &'a mut [u8; PAGE_SIZE], rightmost_child: PageId) -> Self {
+    pub(crate) fn init(bytes: &'a mut [u8; PAGE_SIZE], rightmost_child: PageId) -> Self {
         Self::initialize_with_rightmost(bytes, rightmost_child)
     }
 

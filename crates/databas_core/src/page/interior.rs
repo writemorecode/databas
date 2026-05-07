@@ -158,17 +158,17 @@ where
     A: PageAccess,
 {
     /// Returns the page id stored in the rightmost-child header field.
-    pub fn rightmost_child(&self) -> PageId {
+    pub(crate) fn rightmost_child(&self) -> PageId {
         format::read_u64(self.bytes(), RIGHTMOST_CHILD_OFFSET)
     }
 
     /// Searches the interior page for `key`.
-    pub fn search(&self, key: &[u8]) -> PageResult<SearchResult> {
+    pub(crate) fn search(&self, key: &[u8]) -> PageResult<SearchResult> {
         self.search_slots_by(|page, slot_index| compare_key(page, slot_index, key))
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
-    pub fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Interior>> {
+    pub(crate) fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Interior>> {
         let parsed = cell_parts(self, slot_index)?;
         let cell_bytes = &self.bytes()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
         Ok(Cell::new_interior(cell_bytes, parsed.parts))
@@ -192,7 +192,7 @@ where
     }
 
     /// Looks up a separator key and returns its cell if present.
-    pub fn lookup(&self, key: &[u8]) -> PageResult<Option<Cell<'_, Interior>>> {
+    pub(crate) fn lookup(&self, key: &[u8]) -> PageResult<Option<Cell<'_, Interior>>> {
         match self.search(key)? {
             SearchResult::Found(slot_index) => self.cell(slot_index).map(Some),
             SearchResult::InsertAt(_) => Ok(None),
@@ -205,12 +205,12 @@ where
     A: PageAccessMut,
 {
     /// Updates the page id stored in the rightmost-child header field.
-    pub fn set_rightmost_child(&mut self, page_id: PageId) {
+    pub(crate) fn set_rightmost_child(&mut self, page_id: PageId) {
         format::write_u64(self.bytes_mut(), RIGHTMOST_CHILD_OFFSET, page_id);
     }
 
     /// Returns a typed mutable view of the cell at `slot_index`.
-    pub fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Interior>> {
+    pub(crate) fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Interior>> {
         let parsed = cell_parts(self, slot_index)?;
         let cell_bytes =
             &mut self.bytes_mut()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
@@ -218,7 +218,7 @@ where
     }
 
     /// Inserts a new separator key and its left-child pointer while preserving slot order.
-    pub fn insert(&mut self, key: &[u8], left_child: PageId) -> PageResult<SlotId> {
+    pub(crate) fn insert(&mut self, key: &[u8], left_child: PageId) -> PageResult<SlotId> {
         let cell_len = encoded_len(key.len())?;
         let slot_index = match self.search(key)? {
             SearchResult::Found(_) => return Err(PageError::DuplicateKey),

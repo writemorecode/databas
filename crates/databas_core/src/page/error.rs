@@ -5,7 +5,7 @@ use super::format::PageKind;
 
 /// Errors returned while validating or modifying encoded pages.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum PageError {
+pub(crate) enum PageError {
     /// The encoded page kind tag is not recognized by this format version.
     #[error("unknown page kind: raw tag {actual}")]
     UnknownPageKind { actual: u8 },
@@ -43,11 +43,11 @@ pub enum PageError {
 }
 
 /// Result type used throughout the page module.
-pub type PageResult<T> = Result<T, PageError>;
+pub(crate) type PageResult<T> = Result<T, PageError>;
 
 /// Structural page corruption detected before or during page access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum PageCorruption {
+pub(crate) enum PageCorruption {
     /// The slot directory would extend past the usable page region.
     #[error("slot directory exceeds usable page space")]
     SlotDirectoryExceedsUsableSpace,
@@ -82,7 +82,7 @@ pub enum PageCorruption {
 
 /// Cell-level corruption detected while decoding a page cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum CellCorruption {
+pub(crate) enum CellCorruption {
     /// The encoded cell length is too small for the minimum required prefix.
     #[error("cell length is smaller than the minimum header")]
     LengthTooSmall,

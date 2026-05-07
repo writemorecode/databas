@@ -10,14 +10,14 @@ use super::{
 
 #[derive(Debug)]
 #[doc(hidden)]
-pub struct LeafCellFields {
+pub(crate) struct LeafCellFields {
     key_range: Range<usize>,
     value_range: Range<usize>,
 }
 
 #[derive(Debug)]
 #[doc(hidden)]
-pub struct InteriorCellFields {
+pub(crate) struct InteriorCellFields {
     key_range: Range<usize>,
     left_child: PageId,
 }
@@ -31,7 +31,7 @@ mod private {
     impl Sealed for Interior {}
 }
 
-pub trait CellMarker: private::Sealed {
+pub(crate) trait CellMarker: private::Sealed {
     #[doc(hidden)]
     type Fields;
 }
@@ -46,14 +46,14 @@ impl CellMarker for Interior {
 
 /// A typed immutable view over a single page cell.
 #[derive(Debug)]
-pub struct Cell<'a, N: CellMarker> {
+pub(crate) struct Cell<'a, N: CellMarker> {
     bytes: &'a [u8],
     fields: N::Fields,
 }
 
 /// A typed mutable view over a single page cell.
 #[derive(Debug)]
-pub struct CellMut<'a, N: CellMarker> {
+pub(crate) struct CellMut<'a, N: CellMarker> {
     bytes: &'a mut [u8],
     fields: N::Fields,
 }
@@ -100,29 +100,29 @@ impl<'a> CellMut<'a, Interior> {
 
 impl Cell<'_, Leaf> {
     /// Returns the byte key stored in this leaf cell.
-    pub fn key(&self) -> PageResult<&[u8]> {
+    pub(crate) fn key(&self) -> PageResult<&[u8]> {
         Ok(self.bytes_for(self.fields.key_range.clone()))
     }
 
     /// Returns the byte value stored in this leaf cell.
-    pub fn value(&self) -> PageResult<&[u8]> {
+    pub(crate) fn value(&self) -> PageResult<&[u8]> {
         Ok(self.bytes_for(self.fields.value_range.clone()))
     }
 }
 
 impl CellMut<'_, Leaf> {
     /// Returns the byte key stored in this leaf cell.
-    pub fn key(&self) -> PageResult<&[u8]> {
+    pub(crate) fn key(&self) -> PageResult<&[u8]> {
         Ok(&self.bytes[self.fields.key_range.clone()])
     }
 
     /// Returns the byte value stored in this leaf cell.
-    pub fn value(&self) -> PageResult<&[u8]> {
+    pub(crate) fn value(&self) -> PageResult<&[u8]> {
         Ok(&self.bytes[self.fields.value_range.clone()])
     }
 
     /// Returns the byte value stored in this leaf cell mutably.
-    pub fn value_mut(&mut self) -> PageResult<&mut [u8]> {
+    pub(crate) fn value_mut(&mut self) -> PageResult<&mut [u8]> {
         let range = self.fields.value_range.clone();
         Ok(&mut self.bytes[range])
     }
@@ -130,29 +130,29 @@ impl CellMut<'_, Leaf> {
 
 impl Cell<'_, Interior> {
     /// Returns the separator key stored in this interior cell.
-    pub fn key(&self) -> PageResult<&[u8]> {
+    pub(crate) fn key(&self) -> PageResult<&[u8]> {
         Ok(&self.bytes[self.fields.key_range.clone()])
     }
 
     /// Returns the left-child page id referenced by this interior cell.
-    pub fn left_child(&self) -> PageResult<PageId> {
+    pub(crate) fn left_child(&self) -> PageResult<PageId> {
         Ok(self.fields.left_child)
     }
 }
 
 impl CellMut<'_, Interior> {
     /// Returns the separator key stored in this interior cell.
-    pub fn key(&self) -> PageResult<&[u8]> {
+    pub(crate) fn key(&self) -> PageResult<&[u8]> {
         Ok(&self.bytes[self.fields.key_range.clone()])
     }
 
     /// Returns the left-child page id referenced by this interior cell.
-    pub fn left_child(&self) -> PageResult<PageId> {
+    pub(crate) fn left_child(&self) -> PageResult<PageId> {
         Ok(self.fields.left_child)
     }
 
     /// Updates the left-child page id stored in this interior cell.
-    pub fn set_left_child(&mut self, page_id: PageId) -> PageResult<()> {
+    pub(crate) fn set_left_child(&mut self, page_id: PageId) -> PageResult<()> {
         interior::write_left_child(self.bytes, page_id);
         self.fields.left_child = page_id;
         Ok(())
