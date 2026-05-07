@@ -2169,10 +2169,11 @@ impl<S: PageStore> TreeCursor<S> {
         };
 
         if has_capacity {
-            let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
-            let slot_index = self.insert_leaf_payload_at(&mut page, slot_index, key, value)?;
-            self.set_positioned_state(leaf_page_id, slot_index);
-            drop(page);
+            {
+                let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
+                let slot_index = self.insert_leaf_payload_at(&mut page, slot_index, key, value)?;
+                self.set_positioned_state(leaf_page_id, slot_index);
+            }
             drop(leaf_guard);
             drop(leaf_pin_guard);
             self.refresh_subtree_separators()?;
@@ -2204,10 +2205,11 @@ impl<S: PageStore> TreeCursor<S> {
         };
 
         if has_capacity {
-            let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
-            let slot_index = self.update_leaf_payload_at(&mut page, slot_index, key, value)?;
-            self.set_positioned_state(leaf_page_id, slot_index);
-            drop(page);
+            {
+                let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
+                let slot_index = self.update_leaf_payload_at(&mut page, slot_index, key, value)?;
+                self.set_positioned_state(leaf_page_id, slot_index);
+            }
             drop(leaf_guard);
             drop(leaf_pin_guard);
             self.refresh_path_separators(&tree_path)?;
