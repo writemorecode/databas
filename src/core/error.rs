@@ -186,6 +186,22 @@ pub(crate) enum PageCacheError {
 
 pub(crate) type PageCacheResult<T> = Result<T, PageCacheError>;
 
+#[derive(Debug, Error)]
+pub enum TupleAllocationError {
+    #[error("failed to allocate {value_count} tuple value slots: {source}")]
+    Values {
+        value_count: usize,
+        #[source]
+        source: TryReserveError,
+    },
+    #[error("failed to allocate {byte_count} tuple string bytes: {source}")]
+    StringBytes {
+        byte_count: usize,
+        #[source]
+        source: TryReserveError,
+    },
+}
+
 impl From<DiskManagerError> for StorageError {
     fn from(err: DiskManagerError) -> Self {
         match err {

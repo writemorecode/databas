@@ -1,0 +1,766 @@
+use std::{
+    io::{self, Read, Write},
+    ops::Range,
+};
+
+use crate::core::error::TupleAllocationError;
+
+const TAG_STRING: u8 = 0x01;
+const TAG_BOOLEAN: u8 = 0x02;
+const TAG_INTEGER: u8 = 0x03;
+const TAG_FLOAT: u8 = 0x04;
+
+const BOOL_LENGTH: u32 = 1;
+const I32_LENGTH: u32 = size_of::<i32>() as u32;
+const F32_LENGTH: u32 = size_of::<f32>() as u32;
+
+/// A single typed value stored in a [`Tuple`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    String(String),
+    Boolean(bool),
+    Integer(i32),
+    Float(f32),
+}
+
+/// A borrowed typed value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ValueRef<'a> {
+    String(&'a str),
+    Boolean(bool),
+    Integer(i32),
+    Float(f32),
+}
+
+/// An ordered list of typed storage values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tuple(Vec<Value>);
+
+/// A borrowed ordered list of typed values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TupleRef<'a> {
+    values: &'a [ValueRef<'a>],
+}
+
+/// A validated zero-copy view over count-prefixed TLV tuple bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedTupleView<'a> {
+    bytes: &'a [u8],
+    values: Vec<ValueField>,
+}
+
+/// A validated zero-copy view over count-prefixed TLV tuple bytes.
+pub type TupleView<'a> = EncodedTupleView<'a>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValueField {
+    tag: u8,
+    value_range: Range<usize>,
+}
+
+impl Tuple {
+    /// Creates a tuple from ordered values.
+    pub fn new(values: Vec<Value>) -> Self {
+        Self(values)
+    }
+
+    /// Returns the values in tuple order.
+    pub fn values(&self) -> &[Value] {
+        &self.0
+    }
+
+    /// Consumes the tuple and returns its values.
+    pub fn into_values(self) -> Vec<Value> {
+        self.0
+    }
+
+    /// Returns the number of values in the tuple.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns true when the tuple contains no values.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Appends a value to the tuple.
+    pub fn push(&mut self, value: Value) {
+        self.0.push(value);
+    }
+
+    /// Returns this tuple's values as borrowed values.
+    pub fn value_refs(&self) -> impl Iterator<Item = ValueRef<'_>> {
+        self.0.iter().map(ValueRef::from)
+    }
+
+    /// Serializes this tuple to `writer` using count-prefixed TLV encoding.
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        write_values(writer, self.0.iter().map(ValueRef::from))
+    }
+
+    /// Deserializes one count-prefixed TLV tuple from `reader`.
+    pub fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
+        let value_count = read_u32(reader)?;
+        let mut values = Vec::new();
+        values.try_reserve_exact(value_count as usize).map_err(|source| {
+            io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                TupleAllocationError::Values { value_count: value_count as usize, source },
+            )
+        })?;
+
+        for _ in 0..value_count {
+            let tag = read_u8(reader)?;
+            let len = read_u32(reader)?;
+            values.push(read_value(reader, tag, len)?);
+        }
+
+        Ok(Self(values))
+    }
+
+    /// Deserializes one count-prefixed TLV tuple from `bytes`.
+    pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
+        EncodedTupleView::parse(bytes).map(|view| view.to_owned_tuple())
+    }
+
+    /// Serializes this tuple into a byte vector.
+    pub fn to_bytes(&self) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.write_to(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+impl<'a> ValueRef<'a> {
+    /// Serializes this value as a single TLV item without a tuple count prefix.
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        write_value_ref(writer, *self)
+    }
+}
+
+impl<'a> TupleRef<'a> {
+    /// Creates a borrowed tuple from an ordered slice of borrowed values.
+    pub fn new(values: &'a [ValueRef<'a>]) -> Self {
+        Self { values }
+    }
+
+    /// Returns the values in tuple order.
+    pub fn values(&self) -> &'a [ValueRef<'a>] {
+        self.values
+    }
+
+    /// Returns the number of values in the tuple.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Returns true when the tuple contains no values.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Serializes this tuple to `writer` using count-prefixed TLV encoding.
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        write_values(writer, self.values.iter().copied())
+    }
+
+    /// Serializes this tuple into a byte vector.
+    pub fn to_bytes(&self) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.write_to(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+impl<'a> EncodedTupleView<'a> {
+    /// Validates `bytes` as one count-prefixed TLV tuple and returns a zero-copy view.
+    pub fn parse(bytes: &'a [u8]) -> io::Result<Self> {
+        let (value_count, mut offset) = read_u32_from_slice(bytes, 0)?;
+        let mut values = Vec::new();
+        values.try_reserve_exact(value_count as usize).map_err(|source| {
+            io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                TupleAllocationError::Values { value_count: value_count as usize, source },
+            )
+        })?;
+
+        for _ in 0..value_count {
+            let (tag, next_offset) = read_u8_from_slice(bytes, offset)?;
+            let (len, value_offset) = read_u32_from_slice(bytes, next_offset)?;
+            let value_len = usize::try_from(len).map_err(invalid_data)?;
+            let value_end = value_offset.checked_add(value_len).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "tuple value length overflows usize")
+            })?;
+            let payload = bytes.get(value_offset..value_end).ok_or_else(unexpected_eof)?;
+
+            validate_value_payload(tag, payload)?;
+            values.push(ValueField { tag, value_range: value_offset..value_end });
+            offset = value_end;
+        }
+
+        if offset != bytes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "trailing bytes after tuple payload",
+            ));
+        }
+
+        Ok(Self { bytes, values })
+    }
+
+    /// Returns the number of values in the tuple.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Returns true when the tuple contains no values.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Returns an iterator over borrowed values in tuple order.
+    pub fn values(&self) -> impl Iterator<Item = ValueRef<'a>> + '_ {
+        self.values.iter().map(|field| self.value_ref(field))
+    }
+
+    /// Returns the original encoded tuple bytes.
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Copies this encoded tuple view into an owned tuple.
+    pub fn to_owned_tuple(&self) -> Tuple {
+        self.values().map(Value::from).collect()
+    }
+
+    fn value_ref(&self, field: &ValueField) -> ValueRef<'a> {
+        value_ref_from_field(self.bytes, field)
+    }
+}
+
+fn value_ref_from_field<'a>(bytes: &'a [u8], field: &ValueField) -> ValueRef<'a> {
+    let payload = &bytes[field.value_range.clone()];
+    match field.tag {
+        TAG_STRING => {
+            ValueRef::String(std::str::from_utf8(payload).expect("validated string payload"))
+        }
+        TAG_BOOLEAN => ValueRef::Boolean(payload[0] == 1),
+        TAG_INTEGER => ValueRef::Integer(i32::from_le_bytes(
+            payload.try_into().expect("validated i32 payload"),
+        )),
+        TAG_FLOAT => {
+            ValueRef::Float(f32::from_le_bytes(payload.try_into().expect("validated f32 payload")))
+        }
+        _ => unreachable!("validated tuple value tag"),
+    }
+}
+
+impl From<Vec<Value>> for Tuple {
+    fn from(values: Vec<Value>) -> Self {
+        Self::new(values)
+    }
+}
+
+impl FromIterator<Value> for Tuple {
+    fn from_iter<T: IntoIterator<Item = Value>>(iter: T) -> Self {
+        Self::new(iter.into_iter().collect())
+    }
+}
+
+impl IntoIterator for Tuple {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Tuple {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a> From<&'a Value> for ValueRef<'a> {
+    fn from(value: &'a Value) -> Self {
+        match value {
+            Value::String(value) => Self::String(value),
+            Value::Boolean(value) => Self::Boolean(*value),
+            Value::Integer(value) => Self::Integer(*value),
+            Value::Float(value) => Self::Float(*value),
+        }
+    }
+}
+
+impl<'a> From<ValueRef<'a>> for Value {
+    fn from(value: ValueRef<'a>) -> Self {
+        match value {
+            ValueRef::String(value) => Self::String(value.to_owned()),
+            ValueRef::Boolean(value) => Self::Boolean(value),
+            ValueRef::Integer(value) => Self::Integer(value),
+            ValueRef::Float(value) => Self::Float(value),
+        }
+    }
+}
+
+impl<'a> IntoIterator for TupleRef<'a> {
+    type Item = ValueRef<'a>;
+    type IntoIter = std::iter::Copied<std::slice::Iter<'a, ValueRef<'a>>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter().copied()
+    }
+}
+
+impl<'a> IntoIterator for &'a TupleRef<'a> {
+    type Item = ValueRef<'a>;
+    type IntoIter = std::iter::Copied<std::slice::Iter<'a, ValueRef<'a>>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter().copied()
+    }
+}
+
+impl<'a> IntoIterator for &'a EncodedTupleView<'a> {
+    type Item = ValueRef<'a>;
+    type IntoIter = EncodedTupleViewIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        EncodedTupleViewIter { bytes: self.bytes, fields: self.values.iter() }
+    }
+}
+
+/// Iterator over an [`EncodedTupleView`].
+pub struct EncodedTupleViewIter<'a> {
+    bytes: &'a [u8],
+    fields: std::slice::Iter<'a, ValueField>,
+}
+
+impl<'a> Iterator for EncodedTupleViewIter<'a> {
+    type Item = ValueRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.fields.next().map(|field| value_ref_from_field(self.bytes, field))
+    }
+}
+
+fn write_values<'a, W, I>(writer: &mut W, values: I) -> io::Result<()>
+where
+    W: Write,
+    I: IntoIterator<Item = ValueRef<'a>>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let values = values.into_iter();
+    let value_count = u32::try_from(values.len()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "tuple value count exceeds u32::MAX")
+    })?;
+    writer.write_all(&value_count.to_le_bytes())?;
+
+    for value in values {
+        write_value_ref(writer, value)?;
+    }
+
+    Ok(())
+}
+
+fn write_value_ref<W: Write>(writer: &mut W, value: ValueRef<'_>) -> io::Result<()> {
+    match value {
+        ValueRef::String(value) => {
+            let len = u32::try_from(value.len()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "string length exceeds u32::MAX")
+            })?;
+            write_tlv_header(writer, TAG_STRING, len)?;
+            writer.write_all(value.as_bytes())
+        }
+        ValueRef::Boolean(value) => {
+            write_tlv_header(writer, TAG_BOOLEAN, BOOL_LENGTH)?;
+            writer.write_all(&[value as u8])
+        }
+        ValueRef::Integer(value) => {
+            write_tlv_header(writer, TAG_INTEGER, I32_LENGTH)?;
+            writer.write_all(&value.to_le_bytes())
+        }
+        ValueRef::Float(value) => {
+            write_tlv_header(writer, TAG_FLOAT, F32_LENGTH)?;
+            writer.write_all(&value.to_le_bytes())
+        }
+    }
+}
+
+fn write_tlv_header<W: Write>(writer: &mut W, tag: u8, len: u32) -> io::Result<()> {
+    writer.write_all(&[tag])?;
+    writer.write_all(&len.to_le_bytes())
+}
+
+fn read_value<R: Read>(reader: &mut R, tag: u8, len: u32) -> io::Result<Value> {
+    match tag {
+        TAG_STRING => {
+            let mut bytes = Vec::new();
+            bytes.try_reserve_exact(len as usize).map_err(|source| {
+                io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    TupleAllocationError::StringBytes { byte_count: len as usize, source },
+                )
+            })?;
+            bytes.resize(len as usize, 0);
+            reader.read_exact(&mut bytes)?;
+            String::from_utf8(bytes).map(Value::String).map_err(invalid_data)
+        }
+        TAG_BOOLEAN => {
+            validate_len(tag, len, BOOL_LENGTH)?;
+            match read_u8(reader)? {
+                0 => Ok(Value::Boolean(false)),
+                1 => Ok(Value::Boolean(true)),
+                actual => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid boolean value: {actual}"),
+                )),
+            }
+        }
+        TAG_INTEGER => {
+            validate_len(tag, len, I32_LENGTH)?;
+            let mut bytes = [0; size_of::<i32>()];
+            reader.read_exact(&mut bytes)?;
+            Ok(Value::Integer(i32::from_le_bytes(bytes)))
+        }
+        TAG_FLOAT => {
+            validate_len(tag, len, F32_LENGTH)?;
+            let mut bytes = [0; size_of::<f32>()];
+            reader.read_exact(&mut bytes)?;
+            Ok(Value::Float(f32::from_le_bytes(bytes)))
+        }
+        actual => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unknown tuple value tag: {actual}"),
+        )),
+    }
+}
+
+fn validate_value_payload(tag: u8, payload: &[u8]) -> io::Result<()> {
+    match tag {
+        TAG_STRING => {
+            std::str::from_utf8(payload).map_err(invalid_data)?;
+            Ok(())
+        }
+        TAG_BOOLEAN => {
+            validate_len(tag, payload.len() as u32, BOOL_LENGTH)?;
+            match payload[0] {
+                0 | 1 => Ok(()),
+                actual => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid boolean value: {actual}"),
+                )),
+            }
+        }
+        TAG_INTEGER => validate_len(tag, payload.len() as u32, I32_LENGTH),
+        TAG_FLOAT => validate_len(tag, payload.len() as u32, F32_LENGTH),
+        actual => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unknown tuple value tag: {actual}"),
+        )),
+    }
+}
+
+fn validate_len(tag: u8, actual: u32, expected: u32) -> io::Result<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid length {actual} for tuple value tag {tag}; expected {expected}"),
+        ))
+    }
+}
+
+fn read_u8<R: Read>(reader: &mut R) -> io::Result<u8> {
+    let mut bytes = [0];
+    reader.read_exact(&mut bytes)?;
+    Ok(bytes[0])
+}
+
+fn read_u32<R: Read>(reader: &mut R) -> io::Result<u32> {
+    let mut bytes = [0; size_of::<u32>()];
+    reader.read_exact(&mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn invalid_data(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+fn read_u8_from_slice(bytes: &[u8], offset: usize) -> io::Result<(u8, usize)> {
+    let value = *bytes.get(offset).ok_or_else(unexpected_eof)?;
+    Ok((value, offset + 1))
+}
+
+fn read_u32_from_slice(bytes: &[u8], offset: usize) -> io::Result<(u32, usize)> {
+    let end = offset
+        .checked_add(size_of::<u32>())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "offset overflows usize"))?;
+    let value = bytes.get(offset..end).ok_or_else(unexpected_eof)?;
+    Ok((u32::from_le_bytes(value.try_into().expect("u32 slice has fixed width")), end))
+}
+
+fn unexpected_eof() -> io::Error {
+    io::Error::new(io::ErrorKind::UnexpectedEof, "truncated tuple payload")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    fn read(bytes: &[u8]) -> io::Result<Tuple> {
+        Tuple::read_from(&mut Cursor::new(bytes))
+    }
+
+    #[test]
+    fn mixed_tuple_round_trips() {
+        let tuple = Tuple::new(vec![
+            Value::String("hello".to_owned()),
+            Value::Boolean(true),
+            Value::Integer(-42),
+            Value::Float(3.25),
+        ]);
+
+        let bytes = tuple.to_bytes().unwrap();
+        assert_eq!(read(&bytes).unwrap(), tuple);
+    }
+
+    #[test]
+    fn owned_tuple_reads_from_bytes() {
+        let tuple = Tuple::new(vec![Value::Integer(7), Value::String("seven".to_owned())]);
+
+        assert_eq!(Tuple::from_bytes(&tuple.to_bytes().unwrap()).unwrap(), tuple);
+    }
+
+    #[test]
+    fn owned_tuple_rejects_trailing_bytes() {
+        let tuple = Tuple::new(vec![Value::Integer(1)]);
+        let mut bytes = tuple.to_bytes().unwrap();
+        bytes.push(0);
+
+        let error = Tuple::from_bytes(&bytes).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn empty_tuple_round_trips() {
+        let tuple = Tuple::new(vec![]);
+
+        let bytes = tuple.to_bytes().unwrap();
+        assert_eq!(bytes, 0u32.to_le_bytes());
+        assert_eq!(read(&bytes).unwrap(), tuple);
+    }
+
+    #[test]
+    fn preserves_order_and_duplicates() {
+        let tuple = Tuple::new(vec![
+            Value::Integer(7),
+            Value::String("same".to_owned()),
+            Value::Integer(7),
+            Value::String("same".to_owned()),
+        ]);
+
+        assert_eq!(read(&tuple.to_bytes().unwrap()).unwrap(), tuple);
+    }
+
+    #[test]
+    fn writes_expected_bytes_for_small_tuple() {
+        let tuple = Tuple::new(vec![Value::Boolean(false), Value::Integer(258)]);
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&2u32.to_le_bytes());
+        expected.push(TAG_BOOLEAN);
+        expected.extend_from_slice(&1u32.to_le_bytes());
+        expected.push(0);
+        expected.push(TAG_INTEGER);
+        expected.extend_from_slice(&4u32.to_le_bytes());
+        expected.extend_from_slice(&258i32.to_le_bytes());
+
+        assert_eq!(tuple.to_bytes().unwrap(), expected);
+    }
+
+    #[test]
+    fn rejects_unknown_type_tag() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(0xff);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        let error = read(&bytes).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_invalid_fixed_lengths() {
+        for tag in [TAG_BOOLEAN, TAG_INTEGER, TAG_FLOAT] {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+            bytes.push(tag);
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+
+            let error = read(&bytes).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_boolean_byte() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(TAG_BOOLEAN);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(2);
+
+        let error = read(&bytes).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_string() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(TAG_STRING);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(0xff);
+
+        let error = read(&bytes).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_truncated_stream() {
+        let tuple = Tuple::new(vec![Value::String("abc".to_owned())]);
+        let bytes = tuple.to_bytes().unwrap();
+
+        let error = read(&bytes[..bytes.len() - 1]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn value_refs_iterate_owned_tuple_without_allocating_values() {
+        let tuple = Tuple::new(vec![Value::String("hello".to_owned()), Value::Boolean(false)]);
+
+        let values: Vec<_> = tuple.value_refs().collect();
+
+        assert_eq!(values, vec![ValueRef::String("hello"), ValueRef::Boolean(false)]);
+    }
+
+    #[test]
+    fn tuple_ref_serializes_like_owned_tuple() {
+        let borrowed_values = [
+            ValueRef::String("hello"),
+            ValueRef::Boolean(true),
+            ValueRef::Integer(-42),
+            ValueRef::Float(3.25),
+        ];
+        let tuple_ref = TupleRef::new(&borrowed_values);
+        let owned_tuple = Tuple::new(borrowed_values.into_iter().map(Value::from).collect());
+
+        assert_eq!(tuple_ref.len(), 4);
+        assert!(!tuple_ref.is_empty());
+        assert_eq!(tuple_ref.values(), borrowed_values);
+        assert_eq!(tuple_ref.to_bytes().unwrap(), owned_tuple.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn value_ref_serializes_single_tlv_item() {
+        let mut bytes = Vec::new();
+        ValueRef::Integer(258).write_to(&mut bytes).unwrap();
+
+        let mut expected = Vec::new();
+        expected.push(TAG_INTEGER);
+        expected.extend_from_slice(&4u32.to_le_bytes());
+        expected.extend_from_slice(&258i32.to_le_bytes());
+
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn tuple_view_parses_encoded_bytes_without_owning_values() {
+        let tuple = Tuple::new(vec![
+            Value::String("hello".to_owned()),
+            Value::Boolean(true),
+            Value::Integer(-42),
+            Value::Float(3.25),
+        ]);
+        let bytes = tuple.to_bytes().unwrap();
+
+        let view = TupleView::parse(&bytes).unwrap();
+
+        assert_eq!(view.len(), 4);
+        assert!(!view.is_empty());
+        assert_eq!(view.bytes(), bytes);
+        assert_eq!(view.values().collect::<Vec<_>>(), tuple.value_refs().collect::<Vec<_>>());
+        assert_eq!((&view).into_iter().collect::<Vec<_>>(), tuple.value_refs().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn encoded_tuple_view_copies_to_owned_tuple() {
+        let tuple = Tuple::new(vec![Value::String("abc".to_owned()), Value::Integer(42)]);
+        let bytes = tuple.to_bytes().unwrap();
+        let view = EncodedTupleView::parse(&bytes).unwrap();
+
+        assert_eq!(view.to_owned_tuple(), tuple);
+    }
+
+    #[test]
+    fn tuple_view_rejects_trailing_bytes() {
+        let tuple = Tuple::new(vec![Value::Integer(1)]);
+        let mut bytes = tuple.to_bytes().unwrap();
+        bytes.push(0);
+
+        let error = TupleView::parse(&bytes).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn tuple_view_rejects_invalid_payloads() {
+        let cases = [
+            {
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(&1u32.to_le_bytes());
+                bytes.push(0xff);
+                bytes.extend_from_slice(&0u32.to_le_bytes());
+                bytes
+            },
+            {
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(&1u32.to_le_bytes());
+                bytes.push(TAG_BOOLEAN);
+                bytes.extend_from_slice(&1u32.to_le_bytes());
+                bytes.push(2);
+                bytes
+            },
+            {
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(&1u32.to_le_bytes());
+                bytes.push(TAG_STRING);
+                bytes.extend_from_slice(&1u32.to_le_bytes());
+                bytes.push(0xff);
+                bytes
+            },
+        ];
+
+        for bytes in cases {
+            let error = TupleView::parse(&bytes).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    #[test]
+    fn tuple_view_rejects_truncated_payload() {
+        let tuple = Tuple::new(vec![Value::String("abc".to_owned())]);
+        let bytes = tuple.to_bytes().unwrap();
+
+        let error = TupleView::parse(&bytes[..bytes.len() - 1]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+}

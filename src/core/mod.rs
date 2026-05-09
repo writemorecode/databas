@@ -9,6 +9,7 @@ pub(crate) mod page_cache;
 pub(crate) mod page_replacement;
 pub(crate) mod page_store;
 pub mod pager;
+pub mod tuple;
 
 pub use btree::{CursorState, OwnedRecord, Record, RecordView, TreeCursor};
 pub use cursor::{
@@ -16,6 +17,7 @@ pub use cursor::{
 };
 pub use page_store::PageStore;
 pub use pager::{Pager, PagerOptions};
+pub use tuple::{EncodedTupleView, Tuple, TupleRef, TupleView, Value, ValueRef};
 
 pub(crate) const PAGE_SIZE: usize = 4096;
 

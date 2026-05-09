@@ -1,4 +1,4 @@
-use databas::core::Pager;
+use databas::core::{EncodedTupleView, Pager, Tuple, TupleRef, Value, ValueRef};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_file = tempfile::NamedTempFile::new()?;
@@ -8,10 +8,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut users_by_email = pager.create_index()?;
 
     let row_id = 1;
+    let tuple_row_id = 1;
     let email = b"ada@example.test";
-    let encoded_user = b"id=1;name=Ada Lovelace;email=ada@example.test";
+    let user_values = [
+        ValueRef::Integer(tuple_row_id),
+        ValueRef::String("Ada Lovelace"),
+        ValueRef::String("ada@example.test"),
+    ];
+    let user_tuple = TupleRef::new(&user_values);
+    let encoded_user = user_tuple.to_bytes()?;
 
-    users.insert(row_id, encoded_user)?;
+    users.insert(row_id, &encoded_user)?;
     users_by_email.insert(email, row_id)?;
 
     let index_entry =
@@ -22,13 +29,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(index_entry.row_id(), row_id);
     assert_eq!(user.row_id(), row_id);
-    assert_eq!(user.with_record(|record| record == encoded_user)?, true);
+    let decoded_user = user.with_record(Tuple::from_bytes)??;
+    assert_eq!(decoded_user, Tuple::new(user_values.into_iter().map(Value::from).collect()));
 
-    println!(
-        "found row {} via email index: {}",
-        user.row_id(),
-        user.with_record(|record| String::from_utf8_lossy(record).into_owned())?
-    );
+    user.with_record(|record| {
+        let tuple = EncodedTupleView::parse(record)?;
+        assert_eq!(
+            tuple.values().collect::<Vec<_>>(),
+            vec![
+                ValueRef::Integer(tuple_row_id),
+                ValueRef::String("Ada Lovelace"),
+                ValueRef::String("ada@example.test"),
+            ]
+        );
+
+        println!(
+            "found row {} via email index: {:?}",
+            user.row_id(),
+            tuple.values().collect::<Vec<_>>()
+        );
+
+        Ok::<(), std::io::Error>(())
+    })??;
 
     Ok(())
 }
