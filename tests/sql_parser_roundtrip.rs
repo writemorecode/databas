@@ -32,15 +32,20 @@ fn draw_i32(tc: &TestCase) -> i32 {
 }
 
 fn draw_atom(tc: &TestCase, allow_wildcard: bool) -> String {
-    let variant_count = if allow_wildcard { 4 } else { 3 };
+    let variant_count = if allow_wildcard { 5 } else { 4 };
     match draw_index(tc, variant_count) {
         0 => draw_identifier(tc).to_string(),
         1 => draw_i32(tc).to_string(),
-        2 => {
+        2 => format!(
+            "{}.{}",
+            draw_u32(tc),
+            tc.draw(gs::integers::<u32>().min_value(0).max_value(99))
+        ),
+        3 => {
             let lit = STRING_LITERALS[draw_index(tc, STRING_LITERALS.len())];
             format!("'{lit}'")
         }
-        3 => "*".to_string(),
+        4 => "*".to_string(),
         _ => unreachable!(),
     }
 }
@@ -189,7 +194,6 @@ fn parenthesized_expression_display_loses_grouping() {
 }
 
 #[test]
-#[ignore = "documents a parser/display round-trip bug; do not fix yet"]
 fn float_literals_with_zero_fraction_display_as_integers() {
     let sql = "SELECT 0.0;";
     let parsed = parse_statement(sql);
