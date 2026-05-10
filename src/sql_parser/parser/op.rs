@@ -33,7 +33,7 @@ impl<'a> TryFrom<Token<'a>> for Op {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum Op {
     And,
     Or,

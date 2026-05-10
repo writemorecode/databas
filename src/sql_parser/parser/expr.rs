@@ -56,14 +56,62 @@ impl From<bool> for Expression<'_> {
 
 impl Display for Expression<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.fmt_with_parent_op(f, None, ChildSide::Left)
+    }
+}
+
+#[derive(Copy, Clone)]
+enum ChildSide {
+    Left,
+    Right,
+}
+
+impl Expression<'_> {
+    fn fmt_with_parent_op(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        parent_op: Option<Op>,
+        side: ChildSide,
+    ) -> std::fmt::Result {
+        let needs_parens = match (self, parent_op) {
+            (Expression::BinaryOp((_, child_op, _)), Some(parent_op)) => {
+                let child_bp = child_op.infix_binding_power().map(|(l_bp, _)| l_bp).unwrap_or(0);
+                let parent_bp = parent_op.infix_binding_power().map(|(l_bp, _)| l_bp).unwrap_or(0);
+
+                child_bp < parent_bp || matches!(side, ChildSide::Right) && child_bp == parent_bp
+            }
+            _ => false,
+        };
+
+        if needs_parens {
+            write!(f, "(")?;
+        }
+
         match self {
             Expression::Literal(literal) => write!(f, "{}", literal),
             Expression::Identifier(ident) => write!(f, "{}", ident),
-            Expression::UnaryOp((op, expr)) => write!(f, "{}{}", op, expr),
-            Expression::BinaryOp((left, op, right)) => write!(f, "{} {} {}", left, op, right),
+            Expression::UnaryOp((op, expr)) => {
+                write!(f, "{}", op)?;
+                if matches!(**expr, Expression::BinaryOp(_)) {
+                    write!(f, "({})", expr)
+                } else {
+                    write!(f, "{}", expr)
+                }
+            }
+            Expression::BinaryOp((left, op, right)) => {
+                left.fmt_with_parent_op(f, Some(*op), ChildSide::Left)?;
+                write!(f, " {} ", op)?;
+                right.fmt_with_parent_op(f, Some(*op), ChildSide::Right)
+            }
             Expression::Wildcard => write!(f, "*"),
             Expression::AggregateFunction(agg) => write!(f, "{}", agg),
+        }?;
+
+        if needs_parens {
+            write!(f, ")")?;
         }
+
+        Ok(())
     }
 }
 

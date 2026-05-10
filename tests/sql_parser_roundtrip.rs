@@ -179,7 +179,6 @@ fn create_table_queries_round_trip_through_display(tc: TestCase) {
 }
 
 #[test]
-#[ignore = "documents a parser/display round-trip bug; do not fix yet"]
 fn parenthesized_expression_display_loses_grouping() {
     let sql = "SELECT (alpha + beta) * gamma;";
     let parsed = parse_statement(sql);
