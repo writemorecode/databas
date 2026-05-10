@@ -183,6 +183,7 @@ impl Display for NumberKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NumberKind::Integer(value) => write!(f, "{}", value),
+            NumberKind::Float(value) if value.fract() == 0.0 => write!(f, "{value:.1}"),
             NumberKind::Float(value) => write!(f, "{}", value),
         }
     }
