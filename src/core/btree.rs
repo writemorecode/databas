@@ -11,7 +11,8 @@ use crate::core::{
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
     overflow,
     page::{
-        self, BoundResult, PageError, RawInterior, RawLeaf, Read, SearchResult, Write,
+        self, BoundResult, Interior, Leaf, PageError, RawInterior, RawLeaf, Read, SearchResult,
+        Write,
         format::{
             INTERIOR_CELL_PREFIX_SIZE, KIND_OFFSET, LEAF_CELL_PREFIX_SIZE,
             MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, NO_OVERFLOW_PAGE_ID, OVERFLOW_NEXT_PAGE_ID_SIZE,
@@ -170,7 +171,7 @@ impl<S: PageStore> Record<S> {
         let pin = page_cache.fetch_page(page_id)?;
         let (key_len, value_len, first_overflow_page_id, inline_range) = {
             let page = pin.read()?;
-            let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+            let leaf = page.open::<Leaf>()?;
             leaf.cell_payload_parts(slot_index)?
         };
 
@@ -578,7 +579,7 @@ fn read_leaf_cell<S: PageStore>(
     let pin = page_cache.fetch_page(page_id)?;
     let payload = {
         let page = pin.read()?;
-        let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+        let leaf = page.open::<Leaf>()?;
         let (key_len, value_len, first_overflow_page_id, inline_range) =
             leaf.cell_payload_parts(slot_index)?;
         let mut payload = materialize_payload(
@@ -606,7 +607,7 @@ fn read_interior_cell<S: PageStore>(
     let pin = page_cache.fetch_page(page_id)?;
     let (left_child, key) = {
         let page = pin.read()?;
-        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        let interior = page.open::<Interior>()?;
         let (left_child, key_len, first_overflow_page_id, inline_range) =
             interior.cell_payload_parts(slot_index)?;
         let key = materialize_payload(
@@ -775,14 +776,14 @@ impl<S: PageStore> TreeCursor<S> {
     fn raw_leaf_slot_count(&self, page_id: PageId) -> StorageResult<u16> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
-        let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+        let leaf = page.open::<Leaf>()?;
         Ok(leaf.slot_count())
     }
 
     fn raw_interior_slot_count(&self, page_id: PageId) -> StorageResult<u16> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
-        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        let interior = page.open::<Interior>()?;
         Ok(interior.slot_count())
     }
 
@@ -795,7 +796,7 @@ impl<S: PageStore> TreeCursor<S> {
         let (inline_key_len, first_overflow_page_id, key_len) = {
             let pin = self.page_cache.fetch_page(page_id)?;
             let page = pin.read()?;
-            let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+            let leaf = page.open::<Leaf>()?;
             let (key_len, _, first_overflow_page_id, inline_range) =
                 leaf.cell_payload_parts(slot_index)?;
             let inline_key_len = key_len.min(inline_range.len());
@@ -825,7 +826,7 @@ impl<S: PageStore> TreeCursor<S> {
         let (inline_key_len, first_overflow_page_id, key_len) = {
             let pin = self.page_cache.fetch_page(page_id)?;
             let page = pin.read()?;
-            let interior = RawInterior::<Read<'_>>::open(page.page())?;
+            let interior = page.open::<Interior>()?;
             let (_, key_len, first_overflow_page_id, inline_range) =
                 interior.cell_payload_parts(slot_index)?;
             let inline_key_len = key_len.min(inline_range.len());
@@ -849,7 +850,7 @@ impl<S: PageStore> TreeCursor<S> {
     fn read_interior_left_child(&self, page_id: PageId, slot_index: u16) -> StorageResult<PageId> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
-        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        let interior = page.open::<Interior>()?;
         let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
         Ok(left_child)
     }
@@ -910,7 +911,7 @@ impl<S: PageStore> TreeCursor<S> {
             BoundResult::PastEnd => {
                 let pin = self.page_cache.fetch_page(page_id)?;
                 let page = pin.read()?;
-                let interior = RawInterior::<Read<'_>>::open(page.page())?;
+                let interior = page.open::<Interior>()?;
                 Ok(interior.rightmost_child())
             }
         }
@@ -926,11 +927,11 @@ impl<S: PageStore> TreeCursor<S> {
                 let page = pin.read()?;
                 match read_page_kind(page.page(), page_id)? {
                     PageKind::RawLeaf => {
-                        let _ = RawLeaf::<Read<'_>>::open(page.page())?;
+                        let _ = page.open::<Leaf>()?;
                         return Ok(page_id);
                     }
                     PageKind::RawInterior => {
-                        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+                        let interior = page.open::<Interior>()?;
                         if interior.slot_count() == 0 {
                             interior.rightmost_child()
                         } else {
@@ -953,11 +954,11 @@ impl<S: PageStore> TreeCursor<S> {
                 let page = pin.read()?;
                 match read_page_kind(page.page(), page_id)? {
                     PageKind::RawLeaf => {
-                        let _ = RawLeaf::<Read<'_>>::open(page.page())?;
+                        let _ = page.open::<Leaf>()?;
                         return Ok(page_id);
                     }
                     PageKind::RawInterior => {
-                        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+                        let interior = page.open::<Interior>()?;
                         interior.rightmost_child()
                     }
                 }
@@ -976,7 +977,7 @@ impl<S: PageStore> TreeCursor<S> {
                 let page = pin.read()?;
                 match read_page_kind(page.page(), page_id)? {
                     PageKind::RawLeaf => {
-                        let _ = RawLeaf::<Read<'_>>::open(page.page())?;
+                        let _ = page.open::<Leaf>()?;
                         return Ok(page_id);
                     }
                     PageKind::RawInterior => {
@@ -1001,7 +1002,7 @@ impl<S: PageStore> TreeCursor<S> {
                 let page = pin.read()?;
                 match read_page_kind(page.page(), page_id)? {
                     PageKind::RawLeaf => {
-                        let _ = RawLeaf::<Read<'_>>::open(page.page())?;
+                        let _ = page.open::<Leaf>()?;
                         return Ok((page_id, path));
                     }
                     PageKind::RawInterior => {
@@ -1024,7 +1025,7 @@ impl<S: PageStore> TreeCursor<S> {
                                 });
                                 let pin = self.page_cache.fetch_page(page_id)?;
                                 let page = pin.read()?;
-                                let interior = RawInterior::<Read<'_>>::open(page.page())?;
+                                let interior = page.open::<Interior>()?;
                                 interior.rightmost_child()
                             }
                         }
@@ -1049,7 +1050,7 @@ impl<S: PageStore> TreeCursor<S> {
             let seek = {
                 let page = pin.read()?;
                 expect_page_kind(page.page(), page_id, PageKind::RawLeaf, "raw leaf")?;
-                let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+                let leaf = page.open::<Leaf>()?;
                 direction.edge_seek(&leaf)
             };
 
@@ -1080,7 +1081,7 @@ impl<S: PageStore> TreeCursor<S> {
                 let seek = {
                     let page = pin.read()?;
                     expect_page_kind(page.page(), page_id, PageKind::RawLeaf, "raw leaf")?;
-                    let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+                    let leaf = page.open::<Leaf>()?;
                     direction.adjacent_seek(&leaf, slot_index)
                 };
 
@@ -1281,7 +1282,7 @@ impl<S: PageStore> TreeCursor<S> {
     ) -> StorageResult<(Option<PageId>, Option<PageId>)> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
-        let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+        let leaf = page.open::<Leaf>()?;
         Ok((leaf.prev_page_id(), leaf.next_page_id()))
     }
 
@@ -1292,7 +1293,7 @@ impl<S: PageStore> TreeCursor<S> {
     ) -> StorageResult<(Option<PageId>, Option<PageId>)> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
-        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        let interior = page.open::<Interior>()?;
         Ok((interior.prev_page_id(), interior.next_page_id()))
     }
 
@@ -1321,7 +1322,7 @@ impl<S: PageStore> TreeCursor<S> {
     fn read_interior_child_page_ids(&self, page_id: PageId) -> StorageResult<Vec<PageId>> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
-        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        let interior = page.open::<Interior>()?;
         let mut children = Vec::with_capacity(interior.slot_count() as usize + 1);
         for slot_index in 0..interior.slot_count() {
             let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
@@ -1340,7 +1341,7 @@ impl<S: PageStore> TreeCursor<S> {
     ) -> StorageResult<bool> {
         let pin = self.page_cache.fetch_page(parent_page_id)?;
         let page = pin.read()?;
-        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        let interior = page.open::<Interior>()?;
         for slot_index in 0..interior.slot_count() {
             let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
             if left_child == child_page_id {
@@ -1362,7 +1363,7 @@ impl<S: PageStore> TreeCursor<S> {
                     return self.read_leaf_max_key(page_id);
                 }
                 PageKind::RawInterior => {
-                    let interior = RawInterior::<Read<'_>>::open(page.page())?;
+                    let interior = page.open::<Interior>()?;
                     interior.rightmost_child()
                 }
             }
@@ -1392,7 +1393,7 @@ impl<S: PageStore> TreeCursor<S> {
     ) -> StorageResult<usize> {
         let pin = self.page_cache.fetch_page(parent_page_id)?;
         let page = pin.read()?;
-        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        let interior = page.open::<Interior>()?;
         for slot_index in 0..interior.slot_count() {
             let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
             if left_child == child_page_id {
@@ -1530,7 +1531,7 @@ impl<S: PageStore> TreeCursor<S> {
     fn leaf_page_underoccupied(&self, page_id: PageId) -> StorageResult<bool> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
-        let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+        let leaf = page.open::<Leaf>()?;
         Ok(leaf.is_underoccupied()?)
     }
 
@@ -1538,7 +1539,7 @@ impl<S: PageStore> TreeCursor<S> {
     fn interior_page_underoccupied(&self, page_id: PageId) -> StorageResult<bool> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
-        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+        let interior = page.open::<Interior>()?;
         Ok(interior.is_underoccupied()?)
     }
 
@@ -1683,7 +1684,7 @@ impl<S: PageStore> TreeCursor<S> {
     ) -> StorageResult<()> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let mut guard = pin.write()?;
-        let mut leaf = RawLeaf::<Write<'_>>::open(guard.page_mut())?;
+        let mut leaf = guard.open_mut::<Leaf>()?;
         leaf.set_prev_page_id(prev_page_id);
         Ok(())
     }
@@ -1696,7 +1697,7 @@ impl<S: PageStore> TreeCursor<S> {
     ) -> StorageResult<()> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let mut guard = pin.write()?;
-        let mut interior = RawInterior::<Write<'_>>::open(guard.page_mut())?;
+        let mut interior = guard.open_mut::<Interior>()?;
         interior.set_prev_page_id(prev_page_id);
         Ok(())
     }
@@ -2007,7 +2008,7 @@ impl<S: PageStore> TreeCursor<S> {
             match read_page_kind(page.page(), root_page_id)? {
                 PageKind::RawLeaf => return Ok(()),
                 PageKind::RawInterior => {
-                    let interior = RawInterior::<Read<'_>>::open(page.page())?;
+                    let interior = page.open::<Interior>()?;
                     if interior.slot_count() > 0 {
                         return Ok(());
                     }
@@ -2163,14 +2164,14 @@ impl<S: PageStore> TreeCursor<S> {
         let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
         let mut leaf_guard = leaf_pin_guard.write()?;
         let has_capacity = {
-            let page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
+            let page = leaf_guard.open::<Leaf>()?;
             let needed = self.leaf_cell_local_size(key, value)? + page::format::SLOT_ENTRY_SIZE;
             page.total_reclaimable_space()? >= needed
         };
 
         if has_capacity {
             {
-                let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
+                let mut page = leaf_guard.open_mut::<Leaf>()?;
                 let slot_index = self.insert_leaf_payload_at(&mut page, slot_index, key, value)?;
                 self.set_positioned_state(leaf_page_id, slot_index);
             }
@@ -2198,7 +2199,7 @@ impl<S: PageStore> TreeCursor<S> {
         let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
         let mut leaf_guard = leaf_pin_guard.write()?;
         let has_capacity = {
-            let page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
+            let page = leaf_guard.open::<Leaf>()?;
             let old_len = page.cell_len(slot_index)?;
             let needed = self.leaf_cell_local_size(key, value)?;
             page.total_reclaimable_space()? + old_len >= needed
@@ -2206,7 +2207,7 @@ impl<S: PageStore> TreeCursor<S> {
 
         if has_capacity {
             {
-                let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
+                let mut page = leaf_guard.open_mut::<Leaf>()?;
                 let slot_index = self.update_leaf_payload_at(&mut page, slot_index, key, value)?;
                 self.set_positioned_state(leaf_page_id, slot_index);
             }
@@ -2230,7 +2231,7 @@ impl<S: PageStore> TreeCursor<S> {
         {
             let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
             let mut leaf_guard = leaf_pin_guard.write()?;
-            let mut page = RawLeaf::<Write<'_>>::open(leaf_guard.page_mut())?;
+            let mut page = leaf_guard.open_mut::<Leaf>()?;
             page.delete(key)?;
         }
 
@@ -2248,7 +2249,7 @@ impl<S: PageStore> TreeCursor<S> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let seek = {
             let page = pin.read()?;
-            let leaf = RawLeaf::<Read<'_>>::open(page.page())?;
+            let leaf = page.open::<Leaf>()?;
             let bound = self.lower_bound_leaf_slot(page_id, key)?;
             match bound {
                 BoundResult::At(slot_index) => LeafSeek::Positioned(slot_index),
@@ -2366,14 +2367,14 @@ impl<S: PageStore> TreeCursor<S> {
         let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
         let mut interior_guard = interior_page_guard.write()?;
         let has_capacity = {
-            let page = RawInterior::<Write<'_>>::open(interior_guard.page_mut())?;
+            let page = interior_guard.open::<Interior>()?;
             let needed =
                 self.interior_cell_local_size(&pending.separator)? + page::format::SLOT_ENTRY_SIZE;
             page.total_reclaimable_space()? >= needed
         };
 
         if has_capacity {
-            let mut interior_page = RawInterior::<Write<'_>>::open(interior_guard.page_mut())?;
+            let mut interior_page = interior_guard.open_mut::<Interior>()?;
             let inserted_slot_index = self.insert_interior_payload_at(
                 &mut interior_page,
                 insert_slot_index,
@@ -2505,7 +2506,7 @@ impl<S: PageStore> TreeCursor<S> {
         if let Some(next_page_id) = next_page_id {
             let next_page_guard = self.page_cache.fetch_page(next_page_id)?;
             let mut next_guard = next_page_guard.write()?;
-            let mut next_page = RawLeaf::<Write<'_>>::open(next_guard.page_mut())?;
+            let mut next_page = next_guard.open_mut::<Leaf>()?;
             next_page.set_prev_page_id(Some(right_page_id));
         }
 
@@ -2629,7 +2630,7 @@ impl<S: PageStore> TreeCursor<S> {
         if let Some(next_page_id) = next_page_id {
             let next_page_guard = self.page_cache.fetch_page(next_page_id)?;
             let mut next_guard = next_page_guard.write()?;
-            let mut next_page = RawInterior::<Write<'_>>::open(next_guard.page_mut())?;
+            let mut next_page = next_guard.open_mut::<Interior>()?;
             next_page.set_prev_page_id(Some(right_page_id));
         }
 
@@ -2678,10 +2679,10 @@ pub(crate) fn validate_root_page(
     let page = pin.read()?;
     match read_page_kind(page.page(), root_page_id)? {
         PageKind::RawLeaf => {
-            let _ = RawLeaf::<Read<'_>>::open(page.page())?;
+            let _ = page.open::<Leaf>()?;
         }
         PageKind::RawInterior => {
-            let _ = RawInterior::<Read<'_>>::open(page.page())?;
+            let _ = page.open::<Interior>()?;
         }
     }
     Ok(())
@@ -2789,11 +2790,11 @@ mod tests {
                 let page = pin.read()?;
                 match read_page_kind(page.page(), page_id)? {
                     PageKind::RawLeaf => {
-                        let _ = RawLeaf::<Read<'_>>::open(page.page())?;
+                        let _ = page.open::<Leaf>()?;
                         return Ok(height);
                     }
                     PageKind::RawInterior => {
-                        let interior = RawInterior::<Read<'_>>::open(page.page())?;
+                        let interior = page.open::<Interior>()?;
                         if interior.slot_count() == 0 {
                             interior.rightmost_child()
                         } else {
