@@ -88,6 +88,29 @@ fn assert_round_trips(sql: &str) {
     assert_eq!(parsed, reparsed, "SQL did not round-trip: {sql}\ndisplayed as: {displayed}");
 }
 
+fn parse_statements(sql: &str) -> Vec<Statement<'_>> {
+    Parser::new(sql)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|err| panic!("failed to parse `{sql}`: {err:?}"))
+}
+
+fn assert_statements_round_trip(sql: &str) {
+    let parsed = parse_statements(sql);
+    let displayed = parsed.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    let reparsed = parse_statements(&displayed);
+
+    assert_eq!(parsed, reparsed, "SQL did not round-trip: {sql}\ndisplayed as: {displayed}");
+}
+
+fn draw_statement(tc: &TestCase) -> String {
+    match draw_index(tc, 3) {
+        0 => draw_insert(tc),
+        1 => draw_select(tc),
+        2 => draw_create_table(tc),
+        _ => unreachable!(),
+    }
+}
+
 fn draw_insert(tc: &TestCase) -> String {
     let table = draw_identifier(tc);
     let column_count = draw_non_empty_len(tc, 4);
@@ -181,6 +204,14 @@ fn create_table_queries_round_trip_through_display(tc: TestCase) {
     let sql = draw_create_table(&tc);
     tc.note(&sql);
     assert_round_trips(&sql);
+}
+
+#[hegel::test(test_cases = 250)]
+fn multiple_queries_round_trip_through_display(tc: TestCase) {
+    let sql =
+        (0..draw_non_empty_len(&tc, 8)).map(|_| draw_statement(&tc)).collect::<Vec<_>>().join("\n");
+    tc.note(&sql);
+    assert_statements_round_trip(&sql);
 }
 
 #[test]
