@@ -167,6 +167,7 @@ impl<S: PageStore> PageCache<S> {
     /// Flushes one resident page if dirty.
     ///
     /// Non-resident pages are a no-op. Pinned pages return `PinnedPage`.
+    #[cfg(test)]
     pub(crate) fn flush_page(&self, page_id: PageId) -> PageCacheResult<()> {
         let Some(frame_id) = self.resident_frame_id(page_id)? else {
             return Ok(());
@@ -310,6 +311,7 @@ impl<S: PageStore> PinGuard<S> {
     }
 
     /// Returns the page ID associated with this pin.
+    #[cfg(test)]
     pub(crate) fn page_id(&self) -> PageId {
         self.page_id
     }
