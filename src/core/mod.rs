@@ -2,6 +2,7 @@ pub mod btree;
 pub mod cursor;
 pub mod disk_manager;
 pub mod error;
+#[cfg(test)]
 pub(crate) mod memory_page_store;
 pub(crate) mod overflow;
 pub(crate) mod page;
