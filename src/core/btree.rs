@@ -3078,7 +3078,7 @@ mod tests {
             let mut guard = pin.write().unwrap();
             let mut interior =
                 RawInterior::<Write<'_>>::initialize_with_rightmost(guard.page_mut(), 2);
-            interior.insert(b"stable", 0).unwrap();
+            interior.insert_payload_at(0, 0, b"stable".len(), None, b"stable").unwrap();
         }
         drop(pin);
 

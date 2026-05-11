@@ -36,90 +36,33 @@ mod tests {
     use crate::core::PAGE_SIZE;
 
     #[test]
-    fn leaf_insert_can_be_read_with_lookup() {
-        // Verifies that inserting one leaf cell makes it readable by key lookup.
+    fn leaf_insert_payload_can_be_read() {
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
 
-        page.insert(b"alpha", b"value").unwrap();
+        page.insert_payload_at(0, 5, 5, None, b"alphavalue").unwrap();
 
-        let cell = page.lookup(b"alpha").unwrap().unwrap();
-        assert_eq!(cell.key().unwrap(), b"alpha");
-        assert_eq!(cell.value().unwrap(), b"value");
-    }
-
-    #[test]
-    fn leaf_lookup_reads_inserted_cells_by_key() {
-        // Verifies that leaf lookup returns each inserted cell by its key.
-        let mut bytes = [0; PAGE_SIZE];
-        let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
-
-        page.insert(b"bravo", b"two").unwrap();
-        page.insert(b"alpha", b"one").unwrap();
-        page.insert(b"charlie", b"three").unwrap();
-
-        assert_eq!(page.lookup(b"alpha").unwrap().unwrap().value().unwrap(), b"one");
-        assert_eq!(page.lookup(b"bravo").unwrap().unwrap().value().unwrap(), b"two");
-        assert_eq!(page.lookup(b"charlie").unwrap().unwrap().value().unwrap(), b"three");
-    }
-
-    #[test]
-    fn leaf_cell_mut_replaces_value_for_existing_key() {
-        // Verifies that mutating a leaf cell value updates the value found by lookup.
-        let mut bytes = [0; PAGE_SIZE];
-        let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
-
-        page.insert(b"alpha", b"old").unwrap();
-        let slot_index = match page.search(b"alpha").unwrap() {
-            SearchResult::Found(slot_index) => slot_index,
-            SearchResult::InsertAt(_) => panic!("expected inserted key to be found"),
-        };
-        let mut cell = page.cell_mut(slot_index).unwrap();
-        cell.value_mut().unwrap().copy_from_slice(b"new");
-
-        let cell = page.lookup(b"alpha").unwrap().unwrap();
-        assert_eq!(cell.key().unwrap(), b"alpha");
-        assert_eq!(cell.value().unwrap(), b"new");
+        let (key_len, value_len, overflow_page, payload_range) =
+            page.cell_payload_parts(0).unwrap();
+        assert_eq!(key_len, 5);
+        assert_eq!(value_len, 5);
+        assert_eq!(overflow_page, None);
+        assert_eq!(&page.bytes()[payload_range], b"alphavalue");
     }
 
     #[test]
     fn leaf_delete_removes_existing_key() {
-        // Verifies that deleting a leaf cell removes it from key lookup.
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
 
-        page.insert(b"alpha", b"value").unwrap();
+        page.insert_payload_at(0, 5, 5, None, b"alphavalue").unwrap();
         page.delete(b"alpha").unwrap();
 
-        assert!(page.lookup(b"alpha").unwrap().is_none());
-    }
-
-    #[test]
-    fn leaf_insert_rejects_duplicate_key() {
-        // Verifies that inserting an existing leaf key returns a duplicate-key error.
-        let mut bytes = [0; PAGE_SIZE];
-        let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
-
-        page.insert(b"alpha", b"first").unwrap();
-        let result = page.insert(b"alpha", b"second");
-
-        assert!(matches!(result, Err(PageError::DuplicateKey)));
-    }
-
-    #[test]
-    fn leaf_cell_mut_rejects_missing_slot() {
-        // Verifies that opening a mutable view for a missing leaf slot fails.
-        let mut bytes = [0; PAGE_SIZE];
-        let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
-
-        let result = page.cell_mut(0);
-
-        assert!(matches!(result, Err(PageError::InvalidSlotIndex { .. })));
+        assert!(matches!(page.search(b"alpha").unwrap(), SearchResult::InsertAt(0)));
     }
 
     #[test]
     fn leaf_delete_rejects_missing_key() {
-        // Verifies that deleting a missing leaf key returns a key-not-found error.
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
 
@@ -129,15 +72,18 @@ mod tests {
     }
 
     #[test]
-    fn leaf_insert_returns_page_full_when_free_space_runs_out() {
-        // Verifies that inserting page-sized cumulative data fails with page-full.
+    fn leaf_insert_payload_returns_page_full_when_free_space_runs_out() {
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
         let value = [7; 512];
 
         for index in 0_u16..20 {
             let key = index.to_be_bytes();
-            if let Err(error) = page.insert(&key, &value) {
+            let mut payload = Vec::from(key);
+            payload.extend_from_slice(&value);
+            if let Err(error) =
+                page.insert_payload_at(index, key.len(), value.len(), None, &payload)
+            {
                 assert!(matches!(error, PageError::PageFull { .. }));
                 return;
             }
@@ -147,64 +93,42 @@ mod tests {
     }
 
     #[test]
-    fn leaf_insert_rejects_oversized_cell() {
-        // Verifies that a single oversized leaf cell is rejected instead of using overflow pages.
+    fn leaf_insert_payload_rejects_oversized_cell() {
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
-        let value = vec![7; PAGE_SIZE];
 
-        let result = page.insert(b"alpha", &value);
+        let result = page.insert_payload_at(0, 1, u16::MAX as usize, None, b"");
 
         assert!(matches!(result, Err(PageError::CellTooLarge { .. })));
     }
 
     #[test]
-    fn interior_insert_can_be_read_with_lookup() {
-        // Verifies that inserting one interior cell makes it readable by key lookup.
+    fn interior_insert_payload_can_be_read() {
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Interior>::init(&mut bytes, 99);
 
-        page.insert(b"middle", 7).unwrap();
+        page.insert_payload_at(0, 7, b"middle".len(), None, b"middle").unwrap();
 
-        let cell = page.lookup(b"middle").unwrap().unwrap();
-        assert_eq!(cell.key().unwrap(), b"middle");
+        let cell = page.cell(0).unwrap();
         assert_eq!(cell.left_child().unwrap(), 7);
     }
 
     #[test]
     fn interior_cell_mut_replaces_left_child_for_existing_key() {
-        // Verifies that mutating an interior cell updates the child found by lookup.
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Interior>::init(&mut bytes, 99);
 
-        page.insert(b"middle", 7).unwrap();
-        let slot_index = match page.search(b"middle").unwrap() {
-            SearchResult::Found(slot_index) => slot_index,
-            SearchResult::InsertAt(_) => panic!("expected inserted key to be found"),
-        };
+        page.insert_payload_at(0, 7, b"middle".len(), None, b"middle").unwrap();
+        let slot_index = 0;
         let mut cell = page.cell_mut(slot_index).unwrap();
         cell.set_left_child(11).unwrap();
 
-        let cell = page.lookup(b"middle").unwrap().unwrap();
-        assert_eq!(cell.key().unwrap(), b"middle");
+        let cell = page.cell(slot_index).unwrap();
         assert_eq!(cell.left_child().unwrap(), 11);
     }
 
     #[test]
-    fn interior_insert_rejects_duplicate_key() {
-        // Verifies that inserting an existing interior key returns a duplicate-key error.
-        let mut bytes = [0; PAGE_SIZE];
-        let mut page = Page::<Write<'_>, Interior>::init(&mut bytes, 99);
-
-        page.insert(b"middle", 7).unwrap();
-        let result = page.insert(b"middle", 11);
-
-        assert!(matches!(result, Err(PageError::DuplicateKey)));
-    }
-
-    #[test]
     fn interior_cell_mut_rejects_missing_slot() {
-        // Verifies that opening a mutable view for a missing interior slot fails.
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Interior>::init(&mut bytes, 99);
 
@@ -214,13 +138,11 @@ mod tests {
     }
 
     #[test]
-    fn interior_insert_rejects_oversized_cell() {
-        // Verifies that a single oversized interior cell is rejected instead of using overflow pages.
+    fn interior_insert_payload_rejects_oversized_cell() {
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Interior>::init(&mut bytes, 99);
-        let key = [7; PAGE_SIZE];
 
-        let result = page.insert(&key, 7);
+        let result = page.insert_payload_at(0, 7, u16::MAX as usize + 1, None, b"");
 
         assert!(matches!(result, Err(PageError::CellTooLarge { .. })));
     }

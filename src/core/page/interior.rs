@@ -5,7 +5,7 @@ use crate::core::{PAGE_SIZE, PageId, SlotId};
 use super::{
     CellCorruption, PageError, PageResult,
     cell::{Cell, CellMut},
-    core::{Interior, Page, PageAccess, PageAccessMut, SearchResult},
+    core::{Interior, Page, PageAccess, PageAccessMut},
     format::{
         self, CELL_LENGTH_SIZE, CELL_OVERFLOW_PAGE_ID_SIZE, INTERIOR_CELL_PREFIX_SIZE,
         MIN_INLINE_OVERFLOW_PAYLOAD_BYTES, RIGHTMOST_CHILD_OFFSET, USABLE_SPACE_END,
@@ -23,7 +23,6 @@ pub(crate) struct InteriorCellParts {
     pub(crate) first_overflow_page_id: Option<PageId>,
     pub(crate) inline_payload_range: Range<usize>,
     pub(crate) left_child: PageId,
-    pub(crate) key_range: Range<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,10 +76,7 @@ where
     let payload_len = format::read_u16(page.bytes(), cell_offset) as usize;
     let first_overflow_page_id =
         format::read_optional_u64(page.bytes(), cell_offset + FIRST_OVERFLOW_PAGE_ID_OFFSET);
-    let key_len = format::read_u16(page.bytes(), cell_offset + KEY_LENGTH_OFFSET) as usize;
     let inline_payload_len = cell_len - INTERIOR_CELL_PREFIX_SIZE;
-    let key_start = INTERIOR_CELL_PREFIX_SIZE;
-    let key_end = key_start + key_len.min(inline_payload_len);
 
     Ok(ParsedInteriorCell {
         cell_offset,
@@ -91,26 +87,8 @@ where
             inline_payload_range: INTERIOR_CELL_PREFIX_SIZE
                 ..INTERIOR_CELL_PREFIX_SIZE + inline_payload_len,
             left_child: format::read_u64(page.bytes(), cell_offset + LEFT_CHILD_OFFSET),
-            key_range: key_start..key_end,
         },
     })
-}
-
-fn encoded_len(key_len: usize) -> PageResult<usize> {
-    let len = INTERIOR_CELL_PREFIX_SIZE + key_len;
-    if key_len > u16::MAX as usize || len > u16::MAX as usize {
-        return Err(PageError::CellTooLarge { len, max: u16::MAX as usize });
-    }
-    Ok(len)
-}
-
-fn write_cell(bytes: &mut [u8; PAGE_SIZE], cell_offset: usize, left_child: PageId, key: &[u8]) {
-    let cell_len = INTERIOR_CELL_PREFIX_SIZE + key.len();
-    format::write_u16(bytes, cell_offset, key.len() as u16);
-    format::write_optional_u64(bytes, cell_offset + FIRST_OVERFLOW_PAGE_ID_OFFSET, None);
-    write_left_child(&mut bytes[cell_offset..cell_offset + cell_len], left_child);
-    format::write_u16(bytes, cell_offset + KEY_LENGTH_OFFSET, key.len() as u16);
-    bytes[cell_offset + INTERIOR_CELL_PREFIX_SIZE..cell_offset + cell_len].copy_from_slice(key);
 }
 
 pub(crate) fn write_cell_with_payload(
@@ -139,20 +117,6 @@ pub(crate) fn write_left_child(bytes: &mut [u8], page_id: PageId) {
         .copy_from_slice(&page_id.to_le_bytes());
 }
 
-fn compare_key<A>(
-    page: &Page<A, Interior>,
-    slot_index: SlotId,
-    key: &[u8],
-) -> PageResult<std::cmp::Ordering>
-where
-    A: PageAccess,
-{
-    let parsed = cell_parts(page, slot_index)?;
-    let cell_offset = parsed.cell_offset;
-    let key_range = parsed.parts.key_range;
-    Ok(page.bytes()[cell_offset + key_range.start..cell_offset + key_range.end].cmp(key))
-}
-
 impl<A> Page<A, Interior>
 where
     A: PageAccess,
@@ -160,11 +124,6 @@ where
     /// Returns the page id stored in the rightmost-child header field.
     pub(crate) fn rightmost_child(&self) -> PageId {
         format::read_u64(self.bytes(), RIGHTMOST_CHILD_OFFSET)
-    }
-
-    /// Searches the interior page for `key`.
-    pub(crate) fn search(&self, key: &[u8]) -> PageResult<SearchResult> {
-        self.search_slots_by(|page, slot_index| compare_key(page, slot_index, key))
     }
 
     /// Returns a typed immutable view of the cell at `slot_index`.
@@ -190,14 +149,6 @@ where
             inline_payload_range,
         ))
     }
-
-    /// Looks up a separator key and returns its cell if present.
-    pub(crate) fn lookup(&self, key: &[u8]) -> PageResult<Option<Cell<'_, Interior>>> {
-        match self.search(key)? {
-            SearchResult::Found(slot_index) => self.cell(slot_index).map(Some),
-            SearchResult::InsertAt(_) => Ok(None),
-        }
-    }
 }
 
 impl<A> Page<A, Interior>
@@ -215,20 +166,6 @@ where
         let cell_bytes =
             &mut self.bytes_mut()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
         Ok(CellMut::new_interior(cell_bytes, parsed.parts))
-    }
-
-    /// Inserts a new separator key and its left-child pointer while preserving slot order.
-    pub(crate) fn insert(&mut self, key: &[u8], left_child: PageId) -> PageResult<SlotId> {
-        let cell_len = encoded_len(key.len())?;
-        let slot_index = match self.search(key)? {
-            SearchResult::Found(_) => return Err(PageError::DuplicateKey),
-            SearchResult::InsertAt(slot_index) => slot_index,
-        };
-
-        let cell_offset = self.reserve_space_for_insert(cell_len)?;
-        write_cell(self.bytes_mut(), cell_offset as usize, left_child, key);
-        self.insert_slot(slot_index, cell_offset)?;
-        Ok(slot_index)
     }
 
     /// Inserts an interior cell whose separator key may continue in an overflow chain.

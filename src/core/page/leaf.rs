@@ -4,7 +4,6 @@ use crate::core::{PAGE_SIZE, PageId, SlotId};
 
 use super::{
     CellCorruption, PageError, PageResult,
-    cell::{Cell, CellMut},
     core::{Leaf, Page, PageAccess, PageAccessMut, SearchResult},
     format::{
         self, CELL_LENGTH_SIZE, CELL_OVERFLOW_PAGE_ID_SIZE, LEAF_CELL_PREFIX_SIZE,
@@ -23,13 +22,11 @@ pub(crate) struct LeafCellParts {
     pub(crate) first_overflow_page_id: Option<PageId>,
     pub(crate) inline_payload_range: Range<usize>,
     pub(crate) key_range: Range<usize>,
-    pub(crate) value_range: Range<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedLeafCell {
     pub(crate) cell_offset: usize,
-    pub(crate) cell_len: usize,
     pub(crate) parts: LeafCellParts,
 }
 
@@ -78,45 +75,17 @@ where
     let key_len = format::read_u16(page.bytes(), cell_offset + KEY_LENGTH_OFFSET) as usize;
     let inline_payload_len = cell_len - LEAF_CELL_PREFIX_SIZE;
     let key_start = LEAF_CELL_PREFIX_SIZE;
-    let value_start = key_start + key_len.min(inline_payload_len);
-    let value_end = LEAF_CELL_PREFIX_SIZE + inline_payload_len;
+    let key_end = key_start + key_len.min(inline_payload_len);
 
     Ok(ParsedLeafCell {
         cell_offset,
-        cell_len,
         parts: LeafCellParts {
             payload_len,
             first_overflow_page_id,
             inline_payload_range: LEAF_CELL_PREFIX_SIZE..LEAF_CELL_PREFIX_SIZE + inline_payload_len,
-            key_range: key_start..value_start,
-            value_range: value_start..value_end,
+            key_range: key_start..key_end,
         },
     })
-}
-
-fn encoded_len(key_len: usize, value_len: usize) -> PageResult<usize> {
-    let payload_len = key_len + value_len;
-    let len = LEAF_CELL_PREFIX_SIZE + payload_len;
-    if key_len > u16::MAX as usize || value_len > u16::MAX as usize {
-        return Err(PageError::CellTooLarge { len, max: u16::MAX as usize });
-    }
-    if len > u16::MAX as usize {
-        return Err(PageError::CellTooLarge { len, max: u16::MAX as usize });
-    }
-    Ok(len)
-}
-
-fn write_cell(bytes: &mut [u8; PAGE_SIZE], cell_offset: usize, key: &[u8], value: &[u8]) {
-    let payload_len = key.len() + value.len();
-    format::write_u16(bytes, cell_offset, payload_len as u16);
-    format::write_optional_u64(bytes, cell_offset + FIRST_OVERFLOW_PAGE_ID_OFFSET, None);
-    format::write_u16(bytes, cell_offset + KEY_LENGTH_OFFSET, key.len() as u16);
-    format::write_u16(bytes, cell_offset + VALUE_LENGTH_OFFSET, value.len() as u16);
-    let key_start = cell_offset + LEAF_CELL_PREFIX_SIZE;
-    let value_start = key_start + key.len();
-    let value_end = value_start + value.len();
-    bytes[key_start..value_start].copy_from_slice(key);
-    bytes[value_start..value_end].copy_from_slice(value);
 }
 
 pub(crate) fn write_cell_with_payload(
@@ -190,13 +159,6 @@ where
         self.search_slots_by(|page, slot_index| compare_key(page, slot_index, key))
     }
 
-    /// Returns a typed immutable view of the cell at `slot_index`.
-    pub(crate) fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Leaf>> {
-        let parsed = cell_parts(self, slot_index)?;
-        let cell_bytes = &self.bytes()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
-        Ok(Cell::new_leaf(cell_bytes, parsed.parts))
-    }
-
     /// Returns full payload metadata and the page-relative inline payload range for one cell.
     pub(crate) fn cell_payload_parts(
         &self,
@@ -211,42 +173,12 @@ where
         let value_len = parsed.parts.payload_len - key_len;
         Ok((key_len, value_len, parsed.parts.first_overflow_page_id, inline_payload_range))
     }
-
-    /// Looks up a key and returns its cell if present.
-    pub(crate) fn lookup(&self, key: &[u8]) -> PageResult<Option<Cell<'_, Leaf>>> {
-        match self.search(key)? {
-            SearchResult::Found(slot_index) => self.cell(slot_index).map(Some),
-            SearchResult::InsertAt(_) => Ok(None),
-        }
-    }
 }
 
 impl<A> Page<A, Leaf>
 where
     A: PageAccessMut,
 {
-    /// Returns a typed mutable view of the cell at `slot_index`.
-    pub(crate) fn cell_mut(&mut self, slot_index: SlotId) -> PageResult<CellMut<'_, Leaf>> {
-        let parsed = cell_parts(self, slot_index)?;
-        let cell_bytes =
-            &mut self.bytes_mut()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
-        Ok(CellMut::new_leaf(cell_bytes, parsed.parts))
-    }
-
-    /// Inserts a new `(key, value)` cell while preserving key order.
-    pub(crate) fn insert(&mut self, key: &[u8], value: &[u8]) -> PageResult<SlotId> {
-        let cell_len = encoded_len(key.len(), value.len())?;
-        let slot_index = match self.search(key)? {
-            SearchResult::Found(_) => return Err(PageError::DuplicateKey),
-            SearchResult::InsertAt(slot_index) => slot_index,
-        };
-
-        let cell_offset = self.reserve_space_for_insert(cell_len)?;
-        write_cell(self.bytes_mut(), cell_offset as usize, key, value);
-        self.insert_slot(slot_index, cell_offset)?;
-        Ok(slot_index)
-    }
-
     /// Inserts a leaf cell whose logical payload may continue in an overflow chain.
     pub(crate) fn insert_payload_at(
         &mut self,
@@ -350,7 +282,9 @@ mod test {
 
         const N: usize = USABLE_SPACE_END / 5;
         let (k, v) = ([1_u8; N], [2_u8; N]);
-        page.insert(&k, &v).unwrap();
+        let mut payload = Vec::from(k);
+        payload.extend_from_slice(&v);
+        page.insert_payload_at(0, k.len(), v.len(), None, &payload).unwrap();
 
         assert!(
             page.is_underoccupied().unwrap(),
@@ -358,7 +292,9 @@ mod test {
         );
 
         let (k, v) = ([3_u8; N], [4_u8; N]);
-        page.insert(&k, &v).unwrap();
+        let mut payload = Vec::from(k);
+        payload.extend_from_slice(&v);
+        page.insert_payload_at(1, k.len(), v.len(), None, &payload).unwrap();
 
         assert!(
             !page.is_underoccupied().unwrap(),
