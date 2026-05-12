@@ -103,10 +103,11 @@ fn assert_statements_round_trip(sql: &str) {
 }
 
 fn draw_statement(tc: &TestCase) -> String {
-    match draw_index(tc, 3) {
+    match draw_index(tc, 4) {
         0 => draw_insert(tc),
         1 => draw_select(tc),
         2 => draw_create_table(tc),
+        3 => draw_create_index(tc),
         _ => unreachable!(),
     }
 }
@@ -185,6 +186,14 @@ fn draw_create_table(tc: &TestCase) -> String {
     format!("CREATE TABLE {table} ({});", columns.join(", "))
 }
 
+fn draw_create_index(tc: &TestCase) -> String {
+    let index = draw_identifier(tc);
+    let table = draw_identifier(tc);
+    let columns = (0..draw_non_empty_len(tc, 5)).map(|_| draw_identifier(tc)).collect::<Vec<_>>();
+
+    format!("CREATE INDEX {index} ON {table} ({});", columns.join(", "))
+}
+
 #[hegel::test(test_cases = 250)]
 fn insert_queries_round_trip_through_display(tc: TestCase) {
     let sql = draw_insert(&tc);
@@ -202,6 +211,13 @@ fn select_queries_round_trip_through_display(tc: TestCase) {
 #[hegel::test(test_cases = 250)]
 fn create_table_queries_round_trip_through_display(tc: TestCase) {
     let sql = draw_create_table(&tc);
+    tc.note(&sql);
+    assert_round_trips(&sql);
+}
+
+#[hegel::test(test_cases = 250)]
+fn create_index_queries_round_trip_through_display(tc: TestCase) {
+    let sql = draw_create_index(&tc);
     tc.note(&sql);
     assert_round_trips(&sql);
 }
