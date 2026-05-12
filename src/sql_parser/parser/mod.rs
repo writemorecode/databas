@@ -122,8 +122,22 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Insert) => {
                 Ok(Statement::Insert(self.parse_insert_query()?))
             }
-            TokenKind::Keyword(Keyword::Create) => {
+            TokenKind::Keyword(Keyword::Create) => self.parse_create_query(),
+            other => Err(SQLError::new(SQLErrorKind::Other(other), token.offset)),
+        }
+    }
+
+    fn parse_create_query(&mut self) -> Result<Statement<'a>, SQLError<'a>> {
+        let token = self
+            .lexer
+            .next()
+            .ok_or(SQLError { kind: SQLErrorKind::UnexpectedEnd, pos: self.lexer.position })??;
+        match token.kind {
+            TokenKind::Keyword(Keyword::Table) => {
                 Ok(Statement::CreateTable(self.parse_create_table_query()?))
+            }
+            TokenKind::Keyword(Keyword::Index) => {
+                Ok(Statement::CreateIndex(self.parse_create_index_query()?))
             }
             other => Err(SQLError::new(SQLErrorKind::Other(other), token.offset)),
         }
