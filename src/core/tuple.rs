@@ -9,27 +9,35 @@ const TAG_STRING: u8 = 0x01;
 const TAG_BOOLEAN: u8 = 0x02;
 const TAG_INTEGER: u8 = 0x03;
 const TAG_FLOAT: u8 = 0x04;
+const TAG_NULL: u8 = 0x05;
+const TAG_UNSIGNED_INTEGER: u8 = 0x06;
 
+const NULL_LENGTH: u32 = 0;
 const BOOL_LENGTH: u32 = 1;
 const I32_LENGTH: u32 = size_of::<i32>() as u32;
 const F32_LENGTH: u32 = size_of::<f32>() as u32;
+const U64_LENGTH: u32 = size_of::<u64>() as u32;
 
 /// A single typed value stored in a [`Tuple`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
+    Null,
     String(String),
     Boolean(bool),
     Integer(i32),
     Float(f32),
+    UnsignedInteger(u64),
 }
 
 /// A borrowed typed value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ValueRef<'a> {
+    Null,
     String(&'a str),
     Boolean(bool),
     Integer(i32),
     Float(f32),
+    UnsignedInteger(u64),
 }
 
 /// An ordered list of typed storage values.
@@ -242,6 +250,7 @@ impl<'a> EncodedTupleView<'a> {
 fn value_ref_from_field<'a>(bytes: &'a [u8], field: &ValueField) -> ValueRef<'a> {
     let payload = &bytes[field.value_range.clone()];
     match field.tag {
+        TAG_NULL => ValueRef::Null,
         TAG_STRING => {
             ValueRef::String(std::str::from_utf8(payload).expect("validated string payload"))
         }
@@ -252,6 +261,9 @@ fn value_ref_from_field<'a>(bytes: &'a [u8], field: &ValueField) -> ValueRef<'a>
         TAG_FLOAT => {
             ValueRef::Float(f32::from_le_bytes(payload.try_into().expect("validated f32 payload")))
         }
+        TAG_UNSIGNED_INTEGER => ValueRef::UnsignedInteger(u64::from_le_bytes(
+            payload.try_into().expect("validated u64 payload"),
+        )),
         _ => unreachable!("validated tuple value tag"),
     }
 }
@@ -289,10 +301,12 @@ impl<'a> IntoIterator for &'a Tuple {
 impl<'a> From<&'a Value> for ValueRef<'a> {
     fn from(value: &'a Value) -> Self {
         match value {
+            Value::Null => Self::Null,
             Value::String(value) => Self::String(value),
             Value::Boolean(value) => Self::Boolean(*value),
             Value::Integer(value) => Self::Integer(*value),
             Value::Float(value) => Self::Float(*value),
+            Value::UnsignedInteger(value) => Self::UnsignedInteger(*value),
         }
     }
 }
@@ -300,10 +314,12 @@ impl<'a> From<&'a Value> for ValueRef<'a> {
 impl<'a> From<ValueRef<'a>> for Value {
     fn from(value: ValueRef<'a>) -> Self {
         match value {
+            ValueRef::Null => Self::Null,
             ValueRef::String(value) => Self::String(value.to_owned()),
             ValueRef::Boolean(value) => Self::Boolean(value),
             ValueRef::Integer(value) => Self::Integer(value),
             ValueRef::Float(value) => Self::Float(value),
+            ValueRef::UnsignedInteger(value) => Self::UnsignedInteger(value),
         }
     }
 }
@@ -370,6 +386,7 @@ where
 
 fn write_value_ref<W: Write>(writer: &mut W, value: ValueRef<'_>) -> io::Result<()> {
     match value {
+        ValueRef::Null => write_tlv_header(writer, TAG_NULL, NULL_LENGTH),
         ValueRef::String(value) => {
             let len = u32::try_from(value.len()).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, "string length exceeds u32::MAX")
@@ -389,6 +406,10 @@ fn write_value_ref<W: Write>(writer: &mut W, value: ValueRef<'_>) -> io::Result<
             write_tlv_header(writer, TAG_FLOAT, F32_LENGTH)?;
             writer.write_all(&value.to_le_bytes())
         }
+        ValueRef::UnsignedInteger(value) => {
+            write_tlv_header(writer, TAG_UNSIGNED_INTEGER, U64_LENGTH)?;
+            writer.write_all(&value.to_le_bytes())
+        }
     }
 }
 
@@ -399,6 +420,10 @@ fn write_tlv_header<W: Write>(writer: &mut W, tag: u8, len: u32) -> io::Result<(
 
 fn read_value<R: Read>(reader: &mut R, tag: u8, len: u32) -> io::Result<Value> {
     match tag {
+        TAG_NULL => {
+            validate_len(tag, len, NULL_LENGTH)?;
+            Ok(Value::Null)
+        }
         TAG_STRING => {
             let mut bytes = Vec::new();
             bytes.try_reserve_exact(len as usize).map_err(|source| {
@@ -434,6 +459,12 @@ fn read_value<R: Read>(reader: &mut R, tag: u8, len: u32) -> io::Result<Value> {
             reader.read_exact(&mut bytes)?;
             Ok(Value::Float(f32::from_le_bytes(bytes)))
         }
+        TAG_UNSIGNED_INTEGER => {
+            validate_len(tag, len, U64_LENGTH)?;
+            let mut bytes = [0; size_of::<u64>()];
+            reader.read_exact(&mut bytes)?;
+            Ok(Value::UnsignedInteger(u64::from_le_bytes(bytes)))
+        }
         actual => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown tuple value tag: {actual}"),
@@ -443,6 +474,7 @@ fn read_value<R: Read>(reader: &mut R, tag: u8, len: u32) -> io::Result<Value> {
 
 fn validate_value_payload(tag: u8, payload: &[u8]) -> io::Result<()> {
     match tag {
+        TAG_NULL => validate_len(tag, payload.len() as u32, NULL_LENGTH),
         TAG_STRING => {
             std::str::from_utf8(payload).map_err(invalid_data)?;
             Ok(())
@@ -459,6 +491,7 @@ fn validate_value_payload(tag: u8, payload: &[u8]) -> io::Result<()> {
         }
         TAG_INTEGER => validate_len(tag, payload.len() as u32, I32_LENGTH),
         TAG_FLOAT => validate_len(tag, payload.len() as u32, F32_LENGTH),
+        TAG_UNSIGNED_INTEGER => validate_len(tag, payload.len() as u32, U64_LENGTH),
         actual => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown tuple value tag: {actual}"),
@@ -523,10 +556,12 @@ mod tests {
     #[test]
     fn mixed_tuple_round_trips() {
         let tuple = Tuple::new(vec![
+            Value::Null,
             Value::String("hello".to_owned()),
             Value::Boolean(true),
             Value::Integer(-42),
             Value::Float(3.25),
+            Value::UnsignedInteger(u64::MAX),
         ]);
 
         let bytes = tuple.to_bytes().unwrap();
@@ -600,11 +635,12 @@ mod tests {
 
     #[test]
     fn rejects_invalid_fixed_lengths() {
-        for tag in [TAG_BOOLEAN, TAG_INTEGER, TAG_FLOAT] {
+        for tag in [TAG_NULL, TAG_BOOLEAN, TAG_INTEGER, TAG_FLOAT, TAG_UNSIGNED_INTEGER] {
             let mut bytes = Vec::new();
             bytes.extend_from_slice(&1u32.to_le_bytes());
             bytes.push(tag);
-            bytes.extend_from_slice(&0u32.to_le_bytes());
+            let invalid_len = if tag == TAG_NULL { 1_u32 } else { 0 };
+            bytes.extend_from_slice(&invalid_len.to_le_bytes());
 
             let error = read(&bytes).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -656,15 +692,17 @@ mod tests {
     #[test]
     fn tuple_ref_serializes_like_owned_tuple() {
         let borrowed_values = [
+            ValueRef::Null,
             ValueRef::String("hello"),
             ValueRef::Boolean(true),
             ValueRef::Integer(-42),
             ValueRef::Float(3.25),
+            ValueRef::UnsignedInteger(u64::MAX),
         ];
         let tuple_ref = TupleRef::new(&borrowed_values);
         let owned_tuple = Tuple::new(borrowed_values.into_iter().map(Value::from).collect());
 
-        assert_eq!(tuple_ref.len(), 4);
+        assert_eq!(tuple_ref.len(), 6);
         assert!(!tuple_ref.is_empty());
         assert_eq!(tuple_ref.values(), borrowed_values);
         assert_eq!(tuple_ref.to_bytes().unwrap(), owned_tuple.to_bytes().unwrap());
@@ -686,16 +724,18 @@ mod tests {
     #[test]
     fn tuple_view_parses_encoded_bytes_without_owning_values() {
         let tuple = Tuple::new(vec![
+            Value::Null,
             Value::String("hello".to_owned()),
             Value::Boolean(true),
             Value::Integer(-42),
             Value::Float(3.25),
+            Value::UnsignedInteger(u64::MAX),
         ]);
         let bytes = tuple.to_bytes().unwrap();
 
         let view = TupleView::parse(&bytes).unwrap();
 
-        assert_eq!(view.len(), 4);
+        assert_eq!(view.len(), 6);
         assert!(!view.is_empty());
         assert_eq!(view.bytes(), bytes);
         assert_eq!(view.values().collect::<Vec<_>>(), tuple.value_refs().collect::<Vec<_>>());
