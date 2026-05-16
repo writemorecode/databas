@@ -1999,7 +1999,7 @@ impl<S: PageStore> TreeCursor<S> {
         Ok(false)
     }
 
-    /// Replaces an empty interior root with its sole child.
+    /// Replaces an empty interior root with its sole child while preserving the root page id.
     fn shrink_root_if_empty(&mut self) -> StorageResult<()> {
         let root_page_id = self.root_page_id();
         let pin = self.page_cache.fetch_page(root_page_id)?;
@@ -2016,8 +2016,37 @@ impl<S: PageStore> TreeCursor<S> {
                 }
             }
         };
-        self.root_page_id.set(child_page_id);
-        self.set_page_state(child_page_id);
+
+        let child_pin = self.page_cache.fetch_page(child_page_id)?;
+        let child_snapshot = {
+            let child_page = child_pin.read()?;
+            *child_page.page()
+        };
+
+        let mut root_guard = pin.write()?;
+        *root_guard.page_mut() = child_snapshot;
+        drop(root_guard);
+
+        self.clear_root_sibling_links(root_page_id)?;
+        self.set_page_state(root_page_id);
+        Ok(())
+    }
+
+    fn clear_root_sibling_links(&self, root_page_id: PageId) -> StorageResult<()> {
+        let pin = self.page_cache.fetch_page(root_page_id)?;
+        let mut guard = pin.write()?;
+        match read_page_kind(guard.page(), root_page_id)? {
+            PageKind::RawLeaf => {
+                let mut leaf = guard.open_mut::<Leaf>()?;
+                leaf.set_prev_page_id(None);
+                leaf.set_next_page_id(None);
+            }
+            PageKind::RawInterior => {
+                let mut interior = guard.open_mut::<Interior>()?;
+                interior.set_prev_page_id(None);
+                interior.set_next_page_id(None);
+            }
+        }
         Ok(())
     }
 
@@ -2641,22 +2670,71 @@ impl<S: PageStore> TreeCursor<S> {
         })
     }
 
-    /// Creates a fresh root page after the old root split.
+    /// Installs a new interior root in the existing root page after the old root split.
     fn install_new_root(&mut self, pending: PendingSplit) -> StorageResult<()> {
-        let (root_page_id, root_page_guard) = self.page_cache.new_page()?;
-        let mut root_guard = root_page_guard.write()?;
+        let root_page_id = self.root_page_id();
+        debug_assert_eq!(
+            pending.left_page_id, root_page_id,
+            "root split must report the old root page as its left page"
+        );
+
+        let root_pin = self.page_cache.fetch_page(root_page_id)?;
+        let root_snapshot = {
+            let root_guard = root_pin.read()?;
+            *root_guard.page()
+        };
+
+        let (left_page_id, left_page_pin) = self.page_cache.new_page()?;
+        {
+            let mut left_guard = left_page_pin.write()?;
+            *left_guard.page_mut() = root_snapshot;
+        }
+        self.relink_copied_root_left_child(left_page_id, pending.right_page_id)?;
+
+        let mut root_guard = root_pin.write()?;
         let mut root_page = RawInterior::<Write<'_>>::initialize_with_rightmost(
             root_guard.page_mut(),
             pending.right_page_id,
         );
-        self.insert_interior_payload_at(
-            &mut root_page,
-            0,
-            pending.left_page_id,
-            &pending.separator,
-        )?;
-        self.root_page_id.set(root_page_id);
+        self.insert_interior_payload_at(&mut root_page, 0, left_page_id, &pending.separator)?;
+        self.remap_positioned_page(root_page_id, left_page_id);
         Ok(())
+    }
+
+    fn relink_copied_root_left_child(
+        &self,
+        left_page_id: PageId,
+        right_page_id: PageId,
+    ) -> StorageResult<()> {
+        let left_pin = self.page_cache.fetch_page(left_page_id)?;
+        let mut left_guard = left_pin.write()?;
+        match read_page_kind(left_guard.page(), left_page_id)? {
+            PageKind::RawLeaf => {
+                {
+                    let mut leaf = left_guard.open_mut::<Leaf>()?;
+                    leaf.set_prev_page_id(None);
+                    leaf.set_next_page_id(Some(right_page_id));
+                }
+                self.set_leaf_prev_page_id(right_page_id, Some(left_page_id))?;
+            }
+            PageKind::RawInterior => {
+                {
+                    let mut interior = left_guard.open_mut::<Interior>()?;
+                    interior.set_prev_page_id(None);
+                    interior.set_next_page_id(Some(right_page_id));
+                }
+                self.set_interior_prev_page_id(right_page_id, Some(left_page_id))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remap_positioned_page(&mut self, from_page_id: PageId, to_page_id: PageId) {
+        if let CursorState::Positioned { page_id, slot_index } = self.state
+            && page_id == from_page_id
+        {
+            self.set_positioned_state(to_page_id, slot_index);
+        }
     }
 }
 
@@ -2807,6 +2885,54 @@ mod tests {
             height += 1;
             page_id = next_page_id;
         }
+    }
+
+    #[test]
+    fn root_page_id_stays_stable_after_root_splits() {
+        let mut cursor = memory_tree_cursor(256);
+        let root_page_id = cursor.root_page_id();
+        let mut expected = BTreeMap::new();
+
+        for index in 0..256_u16 {
+            let key = oversized_key(index);
+            let value = format!("value-{index}").into_bytes();
+            cursor.insert(&key, &value).unwrap();
+            expected.insert(key, value);
+            assert_eq!(cursor.root_page_id(), root_page_id);
+
+            if tree_height(&cursor).unwrap() >= 3 {
+                break;
+            }
+        }
+
+        assert!(tree_height(&cursor).unwrap() >= 3, "test setup should split an interior root");
+        for (key, value) in &expected {
+            let record = cursor.get(key).unwrap().expect("inserted key should be readable");
+            assert_record_matches(&record, key, value);
+        }
+    }
+
+    #[test]
+    fn root_page_id_stays_stable_after_root_shrink() {
+        let mut cursor = memory_tree_cursor(256);
+        let root_page_id = cursor.root_page_id();
+        let mut keys = Vec::new();
+
+        for index in 0..512_u32 {
+            let key = index.to_be_bytes().to_vec();
+            cursor.insert(&key, b"value").unwrap();
+            keys.push(key);
+        }
+        assert!(tree_height(&cursor).unwrap() >= 2, "test setup should split the root");
+
+        for key in keys {
+            cursor.delete(&key).unwrap();
+            assert_eq!(cursor.root_page_id(), root_page_id);
+        }
+
+        assert_eq!(cursor.root_page_id(), root_page_id);
+        assert_eq!(tree_height(&cursor).unwrap(), 1);
+        assert!(!cursor.seek_to_first().unwrap());
     }
 
     #[test]
