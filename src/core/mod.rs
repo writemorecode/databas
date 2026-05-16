@@ -1,4 +1,5 @@
 pub mod btree;
+pub mod catalog;
 pub mod cursor;
 pub mod disk_manager;
 pub mod error;
@@ -13,6 +14,12 @@ pub mod pager;
 pub mod tuple;
 
 pub use btree::{CursorState, OwnedRecord, Record, RecordView, TreeCursor};
+pub use catalog::{
+    CatalogError, CatalogObjectKind, ColumnCatalogRow, ColumnSchema, DataType, IndexCatalogRow,
+    IndexColumnSchema, IndexSchema, SYS_COLUMNS_ROOT_PAGE_ID, SYS_COLUMNS_TABLE_ID,
+    SYS_INDEXES_ROOT_PAGE_ID, SYS_INDEXES_TABLE_ID, SYS_TABLES_ROOT_PAGE_ID, SYS_TABLES_TABLE_ID,
+    TableCatalogRow, TableSchema, TupleSchema,
+};
 pub use cursor::{
     IndexCursor, IndexEntry, IndexEntryRef, TableCursor, TableRecord, TableRecordRef,
 };
