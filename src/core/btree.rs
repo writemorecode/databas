@@ -2984,7 +2984,7 @@ mod tests {
         for (key, value) in &cells {
             assert_eq!(expected.get(key).map(Vec::as_slice), Some(value.as_slice()));
 
-            let record = cursor.get(&key).unwrap().expect("inserted tree key should be present");
+            let record = cursor.get(key).unwrap().expect("inserted tree key should be present");
             assert_record_matches(&record, key, value);
         }
 
