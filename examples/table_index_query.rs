@@ -4,8 +4,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_file = tempfile::NamedTempFile::new()?;
     let pager = Pager::open(db_file.path())?;
 
-    let mut users = pager.create_table()?;
-    let mut users_by_email = pager.create_index()?;
+    let mut users = pager.create_table_tree()?;
+    let mut users_by_email = pager.create_index_tree()?;
 
     let row_id = 1;
     let tuple_row_id = 1;

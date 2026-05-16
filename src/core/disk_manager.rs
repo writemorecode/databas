@@ -39,6 +39,10 @@ impl DiskManager {
         Ok(Self { file, page_count })
     }
 
+    pub(crate) fn page_count(&self) -> u64 {
+        self.page_count
+    }
+
     /// Extends the database file by one page.
     /// Returns page ID of the new page.
     pub(crate) fn new_page(&mut self) -> DiskManagerResult<PageId> {

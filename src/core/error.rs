@@ -35,6 +35,7 @@ pub struct CorruptionError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CorruptionComponent {
+    Catalog,
     DatabaseFile,
     DiskPage,
     OverflowPage,
@@ -88,12 +89,22 @@ pub enum CorruptionKind {
     OverflowChainTooShort { expected: usize, actual: usize },
     #[error("overflow chain has extra pages after {expected} bytes were read")]
     OverflowChainTooLong { expected: usize },
+    #[error("missing system catalog root page {page_id}")]
+    MissingSystemCatalogRoot { page_id: PageId },
+    #[error("unexpected system catalog root page: expected {expected}, got {actual}")]
+    UnexpectedSystemCatalogRoot { expected: PageId, actual: PageId },
+    #[error("invalid catalog row in {table}: {reason}")]
+    InvalidCatalogRow { table: &'static str, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConstraintError {
     #[error("duplicate key")]
     DuplicateKey,
+    #[error("duplicate table name: {name}")]
+    DuplicateTableName { name: String },
+    #[error("duplicate index name: {name}")]
+    DuplicateIndexName { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -102,6 +113,14 @@ pub enum InvalidArgumentError {
     InvalidPageId { page_id: PageId },
     #[error("key not found")]
     KeyNotFound,
+    #[error("table not found: {name}")]
+    TableNotFound { name: String },
+    #[error("index not found: {name}")]
+    IndexNotFound { name: String },
+    #[error("column {column} not found in table {table}")]
+    ColumnNotFound { table: String, column: String },
+    #[error("index column list cannot be empty")]
+    EmptyIndexColumns,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -376,6 +395,7 @@ fn map_cell_corruption(kind: CellCorruption) -> CorruptionKind {
 impl fmt::Display for CorruptionComponent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Catalog => write!(f, "catalog"),
             Self::DatabaseFile => write!(f, "database file"),
             Self::DiskPage => write!(f, "disk page"),
             Self::OverflowPage => write!(f, "overflow page"),
