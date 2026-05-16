@@ -362,13 +362,14 @@ impl Pager {
             return Ok(rows);
         }
 
+        let mut record = cursor
+            .current_owned()?
+            .expect("positioned catalog cursor should have a current record");
         loop {
-            let record = cursor
-                .current_owned()?
-                .expect("positioned catalog cursor should have a current record");
             rows.push(decode_catalog_record(catalog_table_name, record, &decode)?);
-            if cursor.next_owned_record()?.is_none() {
-                break;
+            match cursor.next_owned_record()? {
+                Some(next_record) => record = next_record,
+                None => break,
             }
         }
         Ok(rows)
