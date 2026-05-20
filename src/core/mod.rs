@@ -1,5 +1,6 @@
 pub mod btree;
 pub mod catalog;
+pub mod catalog_manager;
 pub mod cursor;
 pub mod disk_manager;
 pub mod error;
@@ -10,7 +11,7 @@ pub(crate) mod page;
 pub(crate) mod page_cache;
 pub(crate) mod page_replacement;
 pub(crate) mod page_store;
-pub mod pager;
+pub(crate) mod pager;
 pub mod tuple;
 
 pub use btree::{CursorState, OwnedRecord, Record, RecordView, TreeCursor};
@@ -20,11 +21,12 @@ pub use catalog::{
     SYS_INDEXES_ROOT_PAGE_ID, SYS_INDEXES_TABLE_ID, SYS_TABLES_ROOT_PAGE_ID, SYS_TABLES_TABLE_ID,
     TableCatalogRow, TableSchema, TupleSchema,
 };
+pub use catalog_manager::CatalogManager;
 pub use cursor::{
     IndexCursor, IndexEntry, IndexEntryRef, TableCursor, TableRecord, TableRecordRef,
 };
 pub use page_store::PageStore;
-pub use pager::{Pager, PagerOptions};
+pub use pager::PagerOptions;
 pub use tuple::{EncodedTupleView, Tuple, TupleRef, TupleView, Value, ValueRef};
 
 pub(crate) const PAGE_SIZE: usize = 4096;

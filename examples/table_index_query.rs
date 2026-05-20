@@ -1,11 +1,40 @@
-use databas::core::{EncodedTupleView, Pager, Tuple, TupleRef, Value, ValueRef};
+use databas::core::{
+    CatalogManager, ColumnSchema, DataType, EncodedTupleView, Tuple, TupleRef, TupleSchema, Value,
+    ValueRef,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_file = tempfile::NamedTempFile::new()?;
-    let pager = Pager::open(db_file.path())?;
+    let catalog = CatalogManager::open(db_file.path())?;
+    catalog.create_table(
+        "users",
+        TupleSchema {
+            columns: vec![
+                ColumnSchema {
+                    name: "id".to_owned(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    primary_key: true,
+                },
+                ColumnSchema {
+                    name: "name".to_owned(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                },
+                ColumnSchema {
+                    name: "email".to_owned(),
+                    data_type: DataType::Text,
+                    nullable: false,
+                    primary_key: false,
+                },
+            ],
+        },
+    )?;
+    catalog.create_index("idx_users_email", "users", &["email"])?;
 
-    let mut users = pager.create_table_tree()?;
-    let mut users_by_email = pager.create_index_tree()?;
+    let mut users = catalog.table_cursor_by_name("users")?;
+    let mut users_by_email = catalog.index_cursor_by_name("idx_users_email")?;
 
     let row_id = 1;
     let tuple_row_id = 1;
