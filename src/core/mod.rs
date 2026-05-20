@@ -1,5 +1,6 @@
 pub mod btree;
 pub mod catalog;
+pub(crate) mod catalog_manager;
 pub mod cursor;
 pub mod disk_manager;
 pub mod error;
