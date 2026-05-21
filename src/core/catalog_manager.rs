@@ -14,10 +14,10 @@ use crate::core::{
         ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind,
         InvalidArgumentError, StorageError, StorageResult,
     },
-    pager::{Pager, PagerOptions},
+    pager::Pager,
 };
 
-/// Public storage-engine entry point for one database file.
+/// Internal catalog manager for one database file.
 ///
 /// `CatalogManager` owns the low-level pager and manages catalog metadata for
 /// table and index B+-trees.
@@ -27,17 +27,26 @@ pub struct CatalogManager {
 }
 
 impl CatalogManager {
-    /// Opens a catalog manager with default pager options.
-    pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let pager = Pager::open(path)?;
+    /// Creates a catalog manager with default pager options.
+    pub(crate) fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
+        let pager = Pager::create(path)?;
         let manager = Self { pager };
         manager.initialize_or_validate_system_catalog()?;
         Ok(manager)
     }
 
-    /// Opens a catalog manager with explicit pager cache settings.
-    pub fn open_with_options(path: impl AsRef<Path>, options: PagerOptions) -> StorageResult<Self> {
-        let pager = Pager::open_with_options(path, options)?;
+    /// Opens a catalog manager, creating an empty database file if needed.
+    #[cfg(test)]
+    pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
+        let pager = Pager::open_or_create(path)?;
+        let manager = Self { pager };
+        manager.initialize_or_validate_system_catalog()?;
+        Ok(manager)
+    }
+
+    /// Opens a catalog manager with default pager options.
+    pub(crate) fn open_existing(path: impl AsRef<Path>) -> StorageResult<Self> {
+        let pager = Pager::open(path)?;
         let manager = Self { pager };
         manager.initialize_or_validate_system_catalog()?;
         Ok(manager)
@@ -46,11 +55,6 @@ impl CatalogManager {
     /// Returns the database-file path associated with this manager.
     pub fn path(&self) -> &Path {
         self.pager.path()
-    }
-
-    /// Returns the pager options used when this manager was opened.
-    pub fn options(&self) -> PagerOptions {
-        self.pager.options()
     }
 
     /// Flushes all dirty, currently unpinned pages to disk.
@@ -176,8 +180,9 @@ impl CatalogManager {
 
     fn initialize_or_validate_system_catalog(&self) -> StorageResult<()> {
         match self.pager.opened_page_count() {
-            0 => self.initialize_system_catalog(),
-            1..=2 => Err(missing_system_catalog_root(self.pager.opened_page_count())),
+            0 => Err(crate::core::database_header::missing_header()),
+            1 => self.initialize_system_catalog(),
+            2..=3 => Err(missing_system_catalog_root(self.pager.opened_page_count())),
             _ => self.validate_system_catalog(),
         }
     }
@@ -410,6 +415,7 @@ mod tests {
             SYS_COLUMNS_TABLE_ID, SYS_INDEXES_TABLE_ID, SYS_TABLES_TABLE_ID, TableCatalogRow,
             system_column_rows,
         },
+        database_header::DatabaseHeader,
         disk_manager::DiskManager,
     };
 
@@ -418,7 +424,7 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let manager = CatalogManager::open(file.path()).unwrap();
 
-        assert_eq!(manager.pager.create_table_tree().unwrap().root_page_id(), 3);
+        assert_eq!(manager.pager.create_table_tree().unwrap().root_page_id(), 4);
 
         let mut tables = manager.pager.table_cursor(SYS_TABLES_ROOT_PAGE_ID).unwrap();
         assert_table_catalog_row(
@@ -483,6 +489,8 @@ mod tests {
         {
             let mut disk_manager = DiskManager::new(file.path()).unwrap();
             assert_eq!(disk_manager.new_page().unwrap(), 0);
+            disk_manager.write_page(0, &DatabaseHeader::encode_page()).unwrap();
+            assert_eq!(disk_manager.new_page().unwrap(), 1);
         }
 
         let error = match CatalogManager::open(file.path()) {
@@ -493,7 +501,7 @@ mod tests {
             error,
             StorageError::Corruption(CorruptionError {
                 component: CorruptionComponent::Catalog,
-                kind: CorruptionKind::MissingSystemCatalogRoot { page_id: 1 },
+                kind: CorruptionKind::MissingSystemCatalogRoot { page_id: 2 },
                 ..
             })
         ));
@@ -509,7 +517,7 @@ mod tests {
 
         assert_eq!(table.table_id, 4);
         assert_eq!(table.name, "users");
-        assert_eq!(table.root_page_id, 3);
+        assert_eq!(table.root_page_id, 4);
         assert_eq!(table.row, row_schema);
         assert_eq!(
             manager.table_cursor_by_name("users").unwrap().root_page_id(),
@@ -549,7 +557,7 @@ mod tests {
         assert_eq!(index.index_id, 5);
         assert_eq!(index.name, "idx_users_email");
         assert_eq!(index.table_id, table.table_id);
-        assert_eq!(index.root_page_id, 4);
+        assert_eq!(index.root_page_id, 5);
         assert_eq!(index.columns.len(), 1);
         assert_eq!(index.columns[0].source_column_ordinal, 2);
         assert_eq!(index.columns[0].column.name, "email");

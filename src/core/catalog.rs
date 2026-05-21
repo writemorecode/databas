@@ -11,11 +11,11 @@ use crate::{
 };
 
 /// Root page id of the `sys_tables` catalog table.
-pub const SYS_TABLES_ROOT_PAGE_ID: PageId = 0;
+pub const SYS_TABLES_ROOT_PAGE_ID: PageId = 1;
 /// Root page id of the `sys_indexes` catalog table.
-pub const SYS_INDEXES_ROOT_PAGE_ID: PageId = 1;
+pub const SYS_INDEXES_ROOT_PAGE_ID: PageId = 2;
 /// Root page id of the `sys_columns` catalog table.
-pub const SYS_COLUMNS_ROOT_PAGE_ID: PageId = 2;
+pub const SYS_COLUMNS_ROOT_PAGE_ID: PageId = 3;
 
 /// Stable object id assigned to the `sys_tables` catalog table.
 pub const SYS_TABLES_TABLE_ID: RowId = 1;

@@ -1,7 +1,9 @@
 pub mod btree;
 pub mod catalog;
-pub mod catalog_manager;
+mod catalog_manager;
 pub mod cursor;
+pub mod database;
+pub(crate) mod database_header;
 pub mod disk_manager;
 pub mod error;
 #[cfg(test)]
@@ -21,10 +23,10 @@ pub use catalog::{
     SYS_INDEXES_ROOT_PAGE_ID, SYS_INDEXES_TABLE_ID, SYS_TABLES_ROOT_PAGE_ID, SYS_TABLES_TABLE_ID,
     TableCatalogRow, TableSchema, TupleSchema,
 };
-pub use catalog_manager::CatalogManager;
 pub use cursor::{
     IndexCursor, IndexEntry, IndexEntryRef, TableCursor, TableRecord, TableRecordRef,
 };
+pub use database::Database;
 pub use page_store::PageStore;
 pub use pager::PagerOptions;
 pub use tuple::{EncodedTupleView, Tuple, TupleRef, TupleView, Value, ValueRef};
