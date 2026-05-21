@@ -1,12 +1,13 @@
 use databas::core::{
-    CatalogManager, ColumnSchema, DataType, EncodedTupleView, Tuple, TupleRef, TupleSchema, Value,
+    ColumnSchema, DataType, Database, EncodedTupleView, Tuple, TupleRef, TupleSchema, Value,
     ValueRef,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_file = tempfile::NamedTempFile::new()?;
-    let catalog = CatalogManager::open(db_file.path())?;
-    catalog.create_table(
+    let db_dir = tempfile::tempdir()?;
+    let db_path = db_dir.path().join("example.db");
+    let database = Database::create(&db_path)?;
+    database.create_table(
         "users",
         TupleSchema {
             columns: vec![
@@ -31,10 +32,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ],
         },
     )?;
-    catalog.create_index("idx_users_email", "users", &["email"])?;
+    database.create_index("idx_users_email", "users", &["email"])?;
 
-    let mut users = catalog.table_cursor_by_name("users")?;
-    let mut users_by_email = catalog.index_cursor_by_name("idx_users_email")?;
+    let mut users = database.table_cursor_by_name("users")?;
+    let mut users_by_email = database.index_cursor_by_name("idx_users_email")?;
 
     let row_id = 1;
     let tuple_row_id = 1;

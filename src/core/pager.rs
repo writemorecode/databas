@@ -4,6 +4,7 @@ use crate::core::{
     PageId,
     btree::{TreeCursor, initialize_empty_root, validate_root_page},
     cursor::{IndexCursor, TableCursor},
+    database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header},
     disk_manager::DiskManager,
     error::StorageResult,
     page_cache::PageCache,
@@ -11,7 +12,7 @@ use crate::core::{
 
 const DEFAULT_PAGE_CACHE_SIZE: usize = 64;
 
-/// Configuration for [`crate::core::CatalogManager`].
+/// Configuration for [`crate::core::Database`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PagerOptions {
     /// Number of frames to preallocate in the page cache.
@@ -32,36 +33,77 @@ impl Default for PagerOptions {
 pub(crate) struct Pager {
     path: PathBuf,
     page_cache: PageCache,
-    options: PagerOptions,
     opened_page_count: u64,
 }
 
 impl Pager {
-    /// Opens a pager with default options.
+    /// Creates a new database file and initializes its database header.
+    pub(crate) fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
+        Self::create_with_options(path, PagerOptions::default())
+    }
+
+    /// Creates a new database file with explicit cache settings.
+    pub(crate) fn create_with_options(
+        path: impl AsRef<Path>,
+        options: PagerOptions,
+    ) -> StorageResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mut disk_manager = DiskManager::create_new(&path)?;
+        initialize_header_page(&mut disk_manager)?;
+        Self::from_disk_manager(path, disk_manager, options)
+    }
+
+    /// Opens an existing pager with default options.
     pub(crate) fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
         Self::open_with_options(path, PagerOptions::default())
     }
 
-    /// Opens a pager with explicit cache settings.
+    /// Opens an existing pager with explicit cache settings.
     pub(crate) fn open_with_options(
         path: impl AsRef<Path>,
         options: PagerOptions,
     ) -> StorageResult<Self> {
         let path = path.as_ref().to_path_buf();
-        let disk_manager = DiskManager::new(&path)?;
+        let mut disk_manager = DiskManager::open_existing(&path)?;
+        validate_header_page(&mut disk_manager)?;
+        Self::from_disk_manager(path, disk_manager, options)
+    }
+
+    /// Opens a pager, creating and initializing an empty file if needed.
+    #[cfg(test)]
+    pub(crate) fn open_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
+        Self::open_or_create_with_options(path, PagerOptions::default())
+    }
+
+    /// Opens a pager with explicit cache settings, creating an empty file if needed.
+    #[cfg(test)]
+    pub(crate) fn open_or_create_with_options(
+        path: impl AsRef<Path>,
+        options: PagerOptions,
+    ) -> StorageResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mut disk_manager = DiskManager::new(&path)?;
+        if disk_manager.page_count() == 0 {
+            initialize_header_page(&mut disk_manager)?;
+        } else {
+            validate_header_page(&mut disk_manager)?;
+        }
+        Self::from_disk_manager(path, disk_manager, options)
+    }
+
+    fn from_disk_manager(
+        path: PathBuf,
+        disk_manager: DiskManager,
+        options: PagerOptions,
+    ) -> StorageResult<Self> {
         let opened_page_count = disk_manager.page_count();
         let page_cache = PageCache::new(disk_manager, options.cache_frames)?;
-        Ok(Self { path, page_cache, options, opened_page_count })
+        Ok(Self { path, page_cache, opened_page_count })
     }
 
     /// Returns the database-file path associated with this pager.
     pub(crate) fn path(&self) -> &Path {
         &self.path
-    }
-
-    /// Returns the options used when this pager was opened.
-    pub(crate) fn options(&self) -> PagerOptions {
-        self.options
     }
 
     /// Returns the page count observed when this pager was opened.
@@ -100,6 +142,23 @@ impl Pager {
     }
 }
 
+fn initialize_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
+    let page_id = disk_manager.new_page()?;
+    debug_assert_eq!(page_id, DATABASE_HEADER_PAGE_ID);
+    disk_manager.write_page(DATABASE_HEADER_PAGE_ID, &DatabaseHeader::encode_page())?;
+    Ok(())
+}
+
+fn validate_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
+    if disk_manager.page_count() == 0 {
+        return Err(missing_header());
+    }
+
+    let mut page = [0u8; crate::core::PAGE_SIZE];
+    disk_manager.read_page(DATABASE_HEADER_PAGE_ID, &mut page)?;
+    DatabaseHeader::validate_page(&page)
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::NamedTempFile;
@@ -109,16 +168,16 @@ mod tests {
     #[test]
     fn opens_database_and_manages_table_and_index_trees() {
         let file = NamedTempFile::new().unwrap();
-        let pager = Pager::open(file.path()).unwrap();
+        let pager = Pager::open_or_create(file.path()).unwrap();
 
-        assert_eq!(pager.opened_page_count(), 0);
-        assert_eq!(pager.create_table_tree().unwrap().root_page_id(), 0);
-        assert_eq!(pager.create_index_tree().unwrap().root_page_id(), 1);
+        assert_eq!(pager.opened_page_count(), 1);
+        assert_eq!(pager.create_table_tree().unwrap().root_page_id(), 1);
+        assert_eq!(pager.create_index_tree().unwrap().root_page_id(), 2);
         pager.flush().unwrap();
 
         let pager = Pager::open(file.path()).unwrap();
-        assert_eq!(pager.opened_page_count(), 2);
-        assert_eq!(pager.table_cursor(0).unwrap().root_page_id(), 0);
-        assert_eq!(pager.index_cursor(1).unwrap().root_page_id(), 1);
+        assert_eq!(pager.opened_page_count(), 3);
+        assert_eq!(pager.table_cursor(1).unwrap().root_page_id(), 1);
+        assert_eq!(pager.index_cursor(2).unwrap().root_page_id(), 2);
     }
 }

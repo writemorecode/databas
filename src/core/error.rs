@@ -49,6 +49,16 @@ pub enum CorruptionComponent {
 pub enum CorruptionKind {
     #[error("invalid file size {size} for page size {page_size}")]
     InvalidFileSize { size: u64, page_size: usize },
+    #[error("missing database header")]
+    MissingDatabaseHeader,
+    #[error("invalid database magic: expected {expected:?}, got {actual:?}")]
+    InvalidDatabaseMagic { expected: [u8; 8], actual: [u8; 8] },
+    #[error("unsupported database version: expected {expected}, got {actual}")]
+    UnsupportedDatabaseVersion { expected: u16, actual: u16 },
+    #[error("invalid database page size: expected {expected}, got {actual}")]
+    InvalidDatabasePageSize { expected: usize, actual: usize },
+    #[error("database header reserved bytes are not zeroed")]
+    DatabaseHeaderReservedBytesNotZero,
     #[error("unknown page kind: raw tag {actual}")]
     UnknownPageKind { actual: u8 },
     #[error("invalid page kind: expected {expected}, got raw tag {actual}")]
