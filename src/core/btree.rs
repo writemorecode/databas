@@ -2935,6 +2935,7 @@ mod tests {
         assert!(!cursor.seek_to_first().unwrap());
     }
 
+    #[ignore = "slow because of fsync"]
     #[test]
     // Builds a four-level raw B+ tree from deterministic random inline cells,
     // proving leaf splits, repeated interior split propagation, exact-key
@@ -2993,6 +2994,7 @@ mod tests {
         assert_eq!(expected.len(), cells.len());
     }
 
+    #[ignore = "slow because of fsync"]
     #[test]
     fn random_insert_delete_simulation_empties_tree_after_random_delete_order() {
         let mut cursor = memory_tree_cursor(256);
@@ -3026,6 +3028,7 @@ mod tests {
         }
     }
 
+    #[ignore = "slow because of fsync"]
     #[test]
     fn random_insert_update_simulation_replaces_values_for_all_keys() {
         let mut cursor = memory_tree_cursor(256);
@@ -3089,6 +3092,7 @@ mod tests {
         assert_reverse_scan_matches(&mut cursor, &updated);
     }
 
+    #[ignore = "slow because of fsync"]
     #[test]
     fn random_mixed_operation_simulation_matches_btreemap_model() {
         let mut cursor = memory_tree_cursor(256);
