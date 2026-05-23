@@ -328,6 +328,27 @@ impl TableSchema {
         root_page_id: PageId,
         query: &CreateTableQuery<'_>,
     ) -> Self {
+        Self {
+            table_id,
+            name: query.table_name.to_owned(),
+            root_page_id,
+            row: TupleSchema::from_create_table_query(query),
+        }
+    }
+
+    /// Returns the `sys_tables` row describing this table.
+    pub fn catalog_row(&self) -> TableCatalogRow {
+        TableCatalogRow {
+            table_id: self.table_id,
+            name: self.name.clone(),
+            root_page_id: self.root_page_id,
+        }
+    }
+}
+
+impl TupleSchema {
+    /// Builds a tuple schema from a parsed `CREATE TABLE` statement.
+    pub fn from_create_table_query(query: &CreateTableQuery<'_>) -> Self {
         let columns = query
             .columns
             .iter()
@@ -339,21 +360,7 @@ impl TableSchema {
             })
             .collect();
 
-        Self {
-            table_id,
-            name: query.table_name.to_owned(),
-            root_page_id,
-            row: TupleSchema { columns },
-        }
-    }
-
-    /// Returns the `sys_tables` row describing this table.
-    pub fn catalog_row(&self) -> TableCatalogRow {
-        TableCatalogRow {
-            table_id: self.table_id,
-            name: self.name.clone(),
-            root_page_id: self.root_page_id,
-        }
+        Self { columns }
     }
 }
 
