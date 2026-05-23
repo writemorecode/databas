@@ -227,7 +227,7 @@ impl CatalogManager {
         Ok(())
     }
 
-    fn table_schema_by_name(&self, name: &str) -> StorageResult<TableSchema> {
+    pub(crate) fn table_schema_by_name(&self, name: &str) -> StorageResult<TableSchema> {
         let table =
             self.table_catalog_rows()?.into_iter().find(|row| row.name == name).ok_or_else(
                 || {

@@ -47,6 +47,11 @@ impl Database {
         self.catalog.create_index(name, table_name, columns)
     }
 
+    /// Returns the schema for the table named `name`.
+    pub fn table_schema_by_name(&self, name: &str) -> StorageResult<TableSchema> {
+        self.catalog.table_schema_by_name(name)
+    }
+
     /// Returns a typed cursor for the table named `name`.
     pub fn table_cursor_by_name(&self, name: &str) -> StorageResult<TableCursor> {
         self.catalog.table_cursor_by_name(name)

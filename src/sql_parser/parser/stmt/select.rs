@@ -8,7 +8,7 @@ use crate::sql_parser::{
     },
     parser::{Parser, expr::Expression, stmt::lists::ExpressionList},
 };
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Ordering {
     Ascending,
     Descending,
