@@ -71,12 +71,13 @@ impl CatalogManager {
         }
 
         let table_id = self.next_object_id()?;
-        let mut column_id = self.next_column_id()?;
         let root_page_id = self.pager.create_table_tree()?.root_page_id();
         let schema = TableSchema { table_id, name: name.to_owned(), root_page_id, row };
 
         self.insert_table_catalog_row(&schema.catalog_row())?;
-        for (ordinal, column) in schema.row.columns.iter().enumerate() {
+        for (column_id, (ordinal, column)) in
+            (self.next_column_id()?..).zip(schema.row.columns.iter().enumerate())
+        {
             let row = ColumnCatalogRow {
                 column_id,
                 object_kind: CatalogObjectKind::Table,
@@ -90,7 +91,6 @@ impl CatalogManager {
                 source_column_ordinal: None,
             };
             self.insert_column_catalog_row(&row)?;
-            column_id += 1;
         }
 
         Ok(schema)
@@ -114,11 +114,12 @@ impl CatalogManager {
 
         let table = self.table_schema_by_name(table_name)?;
         let index_id = self.next_object_id()?;
-        let mut column_id = self.next_column_id()?;
         let mut index_columns = Vec::new();
         let mut catalog_columns = Vec::new();
 
-        for (ordinal, column_name) in columns.iter().enumerate() {
+        for (column_id, (ordinal, column_name)) in
+            (self.next_column_id()?..).zip(columns.iter().enumerate())
+        {
             let (source_column_ordinal, source_column) = table
                 .row
                 .columns
@@ -147,7 +148,6 @@ impl CatalogManager {
                 source_table_id: Some(table.table_id),
                 source_column_ordinal: Some(source_column_ordinal as u64),
             });
-            column_id += 1;
         }
 
         let root_page_id = self.pager.create_index_tree()?.root_page_id();
