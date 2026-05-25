@@ -24,9 +24,25 @@ impl Display for Ordering {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct OrderBy<'a> {
-    pub terms: ExpressionList<'a>,
+pub struct OrderByTerm<'a> {
+    pub column: &'a str,
     pub order: Option<Ordering>,
+}
+
+impl Display for OrderByTerm<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.column)?;
+
+        if let Some(ref order) = self.order {
+            write!(f, " {}", order)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct OrderBy<'a> {
+    pub terms: Vec<OrderByTerm<'a>>,
 }
 
 impl<'a> Parser<'a> {
@@ -37,7 +53,13 @@ impl<'a> Parser<'a> {
         };
         self.lexer.next();
         self.lexer.expect_token(TokenKind::Keyword(Keyword::By))?;
-        let terms = self.parse_expression_list()?;
+        let terms = self.parse_comma_separated_list(|p| p.parse_order_by_term())?;
+
+        Ok(Some(OrderBy { terms }))
+    }
+
+    fn parse_order_by_term(&mut self) -> Result<OrderByTerm<'a>, SQLError<'a>> {
+        let column = self.parse_identifier()?;
         let order = match self.lexer.peek() {
             Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Asc), .. })) => {
                 self.lexer.next();
@@ -50,18 +72,14 @@ impl<'a> Parser<'a> {
             _ => None,
         };
 
-        Ok(Some(OrderBy { terms, order }))
+        Ok(OrderByTerm { column, order })
     }
 }
 
 impl Display for OrderBy<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.terms)?;
-
-        if let Some(ref order) = self.order {
-            write!(f, " {}", order)?;
-        }
-        Ok(())
+        let terms = self.terms.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+        write!(f, "{terms}")
     }
 }
 #[derive(Debug, PartialEq)]
@@ -277,11 +295,10 @@ mod tests {
             table: Some("bar"),
             where_clause: Some(Expression::Identifier("baz")),
             order_by: Some(OrderBy {
-                terms: ExpressionList(vec![
-                    Expression::Identifier("qax"),
-                    Expression::Identifier("quux"),
-                ]),
-                order: Some(Ordering::Descending),
+                terms: vec![
+                    OrderByTerm { column: "qax", order: None },
+                    OrderByTerm { column: "quux", order: Some(Ordering::Descending) },
+                ],
             }),
             limit: None,
             offset: None,
@@ -296,8 +313,7 @@ mod tests {
             table: Some("bar"),
             where_clause: Some(Expression::Identifier("baz")),
             order_by: Some(OrderBy {
-                terms: ExpressionList(vec![Expression::Identifier("qax")]),
-                order: Some(Ordering::Ascending),
+                terms: vec![OrderByTerm { column: "qax", order: Some(Ordering::Ascending) }],
             }),
             limit: None,
             offset: None,
@@ -307,7 +323,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_select_query_rejects_order_by_expression() {
+        let s = "SELECT foo FROM bar ORDER BY qax + 1 ASC;";
+        let mut parser = Parser::new(s);
+        assert!(parser.stmt().is_err());
+    }
 
+    #[test]
     fn test_parse_select_query_with_limit() {
         let s = "SELECT foo FROM bar LIMIT 5;";
         let mut parser = Parser::new(s);
@@ -328,10 +350,7 @@ mod tests {
             columns: ExpressionList(vec![Expression::Identifier("foo")]),
             table: Some("bar"),
             where_clause: Some(Expression::Identifier("baz")),
-            order_by: Some(OrderBy {
-                terms: ExpressionList(vec![Expression::Identifier("qux")]),
-                order: None,
-            }),
+            order_by: Some(OrderBy { terms: vec![OrderByTerm { column: "qux", order: None }] }),
             limit: Some(10),
             offset: None,
         };
