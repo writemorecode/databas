@@ -141,13 +141,19 @@ fn draw_select(tc: &TestCase) -> String {
     }
     if draw_bool(tc) {
         sql.push_str(" ORDER BY ");
-        sql.push_str(&draw_expression_list(tc, 3, false).join(", "));
-        match draw_index(tc, 3) {
-            0 => {}
-            1 => sql.push_str(" ASC"),
-            2 => sql.push_str(" DESC"),
-            _ => unreachable!(),
-        }
+        let terms = (0..draw_non_empty_len(tc, 3))
+            .map(|_| {
+                let mut term = draw_identifier(tc).to_string();
+                match draw_index(tc, 3) {
+                    0 => {}
+                    1 => term.push_str(" ASC"),
+                    2 => term.push_str(" DESC"),
+                    _ => unreachable!(),
+                }
+                term
+            })
+            .collect::<Vec<_>>();
+        sql.push_str(&terms.join(", "));
     }
     if draw_bool(tc) {
         sql.push_str(" LIMIT ");

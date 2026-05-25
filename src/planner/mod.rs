@@ -241,12 +241,14 @@ impl<'db> Planner<'db> {
         if let Some(order_by) = &query.order_by {
             let terms = order_by
                 .terms
-                .0
                 .iter()
-                .map(|expr| {
+                .map(|term| {
+                    let table = table.as_ref().ok_or_else(|| PlannerError::ColumnNotFound {
+                        column: term.column.to_owned(),
+                    })?;
                     Ok(SortTerm {
-                        expression: self.bind_expression(expr, table.as_ref())?,
-                        direction: order_by.order.clone(),
+                        expression: PlannedExpression::Column(bind_column(table, term.column)?),
+                        direction: term.order.clone(),
                     })
                 })
                 .collect::<PlannerResult<Vec<_>>>()?;
