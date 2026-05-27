@@ -1,3 +1,15 @@
+//! SQL query planning.
+//!
+//! The planner lowers parsed SQL statements into a [`Plan`] that contains both
+//! a catalog-bound [`LogicalPlan`] and the executable [`PhysicalPlan`]. Planning
+//! resolves table and column names against the database catalog, expands
+//! wildcard projections, validates statement shapes, and records enough schema
+//! metadata for execution to read or write typed tuples.
+//!
+//! This planner is intentionally conservative. It preserves the parsed query
+//! shape for most relational operators and currently chooses only simple
+//! physical operators such as full table scans and values-backed inserts.
+
 use std::collections::HashSet;
 
 use thiserror::Error;
@@ -23,139 +35,248 @@ use crate::{
     },
 };
 
+/// Result type returned by query planning operations.
 pub type PlannerResult<T> = Result<T, PlannerError>;
 
+/// Complete planning result for one SQL statement.
+///
+/// The logical plan is useful for validation, tests, and future optimization
+/// passes. The physical plan is the tree consumed by the executor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
+    /// Catalog-bound statement representation before physical operator
+    /// selection.
     pub logical: LogicalPlan,
+    /// Executable operator tree selected from the logical plan.
     pub physical: PhysicalPlan,
 }
 
+/// Catalog-bound relational representation of a parsed SQL statement.
+///
+/// Logical plans describe what the statement means after name binding and basic
+/// validation, but before choosing concrete access methods. Children are stored
+/// in `Box`es so the plan can form recursive operator trees.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogicalPlan {
+    /// Create a table with the provided tuple schema.
     CreateTable { name: String, schema: TupleSchema },
+    /// Create a secondary index over bound columns from an existing table.
     CreateIndex { name: String, table: TableSchema, columns: Vec<BoundColumn> },
+    /// Literal rows, usually produced by an `INSERT ... VALUES` statement.
     Values { rows: Vec<Vec<PlannedExpression>> },
+    /// Insert rows from an input plan into bound table columns.
     Insert { table: TableSchema, columns: Vec<BoundColumn>, input: Box<LogicalPlan> },
+    /// Synthetic single-row input used for projection-only selects without a
+    /// `FROM` clause.
     OneRow,
+    /// Read every row from a catalog table.
     TableScan { table: TableSchema },
+    /// Keep only rows for which the predicate evaluates truthfully.
     Filter { input: Box<LogicalPlan>, predicate: PlannedExpression },
+    /// Order input rows by one or more columns.
     Sort { input: Box<LogicalPlan>, terms: Vec<SortTerm> },
+    /// Produce output expressions from each input row.
     Project { input: Box<LogicalPlan>, expressions: Vec<PlannedExpression> },
+    /// Skip the first `offset` input rows.
     Offset { input: Box<LogicalPlan>, offset: u32 },
+    /// Emit at most `limit` input rows.
     Limit { input: Box<LogicalPlan>, limit: u32 },
 }
 
+/// Executable operator tree selected by the planner.
+///
+/// Physical plans mirror the current executor's available operators. Today this
+/// mostly maps logical operators directly, with a few concrete choices such as
+/// [`PhysicalPlan::FullTableScan`] for table access and
+/// [`PhysicalPlan::InsertValues`] for `INSERT ... VALUES`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalPlan {
+    /// Execute a catalog table creation.
     CreateTable {
+        /// Table name to create.
         name: String,
+        /// Row schema for the new table.
         schema: TupleSchema,
     },
+    /// Execute a catalog secondary-index creation.
     CreateIndex {
+        /// Index name to create.
         name: String,
+        /// Table whose rows the index covers.
         table: TableSchema,
+        /// Bound table columns that form the index key.
         columns: Vec<BoundColumn>,
     },
+    /// Produce literal rows.
     Values {
+        /// Planned expressions for each literal row.
         rows: Vec<Vec<PlannedExpression>>,
     },
+    /// Insert literal values into bound table columns.
     InsertValues {
+        /// Target table.
         table: TableSchema,
+        /// Target columns in value order.
         columns: Vec<BoundColumn>,
+        /// Literal value rows to insert.
         values: Vec<Vec<PlannedExpression>>,
     },
+    /// Produce exactly one empty row.
     OneRow,
+    /// Scan all rows from a table.
     FullTableScan {
+        /// Table to scan.
         table: TableSchema,
     },
+    /// Filter rows from an input physical operator.
     Filter {
+        /// Input operator.
         input: Box<PhysicalPlan>,
+        /// Predicate evaluated for each input row.
         predicate: PlannedExpression,
     },
+    /// Sort rows from an input physical operator.
     Sort {
+        /// Input operator.
         input: Box<PhysicalPlan>,
+        /// Sort keys in priority order.
         terms: Vec<SortTerm>,
     },
+    /// Evaluate expressions for each input row.
     Project {
+        /// Input operator.
         input: Box<PhysicalPlan>,
+        /// Output expressions in result-column order.
         expressions: Vec<PlannedExpression>,
     },
+    /// Skip input rows before producing output.
     Offset {
+        /// Input operator.
         input: Box<PhysicalPlan>,
+        /// Number of rows to skip.
         offset: u32,
     },
+    /// Stop after producing a bounded number of rows.
     Limit {
+        /// Input operator.
         input: Box<PhysicalPlan>,
+        /// Maximum number of rows to emit.
         limit: u32,
     },
 }
 
+/// Expression after literal conversion and column binding.
+///
+/// Bound column expressions carry catalog metadata and row ordinals, so the
+/// executor can evaluate them without doing name resolution again.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlannedExpression {
+    /// Constant storage value.
     Literal(Value),
+    /// Reference to a bound table column.
     Column(BoundColumn),
+    /// Unary operator applied to a planned expression.
     Unary { op: Op, expr: Box<PlannedExpression> },
+    /// Binary operator applied to two planned expressions.
     Binary { left: Box<PlannedExpression>, op: Op, right: Box<PlannedExpression> },
 }
 
+/// Catalog column reference resolved during planning.
+///
+/// `ordinal` is the zero-based position of the column in the table row schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundColumn {
+    /// Name of the table that owns this column.
     pub table: String,
+    /// Column name.
     pub name: String,
+    /// Zero-based column position in the table row.
     pub ordinal: usize,
+    /// Storage type recorded for the column.
     pub data_type: DataType,
 }
 
+/// One bound column and optional direction from an `ORDER BY` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SortTerm {
-    pub expression: PlannedExpression,
+    /// Column used as the sort key.
+    pub column: BoundColumn,
+    /// Direction specified by SQL, or `None` when the query omitted one.
     pub direction: Option<Ordering>,
 }
 
+/// Normalized sort direction.
+///
+/// This enum is available for consumers that need an executor-level direction
+/// independent of the parser's `ORDER BY` syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortDirection {
+    /// Sort smaller values before larger values.
     Ascending,
+    /// Sort larger values before smaller values.
     Descending,
 }
 
+/// Errors that can occur while converting parsed SQL into a plan.
 #[derive(Debug, Error)]
 pub enum PlannerError {
+    /// A statement referenced a table that does not exist in the catalog.
     #[error("table not found: {name}")]
     TableNotFound { name: String },
+    /// A statement referenced a column that is not present in the bound table.
     #[error("column {column} not found")]
     ColumnNotFound { column: String },
+    /// An `INSERT` column list named the same column more than once.
     #[error("duplicate insert column: {column}")]
     DuplicateInsertColumn { column: String },
+    /// A `CREATE INDEX` column list named the same column more than once.
     #[error("duplicate index column: {column}")]
     DuplicateIndexColumn { column: String },
+    /// A values row does not provide exactly one value for each target column.
     #[error("insert row has {values} values for {columns} columns")]
     InsertColumnValueCount { columns: usize, values: usize },
+    /// The parser accepted a statement kind the planner cannot lower.
     #[error("unsupported statement: {statement}")]
     UnsupportedStatement { statement: String },
+    /// The planner cannot lower this expression in the current context.
     #[error("unsupported expression: {expression}")]
     UnsupportedExpression { expression: String },
+    /// Aggregate functions are parsed but not yet planned.
     #[error("unsupported aggregate function: {function}")]
     UnsupportedAggregate { function: String },
+    /// A wildcard appeared outside the projection list.
     #[error("wildcard is only supported in SELECT projection")]
     UnsupportedWildcardPosition,
+    /// A wildcard projection was used without a table to expand against.
     #[error("wildcard projection requires a FROM table")]
     WildcardRequiresTable,
+    /// Physical planning found an insert input shape it cannot execute.
     #[error("invalid insert input: expected VALUES")]
     InvalidInsertInput,
+    /// Storage or catalog access failed while planning.
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
 }
 
+/// Planner bound to a database catalog.
+///
+/// A planner borrows a [`Database`] so it can resolve table schemas and bind
+/// column references. It does not mutate the catalog; DDL statements are only
+/// represented as plan nodes until executed.
 pub struct Planner<'db> {
     database: &'db Database,
 }
 
 impl<'db> Planner<'db> {
+    /// Creates a planner that resolves names through `database`.
     pub fn new(database: &'db Database) -> Self {
         Self { database }
     }
 
+    /// Plans one parsed SQL statement.
+    ///
+    /// This first builds a [`LogicalPlan`] with catalog-bound names, then
+    /// converts it into a [`PhysicalPlan`] that can be passed to the executor.
     pub fn plan_statement(&self, statement: &Statement<'_>) -> PlannerResult<Plan> {
         let logical = self.logical_plan_statement(statement)?;
         let physical = self.physical_plan(&logical)?;
@@ -247,7 +368,7 @@ impl<'db> Planner<'db> {
                         column: term.column.to_owned(),
                     })?;
                     Ok(SortTerm {
-                        expression: PlannedExpression::Column(bind_column(table, term.column)?),
+                        column: bind_column(table, term.column)?,
                         direction: term.order.clone(),
                     })
                 })
@@ -648,10 +769,7 @@ mod tests {
         };
         assert_eq!(
             terms,
-            &[SortTerm {
-                expression: PlannedExpression::Column(bound("users", "id", 0, DataType::Integer)),
-                direction: None,
-            }]
+            &[SortTerm { column: bound("users", "id", 0, DataType::Integer), direction: None }]
         );
         assert!(
             matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
