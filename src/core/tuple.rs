@@ -1,4 +1,5 @@
 use std::{
+    fmt::Display,
     io::{self, Read, Write},
     ops::Range,
 };
@@ -27,6 +28,19 @@ pub enum Value {
     Integer(i32),
     Float(f32),
     UnsignedInteger(u64),
+}
+
+impl Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Null => write!(f, "NULL"),
+            Value::String(s) => write!(f, "{s}"),
+            Value::Boolean(b) => write!(f, "{b}"),
+            Value::Integer(i) => write!(f, "{i}"),
+            Value::Float(fl) => write!(f, "{fl}"),
+            Value::UnsignedInteger(u) => write!(f, "{u}"),
+        }
+    }
 }
 
 /// A borrowed typed value.

@@ -1,9 +1,9 @@
 //! Typed table and index cursor wrappers over the raw byte-oriented B+-tree.
 
-use std::fmt;
+use std::fmt::{self, Display};
 
 use crate::core::{
-    RowId,
+    RowId, Tuple,
     btree::{CursorState, OwnedRecord, Record, TreeCursor},
     disk_manager::DiskManager,
     error::StorageResult,
@@ -44,6 +44,17 @@ pub struct TableRecord {
     pub row_id: RowId,
     /// Encoded table record bytes.
     pub record: Box<[u8]>,
+}
+
+impl Display for TableRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // TODO: fix unwrap here
+        let tuple = Tuple::from_bytes(&self.record).unwrap();
+        for value in &tuple {
+            let _ = write!(f, "{value}\t");
+        }
+        Ok(())
+    }
 }
 
 /// Owned secondary-index entry returned by [`IndexCursor`] lookups.
