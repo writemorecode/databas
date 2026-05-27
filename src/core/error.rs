@@ -141,6 +141,8 @@ pub enum LimitExceededError {
     CellTooLarge { len: usize, max: usize },
     #[error("cache capacity exhausted")]
     CacheCapacityExhausted,
+    #[error("row id space exhausted for table {table}")]
+    RowIdExhausted { table: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

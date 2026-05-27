@@ -12,7 +12,7 @@ use crate::core::{
     cursor::{IndexCursor, TableCursor},
     error::{
         ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind,
-        InvalidArgumentError, StorageError, StorageResult,
+        InvalidArgumentError, LimitExceededError, StorageError, StorageResult,
     },
     pager::Pager,
 };
@@ -72,7 +72,8 @@ impl CatalogManager {
 
         let table_id = self.next_object_id()?;
         let root_page_id = self.pager.create_table_tree()?.root_page_id();
-        let schema = TableSchema { table_id, name: name.to_owned(), root_page_id, row };
+        let schema =
+            TableSchema { table_id, name: name.to_owned(), root_page_id, last_row_id: 0, row };
 
         self.insert_table_catalog_row(&schema.catalog_row())?;
         for (column_id, (ordinal, column)) in
@@ -178,6 +179,27 @@ impl CatalogManager {
         self.pager.index_cursor(schema.root_page_id)
     }
 
+    /// Allocates and persists the next row id for a table.
+    pub fn allocate_table_row_id(&self, table: &TableSchema) -> StorageResult<RowId> {
+        let mut row = self
+            .table_catalog_rows()?
+            .into_iter()
+            .find(|row| row.table_id == table.table_id)
+            .ok_or_else(|| {
+                StorageError::InvalidArgument(InvalidArgumentError::TableNotFound {
+                    name: table.name.clone(),
+                })
+            })?;
+        let next_row_id = row.last_row_id.checked_add(1).ok_or_else(|| {
+            StorageError::LimitExceeded(LimitExceededError::RowIdExhausted {
+                table: table.name.clone(),
+            })
+        })?;
+        row.last_row_id = next_row_id;
+        self.update_table_catalog_row(&row)?;
+        Ok(next_row_id)
+    }
+
     fn initialize_or_validate_system_catalog(&self) -> StorageResult<()> {
         match self.pager.opened_page_count() {
             0 => Err(crate::core::database_header::missing_header()),
@@ -249,6 +271,7 @@ impl CatalogManager {
             table_id: table.table_id,
             name: table.name,
             root_page_id: table.root_page_id,
+            last_row_id: table.last_row_id,
             row: TupleSchema { columns: columns.into_iter().map(column_schema_from_row).collect() },
         })
     }
@@ -262,29 +285,43 @@ impl CatalogManager {
                     })
                 },
             )?;
-        let mut columns: Vec<_> = self
+        let columns: Vec<_> = self
             .column_catalog_rows()?
             .into_iter()
             .filter(|row| {
                 row.object_kind == CatalogObjectKind::Index && row.object_id == index.index_id
             })
             .collect();
-        columns.sort_by_key(|row| row.ordinal);
 
-        Ok(IndexSchema {
-            index_id: index.index_id,
-            name: index.name,
-            table_id: index.table_id,
-            root_page_id: index.root_page_id,
-            unique: index.unique,
-            columns: columns
-                .into_iter()
-                .map(|row| IndexColumnSchema {
-                    source_column_ordinal: row.source_column_ordinal.unwrap_or(row.ordinal),
-                    column: column_schema_from_row(row),
-                })
-                .collect(),
-        })
+        Ok(index_schema_from_rows(index, columns))
+    }
+
+    pub(crate) fn index_schemas_for_table(
+        &self,
+        table: &TableSchema,
+    ) -> StorageResult<Vec<IndexSchema>> {
+        let mut indexes: Vec<_> = self
+            .index_catalog_rows()?
+            .into_iter()
+            .filter(|row| row.table_id == table.table_id)
+            .collect();
+        indexes.sort_by_key(|row| row.index_id);
+
+        let column_rows = self.column_catalog_rows()?;
+        indexes
+            .into_iter()
+            .map(|index| {
+                let columns: Vec<_> = column_rows
+                    .iter()
+                    .filter(|row| {
+                        row.object_kind == CatalogObjectKind::Index
+                            && row.object_id == index.index_id
+                    })
+                    .cloned()
+                    .collect();
+                Ok(index_schema_from_rows(index, columns))
+            })
+            .collect()
     }
 
     fn next_object_id(&self) -> StorageResult<RowId> {
@@ -338,6 +375,12 @@ impl CatalogManager {
 
     fn insert_table_catalog_row(&self, row: &TableCatalogRow) -> StorageResult<()> {
         self.insert_catalog_row(SYS_TABLES_ROOT_PAGE_ID, row.table_id, &row.encode())
+    }
+
+    fn update_table_catalog_row(&self, row: &TableCatalogRow) -> StorageResult<()> {
+        let mut cursor = self.pager.table_cursor(SYS_TABLES_ROOT_PAGE_ID)?;
+        let bytes = row.encode().to_bytes()?;
+        cursor.update(row.table_id, &bytes)
     }
 
     fn insert_index_catalog_row(&self, row: &IndexCatalogRow) -> StorageResult<()> {
@@ -404,6 +447,28 @@ fn column_schema_from_row(row: ColumnCatalogRow) -> ColumnSchema {
     }
 }
 
+fn index_schema_from_rows(
+    index: IndexCatalogRow,
+    mut columns: Vec<ColumnCatalogRow>,
+) -> IndexSchema {
+    columns.sort_by_key(|row| row.ordinal);
+
+    IndexSchema {
+        index_id: index.index_id,
+        name: index.name,
+        table_id: index.table_id,
+        root_page_id: index.root_page_id,
+        unique: index.unique,
+        columns: columns
+            .into_iter()
+            .map(|row| IndexColumnSchema {
+                source_column_ordinal: row.source_column_ordinal.unwrap_or(row.ordinal),
+                column: column_schema_from_row(row),
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::NamedTempFile;
@@ -432,18 +497,21 @@ mod tests {
             SYS_TABLES_TABLE_ID,
             "sys_tables",
             SYS_TABLES_ROOT_PAGE_ID,
+            3,
         );
         assert_table_catalog_row(
             &mut tables,
             SYS_INDEXES_TABLE_ID,
             "sys_indexes",
             SYS_INDEXES_ROOT_PAGE_ID,
+            0,
         );
         assert_table_catalog_row(
             &mut tables,
             SYS_COLUMNS_TABLE_ID,
             "sys_columns",
             SYS_COLUMNS_ROOT_PAGE_ID,
+            system_column_rows().len() as RowId,
         );
 
         let mut columns = manager.pager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID).unwrap();
@@ -480,6 +548,7 @@ mod tests {
             SYS_TABLES_TABLE_ID,
             "sys_tables",
             SYS_TABLES_ROOT_PAGE_ID,
+            3,
         );
     }
 
@@ -518,6 +587,7 @@ mod tests {
         assert_eq!(table.table_id, 4);
         assert_eq!(table.name, "users");
         assert_eq!(table.root_page_id, 4);
+        assert_eq!(table.last_row_id, 0);
         assert_eq!(table.row, row_schema);
         assert_eq!(
             manager.table_cursor_by_name("users").unwrap().root_page_id(),
@@ -525,7 +595,7 @@ mod tests {
         );
 
         let mut tables = manager.pager.table_cursor(SYS_TABLES_ROOT_PAGE_ID).unwrap();
-        assert_table_catalog_row(&mut tables, table.table_id, "users", table.root_page_id);
+        assert_table_catalog_row(&mut tables, table.table_id, "users", table.root_page_id, 0);
 
         let first_user_column_id = system_column_rows().len() as RowId + 1;
         let mut columns = manager.pager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID).unwrap();
@@ -615,17 +685,37 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn allocate_table_row_id_persists_last_row_id() {
+        let file = NamedTempFile::new().unwrap();
+        {
+            let manager = CatalogManager::open(file.path()).unwrap();
+            let table = manager.create_table("users", users_schema()).unwrap();
+
+            assert_eq!(manager.allocate_table_row_id(&table).unwrap(), 1);
+            assert_eq!(manager.allocate_table_row_id(&table).unwrap(), 2);
+            assert_eq!(manager.table_schema_by_name("users").unwrap().last_row_id, 2);
+            manager.flush().unwrap();
+        }
+
+        let manager = CatalogManager::open(file.path()).unwrap();
+        let table = manager.table_schema_by_name("users").unwrap();
+        assert_eq!(table.last_row_id, 2);
+        assert_eq!(manager.allocate_table_row_id(&table).unwrap(), 3);
+    }
+
     fn assert_table_catalog_row(
         tables: &mut TableCursor,
         table_id: RowId,
         name: &str,
         root_page_id: PageId,
+        last_row_id: RowId,
     ) {
         let record = tables.get(table_id).unwrap().expect("system table row should exist");
         let tuple = Tuple::from_bytes(&record.record).unwrap();
         assert_eq!(
             TableCatalogRow::decode(&tuple).unwrap(),
-            TableCatalogRow { table_id, name: name.to_owned(), root_page_id }
+            TableCatalogRow { table_id, name: name.to_owned(), root_page_id, last_row_id }
         );
     }
 

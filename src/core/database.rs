@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::core::{
-    IndexSchema, TableCursor, TableSchema, TupleSchema, catalog_manager::CatalogManager,
+    IndexSchema, RowId, TableCursor, TableSchema, TupleSchema, catalog_manager::CatalogManager,
     cursor::IndexCursor, error::StorageResult,
 };
 
@@ -52,9 +52,19 @@ impl Database {
         self.catalog.table_schema_by_name(name)
     }
 
+    /// Returns the schemas for secondary indexes defined on `table`.
+    pub fn index_schemas_for_table(&self, table: &TableSchema) -> StorageResult<Vec<IndexSchema>> {
+        self.catalog.index_schemas_for_table(table)
+    }
+
     /// Returns a typed cursor for the table named `name`.
     pub fn table_cursor_by_name(&self, name: &str) -> StorageResult<TableCursor> {
         self.catalog.table_cursor_by_name(name)
+    }
+
+    /// Allocates and persists the next row id for a table.
+    pub fn allocate_table_row_id(&self, table: &TableSchema) -> StorageResult<RowId> {
+        self.catalog.allocate_table_row_id(table)
     }
 
     /// Returns a typed cursor for the index named `name`.
