@@ -134,6 +134,8 @@ pub struct TableSchema {
     pub name: String,
     /// Root page id of the table's B+-tree.
     pub root_page_id: PageId,
+    /// Largest row id allocated for this table.
+    pub last_row_id: RowId,
     /// Schema of table rows stored in the tree values.
     pub row: TupleSchema,
 }
@@ -173,6 +175,8 @@ pub struct TableCatalogRow {
     pub name: String,
     /// Root page id of the table B+-tree.
     pub root_page_id: PageId,
+    /// Largest row id allocated for this table.
+    pub last_row_id: RowId,
 }
 
 /// Decoded row from `sys_indexes`.
@@ -244,6 +248,8 @@ pub struct SystemTableSchema<'a> {
     pub name: &'a str,
     /// Root page id reserved for this system table.
     pub root_page_id: PageId,
+    /// Largest row id allocated while bootstrapping this system table.
+    pub last_row_id: RowId,
     /// Row schema of the system table.
     pub row: SystemTupleSchema<'a>,
 }
@@ -257,6 +263,8 @@ pub struct SystemTableCatalogRow<'a> {
     pub name: &'a str,
     /// Root page id reserved for this system table.
     pub root_page_id: PageId,
+    /// Largest row id allocated while bootstrapping this system table.
+    pub last_row_id: RowId,
 }
 
 /// Borrowed row written to `sys_columns` while bootstrapping the catalog.
@@ -332,6 +340,7 @@ impl TableSchema {
             table_id,
             name: query.table_name.to_owned(),
             root_page_id,
+            last_row_id: 0,
             row: TupleSchema::from_create_table_query(query),
         }
     }
@@ -342,6 +351,7 @@ impl TableSchema {
             table_id: self.table_id,
             name: self.name.clone(),
             root_page_id: self.root_page_id,
+            last_row_id: self.last_row_id,
         }
     }
 }
@@ -424,16 +434,18 @@ impl TableCatalogRow {
             Value::UnsignedInteger(self.table_id),
             Value::String(self.name.clone()),
             Value::UnsignedInteger(self.root_page_id),
+            Value::UnsignedInteger(self.last_row_id),
         ])
     }
 
     /// Decodes a `sys_tables` storage tuple.
     pub fn decode(tuple: &Tuple) -> Result<Self, CatalogError> {
-        expect_field_count(tuple, 3)?;
+        expect_field_count(tuple, 4)?;
         Ok(Self {
             table_id: expect_unsigned(tuple, 0)?,
             name: expect_string(tuple, 1)?.to_owned(),
             root_page_id: expect_unsigned(tuple, 2)?,
+            last_row_id: expect_unsigned(tuple, 3)?,
         })
     }
 }
@@ -504,6 +516,7 @@ impl SystemTableSchema<'_> {
             table_id: self.table_id,
             name: self.name,
             root_page_id: self.root_page_id,
+            last_row_id: self.last_row_id,
         }
     }
 }
@@ -514,6 +527,7 @@ impl SystemTableCatalogRow<'_> {
             ValueRef::UnsignedInteger(self.table_id),
             ValueRef::String(self.name),
             ValueRef::UnsignedInteger(self.root_page_id),
+            ValueRef::UnsignedInteger(self.last_row_id),
         ];
         TupleRef::new(&values).to_bytes()
     }
@@ -541,6 +555,7 @@ static SYS_TABLES_COLUMNS: &[SystemColumnSchema<'static>] = &[
     column("table_id", DataType::UnsignedInteger, false, true),
     column("name", DataType::Text, false, false),
     column("root_page_id", DataType::UnsignedInteger, false, false),
+    column("last_row_id", DataType::UnsignedInteger, true, false),
 ];
 
 static SYS_INDEXES_COLUMNS: &[SystemColumnSchema<'static>] = &[
@@ -564,24 +579,31 @@ static SYS_COLUMNS_COLUMNS: &[SystemColumnSchema<'static>] = &[
     column("source_column_ordinal", DataType::UnsignedInteger, true, false),
 ];
 
+const SYSTEM_TABLE_ROW_COUNT: RowId = 3;
+const SYSTEM_COLUMN_ROW_COUNT: RowId =
+    (SYS_TABLES_COLUMNS.len() + SYS_INDEXES_COLUMNS.len() + SYS_COLUMNS_COLUMNS.len()) as RowId;
+
 /// Fixed schemas of all built-in system catalog tables.
 pub static SYSTEM_TABLE_SCHEMAS: &[SystemTableSchema<'static>] = &[
     SystemTableSchema {
         table_id: SYS_TABLES_TABLE_ID,
         name: SYS_TABLES_NAME,
         root_page_id: SYS_TABLES_ROOT_PAGE_ID,
+        last_row_id: SYSTEM_TABLE_ROW_COUNT,
         row: SystemTupleSchema { columns: SYS_TABLES_COLUMNS },
     },
     SystemTableSchema {
         table_id: SYS_INDEXES_TABLE_ID,
         name: SYS_INDEXES_NAME,
         root_page_id: SYS_INDEXES_ROOT_PAGE_ID,
+        last_row_id: 0,
         row: SystemTupleSchema { columns: SYS_INDEXES_COLUMNS },
     },
     SystemTableSchema {
         table_id: SYS_COLUMNS_TABLE_ID,
         name: SYS_COLUMNS_NAME,
         root_page_id: SYS_COLUMNS_ROOT_PAGE_ID,
+        last_row_id: SYSTEM_COLUMN_ROW_COUNT,
         row: SystemTupleSchema { columns: SYS_COLUMNS_COLUMNS },
     },
 ];
