@@ -555,7 +555,7 @@ static SYS_TABLES_COLUMNS: &[SystemColumnSchema<'static>] = &[
     column("table_id", DataType::UnsignedInteger, false, true),
     column("name", DataType::Text, false, false),
     column("root_page_id", DataType::UnsignedInteger, false, false),
-    column("last_row_id", DataType::UnsignedInteger, true, false),
+    column("last_row_id", DataType::UnsignedInteger, false, false),
 ];
 
 static SYS_INDEXES_COLUMNS: &[SystemColumnSchema<'static>] = &[
