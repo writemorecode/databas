@@ -48,12 +48,15 @@ pub struct TableRecord {
 
 impl Display for TableRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: fix unwrap here
-        let tuple = Tuple::from_bytes(&self.record).unwrap();
-        for value in &tuple {
-            let _ = write!(f, "{value}\t");
+        match Tuple::from_bytes(&self.record) {
+            Ok(tuple) => {
+                for value in &tuple {
+                    write!(f, "{value}\t")?;
+                }
+                Ok(())
+            }
+            Err(_) => write!(f, "<invalid tuple>"),
         }
-        Ok(())
     }
 }
 
