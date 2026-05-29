@@ -16,6 +16,18 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Cache Cargo build artifacts
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-cargo-
     - name: Check
       run: cargo check
     - name: Clippy
