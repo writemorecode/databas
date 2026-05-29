@@ -70,13 +70,11 @@ impl Pager {
     }
 
     /// Opens a pager, creating and initializing an empty file if needed.
-    #[cfg(test)]
     pub(crate) fn open_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
         Self::open_or_create_with_options(path, PagerOptions::default())
     }
 
     /// Opens a pager with explicit cache settings, creating an empty file if needed.
-    #[cfg(test)]
     pub(crate) fn open_or_create_with_options(
         path: impl AsRef<Path>,
         options: PagerOptions,

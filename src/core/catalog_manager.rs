@@ -36,8 +36,7 @@ impl CatalogManager {
     }
 
     /// Opens a catalog manager, creating an empty database file if needed.
-    #[cfg(test)]
-    pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
+    pub(crate) fn open_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
         let pager = Pager::open_or_create(path)?;
         let manager = Self { pager };
         manager.initialize_or_validate_system_catalog()?;
@@ -484,10 +483,14 @@ mod tests {
         disk_manager::DiskManager,
     };
 
+    fn open(path: impl AsRef<Path>) -> StorageResult<CatalogManager> {
+        CatalogManager::open_or_create(path)
+    }
+
     #[test]
     fn open_new_database_bootstraps_system_catalog_roots_and_rows() {
         let file = NamedTempFile::new().unwrap();
-        let manager = CatalogManager::open(file.path()).unwrap();
+        let manager = open(file.path()).unwrap();
 
         assert_eq!(manager.pager.create_table_tree().unwrap().root_page_id(), 4);
 
@@ -537,11 +540,11 @@ mod tests {
     fn open_existing_database_validates_system_catalog() {
         let file = NamedTempFile::new().unwrap();
         {
-            let manager = CatalogManager::open(file.path()).unwrap();
+            let manager = open(file.path()).unwrap();
             manager.flush().unwrap();
         }
 
-        let manager = CatalogManager::open(file.path()).unwrap();
+        let manager = open(file.path()).unwrap();
         let mut tables = manager.pager.table_cursor(SYS_TABLES_ROOT_PAGE_ID).unwrap();
         assert_table_catalog_row(
             &mut tables,
@@ -562,7 +565,7 @@ mod tests {
             assert_eq!(disk_manager.new_page().unwrap(), 1);
         }
 
-        let error = match CatalogManager::open(file.path()) {
+        let error = match open(file.path()) {
             Ok(_) => panic!("partial catalog should be rejected"),
             Err(error) => error,
         };
@@ -579,7 +582,7 @@ mod tests {
     #[test]
     fn create_table_records_schema_in_catalog() {
         let file = NamedTempFile::new().unwrap();
-        let manager = CatalogManager::open(file.path()).unwrap();
+        let manager = open(file.path()).unwrap();
         let row_schema = users_schema();
 
         let table = manager.create_table("users", row_schema.clone()).unwrap();
@@ -619,7 +622,7 @@ mod tests {
     #[test]
     fn create_index_records_explicit_name_and_source_columns_in_catalog() {
         let file = NamedTempFile::new().unwrap();
-        let manager = CatalogManager::open(file.path()).unwrap();
+        let manager = open(file.path()).unwrap();
         let table = manager.create_table("users", users_schema()).unwrap();
 
         let index = manager.create_index("idx_users_email", "users", &["email"]).unwrap();
@@ -671,7 +674,7 @@ mod tests {
     #[test]
     fn create_index_rejects_unknown_table_column() {
         let file = NamedTempFile::new().unwrap();
-        let manager = CatalogManager::open(file.path()).unwrap();
+        let manager = open(file.path()).unwrap();
         manager.create_table("users", users_schema()).unwrap();
 
         let error = manager.create_index("idx_users_missing", "users", &["missing"]).unwrap_err();
@@ -689,7 +692,7 @@ mod tests {
     fn allocate_table_row_id_persists_last_row_id() {
         let file = NamedTempFile::new().unwrap();
         {
-            let manager = CatalogManager::open(file.path()).unwrap();
+            let manager = open(file.path()).unwrap();
             let table = manager.create_table("users", users_schema()).unwrap();
 
             assert_eq!(manager.allocate_table_row_id(&table).unwrap(), 1);
@@ -698,7 +701,7 @@ mod tests {
             manager.flush().unwrap();
         }
 
-        let manager = CatalogManager::open(file.path()).unwrap();
+        let manager = open(file.path()).unwrap();
         let table = manager.table_schema_by_name("users").unwrap();
         assert_eq!(table.last_row_id, 2);
         assert_eq!(manager.allocate_table_row_id(&table).unwrap(), 3);

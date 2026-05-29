@@ -22,6 +22,11 @@ impl Database {
         Ok(Self { catalog: CatalogManager::open_existing(path)? })
     }
 
+    /// Opens a database file, creating and initializing it if needed.
+    pub fn open_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
+        Ok(Self { catalog: CatalogManager::open_or_create(path)? })
+    }
+
     /// Returns the database-file path associated with this database.
     pub fn path(&self) -> &Path {
         self.catalog.path()

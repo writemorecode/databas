@@ -17,8 +17,7 @@ pub struct DiskManager {
 }
 
 impl DiskManager {
-    /// Create a new `DiskManager` from a path to a file, creating it if needed.
-    #[cfg(test)]
+    /// Open a `DiskManager` from a path to a file, creating it if needed.
     pub(crate) fn new(path: &Path) -> Result<Self, DiskManagerError> {
         Self::open_with_options(
             OpenOptions::new().create(true).read(true).write(true).truncate(false).append(false),
