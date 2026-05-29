@@ -135,6 +135,8 @@ pub type RowStream = Box<dyn Iterator<Item = ExecutorResult<TableRecord>>>;
 
 /// Result of executing one physical plan.
 pub enum ExecutionOutput {
+    /// Textual physical plan produced by `EXPLAIN`.
+    Explain(String),
     /// A lazy stream of result rows.
     Rows {
         /// Result rows yielded on demand.
@@ -154,6 +156,7 @@ impl ExecutionOutput {
     /// the requesting operator name.
     pub fn into_rows(self, operator: &'static str) -> ExecutorResult<RowStream> {
         match self {
+            Self::Explain(_) => Err(ExecutorError::ExpectedRows { operator }),
             Self::Rows { rows } => Ok(rows),
             Self::RowsAffected(_) | Self::SchemaAffected => {
                 Err(ExecutorError::ExpectedRows { operator })
@@ -165,6 +168,7 @@ impl ExecutionOutput {
 impl std::fmt::Debug for ExecutionOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Explain(plan) => f.debug_tuple("Explain").field(plan).finish(),
             Self::Rows { .. } => f.debug_struct("Rows").field("rows", &"<row stream>").finish(),
             Self::RowsAffected(count) => f.debug_tuple("RowsAffected").field(count).finish(),
             Self::SchemaAffected => f.write_str("SchemaAffected"),
@@ -175,6 +179,7 @@ impl std::fmt::Debug for ExecutionOutput {
 impl std::fmt::Display for ExecutionOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ExecutionOutput::Explain(plan) => write!(f, "{plan}"),
             ExecutionOutput::Rows { .. } => write!(f, "Query returned rows."),
             ExecutionOutput::RowsAffected(count) => {
                 write!(f, "{count} rows affected.")
@@ -207,6 +212,7 @@ impl<'db> Executor<'db> {
     /// perform their side effects before returning.
     pub fn execute(&mut self, plan: PhysicalPlan) -> ExecutorResult<ExecutionOutput> {
         match plan {
+            PhysicalPlan::Explain { input } => Ok(ExecutionOutput::Explain(input.to_string())),
             PhysicalPlan::CreateTable { name, schema } => {
                 self.database.create_table(&name, schema)?;
                 Ok(ExecutionOutput::SchemaAffected)
