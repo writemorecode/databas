@@ -31,6 +31,7 @@ pub enum TokenKind<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Keyword {
+    Explain,
     Select,
     From,
     Where,
@@ -74,6 +75,7 @@ pub enum Aggregate {
 impl Display for Keyword {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Keyword::Explain => write!(f, "EXPLAIN"),
             Keyword::Select => write!(f, "SELECT"),
             Keyword::From => write!(f, "FROM"),
             Keyword::Where => write!(f, "WHERE"),
@@ -144,6 +146,7 @@ impl<'a> From<&'a str> for TokenKind<'a> {
     fn from(value: &'a str) -> Self {
         let uppercase = value.to_uppercase();
         match uppercase.as_ref() {
+            "EXPLAIN" => TokenKind::Keyword(Keyword::Explain),
             "SELECT" => TokenKind::Keyword(Keyword::Select),
             "FROM" => TokenKind::Keyword(Keyword::From),
             "WHERE" => TokenKind::Keyword(Keyword::Where),

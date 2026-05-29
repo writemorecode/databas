@@ -116,6 +116,7 @@ impl<'a> Parser<'a> {
             .next()
             .ok_or(SQLError { kind: SQLErrorKind::UnexpectedEnd, pos: self.lexer.position })??;
         match token.kind {
+            TokenKind::Keyword(Keyword::Explain) => Ok(Statement::Explain(Box::new(self.stmt()?))),
             TokenKind::Keyword(Keyword::Select) => {
                 Ok(Statement::Select(self.parse_select_query()?))
             }

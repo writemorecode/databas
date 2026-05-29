@@ -10,7 +10,7 @@
 //! shape for most relational operators and currently chooses only simple
 //! physical operators such as full table scans and values-backed inserts.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt};
 
 use thiserror::Error;
 
@@ -58,6 +58,8 @@ pub struct Plan {
 /// in `Box`es so the plan can form recursive operator trees.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogicalPlan {
+    /// Return the physical plan for an input statement without executing it.
+    Explain { input: Box<LogicalPlan> },
     /// Create a table with the provided tuple schema.
     CreateTable { name: String, schema: TupleSchema },
     /// Create a secondary index over bound columns from an existing table.
@@ -91,6 +93,11 @@ pub enum LogicalPlan {
 /// [`PhysicalPlan::InsertValues`] for `INSERT ... VALUES`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalPlan {
+    /// Return the formatted input plan without executing it.
+    Explain {
+        /// Plan to describe.
+        input: Box<PhysicalPlan>,
+    },
     /// Execute a catalog table creation.
     CreateTable {
         /// Table name to create.
@@ -165,6 +172,85 @@ pub enum PhysicalPlan {
     },
 }
 
+impl fmt::Display for PhysicalPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_physical_plan(self, f, "", true, true)
+    }
+}
+
+fn format_physical_plan(
+    plan: &PhysicalPlan,
+    f: &mut fmt::Formatter<'_>,
+    prefix: &str,
+    is_last: bool,
+    is_root: bool,
+) -> fmt::Result {
+    if !is_root {
+        write!(f, "\n{}{} ", prefix, if is_last { "`-" } else { "|-" })?;
+    }
+    write!(f, "{}", physical_plan_label(plan))?;
+
+    if let Some(input) = physical_plan_input(plan) {
+        let child_prefix = if is_root {
+            String::new()
+        } else {
+            format!("{}{}", prefix, if is_last { "   " } else { "|  " })
+        };
+        format_physical_plan(input, f, &child_prefix, true, false)?;
+    }
+
+    Ok(())
+}
+
+fn physical_plan_input(plan: &PhysicalPlan) -> Option<&PhysicalPlan> {
+    match plan {
+        PhysicalPlan::Explain { input }
+        | PhysicalPlan::Filter { input, .. }
+        | PhysicalPlan::Sort { input, .. }
+        | PhysicalPlan::Project { input, .. }
+        | PhysicalPlan::Offset { input, .. }
+        | PhysicalPlan::Limit { input, .. } => Some(input),
+        PhysicalPlan::CreateTable { .. }
+        | PhysicalPlan::CreateIndex { .. }
+        | PhysicalPlan::Values { .. }
+        | PhysicalPlan::InsertValues { .. }
+        | PhysicalPlan::OneRow
+        | PhysicalPlan::FullTableScan { .. } => None,
+    }
+}
+
+fn physical_plan_label(plan: &PhysicalPlan) -> String {
+    match plan {
+        PhysicalPlan::Explain { .. } => "Explain".to_owned(),
+        PhysicalPlan::CreateTable { name, .. } => format!("CreateTable table={name}"),
+        PhysicalPlan::CreateIndex { name, table, columns } => format!(
+            "CreateIndex index={name} table={} columns=[{}]",
+            table.name,
+            display_list(columns)
+        ),
+        PhysicalPlan::Values { rows } => format!("Values rows={}", rows.len()),
+        PhysicalPlan::InsertValues { table, columns, values } => format!(
+            "InsertValues table={} columns=[{}] rows={}",
+            table.name,
+            display_list(columns),
+            values.len()
+        ),
+        PhysicalPlan::OneRow => "OneRow".to_owned(),
+        PhysicalPlan::FullTableScan { table } => format!("FullTableScan table={}", table.name),
+        PhysicalPlan::Filter { predicate, .. } => format!("Filter predicate={predicate}"),
+        PhysicalPlan::Sort { terms, .. } => format!("Sort terms=[{}]", display_list(terms)),
+        PhysicalPlan::Project { expressions, .. } => {
+            format!("Project expressions=[{}]", display_list(expressions))
+        }
+        PhysicalPlan::Offset { offset, .. } => format!("Offset offset={offset}"),
+        PhysicalPlan::Limit { limit, .. } => format!("Limit limit={limit}"),
+    }
+}
+
+fn display_list<T: fmt::Display>(values: &[T]) -> String {
+    values.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+}
+
 /// Expression after literal conversion and column binding.
 ///
 /// Bound column expressions carry catalog metadata and row ordinals, so the
@@ -179,6 +265,17 @@ pub enum PlannedExpression {
     Unary { op: Op, expr: Box<PlannedExpression> },
     /// Binary operator applied to two planned expressions.
     Binary { left: Box<PlannedExpression>, op: Op, right: Box<PlannedExpression> },
+}
+
+impl fmt::Display for PlannedExpression {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PlannedExpression::Literal(value) => write!(f, "{value}"),
+            PlannedExpression::Column(column) => write!(f, "{column}"),
+            PlannedExpression::Unary { op, expr } => write!(f, "{op} {expr}"),
+            PlannedExpression::Binary { left, op, right } => write!(f, "({left} {op} {right})"),
+        }
+    }
 }
 
 /// Catalog column reference resolved during planning.
@@ -196,6 +293,12 @@ pub struct BoundColumn {
     pub data_type: DataType,
 }
 
+impl fmt::Display for BoundColumn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.table, self.name)
+    }
+}
+
 /// One bound column and optional direction from an `ORDER BY` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SortTerm {
@@ -203,6 +306,16 @@ pub struct SortTerm {
     pub column: BoundColumn,
     /// Direction specified by SQL, or `None` when the query omitted one.
     pub direction: Option<Ordering>,
+}
+
+impl fmt::Display for SortTerm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.column)?;
+        if let Some(direction) = &self.direction {
+            write!(f, " {direction}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Normalized sort direction.
@@ -285,10 +398,22 @@ impl<'db> Planner<'db> {
 
     fn logical_plan_statement(&self, statement: &Statement<'_>) -> PlannerResult<LogicalPlan> {
         match statement {
+            Statement::Explain(statement) => self.plan_explain(statement),
             Statement::CreateTable(query) => self.plan_create_table(query),
             Statement::CreateIndex(query) => self.plan_create_index(query),
             Statement::Insert(query) => self.plan_insert(query),
             Statement::Select(query) => self.plan_select(query),
+        }
+    }
+
+    fn plan_explain(&self, statement: &Statement<'_>) -> PlannerResult<LogicalPlan> {
+        match statement {
+            Statement::Select(query) => {
+                Ok(LogicalPlan::Explain { input: Box::new(self.plan_select(query)?) })
+            }
+            statement => {
+                Err(PlannerError::UnsupportedStatement { statement: statement.to_string() })
+            }
         }
     }
 
@@ -392,6 +517,9 @@ impl<'db> Planner<'db> {
 
     fn physical_plan(&self, logical: &LogicalPlan) -> PlannerResult<PhysicalPlan> {
         match logical {
+            LogicalPlan::Explain { input } => {
+                Ok(PhysicalPlan::Explain { input: Box::new(self.physical_plan(input)?) })
+            }
             LogicalPlan::CreateTable { name, schema } => {
                 Ok(PhysicalPlan::CreateTable { name: name.clone(), schema: schema.clone() })
             }
@@ -746,6 +874,32 @@ mod tests {
     }
 
     #[test]
+    fn explain_select_wraps_planned_select() {
+        let (_dir, database) = database_with_users();
+        let planner = Planner::new(&database);
+        let statement = parse("EXPLAIN SELECT name FROM users WHERE id == 1;");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let LogicalPlan::Explain { input } = &plan.logical else {
+            panic!("expected logical explain plan: {plan:?}");
+        };
+        assert!(matches!(input.as_ref(), LogicalPlan::Project { .. }));
+
+        let PhysicalPlan::Explain { input } = &plan.physical else {
+            panic!("expected physical explain plan: {plan:?}");
+        };
+        let PhysicalPlan::Project { input, expressions } = input.as_ref() else {
+            panic!("expected explained select project plan: {plan:?}");
+        };
+        assert_eq!(
+            expressions,
+            &[PlannedExpression::Column(bound("users", "name", 1, DataType::Text))]
+        );
+        assert!(matches!(input.as_ref(), PhysicalPlan::Filter { .. }));
+    }
+
+    #[test]
     fn select_order_limit_offset_preserves_operator_order() {
         let (_dir, database) = database_with_users();
         let planner = Planner::new(&database);
@@ -816,6 +970,10 @@ mod tests {
         assert!(matches!(
             planner.plan_statement(&parse("CREATE INDEX idx_duplicate ON users (name, name);")),
             Err(PlannerError::DuplicateIndexColumn { column }) if column == "name"
+        ));
+        assert!(matches!(
+            planner.plan_statement(&parse("EXPLAIN INSERT INTO users (id) VALUES (1);")),
+            Err(PlannerError::UnsupportedStatement { statement }) if statement.starts_with("INSERT")
         ));
     }
 

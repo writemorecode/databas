@@ -103,11 +103,12 @@ fn assert_statements_round_trip(sql: &str) {
 }
 
 fn draw_statement(tc: &TestCase) -> String {
-    match draw_index(tc, 4) {
+    match draw_index(tc, 5) {
         0 => draw_insert(tc),
         1 => draw_select(tc),
         2 => draw_create_table(tc),
         3 => draw_create_index(tc),
+        4 => draw_explain_select(tc),
         _ => unreachable!(),
     }
 }
@@ -168,6 +169,10 @@ fn draw_select(tc: &TestCase) -> String {
     sql
 }
 
+fn draw_explain_select(tc: &TestCase) -> String {
+    format!("EXPLAIN {}", draw_select(tc))
+}
+
 fn draw_create_table(tc: &TestCase) -> String {
     let table = draw_identifier(tc);
     let columns = (0..draw_non_empty_len(tc, 5))
@@ -212,6 +217,23 @@ fn select_queries_round_trip_through_display(tc: TestCase) {
     let sql = draw_select(&tc);
     tc.note(&sql);
     assert_round_trips(&sql);
+}
+
+#[hegel::test(test_cases = 250)]
+fn explain_select_queries_round_trip_through_display(tc: TestCase) {
+    let sql = draw_explain_select(&tc);
+    tc.note(&sql);
+    assert_round_trips(&sql);
+}
+
+#[test]
+fn explain_select_parses_as_explain_statement() {
+    let parsed = parse_statement("EXPLAIN SELECT alpha FROM beta;");
+
+    let Statement::Explain(statement) = parsed else {
+        panic!("expected EXPLAIN statement");
+    };
+    assert!(matches!(statement.as_ref(), Statement::Select(_)));
 }
 
 #[hegel::test(test_cases = 250)]

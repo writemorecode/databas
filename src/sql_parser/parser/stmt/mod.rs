@@ -14,6 +14,7 @@ use select::SelectQuery;
 
 #[derive(Debug, PartialEq)]
 pub enum Statement<'a> {
+    Explain(Box<Statement<'a>>),
     Select(SelectQuery<'a>),
     Insert(InsertQuery<'a>),
     CreateTable(CreateTableQuery<'a>),
@@ -23,6 +24,7 @@ pub enum Statement<'a> {
 impl Display for Statement<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Statement::Explain(statement) => write!(f, "EXPLAIN {statement}"),
             Statement::Select(query) => query.fmt(f),
             Statement::Insert(query) => query.fmt(f),
             Statement::CreateTable(query) => query.fmt(f),
