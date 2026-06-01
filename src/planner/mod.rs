@@ -272,7 +272,7 @@ impl fmt::Display for PlannedExpression {
         match self {
             PlannedExpression::Literal(value) => write!(f, "{value}"),
             PlannedExpression::Column(column) => write!(f, "{column}"),
-            PlannedExpression::Unary { op, expr } => write!(f, "{op} {expr}"),
+            PlannedExpression::Unary { op, expr } => write!(f, "{op}{expr}"),
             PlannedExpression::Binary { left, op, right } => write!(f, "({left} {op} {right})"),
         }
     }
