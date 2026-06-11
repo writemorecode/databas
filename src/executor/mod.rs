@@ -15,7 +15,7 @@
 use crate::{
     core::{
         DataType, Database, IndexSchema, TableRecord, TableSchema, Tuple, TupleView, Value,
-        error::StorageError,
+        error::{InternalError, InvariantViolation, StorageError},
     },
     planner::{BoundColumn, PhysicalPlan, PlannedExpression},
     sql_parser::parser::op::Op,
@@ -316,7 +316,9 @@ impl<'db> Executor<'db> {
             Ok(output) => match self.database.commit_transaction(txn_id) {
                 Ok(()) => Ok(output),
                 Err(commit_error) => {
-                    if let Err(rollback_error) = self.database.rollback_transaction(txn_id) {
+                    if let Err(rollback_error) = self.database.rollback_transaction(txn_id)
+                        && !is_no_active_transaction(&rollback_error)
+                    {
                         return Err(rollback_error.into());
                     }
                     Err(commit_error.into())
@@ -330,6 +332,15 @@ impl<'db> Executor<'db> {
             }
         }
     }
+}
+
+fn is_no_active_transaction(error: &StorageError) -> bool {
+    matches!(
+        error,
+        StorageError::Internal(InternalError::InvariantViolation(
+            InvariantViolation::NoActiveTransaction
+        ))
+    )
 }
 
 /// Evaluates one planned scalar expression against a record.

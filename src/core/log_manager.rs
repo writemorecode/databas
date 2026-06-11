@@ -135,6 +135,8 @@ pub(crate) struct LogManager {
     highest_txn_id: TxnId,
     highest_appended_lsn: Option<Lsn>,
     highest_durable_lsn: Option<Lsn>,
+    #[cfg(test)]
+    fail_next_flush: bool,
 }
 
 impl LogManager {
@@ -169,7 +171,14 @@ impl LogManager {
         }
         wal_file.seek(std::io::SeekFrom::End(0))?;
 
-        Ok(Self { wal_file, highest_txn_id, highest_durable_lsn: None, highest_appended_lsn })
+        Ok(Self {
+            wal_file,
+            highest_txn_id,
+            highest_durable_lsn: None,
+            highest_appended_lsn,
+            #[cfg(test)]
+            fail_next_flush: false,
+        })
     }
 
     pub(crate) fn highest_txn_id(&self) -> TxnId {
@@ -236,6 +245,14 @@ impl LogManager {
             });
         }
 
+        #[cfg(test)]
+        if self.fail_next_flush {
+            self.fail_next_flush = false;
+            return Err(LogManagerFlushError::Io(std::io::Error::other(
+                "injected WAL flush failure",
+            )));
+        }
+
         self.wal_file.sync_all()?;
         self.highest_durable_lsn = Some(highest_appended_lsn);
         Ok(())
@@ -254,6 +271,11 @@ impl LogManager {
     #[cfg(test)]
     pub(crate) fn force_next_lsn_exhausted_for_test(&mut self) {
         self.highest_appended_lsn = Some(Lsn::MAX);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_flush_for_test(&mut self) {
+        self.fail_next_flush = true;
     }
 }
 
