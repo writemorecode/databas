@@ -5,10 +5,8 @@ use std::fmt::{self, Display};
 use crate::core::{
     RowId, Tuple,
     btree::{CursorState, OwnedRecord, Record, TreeCursor},
-    disk_manager::DiskManager,
     error::StorageResult,
     page::{CellCorruption, PageError},
-    page_store::PageStore,
 };
 
 const ROW_ID_SIZE: usize = size_of::<RowId>();
@@ -73,40 +71,40 @@ pub struct IndexEntry {
 ///
 /// Inline records keep the backing page pinned internally and expose bytes only
 /// through callbacks. Overflow records may still be materialized by the raw tree.
-pub struct TableRecordRef<S: PageStore = DiskManager> {
+pub struct TableRecordRef {
     row_id: RowId,
-    raw: Record<S>,
+    raw: Record,
 }
 
 /// Non-owned secondary-index entry returned by borrowed [`IndexCursor`] lookups.
 ///
 /// Inline entries keep the backing page pinned internally and expose key bytes
 /// only through callbacks. Overflow keys may still be materialized by the raw tree.
-pub struct IndexEntryRef<S: PageStore = DiskManager> {
+pub struct IndexEntryRef {
     row_id: RowId,
-    raw: Record<S>,
+    raw: Record,
 }
 
 /// Typed cursor for a table B+-tree keyed by row id.
 #[derive(Clone)]
-pub struct TableCursor<S: PageStore = DiskManager> {
-    inner: TreeCursor<S>,
+pub struct TableCursor {
+    inner: TreeCursor,
 }
 
 /// Typed cursor for a secondary-index B+-tree keyed by encoded index bytes.
 #[derive(Clone)]
-pub struct IndexCursor<S: PageStore = DiskManager> {
-    inner: TreeCursor<S>,
+pub struct IndexCursor {
+    inner: TreeCursor,
 }
 
-impl<S: PageStore> TableCursor<S> {
+impl TableCursor {
     /// Wraps a raw tree cursor as a table cursor.
-    pub(crate) fn new(inner: TreeCursor<S>) -> Self {
+    pub(crate) fn new(inner: TreeCursor) -> Self {
         Self { inner }
     }
 
     /// Consumes this table cursor and returns the raw tree cursor.
-    pub fn into_inner(self) -> TreeCursor<S> {
+    pub fn into_inner(self) -> TreeCursor {
         self.inner
     }
 
@@ -136,7 +134,7 @@ impl<S: PageStore> TableCursor<S> {
     }
 
     /// Looks up a table record by row id without eagerly copying page-resident bytes.
-    pub fn get_record(&mut self, row_id: RowId) -> StorageResult<Option<TableRecordRef<S>>> {
+    pub fn get_record(&mut self, row_id: RowId) -> StorageResult<Option<TableRecordRef>> {
         self.inner.get(&encode_table_row_id(row_id))?.map(TableRecordRef::try_from).transpose()
     }
 
@@ -151,14 +149,14 @@ impl<S: PageStore> TableCursor<S> {
     }
 }
 
-impl<S: PageStore> IndexCursor<S> {
+impl IndexCursor {
     /// Wraps a raw tree cursor as an index cursor.
-    pub(crate) fn new(inner: TreeCursor<S>) -> Self {
+    pub(crate) fn new(inner: TreeCursor) -> Self {
         Self { inner }
     }
 
     /// Consumes this index cursor and returns the raw tree cursor.
-    pub fn into_inner(self) -> TreeCursor<S> {
+    pub fn into_inner(self) -> TreeCursor {
         self.inner
     }
 
@@ -188,7 +186,7 @@ impl<S: PageStore> IndexCursor<S> {
     }
 
     /// Looks up an index entry by key without eagerly copying page-resident bytes.
-    pub fn get_entry(&mut self, key: &[u8]) -> StorageResult<Option<IndexEntryRef<S>>> {
+    pub fn get_entry(&mut self, key: &[u8]) -> StorageResult<Option<IndexEntryRef>> {
         self.inner.get(key)?.map(IndexEntryRef::try_from).transpose()
     }
 
@@ -203,7 +201,7 @@ impl<S: PageStore> IndexCursor<S> {
     }
 }
 
-impl<S: PageStore> TableRecordRef<S> {
+impl TableRecordRef {
     /// Returns the row id that identifies this table record.
     pub fn row_id(&self) -> RowId {
         self.row_id
@@ -220,7 +218,7 @@ impl<S: PageStore> TableRecordRef<S> {
     }
 }
 
-impl<S: PageStore> IndexEntryRef<S> {
+impl IndexEntryRef {
     /// Returns the table row id referenced by this secondary-index key.
     pub fn row_id(&self) -> RowId {
         self.row_id
@@ -237,7 +235,7 @@ impl<S: PageStore> IndexEntryRef<S> {
     }
 }
 
-impl<S: PageStore> fmt::Debug for TableCursor<S> {
+impl fmt::Debug for TableCursor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TableCursor")
             .field("root_page_id", &self.root_page_id())
@@ -246,7 +244,7 @@ impl<S: PageStore> fmt::Debug for TableCursor<S> {
     }
 }
 
-impl<S: PageStore> fmt::Debug for IndexCursor<S> {
+impl fmt::Debug for IndexCursor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IndexCursor")
             .field("root_page_id", &self.root_page_id())
@@ -255,7 +253,7 @@ impl<S: PageStore> fmt::Debug for IndexCursor<S> {
     }
 }
 
-impl<S: PageStore> fmt::Debug for TableRecordRef<S> {
+impl fmt::Debug for TableRecordRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TableRecordRef")
             .field("row_id", &self.row_id)
@@ -264,7 +262,7 @@ impl<S: PageStore> fmt::Debug for TableRecordRef<S> {
     }
 }
 
-impl<S: PageStore> fmt::Debug for IndexEntryRef<S> {
+impl fmt::Debug for IndexEntryRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IndexEntryRef")
             .field("row_id", &self.row_id)
@@ -283,19 +281,19 @@ impl TryFrom<OwnedRecord> for TableRecord {
     }
 }
 
-impl<S: PageStore> TryFrom<Record<S>> for TableRecordRef<S> {
+impl TryFrom<Record> for TableRecordRef {
     type Error = crate::core::error::StorageError;
 
-    fn try_from(raw: Record<S>) -> Result<Self, Self::Error> {
+    fn try_from(raw: Record) -> Result<Self, Self::Error> {
         let row_id = raw.with_key(decode_table_row_id)??;
         Ok(Self { row_id, raw })
     }
 }
 
-impl<S: PageStore> TryFrom<Record<S>> for IndexEntryRef<S> {
+impl TryFrom<Record> for IndexEntryRef {
     type Error = crate::core::error::StorageError;
 
-    fn try_from(raw: Record<S>) -> Result<Self, Self::Error> {
+    fn try_from(raw: Record) -> Result<Self, Self::Error> {
         let row_id = raw.with_value(decode_index_row_id)??;
         Ok(Self { row_id, raw })
     }
@@ -313,30 +311,43 @@ impl TryFrom<OwnedRecord> for IndexEntry {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
+    use tempfile::NamedTempFile;
+
     use super::*;
     use crate::core::{
         PAGE_SIZE,
         btree::initialize_empty_root,
+        disk_manager::DiskManager,
         error::{ConstraintError, InvalidArgumentError, StorageError},
-        memory_page_store::MemoryPageStore,
         page_cache::PageCache,
+        storage_runtime::StorageRuntime,
     };
 
-    fn memory_table_cursor(cache_frames: usize) -> TableCursor<MemoryPageStore> {
-        let page_cache = PageCache::new(MemoryPageStore::new(), cache_frames).unwrap();
+    fn temp_page_cache(cache_frames: usize) -> PageCache {
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let runtime =
+            Rc::new(StorageRuntime::new(file.path().to_path_buf(), disk_manager).unwrap());
+        PageCache::new(runtime, cache_frames).unwrap()
+    }
+
+    fn temp_table_cursor(cache_frames: usize) -> TableCursor {
+        let page_cache = temp_page_cache(cache_frames);
         let root_page_id = initialize_empty_root(&page_cache).unwrap();
         TableCursor::new(TreeCursor::new(page_cache, root_page_id))
     }
 
-    fn memory_index_cursor(cache_frames: usize) -> IndexCursor<MemoryPageStore> {
-        let page_cache = PageCache::new(MemoryPageStore::new(), cache_frames).unwrap();
+    fn temp_index_cursor(cache_frames: usize) -> IndexCursor {
+        let page_cache = temp_page_cache(cache_frames);
         let root_page_id = initialize_empty_root(&page_cache).unwrap();
         IndexCursor::new(TreeCursor::new(page_cache, root_page_id))
     }
 
     #[test]
     fn table_cursor_insert_get_update_delete_round_trips_owned_records() {
-        let mut cursor = memory_table_cursor(8);
+        let mut cursor = temp_table_cursor(8);
 
         cursor.insert(42, b"old record").unwrap();
         assert_eq!(
@@ -356,7 +367,7 @@ mod tests {
 
     #[test]
     fn table_cursor_get_record_returns_non_owned_record_view() {
-        let mut cursor = memory_table_cursor(8);
+        let mut cursor = temp_table_cursor(8);
 
         cursor.insert(42, b"record bytes").unwrap();
         let record = cursor.get_record(42).unwrap().expect("record should exist");
@@ -372,7 +383,7 @@ mod tests {
 
     #[test]
     fn index_cursor_insert_get_update_delete_round_trips_owned_entries() {
-        let mut cursor = memory_index_cursor(8);
+        let mut cursor = temp_index_cursor(8);
 
         cursor.insert(b"email:ada@example.test", 7).unwrap();
         assert_eq!(
@@ -392,7 +403,7 @@ mod tests {
 
     #[test]
     fn index_cursor_get_entry_returns_non_owned_entry_view() {
-        let mut cursor = memory_index_cursor(8);
+        let mut cursor = temp_index_cursor(8);
 
         cursor.insert(b"email:ada@example.test", 7).unwrap();
         let entry =
@@ -409,14 +420,14 @@ mod tests {
 
     #[test]
     fn typed_cursors_preserve_duplicate_key_errors() {
-        let mut table = memory_table_cursor(8);
+        let mut table = temp_table_cursor(8);
         table.insert(1, b"one").unwrap();
         assert!(matches!(
             table.insert(1, b"again"),
             Err(StorageError::Constraint(ConstraintError::DuplicateKey))
         ));
 
-        let mut index = memory_index_cursor(8);
+        let mut index = temp_index_cursor(8);
         index.insert(b"key", 1).unwrap();
         assert!(matches!(
             index.insert(b"key", 2),
@@ -426,7 +437,7 @@ mod tests {
 
     #[test]
     fn typed_cursors_preserve_missing_key_errors() {
-        let mut table = memory_table_cursor(8);
+        let mut table = temp_table_cursor(8);
         assert!(matches!(
             table.update(404, b"missing"),
             Err(StorageError::InvalidArgument(InvalidArgumentError::KeyNotFound))
@@ -436,7 +447,7 @@ mod tests {
             Err(StorageError::InvalidArgument(InvalidArgumentError::KeyNotFound))
         ));
 
-        let mut index = memory_index_cursor(8);
+        let mut index = temp_index_cursor(8);
         assert!(matches!(
             index.update(b"missing", 404),
             Err(StorageError::InvalidArgument(InvalidArgumentError::KeyNotFound))
@@ -449,7 +460,7 @@ mod tests {
 
     #[test]
     fn typed_cursors_preserve_overflow_support() {
-        let mut table = memory_table_cursor(16);
+        let mut table = temp_table_cursor(16);
         let large_record = vec![0xaa; PAGE_SIZE * 2];
         table.insert(500, &large_record).unwrap();
         assert_eq!(
@@ -457,7 +468,7 @@ mod tests {
             Some(TableRecord { row_id: 500, record: large_record.into_boxed_slice() })
         );
 
-        let mut index = memory_index_cursor(16);
+        let mut index = temp_index_cursor(16);
         let large_key = vec![0xbb; PAGE_SIZE * 2];
         index.insert(&large_key, 900).unwrap();
         assert_eq!(
@@ -468,14 +479,14 @@ mod tests {
 
     #[test]
     fn typed_borrowed_get_preserves_overflow_support() {
-        let mut table = memory_table_cursor(16);
+        let mut table = temp_table_cursor(16);
         let large_record = vec![0xaa; PAGE_SIZE * 2];
         table.insert(500, &large_record).unwrap();
         let record = table.get_record(500).unwrap().expect("large table record should exist");
         assert_eq!(record.row_id(), 500);
         assert_eq!(record.with_record(|bytes| bytes.to_vec()).unwrap(), large_record);
 
-        let mut index = memory_index_cursor(16);
+        let mut index = temp_index_cursor(16);
         let large_key = vec![0xbb; PAGE_SIZE * 2];
         index.insert(&large_key, 900).unwrap();
         let entry = index.get_entry(&large_key).unwrap().expect("large index entry should exist");

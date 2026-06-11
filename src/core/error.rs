@@ -187,25 +187,11 @@ pub(crate) enum DiskManagerError {
 pub(crate) type DiskManagerResult<T> = Result<T, DiskManagerError>;
 
 #[derive(Debug, Error)]
-pub enum PageStoreError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error(
-        "requested WAL flush through LSN {requested_lsn}, but highest appended LSN is {highest_appended_lsn:?}"
-    )]
-    WalFlushLsnNotAppended { requested_lsn: Lsn, highest_appended_lsn: Option<Lsn> },
-    #[error("invalid page id: {page_id}")]
-    InvalidPageId { page_id: PageId },
-    #[error("invalid file size (not multiple of page size): {size}")]
-    InvalidFileSize { size: u64 },
-}
-
-pub type PageStoreResult<T> = Result<T, PageStoreError>;
-
-#[derive(Debug, Error)]
 pub(crate) enum PageCacheError {
-    #[error("page store error: {0}")]
-    Store(#[from] PageStoreError),
+    #[error("disk manager error: {0}")]
+    Disk(#[from] DiskManagerError),
+    #[error("WAL flush error: {0}")]
+    WalFlush(#[from] LogManagerFlushError),
     #[error("no evictable frame available")]
     NoEvictableFrame,
     #[error("page {page_id} is pinned")]
@@ -258,55 +244,21 @@ impl From<DiskManagerError> for StorageError {
     }
 }
 
-impl From<PageStoreError> for StorageError {
-    fn from(err: PageStoreError) -> Self {
-        match err {
-            PageStoreError::Io(err) => Self::Io(err),
-            PageStoreError::WalFlushLsnNotAppended { requested_lsn, highest_appended_lsn } => {
-                Self::Internal(InternalError::InvariantViolation(
-                    InvariantViolation::WalFlushLsnNotAppended {
-                        requested_lsn,
-                        highest_appended_lsn,
-                    },
-                ))
-            }
-            PageStoreError::InvalidPageId { page_id } => {
-                Self::InvalidArgument(InvalidArgumentError::InvalidPageId { page_id })
-            }
-            PageStoreError::InvalidFileSize { size } => Self::Corruption(CorruptionError {
-                component: CorruptionComponent::DatabaseFile,
-                page_id: None,
-                kind: CorruptionKind::InvalidFileSize { size, page_size: PAGE_SIZE },
-            }),
-        }
-    }
-}
-
-impl From<LogManagerFlushError> for PageStoreError {
-    fn from(err: LogManagerFlushError) -> Self {
-        match err {
-            LogManagerFlushError::Io(err) => Self::Io(err),
-            LogManagerFlushError::LsnNotAppended { requested_lsn, highest_appended_lsn } => {
-                Self::WalFlushLsnNotAppended { requested_lsn, highest_appended_lsn }
-            }
-        }
-    }
-}
-
-impl From<DiskManagerError> for PageStoreError {
-    fn from(err: DiskManagerError) -> Self {
-        match err {
-            DiskManagerError::Io(err) => Self::Io(err),
-            DiskManagerError::InvalidPageId { page_id } => Self::InvalidPageId { page_id },
-            DiskManagerError::InvalidFileSize { size } => Self::InvalidFileSize { size },
-        }
-    }
-}
-
 impl From<PageCacheError> for StorageError {
     fn from(err: PageCacheError) -> Self {
         match err {
-            PageCacheError::Store(err) => err.into(),
+            PageCacheError::Disk(err) => err.into(),
+            PageCacheError::WalFlush(err) => match err {
+                LogManagerFlushError::Io(err) => Self::Io(err),
+                LogManagerFlushError::LsnNotAppended { requested_lsn, highest_appended_lsn } => {
+                    Self::Internal(InternalError::InvariantViolation(
+                        InvariantViolation::WalFlushLsnNotAppended {
+                            requested_lsn,
+                            highest_appended_lsn,
+                        },
+                    ))
+                }
+            },
             PageCacheError::NoEvictableFrame => {
                 Self::LimitExceeded(LimitExceededError::CacheCapacityExhausted)
             }

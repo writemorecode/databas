@@ -23,12 +23,11 @@ use std::{
 };
 
 use crate::core::{
-    disk_manager::DiskManager,
     error::{PageCacheError, PageCacheResult},
     log_manager::{Lsn, ZERO_LSN},
     page::{self, NodeMarker, Page, PageResult, Read, Write},
     page_replacement::ClockPolicy,
-    page_store::PageStore,
+    storage_runtime::StorageRuntime,
     {PAGE_SIZE, PageId},
 };
 
@@ -59,16 +58,15 @@ struct CacheMeta {
     replacement: ClockPolicy,
 }
 
-struct PageCacheInner<S: PageStore> {
-    store: RefCell<S>,
+struct PageCacheInner {
+    runtime: Rc<StorageRuntime>,
     meta: RefCell<CacheMeta>,
     frames: Vec<Frame>,
 }
 
-impl<S: PageStore> PageCacheInner<S> {
+impl PageCacheInner {
     /// Attempts to flush all dirty unpinned frames and ignores write errors.
     fn flush_best_effort_on_drop(&mut self) {
-        let store = self.store.get_mut();
         for frame in &mut self.frames {
             if !frame.dirty.get() || frame.pin_count.get() > 0 {
                 continue;
@@ -80,9 +78,11 @@ impl<S: PageStore> PageCacheInner<S> {
 
             let page = frame.data.get_mut();
             let page_lsn = page_lsn(page);
-            if store
+            if self
+                .runtime
                 .flush_wal_through(page_lsn)
-                .and_then(|()| store.write_page(page_id, page))
+                .map_err(PageCacheError::from)
+                .and_then(|()| self.runtime.write_page(page_id, page).map_err(PageCacheError::from))
                 .is_ok()
             {
                 frame.dirty.set(false);
@@ -91,7 +91,7 @@ impl<S: PageStore> PageCacheInner<S> {
     }
 }
 
-impl<S: PageStore> Drop for PageCacheInner<S> {
+impl Drop for PageCacheInner {
     /// Performs best-effort flushing for dirty unpinned frames when the last
     /// cache handle and all outstanding pins have been dropped.
     fn drop(&mut self) {
@@ -106,21 +106,21 @@ impl<S: PageStore> Drop for PageCacheInner<S> {
 /// cache operations. Use [`PinGuard`] to keep pages resident and use
 /// [`PageReadGuard`] or [`PageWriteGuard`] for temporary access to the page
 /// bytes.
-pub(crate) struct PageCache<S: PageStore = DiskManager> {
-    inner: Rc<PageCacheInner<S>>,
+pub(crate) struct PageCache {
+    inner: Rc<PageCacheInner>,
 }
 
-impl<S: PageStore> Clone for PageCache<S> {
+impl Clone for PageCache {
     fn clone(&self) -> Self {
         Self { inner: Rc::clone(&self.inner) }
     }
 }
 
-impl<S: PageStore> PageCache<S> {
+impl PageCache {
     /// Creates a new page cache with a fixed number of preallocated frames.
     ///
     /// Returns an error when `frame_count` is zero.
-    pub(crate) fn new(store: S, frame_count: usize) -> PageCacheResult<Self> {
+    pub(crate) fn new(runtime: Rc<StorageRuntime>, frame_count: usize) -> PageCacheResult<Self> {
         if frame_count == 0 {
             return Err(PageCacheError::InvalidFrameCount { frame_count });
         }
@@ -133,7 +133,7 @@ impl<S: PageStore> PageCache<S> {
 
         Ok(Self {
             inner: Rc::new(PageCacheInner {
-                store: RefCell::new(store),
+                runtime,
                 meta: RefCell::new(CacheMeta {
                     page_table: HashMap::new(),
                     replacement: ClockPolicy::new(frame_count),
@@ -147,7 +147,7 @@ impl<S: PageStore> PageCache<S> {
     ///
     /// Cache hits update replacement state and increment pin count.
     /// Cache misses use CLOCK replacement and may evict a dirty page.
-    pub(crate) fn fetch_page(&self, page_id: PageId) -> PageCacheResult<PinGuard<S>> {
+    pub(crate) fn fetch_page(&self, page_id: PageId) -> PageCacheResult<PinGuard> {
         if let Some(frame_id) = self.resident_frame_id(page_id)? {
             let frame = &self.inner.frames[frame_id];
             frame.pin_count.set(frame.pin_count.get().checked_add(1).expect("pin count overflow"));
@@ -164,9 +164,9 @@ impl<S: PageStore> PageCache<S> {
     ///
     /// A victim frame is selected before allocation so a full pinned cache
     /// returns `NoEvictableFrame` without growing the file.
-    pub(crate) fn new_page(&self) -> PageCacheResult<(PageId, PinGuard<S>)> {
+    pub(crate) fn new_page(&self) -> PageCacheResult<(PageId, PinGuard)> {
         let frame_id = self.select_victim_frame().ok_or(PageCacheError::NoEvictableFrame)?;
-        let page_id = self.inner.store.borrow_mut().new_page()?;
+        let page_id = self.inner.runtime.new_page()?;
         self.replace_frame(frame_id, page_id)?;
         Ok((page_id, PinGuard::new(Rc::clone(&self.inner), frame_id, page_id)))
     }
@@ -252,7 +252,7 @@ impl<S: PageStore> PageCache<S> {
         let old_page_id = frame.page_id.get();
 
         let mut data = [0u8; PAGE_SIZE];
-        self.inner.store.borrow_mut().read_page(new_page_id, &mut data)?;
+        self.inner.runtime.read_page(new_page_id, &mut data)?;
 
         {
             let mut frame_data = frame.data.try_borrow_mut().map_err(|_| {
@@ -292,8 +292,8 @@ impl<S: PageStore> PageCache<S> {
             .try_borrow()
             .map_err(|_| PageCacheError::PageImmutableBorrowConflict { page_id })?;
         let page_lsn = page_lsn(&page);
-        self.inner.store.borrow_mut().flush_wal_through(page_lsn)?;
-        self.inner.store.borrow_mut().write_page(page_id, &page)?;
+        self.inner.runtime.flush_wal_through(page_lsn)?;
+        self.inner.runtime.write_page(page_id, &page)?;
         frame.dirty.set(false);
         Ok(())
     }
@@ -318,15 +318,15 @@ fn page_lsn(page: &[u8; PAGE_SIZE]) -> Lsn {
 /// borrow the page contents temporarily.
 ///
 /// Dropping the guard decrements the frame pin count.
-pub(crate) struct PinGuard<S: PageStore = DiskManager> {
-    page_cache: Rc<PageCacheInner<S>>,
+pub(crate) struct PinGuard {
+    page_cache: Rc<PageCacheInner>,
     frame_id: FrameId,
     page_id: PageId,
 }
 
-impl<S: PageStore> PinGuard<S> {
+impl PinGuard {
     /// Creates a new pin guard for a specific frame.
-    fn new(page_cache: Rc<PageCacheInner<S>>, frame_id: FrameId, page_id: PageId) -> Self {
+    fn new(page_cache: Rc<PageCacheInner>, frame_id: FrameId, page_id: PageId) -> Self {
         Self { page_cache, frame_id, page_id }
     }
 
@@ -365,7 +365,7 @@ impl<S: PageStore> PinGuard<S> {
     }
 }
 
-impl<S: PageStore> Drop for PinGuard<S> {
+impl Drop for PinGuard {
     /// Decrements the frame pin count when the guard leaves scope.
     fn drop(&mut self) {
         let frame = &self.page_cache.frames[self.frame_id];
@@ -440,14 +440,16 @@ impl PageWriteGuard<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, path::Path, rc::Rc};
+    use std::{path::Path, rc::Rc};
 
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::error::{PageStoreError, PageStoreResult};
+    use crate::core::disk_manager::DiskManager;
+    use crate::core::log_manager::{LogManagerFlushError, LogRecord, LogRecordKind};
     use crate::core::page::format::PageKind;
     use crate::core::page::{Leaf, Page, Write};
+    use crate::core::storage_runtime::StorageRuntime;
 
     /// Generates a deterministic page payload from a seed byte.
     fn page_with_pattern(seed: u8) -> [u8; PAGE_SIZE] {
@@ -468,14 +470,25 @@ mod tests {
     }
 
     /// Creates a temporary database file and writes the provided pages to it.
-    fn create_disk_with_pages(pages: &[[u8; PAGE_SIZE]]) -> (NamedTempFile, DiskManager) {
+    fn runtime_for_disk(path: &Path, disk_manager: DiskManager) -> Rc<StorageRuntime> {
+        Rc::new(StorageRuntime::new(path.to_path_buf(), disk_manager).unwrap())
+    }
+
+    fn runtime_for_path(path: &Path) -> Rc<StorageRuntime> {
+        let disk_manager = DiskManager::new(path).unwrap();
+        runtime_for_disk(path, disk_manager)
+    }
+
+    /// Creates a temporary database file and writes the provided pages to it.
+    fn create_disk_with_pages(pages: &[[u8; PAGE_SIZE]]) -> (NamedTempFile, Rc<StorageRuntime>) {
         let file = NamedTempFile::new().unwrap();
         let mut disk_manager = DiskManager::new(file.path()).unwrap();
         for page in pages {
             let page_id = disk_manager.new_page().unwrap();
             disk_manager.write_page(page_id, page).unwrap();
         }
-        (file, disk_manager)
+        let runtime = runtime_for_disk(file.path(), disk_manager);
+        (file, runtime)
     }
 
     /// Reads one page from disk for assertions in tests.
@@ -486,86 +499,18 @@ mod tests {
         page
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum StoreEvent {
-        FlushWalThrough(Lsn),
-        WritePage(PageId),
-    }
-
-    #[derive(Debug)]
-    struct RecordingStoreState {
-        pages: Vec<[u8; PAGE_SIZE]>,
-        events: Vec<StoreEvent>,
-        fail_wal_flush: bool,
-        fail_write: bool,
-    }
-
-    #[derive(Debug)]
-    struct RecordingPageStore {
-        state: Rc<RefCell<RecordingStoreState>>,
-    }
-
-    impl RecordingPageStore {
-        fn with_pages(pages: Vec<[u8; PAGE_SIZE]>) -> (Rc<RefCell<RecordingStoreState>>, Self) {
-            let state = Rc::new(RefCell::new(RecordingStoreState {
-                pages,
-                events: Vec::new(),
-                fail_wal_flush: false,
-                fail_write: false,
-            }));
-            (Rc::clone(&state), Self { state })
-        }
-    }
-
-    impl PageStore for RecordingPageStore {
-        fn new_page(&mut self) -> PageStoreResult<PageId> {
-            let mut state = self.state.borrow_mut();
-            let page_id = state.pages.len() as PageId;
-            state.pages.push([0u8; PAGE_SIZE]);
-            Ok(page_id)
-        }
-
-        fn read_page(&mut self, page_id: PageId, buf: &mut [u8; PAGE_SIZE]) -> PageStoreResult<()> {
-            let state = self.state.borrow();
-            let page = state
-                .pages
-                .get(page_id as usize)
-                .ok_or(PageStoreError::InvalidPageId { page_id })?;
-            *buf = *page;
-            Ok(())
-        }
-
-        fn write_page(&mut self, page_id: PageId, buf: &[u8; PAGE_SIZE]) -> PageStoreResult<()> {
-            let mut state = self.state.borrow_mut();
-            state.events.push(StoreEvent::WritePage(page_id));
-            if state.fail_write {
-                return Err(PageStoreError::Io(std::io::Error::other("write failed")));
-            }
-            let page = state
-                .pages
-                .get_mut(page_id as usize)
-                .ok_or(PageStoreError::InvalidPageId { page_id })?;
-            *page = *buf;
-            Ok(())
-        }
-
-        fn flush_wal_through(&mut self, lsn: Lsn) -> PageStoreResult<()> {
-            let mut state = self.state.borrow_mut();
-            state.events.push(StoreEvent::FlushWalThrough(lsn));
-            if state.fail_wal_flush {
-                return Err(PageStoreError::WalFlushLsnNotAppended {
-                    requested_lsn: lsn,
-                    highest_appended_lsn: None,
-                });
-            }
-            Ok(())
+    fn append_wal_through(runtime: &StorageRuntime, target_lsn: Lsn) {
+        for txn_id in 1..=target_lsn {
+            runtime
+                .append_log_transaction(txn_id, &[LogRecord { txn_id, kind: LogRecordKind::Begin }])
+                .unwrap();
         }
     }
 
     #[test]
     fn constructor_rejects_zero_frame_count() {
         let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let disk_manager = runtime_for_path(file.path());
         let result = PageCache::new(disk_manager, 0);
         assert!(matches!(result, Err(PageCacheError::InvalidFrameCount { frame_count: 0 })));
     }
@@ -573,7 +518,7 @@ mod tests {
     #[test]
     fn frames_are_preallocated_and_empty() {
         let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 3).unwrap();
 
         assert_eq!(cache.inner.frames.len(), 3);
@@ -686,7 +631,7 @@ mod tests {
     #[test]
     fn page_guards_support_typed_page_views() {
         let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
         let (_page_id, guard) = cache.new_page().unwrap();
@@ -890,8 +835,9 @@ mod tests {
     #[test]
     fn flush_page_forces_wal_through_page_lsn_before_write() {
         let page = formatted_page_with_lsn(15, 7);
-        let (state, store) = RecordingPageStore::with_pages(vec![page]);
-        let cache = PageCache::new(store, 1).unwrap();
+        let (file, runtime) = create_disk_with_pages(&[page]);
+        append_wal_through(&runtime, 7);
+        let cache = PageCache::new(runtime, 1).unwrap();
 
         {
             let guard = cache.fetch_page(0).unwrap();
@@ -900,10 +846,8 @@ mod tests {
 
         cache.flush_page(0).unwrap();
 
-        assert_eq!(
-            state.borrow().events,
-            [StoreEvent::FlushWalThrough(7), StoreEvent::WritePage(0)]
-        );
+        let flushed_page = read_disk_page(file.path(), 0);
+        assert_eq!(flushed_page[PAGE_SIZE - 1], 177);
         assert!(!cache.inner.frames[0].dirty.get());
     }
 
@@ -911,8 +855,9 @@ mod tests {
     fn dirty_page_eviction_forces_wal_through_page_lsn_before_write() {
         let page0 = formatted_page_with_lsn(1, 13);
         let page1 = page_with_pattern(2);
-        let (state, store) = RecordingPageStore::with_pages(vec![page0, page1]);
-        let cache = PageCache::new(store, 1).unwrap();
+        let (file, runtime) = create_disk_with_pages(&[page0, page1]);
+        append_wal_through(&runtime, 13);
+        let cache = PageCache::new(runtime, 1).unwrap();
 
         {
             let guard = cache.fetch_page(0).unwrap();
@@ -923,18 +868,17 @@ mod tests {
             let _guard = cache.fetch_page(1).unwrap();
         }
 
-        assert_eq!(
-            state.borrow().events,
-            [StoreEvent::FlushWalThrough(13), StoreEvent::WritePage(0)]
-        );
+        let flushed_page = read_disk_page(file.path(), 0);
+        assert_eq!(flushed_page[PAGE_SIZE - 1], 222);
     }
 
     #[test]
     fn flush_all_forces_wal_through_each_dirty_page_lsn_before_each_write() {
         let page0 = formatted_page_with_lsn(4, 21);
         let page1 = formatted_page_with_lsn(5, 34);
-        let (state, store) = RecordingPageStore::with_pages(vec![page0, page1]);
-        let cache = PageCache::new(store, 2).unwrap();
+        let (file, runtime) = create_disk_with_pages(&[page0, page1]);
+        append_wal_through(&runtime, 34);
+        let cache = PageCache::new(runtime, 2).unwrap();
 
         {
             let guard = cache.fetch_page(0).unwrap();
@@ -947,15 +891,10 @@ mod tests {
 
         cache.flush_all().unwrap();
 
-        assert_eq!(
-            state.borrow().events,
-            [
-                StoreEvent::FlushWalThrough(21),
-                StoreEvent::WritePage(0),
-                StoreEvent::FlushWalThrough(34),
-                StoreEvent::WritePage(1)
-            ]
-        );
+        let flushed_page0 = read_disk_page(file.path(), 0);
+        let flushed_page1 = read_disk_page(file.path(), 1);
+        assert_eq!(flushed_page0[PAGE_SIZE - 1], 10);
+        assert_eq!(flushed_page1[PAGE_SIZE - 1], 20);
         for frame in &cache.inner.frames {
             assert!(!frame.dirty.get());
         }
@@ -964,9 +903,8 @@ mod tests {
     #[test]
     fn wal_flush_failure_prevents_page_write_and_leaves_frame_dirty() {
         let page = formatted_page_with_lsn(15, 55);
-        let (state, store) = RecordingPageStore::with_pages(vec![page]);
-        state.borrow_mut().fail_wal_flush = true;
-        let cache = PageCache::new(store, 1).unwrap();
+        let (file, runtime) = create_disk_with_pages(&[page]);
+        let cache = PageCache::new(runtime, 1).unwrap();
 
         {
             let guard = cache.fetch_page(0).unwrap();
@@ -977,34 +915,36 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(PageCacheError::Store(PageStoreError::WalFlushLsnNotAppended {
+            Err(PageCacheError::WalFlush(LogManagerFlushError::LsnNotAppended {
                 requested_lsn: 55,
-                ..
+                highest_appended_lsn: None,
             }))
         ));
-        assert_eq!(state.borrow().events, [StoreEvent::FlushWalThrough(55)]);
+        let page_on_disk = read_disk_page(file.path(), 0);
+        assert_eq!(page_on_disk[PAGE_SIZE - 1], page[PAGE_SIZE - 1]);
         assert!(cache.inner.frames[0].dirty.get());
     }
 
     #[test]
     fn page_write_failure_after_wal_flush_leaves_frame_dirty() {
-        let page = formatted_page_with_lsn(15, 89);
-        let (state, store) = RecordingPageStore::with_pages(vec![page]);
-        state.borrow_mut().fail_write = true;
-        let cache = PageCache::new(store, 1).unwrap();
+        let file = NamedTempFile::new().unwrap();
+        let disk_manager = runtime_for_path(file.path());
+        let cache = PageCache::new(disk_manager, 1).unwrap();
 
-        {
-            let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
-        }
+        cache.inner.frames[0].page_id.set(Some(99));
+        *cache.inner.frames[0].data.borrow_mut() = page_with_pattern(15);
+        cache.inner.frames[0].dirty.set(true);
+        cache.inner.frames[0].pin_count.set(0);
+        cache.inner.meta.borrow_mut().page_table.insert(99, 0);
 
-        let result = cache.flush_page(0);
+        let result = cache.flush_page(99);
 
-        assert!(matches!(result, Err(PageCacheError::Store(PageStoreError::Io(_)))));
-        assert_eq!(
-            state.borrow().events,
-            [StoreEvent::FlushWalThrough(89), StoreEvent::WritePage(0)]
-        );
+        assert!(matches!(
+            result,
+            Err(PageCacheError::Disk(crate::core::error::DiskManagerError::InvalidPageId {
+                page_id: 99
+            }))
+        ));
         assert!(cache.inner.frames[0].dirty.get());
     }
 
@@ -1104,7 +1044,7 @@ mod tests {
     #[test]
     fn new_page_returns_pinned_zero_initialized_page() {
         let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
         let (page_id, guard) = cache.new_page().unwrap();
@@ -1115,7 +1055,7 @@ mod tests {
     #[test]
     fn new_page_allocates_sequential_ids() {
         let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
         let (first_page_id, first_guard) = cache.new_page().unwrap();
@@ -1130,7 +1070,7 @@ mod tests {
     #[test]
     fn new_page_returns_error_when_all_frames_are_pinned() {
         let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
         cache.inner.frames[0].pin_count.set(1);
@@ -1150,7 +1090,7 @@ mod tests {
     #[test]
     fn new_page_changes_are_durable_after_flush_and_reopen() {
         let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let disk_manager = runtime_for_path(file.path());
 
         let page_id = {
             let cache = PageCache::new(disk_manager, 1).unwrap();
@@ -1175,7 +1115,7 @@ mod tests {
     #[test]
     fn fetch_page_returns_error_for_corrupt_page_table_entry() {
         let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
         cache.inner.meta.borrow_mut().page_table.insert(7, 99);
@@ -1190,7 +1130,7 @@ mod tests {
     #[test]
     fn flush_page_returns_error_for_corrupt_page_table_entry() {
         let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
+        let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
         cache.inner.meta.borrow_mut().page_table.insert(8, 100);

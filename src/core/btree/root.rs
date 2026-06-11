@@ -1,9 +1,7 @@
 use super::*;
 
 /// Allocates and initializes a brand-new empty raw root leaf page.
-pub(crate) fn initialize_empty_root<S: PageStore>(
-    page_cache: &PageCache<S>,
-) -> StorageResult<PageId> {
+pub(crate) fn initialize_empty_root(page_cache: &PageCache) -> StorageResult<PageId> {
     let (page_id, pin) = page_cache.new_page()?;
     let mut page = pin.write()?;
     let _ = RawLeaf::<Write<'_>>::initialize(page.page_mut());
@@ -12,7 +10,7 @@ pub(crate) fn initialize_empty_root<S: PageStore>(
 
 /// Verifies that `root_page_id` names a raw leaf or raw interior page.
 pub(crate) fn validate_root_page(
-    page_cache: &PageCache<impl PageStore>,
+    page_cache: &PageCache,
     root_page_id: PageId,
 ) -> StorageResult<()> {
     let pin = page_cache.fetch_page(root_page_id)?;

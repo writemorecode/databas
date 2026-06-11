@@ -20,7 +20,6 @@ use crate::core::{
         },
     },
     page_cache::{PageCache, PageWriteGuard, PinGuard},
-    page_store::PageStore,
 };
 
 mod mutation;
@@ -62,8 +61,8 @@ pub enum CursorState {
 
 /// Public handle to a single raw B+-tree rooted at `root_page_id`.
 #[derive(Clone)]
-pub struct TreeCursor<S: PageStore> {
-    page_cache: PageCache<S>,
+pub struct TreeCursor {
+    page_cache: PageCache,
     root_page_id: Rc<Cell<PageId>>,
     state: CursorState,
 }

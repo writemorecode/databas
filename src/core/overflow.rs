@@ -5,7 +5,6 @@ use crate::core::{
     error::StorageResult,
     page::format::{self, OVERFLOW_NEXT_PAGE_ID_SIZE},
     page_cache::PageCache,
-    page_store::PageStore,
 };
 
 pub(crate) const OVERFLOW_PAYLOAD_SIZE: usize = PAGE_SIZE - OVERFLOW_NEXT_PAGE_ID_SIZE;
@@ -15,10 +14,7 @@ fn write_next_page_id(page: &mut [u8; PAGE_SIZE], next_page_id: Option<PageId>) 
 }
 
 /// Writes `payload` into a newly allocated overflow chain.
-pub(crate) fn write_chain<S: PageStore>(
-    page_cache: &PageCache<S>,
-    payload: &[u8],
-) -> StorageResult<Option<PageId>> {
+pub(crate) fn write_chain(page_cache: &PageCache, payload: &[u8]) -> StorageResult<Option<PageId>> {
     if payload.is_empty() {
         return Ok(None);
     }

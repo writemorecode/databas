@@ -2,7 +2,7 @@ use super::payload::{read_interior_cell, read_leaf_cell};
 use super::root::read_page_kind;
 use super::*;
 
-impl<S: PageStore> TreeCursor<S> {
+impl TreeCursor {
     /// Returns the previous and next sibling pointers for a leaf page.
     pub(super) fn read_leaf_page_links(
         &self,

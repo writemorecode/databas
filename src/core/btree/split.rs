@@ -2,7 +2,7 @@ use super::payload::{cell_corruption, materialize_payload};
 use super::root::read_page_kind;
 use super::*;
 
-impl<S: PageStore> TreeCursor<S> {
+impl TreeCursor {
     /// Bubbles one pending split up the recorded tree path until it lands.
     pub(super) fn propagate_split(
         &mut self,

@@ -22,8 +22,8 @@ fn read_overflow_next_page_id(page: &[u8; PAGE_SIZE]) -> Option<PageId> {
     page::format::read_optional_u64(page, 0)
 }
 
-pub(super) fn write_overflow_chain_from_slices<S: PageStore>(
-    page_cache: &PageCache<S>,
+pub(super) fn write_overflow_chain_from_slices(
+    page_cache: &PageCache,
     mut first: &[u8],
     mut second: &[u8],
 ) -> StorageResult<Option<PageId>> {
@@ -69,8 +69,8 @@ pub(super) fn write_overflow_chain_from_slices<S: PageStore>(
     Ok(first_page_id)
 }
 
-fn append_overflow_chain_exact<S: PageStore>(
-    page_cache: &PageCache<S>,
+fn append_overflow_chain_exact(
+    page_cache: &PageCache,
     first_overflow_page_id: PageId,
     payload: &mut Vec<u8>,
     total_payload_len: usize,
@@ -120,8 +120,8 @@ fn append_overflow_chain_exact<S: PageStore>(
     Ok(())
 }
 
-pub(super) fn materialize_payload<S: PageStore>(
-    page_cache: &PageCache<S>,
+pub(super) fn materialize_payload(
+    page_cache: &PageCache,
     page_id: PageId,
     inline_payload: &[u8],
     first_overflow_page_id: Option<PageId>,
@@ -152,8 +152,8 @@ pub(super) fn materialize_payload<S: PageStore>(
     Ok(payload)
 }
 
-pub(super) fn materialize_leaf_cell<S: PageStore>(
-    page_cache: &PageCache<S>,
+pub(super) fn materialize_leaf_cell(
+    page_cache: &PageCache,
     page_id: PageId,
     inline_payload: &[u8],
     first_overflow_page_id: PageId,
@@ -175,8 +175,8 @@ pub(super) fn materialize_leaf_cell<S: PageStore>(
     Ok((payload.into_boxed_slice(), value.into_boxed_slice()))
 }
 
-pub(super) fn read_leaf_cell<S: PageStore>(
-    page_cache: &PageCache<S>,
+pub(super) fn read_leaf_cell(
+    page_cache: &PageCache,
     page_id: PageId,
     slot_index: u16,
 ) -> StorageResult<(Vec<u8>, Vec<u8>)> {
@@ -203,8 +203,8 @@ pub(super) fn read_leaf_cell<S: PageStore>(
     Ok(payload)
 }
 
-pub(super) fn read_interior_cell<S: PageStore>(
-    page_cache: &PageCache<S>,
+pub(super) fn read_interior_cell(
+    page_cache: &PageCache,
     page_id: PageId,
     slot_index: u16,
 ) -> StorageResult<(PageId, Vec<u8>)> {
@@ -258,8 +258,8 @@ pub(super) fn compare_key_prefix(
     Ok(None)
 }
 
-pub(super) fn compare_overflow_key<S: PageStore>(
-    page_cache: &PageCache<S>,
+pub(super) fn compare_overflow_key(
+    page_cache: &PageCache,
     page_id: PageId,
     key: &[u8],
     inline_key_len: usize,
