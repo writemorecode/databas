@@ -130,8 +130,8 @@ impl TransactionManager {
         }
 
         let lsn = log.append_record(txn_id, LogRecordKind::Commit)?;
-        log.flush_through(lsn)?;
         self.active = None;
+        log.flush_through(lsn)?;
         Ok(())
     }
 
@@ -198,8 +198,9 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::log_manager::{
-        LogManager, OwnedLogRecordKind, read_log_record_kinds_for_test,
+    use crate::core::{
+        error::{InternalError, InvariantViolation},
+        log_manager::{LogManager, OwnedLogRecordKind, read_log_record_kinds_for_test},
     };
 
     #[test]
@@ -234,6 +235,37 @@ mod tests {
                 (1, OwnedLogRecordKind::Begin),
                 (1, OwnedLogRecordKind::PageAlloc { page_id: 7 }),
                 (1, OwnedLogRecordKind::Commit),
+            ]
+        );
+    }
+
+    #[test]
+    fn commit_flush_failure_ends_transaction_without_rollback_record() {
+        let file = NamedTempFile::new().unwrap();
+        let mut log = LogManager::new(file.path()).unwrap();
+        let mut transactions = TransactionManager::new(0);
+        let before = [0; PAGE_SIZE];
+        let after = [1; PAGE_SIZE];
+
+        let txn_id = transactions.begin(&mut log).unwrap();
+        transactions.record_page_update(&mut log, 7, &before, &after).unwrap();
+        log.fail_next_flush_for_test();
+
+        let result = transactions.commit(&mut log, txn_id);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            transactions.take_rollback_pages(txn_id),
+            Err(StorageError::Internal(InternalError::InvariantViolation(
+                InvariantViolation::NoActiveTransaction
+            )))
+        ));
+        assert_eq!(
+            read_log_record_kinds_for_test(file.path()),
+            [
+                (txn_id, OwnedLogRecordKind::Begin),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 7 }),
+                (txn_id, OwnedLogRecordKind::Commit),
             ]
         );
     }
