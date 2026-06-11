@@ -4,10 +4,10 @@
 //! upward from the header, a packed cell-content region that grows downward
 //! from the end of usable space, and a zeroed reserved footer.
 
-use crate::core::{PAGE_SIZE, PageId, SlotId};
+use crate::core::{PAGE_SIZE, PageId, SlotId, log_manager::Lsn};
 
 /// Current on-disk page format version.
-pub(crate) const FORMAT_VERSION: u8 = 4;
+pub(crate) const FORMAT_VERSION: u8 = 5;
 /// Number of bytes reserved at the end of every page.
 pub(crate) const RESERVED_FOOTER_SIZE: usize = 4;
 /// Exclusive end offset of the usable region within a page buffer.
@@ -53,8 +53,10 @@ pub(crate) const FRAGMENTED_FREE_BYTES_OFFSET: usize = 8;
 pub(crate) const PREV_PAGE_ID_OFFSET: usize = 10;
 /// Offset of the next-page sibling pointer in the shared page header.
 pub(crate) const NEXT_PAGE_ID_OFFSET: usize = PREV_PAGE_ID_OFFSET + 8;
+/// Offset of the page LSN in the shared page header.
+pub(crate) const LSN_OFFSET: usize = NEXT_PAGE_ID_OFFSET + 8;
 /// Number of bytes in the header shared by all page kinds.
-pub(crate) const SHARED_HEADER_SIZE: usize = NEXT_PAGE_ID_OFFSET + 8;
+pub(crate) const SHARED_HEADER_SIZE: usize = LSN_OFFSET + size_of::<Lsn>();
 /// Offset of the rightmost-child pointer in an interior-page header.
 pub(crate) const RIGHTMOST_CHILD_OFFSET: usize = SHARED_HEADER_SIZE;
 /// Total header size for a leaf page.

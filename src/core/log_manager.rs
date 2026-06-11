@@ -11,6 +11,7 @@ use crate::core::{PageId, SlotId};
 
 pub(crate) type TxnId = u64;
 pub(crate) type Lsn = u64;
+pub(crate) const ZERO_LSN: Lsn = 0;
 
 const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const FOOTER_MAGIC: [u8; 8] = *b"DBWALFTR";
