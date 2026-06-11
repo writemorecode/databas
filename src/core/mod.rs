@@ -6,14 +6,12 @@ pub mod database;
 pub(crate) mod database_header;
 pub mod disk_manager;
 pub mod error;
-#[cfg(test)]
-pub(crate) mod memory_page_store;
 pub(crate) mod overflow;
 pub(crate) mod page;
 pub(crate) mod page_cache;
 pub(crate) mod page_replacement;
-pub(crate) mod page_store;
 pub(crate) mod pager;
+pub(crate) mod storage_runtime;
 pub mod tuple;
 
 pub(crate) mod log_manager;
@@ -29,7 +27,6 @@ pub use cursor::{
     IndexCursor, IndexEntry, IndexEntryRef, TableCursor, TableRecord, TableRecordRef,
 };
 pub use database::Database;
-pub use page_store::PageStore;
 pub use pager::PagerOptions;
 pub use tuple::{EncodedTupleView, Tuple, TupleRef, TupleView, Value, ValueRef};
 

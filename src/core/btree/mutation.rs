@@ -1,7 +1,7 @@
 use super::payload::{cell_corruption, write_overflow_chain_from_slices};
 use super::*;
 
-impl<S: PageStore> TreeCursor<S> {
+impl TreeCursor {
     pub(super) fn checked_payload_len(&self, payload_len: usize) -> StorageResult<()> {
         if payload_len > u16::MAX as usize {
             return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize }.into());

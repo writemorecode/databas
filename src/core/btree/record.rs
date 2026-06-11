@@ -4,8 +4,8 @@ use std::ops::Range;
 use super::payload::{cell_corruption, materialize_leaf_cell};
 use super::*;
 
-pub(in crate::core::btree) enum RecordStorage<S: PageStore> {
-    PageResident { pin: PinGuard<S>, key_range: Range<usize>, value_range: Range<usize> },
+pub(in crate::core::btree) enum RecordStorage {
+    PageResident { pin: PinGuard, key_range: Range<usize>, value_range: Range<usize> },
     Materialized { key: Box<[u8]>, value: Box<[u8]> },
 }
 
@@ -16,10 +16,10 @@ pub(in crate::core::btree) enum RecordStorage<S: PageStore> {
 /// callbacks. Records for cells with overflow payload are materialized into
 /// fixed-size heap allocations. Use [`OwnedRecord`] when a stable snapshot is
 /// needed across later tree mutations.
-pub struct Record<S: PageStore> {
+pub struct Record {
     page_id: PageId,
     slot_index: u16,
-    pub(in crate::core::btree) storage: RecordStorage<S>,
+    pub(in crate::core::btree) storage: RecordStorage,
 }
 
 /// Stable, owned raw record snapshot.
@@ -56,10 +56,10 @@ impl<'a> RecordView<'a> {
     }
 }
 
-impl<S: PageStore> Record<S> {
+impl Record {
     /// Builds a record view from one raw leaf-page slot.
     pub(crate) fn new(
-        page_cache: &PageCache<S>,
+        page_cache: &PageCache,
         page_id: PageId,
         slot_index: u16,
     ) -> StorageResult<Self> {
@@ -179,7 +179,7 @@ impl fmt::Debug for OwnedRecord {
     }
 }
 
-impl<S: PageStore> fmt::Debug for Record<S> {
+impl fmt::Debug for Record {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Record")
             .field("page_id", &self.page_id)

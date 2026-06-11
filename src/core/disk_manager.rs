@@ -5,16 +5,13 @@ use std::{
 };
 
 use crate::core::{
-    error::{DiskManagerError, DiskManagerResult, PageStoreResult},
-    log_manager::{LogManager, Lsn},
-    page_store::PageStore,
+    error::{DiskManagerError, DiskManagerResult},
     {PAGE_SIZE, PageId},
 };
 
 /// Reads and writes pages to and from a database file.
 pub struct DiskManager {
     file: File,
-    log_manager: LogManager,
     page_count: u64,
 }
 
@@ -42,7 +39,6 @@ impl DiskManager {
 
     fn open_with_options(options: &mut OpenOptions, path: &Path) -> Result<Self, DiskManagerError> {
         let file = options.open(path)?;
-        let log_manager = LogManager::new(path)?;
 
         let file_metadata = file.metadata()?;
         let file_size = file_metadata.len();
@@ -53,7 +49,7 @@ impl DiskManager {
 
         let page_count = file_size / (PAGE_SIZE as u64);
 
-        Ok(Self { file, log_manager, page_count })
+        Ok(Self { file, page_count })
     }
 
     pub(crate) fn page_count(&self) -> u64 {
@@ -106,28 +102,6 @@ impl DiskManager {
     /// Calculate disk offset for page `page_id`.
     fn page_offset(page_id: PageId) -> u64 {
         page_id * (PAGE_SIZE as u64)
-    }
-}
-
-impl PageStore for DiskManager {
-    fn new_page(&mut self) -> PageStoreResult<PageId> {
-        Self::new_page(self).map_err(Into::into)
-    }
-
-    fn read_page(&mut self, page_id: PageId, buf: &mut [u8; PAGE_SIZE]) -> PageStoreResult<()> {
-        Self::read_page(self, page_id, buf).map_err(Into::into)
-    }
-
-    fn write_page(&mut self, page_id: PageId, buf: &[u8; PAGE_SIZE]) -> PageStoreResult<()> {
-        Self::write_page(self, page_id, buf).map_err(Into::into)
-    }
-
-    fn sync(&mut self) -> PageStoreResult<()> {
-        self.file.sync_all().map_err(Into::into)
-    }
-
-    fn flush_wal_through(&mut self, lsn: Lsn) -> PageStoreResult<()> {
-        self.log_manager.flush_through(lsn).map_err(Into::into)
     }
 }
 

@@ -24,9 +24,9 @@ enum ScanDirection {
 
 impl ScanDirection {
     /// Descends from `start_page_id` to the leaf at the edge implied by `self`.
-    fn descend_to_edge_leaf<S: PageStore>(
+    fn descend_to_edge_leaf(
         self,
-        cursor: &TreeCursor<S>,
+        cursor: &TreeCursor,
         start_page_id: PageId,
     ) -> StorageResult<PageId> {
         match self {
@@ -86,9 +86,9 @@ impl ScanDirection {
     }
 }
 
-impl<S: PageStore> TreeCursor<S> {
+impl TreeCursor {
     /// Creates a cursor anchored at `root_page_id` in page-level state.
-    pub(crate) fn new(page_cache: PageCache<S>, root_page_id: PageId) -> Self {
+    pub(crate) fn new(page_cache: PageCache, root_page_id: PageId) -> Self {
         Self {
             page_cache,
             root_page_id: Rc::new(Cell::new(root_page_id)),
@@ -142,7 +142,7 @@ impl<S: PageStore> TreeCursor<S> {
     }
 
     /// Materializes one record from a positioned raw leaf slot.
-    pub(super) fn record_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<Record<S>> {
+    pub(super) fn record_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<Record> {
         Record::new(&self.page_cache, page_id, slot_index)
     }
 
@@ -441,7 +441,7 @@ impl<S: PageStore> TreeCursor<S> {
         &mut self,
         start_page_id: PageId,
         direction: ScanDirection,
-    ) -> StorageResult<Option<Record<S>>> {
+    ) -> StorageResult<Option<Record>> {
         let mut page_id = start_page_id;
 
         loop {
@@ -468,7 +468,7 @@ impl<S: PageStore> TreeCursor<S> {
     }
 
     /// Advances or rewinds the cursor by one logical record.
-    fn step_record(&mut self, direction: ScanDirection) -> StorageResult<Option<Record<S>>> {
+    fn step_record(&mut self, direction: ScanDirection) -> StorageResult<Option<Record>> {
         match self.state {
             CursorState::Exhausted => Ok(None),
             CursorState::Page { page_id } => {
@@ -505,7 +505,7 @@ impl<S: PageStore> TreeCursor<S> {
     ///
     /// The cursor ends on the matching record when found, or on the leaf page
     /// where `key` would be inserted when absent.
-    pub fn get(&mut self, key: &[u8]) -> StorageResult<Option<Record<S>>> {
+    pub fn get(&mut self, key: &[u8]) -> StorageResult<Option<Record>> {
         let page_id = self.leaf_page_for_key(key)?;
         let slot_index = match self.search_leaf_slot(page_id, key)? {
             SearchResult::Found(slot_index) => Some(slot_index),
@@ -570,7 +570,7 @@ impl<S: PageStore> TreeCursor<S> {
     }
 
     /// Reads the currently selected record, if any.
-    pub fn current(&self) -> StorageResult<Option<Record<S>>> {
+    pub fn current(&self) -> StorageResult<Option<Record>> {
         match self.state {
             CursorState::Positioned { page_id, slot_index } => {
                 self.record_at(page_id, slot_index).map(Some)
@@ -585,7 +585,7 @@ impl<S: PageStore> TreeCursor<S> {
     }
 
     /// Advances to the next record in sorted key order.
-    pub fn next_record(&mut self) -> StorageResult<Option<Record<S>>> {
+    pub fn next_record(&mut self) -> StorageResult<Option<Record>> {
         self.step_record(ScanDirection::Forward)
     }
 
@@ -595,7 +595,7 @@ impl<S: PageStore> TreeCursor<S> {
     }
 
     /// Moves to the previous record in sorted key order.
-    pub fn prev_record(&mut self) -> StorageResult<Option<Record<S>>> {
+    pub fn prev_record(&mut self) -> StorageResult<Option<Record>> {
         self.step_record(ScanDirection::Backward)
     }
 

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::{path::Path, rc::Rc};
 
 use crate::core::{
     PageId,
@@ -8,6 +8,7 @@ use crate::core::{
     disk_manager::DiskManager,
     error::StorageResult,
     page_cache::PageCache,
+    storage_runtime::StorageRuntime,
 };
 
 const DEFAULT_PAGE_CACHE_SIZE: usize = 64;
@@ -31,7 +32,7 @@ impl Default for PagerOptions {
 /// only for producing typed B+-tree cursors rooted at specific page ids.
 #[derive(Clone)]
 pub(crate) struct Pager {
-    path: PathBuf,
+    runtime: Rc<StorageRuntime>,
     page_cache: PageCache,
     opened_page_count: u64,
 }
@@ -90,18 +91,19 @@ impl Pager {
     }
 
     fn from_disk_manager(
-        path: PathBuf,
+        path: std::path::PathBuf,
         disk_manager: DiskManager,
         options: PagerOptions,
     ) -> StorageResult<Self> {
         let opened_page_count = disk_manager.page_count();
-        let page_cache = PageCache::new(disk_manager, options.cache_frames)?;
-        Ok(Self { path, page_cache, opened_page_count })
+        let runtime = Rc::new(StorageRuntime::new(path, disk_manager)?);
+        let page_cache = PageCache::new(Rc::clone(&runtime), options.cache_frames)?;
+        Ok(Self { runtime, page_cache, opened_page_count })
     }
 
     /// Returns the database-file path associated with this pager.
     pub(crate) fn path(&self) -> &Path {
-        &self.path
+        self.runtime.path()
     }
 
     /// Returns the page count observed when this pager was opened.
