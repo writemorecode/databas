@@ -7,9 +7,9 @@ use crate::core::{
     database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header},
     disk_manager::DiskManager,
     error::StorageResult,
-    log_manager::TxnId,
     page_cache::PageCache,
     storage_runtime::StorageRuntime,
+    transaction_runtime::TransactionRuntime,
 };
 
 const DEFAULT_PAGE_CACHE_SIZE: usize = 64;
@@ -119,20 +119,8 @@ impl Pager {
         Ok(())
     }
 
-    pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
-        self.runtime.begin_transaction()
-    }
-
-    pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        self.runtime.commit_transaction(txn_id)
-    }
-
-    pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        let undo_pages = self.runtime.take_rollback_pages(txn_id)?;
-        self.page_cache.restore_rollback_pages(undo_pages)?;
-        self.page_cache.flush_all()?;
-        self.runtime.sync_database_file()?;
-        self.runtime.finish_rollback(txn_id)
+    pub(crate) fn transaction_runtime(&self) -> TransactionRuntime {
+        TransactionRuntime::new(Rc::clone(&self.runtime), self.page_cache.clone())
     }
 
     /// Creates a new empty table tree and returns a cursor rooted at it.

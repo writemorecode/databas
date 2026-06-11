@@ -14,7 +14,6 @@ use crate::core::{
         ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind,
         InvalidArgumentError, LimitExceededError, StorageError, StorageResult,
     },
-    log_manager::TxnId,
     pager::Pager,
 };
 
@@ -28,28 +27,28 @@ pub struct CatalogManager {
 }
 
 impl CatalogManager {
-    /// Creates a catalog manager with default pager options.
-    pub(crate) fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let pager = Pager::create(path)?;
+    pub(crate) fn from_pager(pager: Pager) -> StorageResult<Self> {
         let manager = Self { pager };
         manager.initialize_or_validate_system_catalog()?;
         Ok(manager)
+    }
+
+    /// Creates a catalog manager with default pager options.
+    pub(crate) fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
+        let pager = Pager::create(path)?;
+        Self::from_pager(pager)
     }
 
     /// Opens a catalog manager, creating an empty database file if needed.
     pub(crate) fn open_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
         let pager = Pager::open_or_create(path)?;
-        let manager = Self { pager };
-        manager.initialize_or_validate_system_catalog()?;
-        Ok(manager)
+        Self::from_pager(pager)
     }
 
     /// Opens a catalog manager with default pager options.
     pub(crate) fn open_existing(path: impl AsRef<Path>) -> StorageResult<Self> {
         let pager = Pager::open(path)?;
-        let manager = Self { pager };
-        manager.initialize_or_validate_system_catalog()?;
-        Ok(manager)
+        Self::from_pager(pager)
     }
 
     /// Returns the database-file path associated with this manager.
@@ -60,18 +59,6 @@ impl CatalogManager {
     /// Flushes all dirty, currently unpinned pages to disk.
     pub fn flush(&self) -> StorageResult<()> {
         self.pager.flush()
-    }
-
-    pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
-        self.pager.begin_transaction()
-    }
-
-    pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        self.pager.commit_transaction(txn_id)
-    }
-
-    pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        self.pager.rollback_transaction(txn_id)
     }
 
     /// Creates a cataloged table, allocates its root page, and records its columns.

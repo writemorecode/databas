@@ -2,31 +2,39 @@ use std::path::Path;
 
 use crate::core::{
     IndexSchema, RowId, TableCursor, TableSchema, TupleSchema, catalog_manager::CatalogManager,
-    cursor::IndexCursor, error::StorageResult, log_manager::TxnId,
+    cursor::IndexCursor, error::StorageResult, log_manager::TxnId, pager::Pager,
+    transaction_runtime::TransactionRuntime,
 };
 
 /// Public database handle for one database file.
 pub struct Database {
     catalog: CatalogManager,
+    transactions: TransactionRuntime,
 }
 
 impl Database {
     /// Creates a new database file.
     pub fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let catalog = CatalogManager::create(&path)?;
-        Ok(Self { catalog })
+        let pager = Pager::create(path)?;
+        Self::from_pager(pager)
     }
 
     /// Opens an existing database file.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let catalog = CatalogManager::open_existing(&path)?;
-        Ok(Self { catalog })
+        let pager = Pager::open(path)?;
+        Self::from_pager(pager)
     }
 
     /// Opens a database file, creating and initializing it if needed.
     pub fn open_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let catalog = CatalogManager::open_or_create(&path)?;
-        Ok(Self { catalog })
+        let pager = Pager::open_or_create(path)?;
+        Self::from_pager(pager)
+    }
+
+    fn from_pager(pager: Pager) -> StorageResult<Self> {
+        let transactions = pager.transaction_runtime();
+        let catalog = CatalogManager::from_pager(pager)?;
+        Ok(Self { catalog, transactions })
     }
 
     /// Returns the database-file path associated with this database.
@@ -40,15 +48,15 @@ impl Database {
     }
 
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
-        self.catalog.begin_transaction()
+        self.transactions.begin_transaction()
     }
 
     pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        self.catalog.commit_transaction(txn_id)
+        self.transactions.commit_transaction(txn_id)
     }
 
     pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        self.catalog.rollback_transaction(txn_id)
+        self.transactions.rollback_transaction(txn_id)
     }
 
     /// Creates a table and records its schema in the system catalog.
