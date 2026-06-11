@@ -1,5 +1,6 @@
 use crate::core::{
     error::PageStoreResult,
+    log_manager::Lsn,
     {PAGE_SIZE, PageId},
 };
 
@@ -16,6 +17,11 @@ pub trait PageStore {
 
     /// Optional durability barrier.
     fn sync(&mut self) -> PageStoreResult<()> {
+        Ok(())
+    }
+
+    /// Ensures the WAL is durable through `lsn` before a database page write.
+    fn flush_wal_through(&mut self, _lsn: Lsn) -> PageStoreResult<()> {
         Ok(())
     }
 }

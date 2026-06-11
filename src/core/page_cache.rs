@@ -25,7 +25,8 @@ use std::{
 use crate::core::{
     disk_manager::DiskManager,
     error::{PageCacheError, PageCacheResult},
-    page::{NodeMarker, Page, PageResult, Read, Write},
+    log_manager::{Lsn, ZERO_LSN},
+    page::{self, NodeMarker, Page, PageResult, Read, Write},
     page_replacement::ClockPolicy,
     page_store::PageStore,
     {PAGE_SIZE, PageId},
@@ -77,7 +78,13 @@ impl<S: PageStore> PageCacheInner<S> {
                 continue;
             };
 
-            if store.write_page(page_id, frame.data.get_mut()).is_ok() {
+            let page = frame.data.get_mut();
+            let page_lsn = page_lsn(page);
+            if store
+                .flush_wal_through(page_lsn)
+                .and_then(|()| store.write_page(page_id, page))
+                .is_ok()
+            {
                 frame.dirty.set(false);
             }
         }
@@ -284,9 +291,22 @@ impl<S: PageStore> PageCache<S> {
             .data
             .try_borrow()
             .map_err(|_| PageCacheError::PageImmutableBorrowConflict { page_id })?;
+        let page_lsn = page_lsn(&page);
+        self.inner.store.borrow_mut().flush_wal_through(page_lsn)?;
         self.inner.store.borrow_mut().write_page(page_id, &page)?;
         frame.dirty.set(false);
         Ok(())
+    }
+}
+
+fn page_lsn(page: &[u8; PAGE_SIZE]) -> Lsn {
+    let is_current_btree_page = page::format::PageKind::from_raw(page[page::format::KIND_OFFSET])
+        .is_some()
+        && page[page::format::VERSION_OFFSET] == page::format::FORMAT_VERSION;
+    if is_current_btree_page {
+        page::format::read_u64(page, page::format::LSN_OFFSET)
+    } else {
+        ZERO_LSN
     }
 }
 
@@ -420,11 +440,12 @@ impl PageWriteGuard<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{cell::RefCell, path::Path, rc::Rc};
 
     use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::core::error::{PageStoreError, PageStoreResult};
     use crate::core::page::format::PageKind;
     use crate::core::page::{Leaf, Page, Write};
 
@@ -434,6 +455,15 @@ mod tests {
         for (index, byte) in page.iter_mut().enumerate() {
             *byte = seed.wrapping_add(index as u8);
         }
+        page::format::write_u64(&mut page, page::format::LSN_OFFSET, ZERO_LSN);
+        page
+    }
+
+    fn formatted_page_with_lsn(seed: u8, lsn: Lsn) -> [u8; PAGE_SIZE] {
+        let mut page = page_with_pattern(seed);
+        page[page::format::KIND_OFFSET] = PageKind::RawLeaf as u8;
+        page[page::format::VERSION_OFFSET] = page::format::FORMAT_VERSION;
+        page::format::write_u64(&mut page, page::format::LSN_OFFSET, lsn);
         page
     }
 
@@ -454,6 +484,82 @@ mod tests {
         let mut page = [0u8; PAGE_SIZE];
         disk_manager.read_page(page_id, &mut page).unwrap();
         page
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum StoreEvent {
+        FlushWalThrough(Lsn),
+        WritePage(PageId),
+    }
+
+    #[derive(Debug)]
+    struct RecordingStoreState {
+        pages: Vec<[u8; PAGE_SIZE]>,
+        events: Vec<StoreEvent>,
+        fail_wal_flush: bool,
+        fail_write: bool,
+    }
+
+    #[derive(Debug)]
+    struct RecordingPageStore {
+        state: Rc<RefCell<RecordingStoreState>>,
+    }
+
+    impl RecordingPageStore {
+        fn with_pages(pages: Vec<[u8; PAGE_SIZE]>) -> (Rc<RefCell<RecordingStoreState>>, Self) {
+            let state = Rc::new(RefCell::new(RecordingStoreState {
+                pages,
+                events: Vec::new(),
+                fail_wal_flush: false,
+                fail_write: false,
+            }));
+            (Rc::clone(&state), Self { state })
+        }
+    }
+
+    impl PageStore for RecordingPageStore {
+        fn new_page(&mut self) -> PageStoreResult<PageId> {
+            let mut state = self.state.borrow_mut();
+            let page_id = state.pages.len() as PageId;
+            state.pages.push([0u8; PAGE_SIZE]);
+            Ok(page_id)
+        }
+
+        fn read_page(&mut self, page_id: PageId, buf: &mut [u8; PAGE_SIZE]) -> PageStoreResult<()> {
+            let state = self.state.borrow();
+            let page = state
+                .pages
+                .get(page_id as usize)
+                .ok_or(PageStoreError::InvalidPageId { page_id })?;
+            *buf = *page;
+            Ok(())
+        }
+
+        fn write_page(&mut self, page_id: PageId, buf: &[u8; PAGE_SIZE]) -> PageStoreResult<()> {
+            let mut state = self.state.borrow_mut();
+            state.events.push(StoreEvent::WritePage(page_id));
+            if state.fail_write {
+                return Err(PageStoreError::Io(std::io::Error::other("write failed")));
+            }
+            let page = state
+                .pages
+                .get_mut(page_id as usize)
+                .ok_or(PageStoreError::InvalidPageId { page_id })?;
+            *page = *buf;
+            Ok(())
+        }
+
+        fn flush_wal_through(&mut self, lsn: Lsn) -> PageStoreResult<()> {
+            let mut state = self.state.borrow_mut();
+            state.events.push(StoreEvent::FlushWalThrough(lsn));
+            if state.fail_wal_flush {
+                return Err(PageStoreError::WalFlushLsnNotAppended {
+                    requested_lsn: lsn,
+                    highest_appended_lsn: None,
+                });
+            }
+            Ok(())
+        }
     }
 
     #[test]
@@ -779,6 +885,127 @@ mod tests {
         assert!(!cache.inner.frames[0].dirty.get());
         let flushed_page = read_disk_page(file.path(), 0);
         assert_eq!(flushed_page[0], 177);
+    }
+
+    #[test]
+    fn flush_page_forces_wal_through_page_lsn_before_write() {
+        let page = formatted_page_with_lsn(15, 7);
+        let (state, store) = RecordingPageStore::with_pages(vec![page]);
+        let cache = PageCache::new(store, 1).unwrap();
+
+        {
+            let guard = cache.fetch_page(0).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+        }
+
+        cache.flush_page(0).unwrap();
+
+        assert_eq!(
+            state.borrow().events,
+            [StoreEvent::FlushWalThrough(7), StoreEvent::WritePage(0)]
+        );
+        assert!(!cache.inner.frames[0].dirty.get());
+    }
+
+    #[test]
+    fn dirty_page_eviction_forces_wal_through_page_lsn_before_write() {
+        let page0 = formatted_page_with_lsn(1, 13);
+        let page1 = page_with_pattern(2);
+        let (state, store) = RecordingPageStore::with_pages(vec![page0, page1]);
+        let cache = PageCache::new(store, 1).unwrap();
+
+        {
+            let guard = cache.fetch_page(0).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 222;
+        }
+
+        {
+            let _guard = cache.fetch_page(1).unwrap();
+        }
+
+        assert_eq!(
+            state.borrow().events,
+            [StoreEvent::FlushWalThrough(13), StoreEvent::WritePage(0)]
+        );
+    }
+
+    #[test]
+    fn flush_all_forces_wal_through_each_dirty_page_lsn_before_each_write() {
+        let page0 = formatted_page_with_lsn(4, 21);
+        let page1 = formatted_page_with_lsn(5, 34);
+        let (state, store) = RecordingPageStore::with_pages(vec![page0, page1]);
+        let cache = PageCache::new(store, 2).unwrap();
+
+        {
+            let guard = cache.fetch_page(0).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 10;
+        }
+        {
+            let guard = cache.fetch_page(1).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 20;
+        }
+
+        cache.flush_all().unwrap();
+
+        assert_eq!(
+            state.borrow().events,
+            [
+                StoreEvent::FlushWalThrough(21),
+                StoreEvent::WritePage(0),
+                StoreEvent::FlushWalThrough(34),
+                StoreEvent::WritePage(1)
+            ]
+        );
+        for frame in &cache.inner.frames {
+            assert!(!frame.dirty.get());
+        }
+    }
+
+    #[test]
+    fn wal_flush_failure_prevents_page_write_and_leaves_frame_dirty() {
+        let page = formatted_page_with_lsn(15, 55);
+        let (state, store) = RecordingPageStore::with_pages(vec![page]);
+        state.borrow_mut().fail_wal_flush = true;
+        let cache = PageCache::new(store, 1).unwrap();
+
+        {
+            let guard = cache.fetch_page(0).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+        }
+
+        let result = cache.flush_page(0);
+
+        assert!(matches!(
+            result,
+            Err(PageCacheError::Store(PageStoreError::WalFlushLsnNotAppended {
+                requested_lsn: 55,
+                ..
+            }))
+        ));
+        assert_eq!(state.borrow().events, [StoreEvent::FlushWalThrough(55)]);
+        assert!(cache.inner.frames[0].dirty.get());
+    }
+
+    #[test]
+    fn page_write_failure_after_wal_flush_leaves_frame_dirty() {
+        let page = formatted_page_with_lsn(15, 89);
+        let (state, store) = RecordingPageStore::with_pages(vec![page]);
+        state.borrow_mut().fail_write = true;
+        let cache = PageCache::new(store, 1).unwrap();
+
+        {
+            let guard = cache.fetch_page(0).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+        }
+
+        let result = cache.flush_page(0);
+
+        assert!(matches!(result, Err(PageCacheError::Store(PageStoreError::Io(_)))));
+        assert_eq!(
+            state.borrow().events,
+            [StoreEvent::FlushWalThrough(89), StoreEvent::WritePage(0)]
+        );
+        assert!(cache.inner.frames[0].dirty.get());
     }
 
     #[test]
