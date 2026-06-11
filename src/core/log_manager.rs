@@ -122,15 +122,21 @@ impl LogManager {
     ) -> Result<Lsn, LogManagerError<'a>> {
         validate_record_txn_ids(txn_id, records)?;
 
-        let lsn = match self.highest_appended_lsn {
-            Some(lsn) => lsn.checked_add(1).ok_or(LogManagerError::LsnExhausted)?,
-            None => 1,
-        };
+        let record_count = u64::try_from(records.len()).expect("usize record count fits in u64");
+        let lsn = self
+            .highest_appended_lsn
+            .unwrap_or(ZERO_LSN)
+            .checked_add(record_count)
+            .ok_or(LogManagerError::LsnExhausted)?;
 
         serialize_transaction(&mut self.wal_file, txn_id, records)?;
-        self.highest_appended_lsn = Some(lsn);
+        if record_count > 0 {
+            self.highest_appended_lsn = Some(lsn);
+        }
         self.wal_file.sync_all()?;
-        self.highest_durable_lsn = Some(lsn);
+        if record_count > 0 {
+            self.highest_durable_lsn = Some(lsn);
+        }
         Ok(lsn)
     }
 
@@ -697,9 +703,9 @@ mod tests {
 
         let lsn = manager.append_transaction(11, &records).unwrap();
 
-        assert_eq!(lsn, 1);
-        assert_eq!(manager.highest_appended_lsn(), Some(1));
-        assert_eq!(manager.highest_durable_lsn(), Some(1));
+        assert_eq!(lsn, 2);
+        assert_eq!(manager.highest_appended_lsn(), Some(2));
+        assert_eq!(manager.highest_durable_lsn(), Some(2));
 
         let mut wal_file = File::open(file.path().with_added_extension("wal")).unwrap();
         let mut buf = Vec::new();
@@ -710,6 +716,26 @@ mod tests {
         assert_eq!(transaction.records.len(), 2);
         assert!(matches!(transaction.records[0].kind, LogRecordKind::Begin));
         assert!(matches!(transaction.records[1].kind, LogRecordKind::Commit));
+    }
+
+    #[test]
+    fn append_transaction_assigns_one_lsn_per_record() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+        let first_records = [
+            LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+            LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+        ];
+        let second_records = [
+            LogRecord { txn_id: 12, kind: LogRecordKind::Begin },
+            LogRecord { txn_id: 12, kind: LogRecordKind::PageAlloc { page_id: 7 } },
+            LogRecord { txn_id: 12, kind: LogRecordKind::Commit },
+        ];
+
+        assert_eq!(manager.append_transaction(11, &first_records).unwrap(), 2);
+        assert_eq!(manager.append_transaction(12, &second_records).unwrap(), 5);
+        assert_eq!(manager.highest_appended_lsn(), Some(5));
+        assert_eq!(manager.highest_durable_lsn(), Some(5));
     }
 
     #[test]
