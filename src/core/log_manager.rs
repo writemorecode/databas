@@ -89,7 +89,8 @@ pub(crate) struct LogManager {
 }
 
 impl LogManager {
-    pub(crate) fn new(db_file_path: &'_ Path) -> Result<Self, LogManagerError<'_>> {
+    pub(crate) fn new(db_file_path: impl AsRef<Path>) -> std::io::Result<Self> {
+        let db_file_path = db_file_path.as_ref().to_path_buf();
         let wal_file_path = db_file_path.with_added_extension("wal");
         let wal_file = OpenOptions::new()
             .create(true)
