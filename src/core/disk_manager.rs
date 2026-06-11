@@ -80,7 +80,6 @@ impl DiskManager {
         let new_page_id = page_id + 1;
         let new_file_size = Self::page_offset(new_page_id);
         self.file.set_len(new_file_size)?;
-        self.file.sync_all()?;
         self.page_count += 1;
         Ok(page_id)
     }
@@ -112,7 +111,6 @@ impl DiskManager {
         let offset = Self::page_offset(page_id);
         self.file.seek(std::io::SeekFrom::Start(offset))?;
         self.file.write_all(buf)?;
-        self.file.sync_all()?;
         Ok(())
     }
 

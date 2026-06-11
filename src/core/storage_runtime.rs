@@ -66,6 +66,10 @@ impl StorageRuntime {
         self.disk.borrow_mut().write_page(page_id, buf)
     }
 
+    pub(crate) fn sync_database_file(&self) -> Result<(), DiskManagerError> {
+        self.disk.borrow().sync()
+    }
+
     pub(crate) fn flush_wal_through(&self, lsn: Lsn) -> Result<(), LogManagerFlushError> {
         self.log.borrow_mut().flush_through(lsn)
     }
