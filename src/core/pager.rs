@@ -115,6 +115,7 @@ impl Pager {
     /// Flushes all dirty, currently unpinned pages to disk.
     pub(crate) fn flush(&self) -> StorageResult<()> {
         self.page_cache.flush_all()?;
+        self.runtime.sync_database_file()?;
         Ok(())
     }
 
@@ -130,6 +131,7 @@ impl Pager {
         let undo_pages = self.runtime.take_rollback_pages(txn_id)?;
         self.page_cache.restore_rollback_pages(undo_pages)?;
         self.page_cache.flush_all()?;
+        self.runtime.sync_database_file()?;
         self.runtime.finish_rollback(txn_id)
     }
 
@@ -162,6 +164,7 @@ fn initialize_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
     let page_id = disk_manager.new_page()?;
     debug_assert_eq!(page_id, DATABASE_HEADER_PAGE_ID);
     disk_manager.write_page(DATABASE_HEADER_PAGE_ID, &DatabaseHeader::encode_page())?;
+    disk_manager.sync()?;
     Ok(())
 }
 
