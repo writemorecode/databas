@@ -1,3 +1,21 @@
+//! Write-ahead log (WAL) serialization, append, flush, and recovery scanning.
+//!
+//! The WAL is stored next to the database file using the same path with an
+//! additional `.wal` extension. Records are physically grouped into transaction
+//! frames:
+//!
+//! ```text
+//! header magic | format version | transaction id | record count | payload length
+//! payload records...
+//! footer magic | transaction id | payload CRC32
+//! ```
+//!
+//! LSNs are not stored explicitly in the frame. They are assigned logically by
+//! record position across complete frames, starting at 1. Appending advances
+//! the highest appended LSN, while [`LogManager::flush_through`] is responsible
+//! for making appended bytes durable before pages protected by those LSNs are
+//! written to the database file.
+
 use std::{
     fs::{File, OpenOptions},
     io::{BufReader, Read, Seek, Write},
@@ -9,8 +27,11 @@ use thiserror::Error;
 
 use crate::core::{PAGE_SIZE, PageId};
 
+/// Monotonic identifier for a transaction in the WAL.
 pub(crate) type TxnId = u64;
+/// Log sequence number assigned to one WAL record.
 pub(crate) type Lsn = u64;
+/// Sentinel LSN used for pages that do not reflect any logged update.
 pub(crate) const ZERO_LSN: Lsn = 0;
 
 const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
@@ -28,87 +49,138 @@ const KIND_ROLLBACK: u8 = 3;
 const KIND_PAGE_UPDATE: u8 = 4;
 const KIND_PAGE_ALLOC: u8 = 5;
 
+/// Errors raised while opening, writing, or decoding WAL frames.
 #[derive(Debug, Error)]
 pub enum LogManagerError<'a> {
+    /// Underlying filesystem operation failed.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// The supplied database path could not be transformed into a WAL path.
     #[error("invalid database file path: {db_file_path}")]
     InvalidDbFilePath { db_file_path: &'a Path },
+    /// A frame did not start with the expected WAL header marker.
     #[error("invalid WAL header magic: {actual:?}")]
     InvalidHeaderMagic { actual: [u8; 8] },
+    /// A frame did not end with the expected WAL footer marker.
     #[error("invalid WAL footer magic: {actual:?}")]
     InvalidFooterMagic { actual: [u8; 8] },
+    /// The WAL was produced by an incompatible format version.
     #[error("unsupported WAL format version: expected {expected}, got {actual}")]
     UnsupportedVersion { expected: u16, actual: u16 },
+    /// A frame ended before the number of bytes promised by its header.
     #[error("truncated WAL frame: needed {needed} bytes, remaining {remaining}")]
     TruncatedFrame { needed: usize, remaining: usize },
+    /// A payload length from disk cannot fit in this process's address space.
     #[error("WAL payload length does not fit in memory: {payload_len}")]
     PayloadLengthTooLarge { payload_len: u64 },
+    /// Frame length arithmetic overflowed while sizing a WAL payload.
     #[error("WAL payload length overflow")]
     PayloadLengthOverflow,
+    /// A frame payload failed CRC validation.
     #[error("WAL checksum mismatch: expected {expected}, got {actual}")]
     ChecksumMismatch { expected: u32, actual: u32 },
+    /// A payload contained an unrecognized record-kind tag.
     #[error("unknown WAL log record kind: {kind}")]
     UnknownRecordKind { kind: u8 },
+    /// The footer transaction id did not match the frame header.
     #[error("WAL footer txn id mismatch: expected {expected}, got {actual}")]
     FooterTxnIdMismatch { expected: TxnId, actual: TxnId },
+    /// A record was appended in a transaction frame for a different transaction.
     #[error("WAL record txn id mismatch: expected {expected}, got {actual}")]
     RecordTxnIdMismatch { expected: TxnId, actual: TxnId },
+    /// The decoded payload record count differed from the header count.
     #[error("WAL record count mismatch: expected {expected}, got {actual}")]
     RecordCountMismatch { expected: u32, actual: u32 },
+    /// A transaction frame contains more records than the format can encode.
     #[error("too many WAL records in transaction: {count}")]
     TooManyRecords { count: usize },
+    /// The next LSN would exceed the numeric range of [`Lsn`].
     #[error("WAL LSN exhausted")]
     LsnExhausted,
+    /// A page update record did not contain full `PAGE_SIZE` images.
     #[error("WAL full-page image has invalid length: expected {expected}, got {actual}")]
     InvalidPageImageLength { expected: usize, actual: usize },
 }
 
+/// Errors raised while forcing appended WAL bytes to durable storage.
 #[derive(Debug, Error)]
 pub(crate) enum LogManagerFlushError {
+    /// The filesystem sync failed.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// The caller requested durability for an LSN that has not been appended.
     #[error(
         "requested WAL flush through LSN {requested_lsn}, but highest appended LSN is {highest_appended_lsn:?}"
     )]
     LsnNotAppended { requested_lsn: Lsn, highest_appended_lsn: Option<Lsn> },
 }
 
+/// Borrowed WAL record used while serializing a transaction frame.
 #[derive(Debug)]
 pub(crate) struct LogRecord<'a> {
+    /// Transaction that owns this record.
     pub(crate) txn_id: TxnId,
+    /// Record payload.
     pub(crate) kind: LogRecordKind<'a>,
 }
 
+/// Borrowed WAL record payload.
 #[derive(Debug)]
 pub(crate) enum LogRecordKind<'a> {
+    /// Transaction start marker.
     Begin,
+    /// Transaction commit marker.
     Commit,
+    /// Transaction rollback-complete marker.
     Rollback,
+    /// Full-page physical update.
+    ///
+    /// `redo_data` is the complete page image to install while redoing a
+    /// committed transaction. `undo_data` is the complete page image to restore
+    /// while undoing an incomplete transaction during recovery or explicit
+    /// rollback.
     PageUpdate { page_id: PageId, redo_data: &'a [u8], undo_data: &'a [u8] },
+    /// Allocation of a database page by a transaction.
     PageAlloc { page_id: PageId },
 }
 
+/// Owned WAL record returned by recovery scans.
+///
+/// Unlike [`LogRecord`], this form owns page images and includes the LSN
+/// assigned from the record's position in the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecoveryLogRecord {
+    /// Logical LSN assigned to this record.
     pub(crate) lsn: Lsn,
+    /// Transaction that owns this record.
     pub(crate) txn_id: TxnId,
+    /// Owned record payload.
     pub(crate) kind: RecoveryLogRecordKind,
 }
 
+/// Owned WAL record payload used by crash recovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecoveryLogRecordKind {
+    /// Transaction start marker.
     Begin,
+    /// Transaction commit marker.
     Commit,
+    /// Transaction rollback-complete marker.
     Rollback,
+    /// Full-page physical update with owned redo and undo page images.
     PageUpdate { page_id: PageId, redo_data: Box<[u8; PAGE_SIZE]>, undo_data: Box<[u8; PAGE_SIZE]> },
+    /// Allocation of a database page by a transaction.
     PageAlloc { page_id: PageId },
 }
 
+/// Result of scanning the WAL for recovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecoveryLogScan {
+    /// Complete records decoded from valid WAL frames, in log order.
     pub(crate) records: Vec<RecoveryLogRecord>,
+    /// Whether an incomplete final frame was found and truncated.
     pub(crate) truncated_tail: bool,
+    /// Largest transaction id observed in complete frames.
     pub(crate) max_txn_id: TxnId,
 }
 
@@ -124,10 +196,18 @@ pub(crate) enum OwnedLogRecordKind {
 
 #[derive(Debug)]
 pub(crate) struct LogTransaction<'a> {
+    /// Transaction id shared by all records in this frame.
     pub(crate) txn_id: TxnId,
+    /// Records decoded from the frame payload.
     pub(crate) records: Vec<LogRecord<'a>>,
 }
 
+/// Append-only manager for the database write-ahead log.
+///
+/// `LogManager` tracks two positions: the highest LSN appended to the WAL file
+/// and the highest LSN known to be durable after a successful flush. Page-cache
+/// code uses that distinction to enforce the write-ahead rule before writing a
+/// dirty page whose page header references a logged LSN.
 #[derive(Debug)]
 pub(crate) struct LogManager {
     wal_file: File,
@@ -140,6 +220,12 @@ pub(crate) struct LogManager {
 }
 
 impl LogManager {
+    /// Opens or creates the WAL file associated with `db_file_path`.
+    ///
+    /// Existing complete frames are scanned to reconstruct the highest appended
+    /// LSN and highest transaction id. Opening does not mark existing bytes as
+    /// durable in this process; callers must still use [`Self::flush_through`]
+    /// before relying on a newly appended record.
     pub(crate) fn new(db_file_path: impl AsRef<Path>) -> std::io::Result<Self> {
         let db_file_path = db_file_path.as_ref().to_path_buf();
         let wal_file_path = db_file_path.with_added_extension("wal");
@@ -181,10 +267,12 @@ impl LogManager {
         })
     }
 
+    /// Returns the largest transaction id observed in the WAL.
     pub(crate) fn highest_txn_id(&self) -> TxnId {
         self.highest_txn_id
     }
 
+    /// Returns the LSN that would be assigned to the next appended record.
     pub(crate) fn next_lsn(&self) -> Result<Lsn, LogManagerError<'static>> {
         self.highest_appended_lsn
             .unwrap_or(ZERO_LSN)
@@ -192,6 +280,11 @@ impl LogManager {
             .ok_or(LogManagerError::LsnExhausted)
     }
 
+    /// Appends one WAL record as a single-record transaction frame.
+    ///
+    /// Returns the LSN assigned to the appended record. The record is appended
+    /// to the operating system file handle but is not forced to durable storage;
+    /// use [`Self::flush_through`] for durability.
     pub(crate) fn append_record<'a>(
         &mut self,
         txn_id: TxnId,
@@ -200,6 +293,12 @@ impl LogManager {
         self.append_transaction(txn_id, &[LogRecord { txn_id, kind }])
     }
 
+    /// Appends a transaction frame containing `records`.
+    ///
+    /// All records must belong to `txn_id`. LSNs are assigned one per record in
+    /// frame order, and the return value is the highest LSN assigned by this
+    /// append. Empty frames are allowed for serializer symmetry and return the
+    /// current highest appended LSN without advancing it.
     pub(crate) fn append_transaction<'a>(
         &mut self,
         txn_id: TxnId,
@@ -222,6 +321,12 @@ impl LogManager {
         Ok(lsn)
     }
 
+    /// Forces WAL bytes through `requested_lsn` to durable storage.
+    ///
+    /// This is the durability half of the write-ahead rule. The call is a no-op
+    /// for [`ZERO_LSN`] and for LSNs already known durable. On success, the
+    /// manager conservatively marks all currently appended records durable
+    /// because the underlying file sync covers the whole WAL file.
     pub(crate) fn flush_through(&mut self, requested_lsn: Lsn) -> Result<(), LogManagerFlushError> {
         if requested_lsn == ZERO_LSN {
             return Ok(());
@@ -279,6 +384,12 @@ impl LogManager {
     }
 }
 
+/// Reads complete WAL frames and returns owned records for crash recovery.
+///
+/// A torn or incomplete final frame is treated as a non-durable tail: it is
+/// truncated from the WAL and reported through [`RecoveryLogScan::truncated_tail`].
+/// Corruption in a complete-looking frame, such as bad magic or a checksum
+/// mismatch, is returned as an error and the WAL is left intact.
 pub(crate) fn read_recovery_log(
     db_file_path: impl AsRef<Path>,
 ) -> Result<RecoveryLogScan, LogManagerError<'static>> {
@@ -342,6 +453,7 @@ pub(crate) fn read_recovery_log(
     Ok(RecoveryLogScan { records, truncated_tail, max_txn_id })
 }
 
+/// Removes all WAL contents after recovery has made the database file consistent.
 pub(crate) fn truncate_wal(db_file_path: impl AsRef<Path>) -> Result<(), LogManagerError<'static>> {
     let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
     let wal_file =
@@ -421,6 +533,11 @@ impl LogManagerError<'_> {
     }
 }
 
+/// Serializes a complete transaction frame to `writer`.
+///
+/// The frame includes the header, all payload records, and a footer containing
+/// the transaction id and CRC32 of the payload bytes. It does not assign or
+/// persist LSNs; callers derive LSNs from record position in append order.
 pub(crate) fn serialize_transaction<'a, W: Write>(
     mut writer: W,
     txn_id: TxnId,
@@ -442,6 +559,10 @@ pub(crate) fn serialize_transaction<'a, W: Write>(
     Ok(())
 }
 
+/// Deserializes exactly one transaction frame from `buf`.
+///
+/// The returned records borrow their page-image slices from `buf`. The input
+/// must contain one complete frame and no trailing bytes.
 pub(crate) fn deserialize_transaction(
     buf: &'_ [u8],
 ) -> Result<LogTransaction<'_>, LogManagerError<'_>> {
