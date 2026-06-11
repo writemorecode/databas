@@ -56,6 +56,23 @@ impl DiskManager {
         self.page_count
     }
 
+    pub(crate) fn ensure_page_exists(&mut self, page_id: PageId) -> DiskManagerResult<()> {
+        if page_id < self.page_count {
+            return Ok(());
+        }
+
+        let new_page_count = page_id + 1;
+        self.file.set_len(Self::page_offset(new_page_count))?;
+        self.file.sync_all()?;
+        self.page_count = new_page_count;
+        Ok(())
+    }
+
+    pub(crate) fn sync(&self) -> DiskManagerResult<()> {
+        self.file.sync_all()?;
+        Ok(())
+    }
+
     /// Extends the database file by one page.
     /// Returns page ID of the new page.
     pub(crate) fn new_page(&mut self) -> DiskManagerResult<PageId> {

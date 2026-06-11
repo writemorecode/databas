@@ -1470,6 +1470,33 @@ mod tests {
     }
 
     #[test]
+    fn committed_insert_recovers_from_wal_after_crash_without_database_flush() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let database = Database::create(&path).unwrap();
+        database.create_table("users", users_schema()).unwrap();
+        database.flush().unwrap();
+        let insert = Parser::new("INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+            .stmt()
+            .unwrap();
+        let insert_plan = Planner::new(&database).plan_statement(&insert).unwrap();
+        let mut executor = Executor::new(&database);
+
+        executor.execute(insert_plan.physical).unwrap();
+        std::mem::forget(executor);
+        std::mem::forget(database);
+
+        let reopened = Database::open(&path).unwrap();
+        let mut users = reopened.table_cursor_by_name("users").unwrap();
+        let row = users.get(1).unwrap().expect("committed row should recover from WAL");
+
+        assert_eq!(
+            values(&row),
+            vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(true),]
+        );
+    }
+
+    #[test]
     fn select_without_from_executes_through_one_row_and_project() {
         let dir = tempdir().unwrap();
         let database = Database::create(dir.path().join("test.db")).unwrap();
