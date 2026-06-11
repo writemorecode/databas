@@ -16,6 +16,8 @@ pub(crate) mod page_store;
 pub(crate) mod pager;
 pub mod tuple;
 
+pub(crate) mod log_manager;
+
 pub use btree::{CursorState, OwnedRecord, Record, RecordView, TreeCursor};
 pub use catalog::{
     CatalogError, CatalogObjectKind, ColumnCatalogRow, ColumnSchema, DataType, IndexCatalogRow,
