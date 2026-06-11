@@ -1,6 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek, Write},
+    io::{BufReader, Read, Seek, Write},
     path::Path,
 };
 
@@ -19,6 +19,7 @@ const WAL_FORMAT_VERSION: u16 = 2;
 const HEADER_LEN: usize = 8 + 2 + 8 + 4 + 8;
 const FOOTER_LEN: usize = 8 + 8 + 4;
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_SCAN_BUFFER_LEN: usize = 8192;
 
 const KIND_BEGIN: u8 = 1;
@@ -117,15 +118,20 @@ impl LogManager {
         let mut highest_appended_lsn = None;
         let mut highest_txn_id = 0;
         wal_file.seek(std::io::SeekFrom::Start(0))?;
-        while let Some(frame) = scan_transaction_frame(&mut wal_file).map_err(wal_open_error)? {
-            highest_txn_id = highest_txn_id.max(frame.txn_id);
-            if frame.record_count > 0 {
-                let next_lsn = highest_appended_lsn
-                    .unwrap_or(ZERO_LSN)
-                    .checked_add(u64::from(frame.record_count))
-                    .ok_or(LogManagerError::LsnExhausted)
-                    .map_err(wal_open_error)?;
-                highest_appended_lsn = Some(next_lsn);
+        {
+            let mut wal_reader = BufReader::with_capacity(WAL_READ_BUFFER_LEN, &mut wal_file);
+            while let Some(frame) =
+                scan_transaction_frame(&mut wal_reader).map_err(wal_open_error)?
+            {
+                highest_txn_id = highest_txn_id.max(frame.txn_id);
+                if frame.record_count > 0 {
+                    let next_lsn = highest_appended_lsn
+                        .unwrap_or(ZERO_LSN)
+                        .checked_add(u64::from(frame.record_count))
+                        .ok_or(LogManagerError::LsnExhausted)
+                        .map_err(wal_open_error)?;
+                    highest_appended_lsn = Some(next_lsn);
+                }
             }
         }
         wal_file.seek(std::io::SeekFrom::End(0))?;
