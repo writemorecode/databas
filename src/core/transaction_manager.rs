@@ -1,3 +1,12 @@
+//! Single-transaction coordinator for WAL-backed page changes.
+//!
+//! The storage layer currently allows at most one active transaction per
+//! [`TransactionManager`]. While that transaction is active, page allocations
+//! and full-page updates are recorded in the write-ahead log before the dirty
+//! page is allowed to reach the database file. Rollback uses the in-memory undo
+//! images accumulated here; crash recovery uses the durable WAL records written
+//! by [`LogManager`].
+
 use crate::core::{
     PAGE_SIZE, PageId,
     error::{InternalError, InvariantViolation, StorageError, StorageResult},
@@ -5,19 +14,39 @@ use crate::core::{
     page,
 };
 
+/// Full-page image needed to undo one page update during an explicit rollback.
+///
+/// Entries are collected in update order and later returned in reverse LSN
+/// order so a rollback restores the newest version of each page first.
 #[derive(Debug, Clone)]
 pub(crate) struct PageUndo {
+    /// Page to restore.
     pub(crate) page_id: PageId,
+    /// Full page image captured before the logged update.
     pub(crate) before: [u8; PAGE_SIZE],
+    /// LSN assigned to the update that this image undoes.
     pub(crate) lsn: Lsn,
 }
 
+/// WAL metadata returned after a transactional page update is logged.
+///
+/// The returned redo image is the caller's `after` image with the assigned LSN
+/// stamped into the page header when the page format supports an LSN field.
 #[derive(Debug)]
 pub(crate) struct LoggedPageUpdate {
+    /// LSN assigned to the WAL update record.
     pub(crate) lsn: Lsn,
+    /// Full page image that should be installed into the cache after logging.
     pub(crate) redo: [u8; PAGE_SIZE],
 }
 
+/// Tracks the single active transaction and its rollback state.
+///
+/// `TransactionManager` is deliberately small: it assigns monotonically
+/// increasing transaction ids, appends transaction-control records, remembers
+/// in-memory undo images for explicit rollback, and marks the active
+/// transaction as poisoned after an error that may have left its effects only
+/// partially logged.
 #[derive(Debug)]
 pub(crate) struct TransactionManager {
     max_txn_id: TxnId,
@@ -33,10 +62,19 @@ struct ActiveTransaction {
 }
 
 impl TransactionManager {
+    /// Creates a manager whose next transaction id will be greater than `max_txn_id`.
+    ///
+    /// Callers seed this with the largest transaction id observed during
+    /// recovery and WAL reopening so transaction ids remain monotonic across
+    /// process restarts.
     pub(crate) fn new(max_txn_id: TxnId) -> Self {
         Self { max_txn_id, active: None }
     }
 
+    /// Begins the only active transaction and writes its `Begin` WAL record.
+    ///
+    /// Returns an invariant violation if another transaction is already active
+    /// or if the transaction-id counter is exhausted.
     pub(crate) fn begin(&mut self, log: &mut LogManager) -> StorageResult<TxnId> {
         if let Some(active) = &self.active {
             return Err(invariant(InvariantViolation::ActiveTransaction { txn_id: active.txn_id }));
@@ -57,6 +95,12 @@ impl TransactionManager {
         Ok(txn_id)
     }
 
+    /// Records a page allocation for the active transaction, if any.
+    ///
+    /// Page allocations outside a transaction are allowed and do not write WAL.
+    /// Allocated page ids are currently not reclaimed during rollback; the WAL
+    /// record exists so crash recovery can make committed allocations visible
+    /// before replaying their updates.
     pub(crate) fn record_page_alloc(
         &mut self,
         log: &mut LogManager,
@@ -77,6 +121,17 @@ impl TransactionManager {
         Ok(Some(lsn))
     }
 
+    /// Writes a full-page update record for the active transaction, if any.
+    ///
+    /// When no transaction is active, the update is not logged and `Ok(None)`
+    /// is returned. With an active transaction, this method reserves the next
+    /// LSN, stamps it into the redo image for current B+-tree pages, appends a
+    /// `PageUpdate` WAL record containing both redo and undo full-page images,
+    /// and remembers the undo image for explicit rollback.
+    ///
+    /// If LSN reservation or WAL append fails, the active transaction is marked
+    /// poisoned. A poisoned transaction cannot commit because the caller can no
+    /// longer prove that all page effects were logged.
     pub(crate) fn record_page_update(
         &mut self,
         log: &mut LogManager,
@@ -114,12 +169,22 @@ impl TransactionManager {
         Ok(Some(LoggedPageUpdate { lsn, redo }))
     }
 
+    /// Marks the active transaction as unsafe to commit.
+    ///
+    /// Storage layers call this after an error outside direct WAL append paths
+    /// when the active transaction may have observed a partial mutation.
     pub(crate) fn record_failure(&mut self) {
         if let Some(active) = self.active.as_mut() {
             active.poisoned = true;
         }
     }
 
+    /// Commits the active transaction and flushes its commit record to durable storage.
+    ///
+    /// The active transaction is cleared after the commit record is appended.
+    /// If the subsequent WAL flush fails, callers receive the flush error but
+    /// the transaction is no longer available for explicit rollback; recovery
+    /// will decide the outcome from the WAL contents on the next open.
     pub(crate) fn commit(&mut self, log: &mut LogManager, txn_id: TxnId) -> StorageResult<()> {
         let active = self.active.as_ref().ok_or_else(no_active_transaction)?;
         if active.txn_id != txn_id {
@@ -135,6 +200,11 @@ impl TransactionManager {
         Ok(())
     }
 
+    /// Removes the active transaction and returns its undo images for rollback.
+    ///
+    /// The returned vector is ordered from newest update to oldest update. If
+    /// `txn_id` does not match the active transaction, the transaction is put
+    /// back before returning the mismatch error.
     pub(crate) fn take_rollback_pages(&mut self, txn_id: TxnId) -> StorageResult<Vec<PageUndo>> {
         let active = self.active.take().ok_or_else(no_active_transaction)?;
         if active.txn_id != txn_id {
@@ -148,6 +218,10 @@ impl TransactionManager {
         Ok(undo_pages)
     }
 
+    /// Writes and flushes the `Rollback` record after undo pages reach disk.
+    ///
+    /// Callers perform the physical page restoration first, then use this
+    /// method to make the completed rollback durable in the WAL.
     pub(crate) fn finish_rollback(
         &mut self,
         log: &mut LogManager,
@@ -159,6 +233,10 @@ impl TransactionManager {
     }
 }
 
+/// Stamps the assigned page LSN into page formats that carry one.
+///
+/// Overflow pages and unknown page formats are left unchanged. Their effective
+/// page LSN is treated as [`ZERO_LSN`] by [`page_lsn`].
 fn stamp_page_lsn(page_bytes: &mut [u8; PAGE_SIZE], lsn: Lsn) {
     if page::is_overflow_page(page_bytes) {
         return;
@@ -181,6 +259,11 @@ fn invariant(kind: InvariantViolation) -> StorageError {
     StorageError::Internal(InternalError::InvariantViolation(kind))
 }
 
+/// Reads the recovery LSN stored in a page image.
+///
+/// Current B+-tree pages store an LSN in their page header. Overflow pages and
+/// unrecognized or zeroed pages return [`ZERO_LSN`], which makes recovery treat
+/// them as not yet reflecting any logged update.
 pub(crate) fn page_lsn(page_bytes: &[u8; PAGE_SIZE]) -> Lsn {
     if page::is_overflow_page(page_bytes) {
         return ZERO_LSN;
