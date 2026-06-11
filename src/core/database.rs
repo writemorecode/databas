@@ -2,29 +2,35 @@ use std::path::Path;
 
 use crate::core::{
     IndexSchema, RowId, TableCursor, TableSchema, TupleSchema, catalog_manager::CatalogManager,
-    cursor::IndexCursor, error::StorageResult,
+    cursor::IndexCursor, error::StorageResult, log_manager::LogManager,
 };
 
 /// Public database handle for one database file.
-#[derive(Clone)]
 pub struct Database {
     catalog: CatalogManager,
+    log_manager: LogManager,
 }
 
 impl Database {
     /// Creates a new database file.
     pub fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
-        Ok(Self { catalog: CatalogManager::create(path)? })
+        let catalog = CatalogManager::create(&path)?;
+        let log_manager = LogManager::new(path)?;
+        Ok(Self { catalog, log_manager })
     }
 
     /// Opens an existing database file.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
-        Ok(Self { catalog: CatalogManager::open_existing(path)? })
+        let catalog = CatalogManager::open_existing(&path)?;
+        let log_manager = LogManager::new(path)?;
+        Ok(Self { catalog, log_manager })
     }
 
     /// Opens a database file, creating and initializing it if needed.
     pub fn open_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
-        Ok(Self { catalog: CatalogManager::open_or_create(path)? })
+        let catalog = CatalogManager::open_or_create(&path)?;
+        let log_manager = LogManager::new(path)?;
+        Ok(Self { catalog, log_manager })
     }
 
     /// Returns the database-file path associated with this database.
@@ -95,6 +101,16 @@ mod tests {
 
         let reopened = Database::open(&path).unwrap();
         assert_eq!(reopened.path(), path);
+    }
+
+    #[test]
+    fn create_initializes_write_ahead_log() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let _database = Database::create(&path).unwrap();
+
+        assert!(path.with_added_extension("wal").exists());
     }
 
     #[test]
