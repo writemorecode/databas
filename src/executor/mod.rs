@@ -1480,10 +1480,10 @@ mod tests {
             .stmt()
             .unwrap();
         let insert_plan = Planner::new(&database).plan_statement(&insert).unwrap();
-        let mut executor = Executor::new(&database);
-
-        executor.execute(insert_plan.physical).unwrap();
-        std::mem::forget(executor);
+        {
+            let mut executor = Executor::new(&database);
+            executor.execute(insert_plan.physical).unwrap();
+        }
         std::mem::forget(database);
 
         let reopened = Database::open(&path).unwrap();
