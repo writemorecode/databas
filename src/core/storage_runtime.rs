@@ -78,7 +78,7 @@ impl StorageRuntime {
         &self,
         txn_id: TxnId,
         records: &[LogRecord<'a>],
-    ) -> Result<Lsn, LogManagerError<'a>> {
+    ) -> Result<Lsn, LogManagerError> {
         self.log.borrow_mut().append_transaction(txn_id, records)
     }
 

@@ -305,8 +305,8 @@ impl From<PageCacheError> for StorageError {
     }
 }
 
-impl From<LogManagerError<'_>> for StorageError {
-    fn from(err: LogManagerError<'_>) -> Self {
+impl From<LogManagerError> for StorageError {
+    fn from(err: LogManagerError) -> Self {
         match err {
             LogManagerError::Io(err) => Self::Io(err),
             err => Self::Internal(InternalError::InvariantViolation(InvariantViolation::WalLog {

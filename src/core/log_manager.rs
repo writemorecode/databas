@@ -19,7 +19,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{BufReader, Read, Seek, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use crc::{CRC_32_ISO_HDLC, Crc, Digest};
@@ -51,13 +51,13 @@ const KIND_PAGE_ALLOC: u8 = 5;
 
 /// Errors raised while opening, writing, or decoding WAL frames.
 #[derive(Debug, Error)]
-pub enum LogManagerError<'a> {
+pub enum LogManagerError {
     /// Underlying filesystem operation failed.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     /// The supplied database path could not be transformed into a WAL path.
     #[error("invalid database file path: {db_file_path}")]
-    InvalidDbFilePath { db_file_path: &'a Path },
+    InvalidDbFilePath { db_file_path: PathBuf },
     /// A frame did not start with the expected WAL header marker.
     #[error("invalid WAL header magic: {actual:?}")]
     InvalidHeaderMagic { actual: [u8; 8] },
@@ -273,7 +273,7 @@ impl LogManager {
     }
 
     /// Returns the LSN that would be assigned to the next appended record.
-    pub(crate) fn next_lsn(&self) -> Result<Lsn, LogManagerError<'static>> {
+    pub(crate) fn next_lsn(&self) -> Result<Lsn, LogManagerError> {
         self.highest_appended_lsn
             .unwrap_or(ZERO_LSN)
             .checked_add(1)
@@ -289,7 +289,7 @@ impl LogManager {
         &mut self,
         txn_id: TxnId,
         kind: LogRecordKind<'a>,
-    ) -> Result<Lsn, LogManagerError<'a>> {
+    ) -> Result<Lsn, LogManagerError> {
         self.append_transaction(txn_id, &[LogRecord { txn_id, kind }])
     }
 
@@ -303,7 +303,7 @@ impl LogManager {
         &mut self,
         txn_id: TxnId,
         records: &[LogRecord<'a>],
-    ) -> Result<Lsn, LogManagerError<'a>> {
+    ) -> Result<Lsn, LogManagerError> {
         validate_record_txn_ids(txn_id, records)?;
 
         let record_count = u64::try_from(records.len()).expect("usize record count fits in u64");
@@ -392,7 +392,7 @@ impl LogManager {
 /// mismatch, is returned as an error and the WAL is left intact.
 pub(crate) fn read_recovery_log(
     db_file_path: impl AsRef<Path>,
-) -> Result<RecoveryLogScan, LogManagerError<'static>> {
+) -> Result<RecoveryLogScan, LogManagerError> {
     let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
     let mut wal_file = OpenOptions::new()
         .create(true)
@@ -421,7 +421,7 @@ pub(crate) fn read_recovery_log(
                 truncated_tail = true;
                 break;
             }
-            Err(err) => return Err(err.into_static()),
+            Err(err) => return Err(err),
         };
 
         let frame_end =
@@ -431,8 +431,7 @@ pub(crate) fn read_recovery_log(
             break;
         }
 
-        let transaction = deserialize_transaction(&buf[offset..frame_end])
-            .map_err(LogManagerError::into_static)?;
+        let transaction = deserialize_transaction(&buf[offset..frame_end])?;
         max_txn_id = max_txn_id.max(transaction.txn_id);
         for record in transaction.records {
             next_lsn = next_lsn.checked_add(1).ok_or(LogManagerError::LsnExhausted)?;
@@ -454,7 +453,7 @@ pub(crate) fn read_recovery_log(
 }
 
 /// Removes all WAL contents after recovery has made the database file consistent.
-pub(crate) fn truncate_wal(db_file_path: impl AsRef<Path>) -> Result<(), LogManagerError<'static>> {
+pub(crate) fn truncate_wal(db_file_path: impl AsRef<Path>) -> Result<(), LogManagerError> {
     let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
     let wal_file =
         OpenOptions::new().create(true).write(true).truncate(true).open(wal_file_path)?;
@@ -463,7 +462,7 @@ pub(crate) fn truncate_wal(db_file_path: impl AsRef<Path>) -> Result<(), LogMana
 }
 
 impl RecoveryLogRecordKind {
-    fn from_log_record_kind(kind: LogRecordKind<'_>) -> Result<Self, LogManagerError<'static>> {
+    fn from_log_record_kind(kind: LogRecordKind<'_>) -> Result<Self, LogManagerError> {
         match kind {
             LogRecordKind::Begin => Ok(Self::Begin),
             LogRecordKind::Commit => Ok(Self::Commit),
@@ -478,59 +477,12 @@ impl RecoveryLogRecordKind {
     }
 }
 
-fn page_image_array(image: &[u8]) -> Result<Box<[u8; PAGE_SIZE]>, LogManagerError<'static>> {
+fn page_image_array(image: &[u8]) -> Result<Box<[u8; PAGE_SIZE]>, LogManagerError> {
     let image = image.try_into().map_err(|_| LogManagerError::InvalidPageImageLength {
         expected: PAGE_SIZE,
         actual: image.len(),
     })?;
     Ok(Box::new(image))
-}
-
-impl LogManagerError<'_> {
-    fn into_static(self) -> LogManagerError<'static> {
-        match self {
-            LogManagerError::Io(err) => LogManagerError::Io(err),
-            LogManagerError::InvalidDbFilePath { .. } => LogManagerError::InvalidDbFilePath {
-                db_file_path: Path::new("<invalid database file path>"),
-            },
-            LogManagerError::InvalidHeaderMagic { actual } => {
-                LogManagerError::InvalidHeaderMagic { actual }
-            }
-            LogManagerError::InvalidFooterMagic { actual } => {
-                LogManagerError::InvalidFooterMagic { actual }
-            }
-            LogManagerError::UnsupportedVersion { expected, actual } => {
-                LogManagerError::UnsupportedVersion { expected, actual }
-            }
-            LogManagerError::TruncatedFrame { needed, remaining } => {
-                LogManagerError::TruncatedFrame { needed, remaining }
-            }
-            LogManagerError::PayloadLengthTooLarge { payload_len } => {
-                LogManagerError::PayloadLengthTooLarge { payload_len }
-            }
-            LogManagerError::PayloadLengthOverflow => LogManagerError::PayloadLengthOverflow,
-            LogManagerError::ChecksumMismatch { expected, actual } => {
-                LogManagerError::ChecksumMismatch { expected, actual }
-            }
-            LogManagerError::UnknownRecordKind { kind } => {
-                LogManagerError::UnknownRecordKind { kind }
-            }
-            LogManagerError::FooterTxnIdMismatch { expected, actual } => {
-                LogManagerError::FooterTxnIdMismatch { expected, actual }
-            }
-            LogManagerError::RecordTxnIdMismatch { expected, actual } => {
-                LogManagerError::RecordTxnIdMismatch { expected, actual }
-            }
-            LogManagerError::RecordCountMismatch { expected, actual } => {
-                LogManagerError::RecordCountMismatch { expected, actual }
-            }
-            LogManagerError::TooManyRecords { count } => LogManagerError::TooManyRecords { count },
-            LogManagerError::LsnExhausted => LogManagerError::LsnExhausted,
-            LogManagerError::InvalidPageImageLength { expected, actual } => {
-                LogManagerError::InvalidPageImageLength { expected, actual }
-            }
-        }
-    }
 }
 
 /// Serializes a complete transaction frame to `writer`.
@@ -542,7 +494,7 @@ pub(crate) fn serialize_transaction<'a, W: Write>(
     mut writer: W,
     txn_id: TxnId,
     records: &[LogRecord<'a>],
-) -> Result<(), LogManagerError<'a>> {
+) -> Result<(), LogManagerError> {
     validate_record_txn_ids(txn_id, records)?;
     let entry_count = u32::try_from(records.len())
         .map_err(|_| LogManagerError::TooManyRecords { count: records.len() })?;
@@ -565,7 +517,7 @@ pub(crate) fn serialize_transaction<'a, W: Write>(
 /// must contain one complete frame and no trailing bytes.
 pub(crate) fn deserialize_transaction(
     buf: &'_ [u8],
-) -> Result<LogTransaction<'_>, LogManagerError<'_>> {
+) -> Result<LogTransaction<'_>, LogManagerError> {
     let frame_len = transaction_frame_len(buf)?;
     if buf.len() > frame_len {
         return Err(LogManagerError::TruncatedFrame {
@@ -667,7 +619,7 @@ struct WalFrameHeader {
 
 fn scan_transaction_frame<R: Read>(
     reader: &mut R,
-) -> Result<Option<ScannedWalFrame>, LogManagerError<'static>> {
+) -> Result<Option<ScannedWalFrame>, LogManagerError> {
     let Some(header_bytes) = read_exact_or_eof::<_, HEADER_LEN>(reader)? else {
         return Ok(None);
     };
@@ -702,7 +654,7 @@ fn scan_log_record_payload<R: Read>(
     reader: &mut R,
     digest: &mut Digest<'_, u32>,
     remaining: &mut usize,
-) -> Result<(), LogManagerError<'static>> {
+) -> Result<(), LogManagerError> {
     match read_crc_u8(reader, digest, remaining)? {
         KIND_BEGIN | KIND_COMMIT | KIND_ROLLBACK => Ok(()),
         KIND_PAGE_ALLOC => {
@@ -713,8 +665,8 @@ fn scan_log_record_payload<R: Read>(
             read_crc_u64(reader, digest, remaining)?;
             let redo_len = read_crc_u32(reader, digest, remaining)? as usize;
             let undo_len = read_crc_u32(reader, digest, remaining)? as usize;
-            validate_page_image_len_with_lifetime(redo_len)?;
-            validate_page_image_len_with_lifetime(undo_len)?;
+            validate_page_image_len_value(redo_len)?;
+            validate_page_image_len_value(undo_len)?;
             read_crc_discard(reader, digest, remaining, redo_len)?;
             read_crc_discard(reader, digest, remaining, undo_len)
         }
@@ -739,7 +691,7 @@ fn read_crc_u8<R: Read>(
     reader: &mut R,
     digest: &mut Digest<'_, u32>,
     remaining: &mut usize,
-) -> Result<u8, LogManagerError<'static>> {
+) -> Result<u8, LogManagerError> {
     let bytes = read_crc_array::<_, 1>(reader, digest, remaining)?;
     Ok(bytes[0])
 }
@@ -748,7 +700,7 @@ fn read_crc_u32<R: Read>(
     reader: &mut R,
     digest: &mut Digest<'_, u32>,
     remaining: &mut usize,
-) -> Result<u32, LogManagerError<'static>> {
+) -> Result<u32, LogManagerError> {
     let bytes = read_crc_array::<_, 4>(reader, digest, remaining)?;
     Ok(u32::from_le_bytes(bytes))
 }
@@ -757,7 +709,7 @@ fn read_crc_u64<R: Read>(
     reader: &mut R,
     digest: &mut Digest<'_, u32>,
     remaining: &mut usize,
-) -> Result<u64, LogManagerError<'static>> {
+) -> Result<u64, LogManagerError> {
     let bytes = read_crc_array::<_, 8>(reader, digest, remaining)?;
     Ok(u64::from_le_bytes(bytes))
 }
@@ -766,7 +718,7 @@ fn read_crc_array<R: Read, const N: usize>(
     reader: &mut R,
     digest: &mut Digest<'_, u32>,
     remaining: &mut usize,
-) -> Result<[u8; N], LogManagerError<'static>> {
+) -> Result<[u8; N], LogManagerError> {
     if *remaining < N {
         return Err(LogManagerError::TruncatedFrame { needed: N, remaining: *remaining });
     }
@@ -782,7 +734,7 @@ fn read_crc_discard<R: Read>(
     digest: &mut Digest<'_, u32>,
     remaining: &mut usize,
     len: usize,
-) -> Result<(), LogManagerError<'static>> {
+) -> Result<(), LogManagerError> {
     if *remaining < len {
         return Err(LogManagerError::TruncatedFrame { needed: len, remaining: *remaining });
     }
@@ -799,9 +751,7 @@ fn read_crc_discard<R: Read>(
     Ok(())
 }
 
-fn parse_header(
-    header_bytes: &[u8; HEADER_LEN],
-) -> Result<WalFrameHeader, LogManagerError<'static>> {
+fn parse_header(header_bytes: &[u8; HEADER_LEN]) -> Result<WalFrameHeader, LogManagerError> {
     let header_magic: [u8; 8] = header_bytes[0..8].try_into().expect("header magic len is fixed");
     if header_magic != HEADER_MAGIC {
         return Err(LogManagerError::InvalidHeaderMagic { actual: header_magic });
@@ -830,7 +780,7 @@ fn validate_footer(
     footer_bytes: &[u8; FOOTER_LEN],
     txn_id: TxnId,
     actual_crc: u32,
-) -> Result<(), LogManagerError<'static>> {
+) -> Result<(), LogManagerError> {
     let footer_magic: [u8; 8] = footer_bytes[0..8].try_into().expect("footer magic len is fixed");
     if footer_magic != FOOTER_MAGIC {
         return Err(LogManagerError::InvalidFooterMagic { actual: footer_magic });
@@ -857,14 +807,14 @@ fn validate_footer(
     Ok(())
 }
 
-fn wal_open_error(err: LogManagerError<'_>) -> std::io::Error {
+fn wal_open_error(err: LogManagerError) -> std::io::Error {
     match err {
         LogManagerError::Io(err) => err,
         err => std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()),
     }
 }
 
-fn transaction_frame_len(buf: &'_ [u8]) -> Result<usize, LogManagerError<'_>> {
+fn transaction_frame_len(buf: &'_ [u8]) -> Result<usize, LogManagerError> {
     if buf.len() < HEADER_LEN {
         return Err(LogManagerError::TruncatedFrame { needed: HEADER_LEN, remaining: buf.len() });
     }
@@ -914,7 +864,7 @@ pub(crate) fn read_log_record_kinds_for_test(
 fn deserialize_log_record<'a>(
     cursor: &mut Cursor<'a>,
     txn_id: TxnId,
-) -> Result<LogRecord<'a>, LogManagerError<'a>> {
+) -> Result<LogRecord<'a>, LogManagerError> {
     let kind = match cursor.read_u8()? {
         KIND_BEGIN => LogRecordKind::Begin,
         KIND_COMMIT => LogRecordKind::Commit,
@@ -941,7 +891,7 @@ fn deserialize_log_record<'a>(
 fn validate_record_txn_ids<'a>(
     txn_id: TxnId,
     records: &[LogRecord<'a>],
-) -> Result<(), LogManagerError<'a>> {
+) -> Result<(), LogManagerError> {
     for record in records {
         if record.txn_id != txn_id {
             return Err(LogManagerError::RecordTxnIdMismatch {
@@ -953,7 +903,7 @@ fn validate_record_txn_ids<'a>(
     Ok(())
 }
 
-fn serialized_records_len<'a>(records: &[LogRecord<'a>]) -> Result<u64, LogManagerError<'a>> {
+fn serialized_records_len<'a>(records: &[LogRecord<'a>]) -> Result<u64, LogManagerError> {
     let mut len = 0u64;
     for record in records {
         len = len
@@ -963,7 +913,7 @@ fn serialized_records_len<'a>(records: &[LogRecord<'a>]) -> Result<u64, LogManag
     Ok(len)
 }
 
-fn serialized_record_len<'a>(kind: &LogRecordKind<'a>) -> Result<u64, LogManagerError<'a>> {
+fn serialized_record_len<'a>(kind: &LogRecordKind<'a>) -> Result<u64, LogManagerError> {
     match kind {
         LogRecordKind::Begin | LogRecordKind::Commit | LogRecordKind::Rollback => Ok(1),
         LogRecordKind::PageUpdate { redo_data, undo_data, .. } => {
@@ -981,11 +931,11 @@ fn serialized_record_len<'a>(kind: &LogRecordKind<'a>) -> Result<u64, LogManager
     }
 }
 
-fn validate_page_image_len<'a>(image: &[u8]) -> Result<(), LogManagerError<'a>> {
-    validate_page_image_len_with_lifetime(image.len())
+fn validate_page_image_len(image: &[u8]) -> Result<(), LogManagerError> {
+    validate_page_image_len_value(image.len())
 }
 
-fn validate_page_image_len_with_lifetime<'a>(len: usize) -> Result<(), LogManagerError<'a>> {
+fn validate_page_image_len_value(len: usize) -> Result<(), LogManagerError> {
     if len == PAGE_SIZE {
         Ok(())
     } else {
@@ -1020,7 +970,7 @@ fn write_log_record_payload<'a, W: Write>(
     writer: &mut W,
     digest: &mut Digest<'_, u32>,
     kind: &LogRecordKind<'a>,
-) -> Result<(), LogManagerError<'a>> {
+) -> Result<(), LogManagerError> {
     match kind {
         LogRecordKind::Begin => write_crc_u8(writer, digest, KIND_BEGIN)?,
         LogRecordKind::Commit => write_crc_u8(writer, digest, KIND_COMMIT)?,
@@ -1098,12 +1048,12 @@ impl<'a> Cursor<'a> {
         self.buf.len() - self.position
     }
 
-    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], LogManagerError<'a>> {
+    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], LogManagerError> {
         let slice = self.read_slice(N)?;
         Ok(slice.try_into().expect("slice length is fixed"))
     }
 
-    fn read_slice(&mut self, len: usize) -> Result<&'a [u8], LogManagerError<'a>> {
+    fn read_slice(&mut self, len: usize) -> Result<&'a [u8], LogManagerError> {
         let end = self.position.checked_add(len).ok_or(LogManagerError::PayloadLengthOverflow)?;
         if end > self.buf.len() {
             return Err(LogManagerError::TruncatedFrame {
@@ -1116,19 +1066,19 @@ impl<'a> Cursor<'a> {
         Ok(slice)
     }
 
-    fn read_u8(&mut self) -> Result<u8, LogManagerError<'a>> {
+    fn read_u8(&mut self) -> Result<u8, LogManagerError> {
         Ok(self.read_array::<1>()?[0])
     }
 
-    fn read_u16(&mut self) -> Result<u16, LogManagerError<'a>> {
+    fn read_u16(&mut self) -> Result<u16, LogManagerError> {
         Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
-    fn read_u32(&mut self) -> Result<u32, LogManagerError<'a>> {
+    fn read_u32(&mut self) -> Result<u32, LogManagerError> {
         Ok(u32::from_le_bytes(self.read_array::<4>()?))
     }
 
-    fn read_u64(&mut self) -> Result<u64, LogManagerError<'a>> {
+    fn read_u64(&mut self) -> Result<u64, LogManagerError> {
         Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
 }
