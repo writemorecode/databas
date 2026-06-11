@@ -20,8 +20,8 @@ struct TransactionRecovery {
 struct RecoveryPageUpdate {
     lsn: Lsn,
     page_id: PageId,
-    redo_data: [u8; PAGE_SIZE],
-    undo_data: [u8; PAGE_SIZE],
+    redo_data: Box<[u8; PAGE_SIZE]>,
+    undo_data: Box<[u8; PAGE_SIZE]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +107,7 @@ fn redo_update(disk: &mut DiskManager, update: &RecoveryPageUpdate) -> StorageRe
     let mut current = [0; PAGE_SIZE];
     disk.read_page(update.page_id, &mut current)?;
     if should_apply_redo(&current, update.lsn) {
-        disk.write_page(update.page_id, &update.redo_data)?;
+        disk.write_page(update.page_id, update.redo_data.as_ref())?;
     }
     Ok(())
 }
@@ -120,7 +120,7 @@ fn undo_update(disk: &mut DiskManager, update: &RecoveryPageUpdate) -> StorageRe
     let mut current = [0; PAGE_SIZE];
     disk.read_page(update.page_id, &mut current)?;
     if should_apply_undo(&current, update.lsn) {
-        disk.write_page(update.page_id, &update.undo_data)?;
+        disk.write_page(update.page_id, update.undo_data.as_ref())?;
     }
     Ok(())
 }

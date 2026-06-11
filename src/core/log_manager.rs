@@ -101,7 +101,7 @@ pub(crate) enum RecoveryLogRecordKind {
     Begin,
     Commit,
     Rollback,
-    PageUpdate { page_id: PageId, redo_data: [u8; PAGE_SIZE], undo_data: [u8; PAGE_SIZE] },
+    PageUpdate { page_id: PageId, redo_data: Box<[u8; PAGE_SIZE]>, undo_data: Box<[u8; PAGE_SIZE]> },
     PageAlloc { page_id: PageId },
 }
 
@@ -339,11 +339,12 @@ impl RecoveryLogRecordKind {
     }
 }
 
-fn page_image_array(image: &[u8]) -> Result<[u8; PAGE_SIZE], LogManagerError<'static>> {
-    image.try_into().map_err(|_| LogManagerError::InvalidPageImageLength {
+fn page_image_array(image: &[u8]) -> Result<Box<[u8; PAGE_SIZE]>, LogManagerError<'static>> {
+    let image = image.try_into().map_err(|_| LogManagerError::InvalidPageImageLength {
         expected: PAGE_SIZE,
         actual: image.len(),
-    })
+    })?;
+    Ok(Box::new(image))
 }
 
 impl LogManagerError<'_> {
@@ -1287,8 +1288,8 @@ mod tests {
         match &scan.records[1].kind {
             RecoveryLogRecordKind::PageUpdate { page_id, redo_data, undo_data } => {
                 assert_eq!(*page_id, 100);
-                assert_eq!(redo_data, &redo);
-                assert_eq!(undo_data, &undo);
+                assert_eq!(redo_data.as_ref(), &redo);
+                assert_eq!(undo_data.as_ref(), &undo);
             }
             kind => panic!("unexpected record kind: {kind:?}"),
         }
