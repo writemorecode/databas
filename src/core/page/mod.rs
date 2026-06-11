@@ -33,7 +33,7 @@ pub(crate) type RawInterior<A> = Page<A, Interior>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::PAGE_SIZE;
+    use crate::core::{PAGE_SIZE, log_manager::ZERO_LSN};
 
     #[test]
     fn leaf_insert_payload_can_be_read() {
@@ -48,6 +48,48 @@ mod tests {
         assert_eq!(value_len, 5);
         assert_eq!(overflow_page, None);
         assert_eq!(&page.bytes()[payload_range], b"alphavalue");
+    }
+
+    #[test]
+    fn initialized_pages_start_with_zero_lsn() {
+        let mut leaf_bytes = [0; PAGE_SIZE];
+        let leaf = Page::<Write<'_>, Leaf>::init(&mut leaf_bytes);
+        assert_eq!(leaf.lsn(), ZERO_LSN);
+
+        let mut interior_bytes = [0; PAGE_SIZE];
+        let interior = Page::<Write<'_>, Interior>::init(&mut interior_bytes, 99);
+        assert_eq!(interior.lsn(), ZERO_LSN);
+    }
+
+    #[test]
+    fn page_lsn_round_trips_through_header() {
+        let mut bytes = [0; PAGE_SIZE];
+        {
+            let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
+            page.set_lsn(42);
+            assert_eq!(page.lsn(), 42);
+        }
+
+        let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
+        assert_eq!(page.lsn(), 42);
+    }
+
+    #[test]
+    fn rejects_old_page_format_version() {
+        let mut bytes = [0; PAGE_SIZE];
+        {
+            let _page = Page::<Write<'_>, Leaf>::init(&mut bytes);
+        }
+        let old_version = format::FORMAT_VERSION - 1;
+        bytes[format::VERSION_OFFSET] = old_version;
+
+        let result = Page::<Read<'_>, Leaf>::open(&bytes);
+
+        assert!(matches!(
+            result,
+            Err(PageError::InvalidPageVersion { expected, actual })
+                if expected == format::FORMAT_VERSION && actual == old_version
+        ));
     }
 
     #[test]
