@@ -750,11 +750,13 @@ fn record_bytes_from_values(values: Vec<Value>) -> ExecutorResult<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use tempfile::tempdir;
 
     use super::*;
     use crate::{
-        core::{ColumnSchema, DataType, TupleSchema},
+        core::{ColumnSchema, DataType, PAGE_SIZE, TupleSchema},
         planner::{BoundColumn, Planner},
         sql_parser::parser::Parser,
     };
@@ -769,6 +771,12 @@ mod tests {
 
     fn collect_rows(output: ExecutionOutput) -> ExecutorResult<Vec<TableRecord>> {
         output.into_rows("TEST")?.collect()
+    }
+
+    fn execute_sql(database: &Database, sql: &str) -> ExecutorResult<ExecutionOutput> {
+        let statement = Parser::new(sql).stmt().unwrap();
+        let plan = Planner::new(database).plan_statement(&statement).unwrap();
+        Executor::new(database).execute(plan.physical)
     }
 
     fn bound(name: &str, ordinal: usize, data_type: DataType) -> BoundColumn {
@@ -813,6 +821,38 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn insert_many_users_sql(count: u64) -> String {
+        let mut sql = String::from("INSERT INTO users (id, name, active) VALUES ");
+        for id in 1..=count {
+            if id > 1 {
+                sql.push_str(", ");
+            }
+            write!(&mut sql, "({id}, 'user{id}', TRUE)").unwrap();
+        }
+        sql.push(';');
+        sql
+    }
+
+    fn assert_user_row(database: &Database, row_id: u64, expected_name: &str) {
+        let mut users = database.table_cursor_by_name("users").unwrap();
+        let row = users.get(row_id).unwrap().expect("user row should exist");
+        assert_eq!(
+            values(&row),
+            vec![
+                Value::Integer(row_id as i32),
+                Value::String(expected_name.to_owned()),
+                Value::Boolean(true),
+            ]
+        );
+    }
+
+    fn assert_name_index_entry(database: &Database, name: &str, row_id: u64) {
+        let mut index = database.index_cursor_by_name("idx_users_name").unwrap();
+        let key = Tuple::new(vec![Value::String(name.to_owned())]).to_bytes().unwrap();
+        let entry = index.get(&key).unwrap().expect("index entry should exist");
+        assert_eq!(entry.row_id, row_id);
     }
 
     #[test]
@@ -1478,6 +1518,189 @@ mod tests {
         let entry = index.get(&key).unwrap().expect("index entry should track inserted row");
 
         assert_eq!(entry.row_id, 1);
+    }
+
+    #[test]
+    fn committed_create_table_recovers_from_wal_after_crash_without_database_flush() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let database = Database::create(&path).unwrap();
+        database.flush().unwrap();
+
+        execute_sql(&database, "CREATE TABLE recovered (id INT PRIMARY KEY, name TEXT);").unwrap();
+        std::mem::forget(database);
+
+        let reopened = Database::open(&path).unwrap();
+        let schema = reopened.table_schema_by_name("recovered").unwrap();
+
+        assert_eq!(schema.name, "recovered");
+        assert_eq!(schema.row.columns.len(), 2);
+        assert_eq!(schema.row.columns[0].name, "id");
+        assert_eq!(schema.row.columns[1].name, "name");
+        reopened.table_cursor_by_name("recovered").unwrap();
+    }
+
+    #[test]
+    fn committed_create_index_backfill_recovers_from_wal_after_crash_without_database_flush() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let database = Database::create(&path).unwrap();
+        database.create_table("users", users_schema()).unwrap();
+        database.flush().unwrap();
+
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
+        )
+        .unwrap();
+        database.flush().unwrap();
+        execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+        std::mem::forget(database);
+
+        let reopened = Database::open(&path).unwrap();
+
+        assert_name_index_entry(&reopened, "Ada", 1);
+        assert_name_index_entry(&reopened, "Grace", 2);
+    }
+
+    #[test]
+    fn committed_large_insert_with_btree_splits_recovers_from_wal_after_crash() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let database = Database::create(&path).unwrap();
+        database.create_table("users", users_schema()).unwrap();
+        database.flush().unwrap();
+
+        execute_sql(&database, &insert_many_users_sql(500)).unwrap();
+        std::mem::forget(database);
+
+        let reopened = Database::open(&path).unwrap();
+
+        assert_eq!(reopened.table_schema_by_name("users").unwrap().last_row_id, 500);
+        assert_user_row(&reopened, 1, "user1");
+        assert_user_row(&reopened, 250, "user250");
+        assert_user_row(&reopened, 500, "user500");
+    }
+
+    #[test]
+    fn committed_overflow_insert_recovers_from_wal_after_crash() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let database = Database::create(&path).unwrap();
+        database.create_table("users", users_schema()).unwrap();
+        database.flush().unwrap();
+        let large_name = "x".repeat(PAGE_SIZE * 3);
+        let insert =
+            format!("INSERT INTO users (id, name, active) VALUES (1, '{large_name}', TRUE);");
+
+        execute_sql(&database, &insert).unwrap();
+        std::mem::forget(database);
+
+        let reopened = Database::open(&path).unwrap();
+        let mut users = reopened.table_cursor_by_name("users").unwrap();
+        let row = users.get(1).unwrap().expect("overflow row should recover from WAL");
+
+        assert_eq!(
+            values(&row),
+            vec![Value::Integer(1), Value::String(large_name), Value::Boolean(true)]
+        );
+    }
+
+    #[test]
+    fn failed_indexed_multi_row_insert_rolls_back_after_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let database = Database::create(&path).unwrap();
+        database.create_table("users", users_schema()).unwrap();
+        database.create_index("idx_users_name", "users", &["name"]).unwrap();
+        database.flush().unwrap();
+
+        let invalid = insert_values_plan(
+            &database,
+            vec![
+                bound("id", 0, DataType::Integer),
+                bound("name", 1, DataType::Text),
+                bound("active", 2, DataType::Boolean),
+            ],
+            vec![
+                vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(true)],
+                vec![
+                    Value::Integer(2),
+                    Value::String("Grace".to_owned()),
+                    Value::String("yes".to_owned()),
+                ],
+            ],
+        );
+
+        assert!(matches!(
+            Executor::new(&database).execute(invalid),
+            Err(ExecutorError::InsertTypeMismatch {
+                column,
+                expected: DataType::Boolean,
+                actual: Value::String(value),
+            }) if column == "active" && value == "yes"
+        ));
+        std::mem::forget(database);
+
+        let reopened = Database::open(&path).unwrap();
+        let mut users = reopened.table_cursor_by_name("users").unwrap();
+        let mut index = reopened.index_cursor_by_name("idx_users_name").unwrap();
+        let ada = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
+
+        assert_eq!(reopened.table_schema_by_name("users").unwrap().last_row_id, 0);
+        assert!(users.get(1).unwrap().is_none());
+        assert!(index.get(&ada).unwrap().is_none());
+    }
+
+    #[test]
+    fn uncommitted_flushed_insert_is_undone_during_recovery() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let database = Database::create(&path).unwrap();
+        database.create_table("users", users_schema()).unwrap();
+        database.create_index("idx_users_name", "users", &["name"]).unwrap();
+        database.flush().unwrap();
+        let txn_id = database.begin_transaction().unwrap();
+        let table = database.table_schema_by_name("users").unwrap();
+
+        execute_insert_values(
+            &database,
+            table,
+            vec![
+                bound("id", 0, DataType::Integer),
+                bound("name", 1, DataType::Text),
+                bound("active", 2, DataType::Boolean),
+            ],
+            vec![vec![
+                PlannedExpression::Literal(Value::Integer(1)),
+                PlannedExpression::Literal(Value::String("Ada".to_owned())),
+                PlannedExpression::Literal(Value::Boolean(true)),
+            ]],
+        )
+        .unwrap();
+        database.flush().unwrap();
+        assert_eq!(txn_id, 1);
+        std::mem::forget(database);
+
+        let reopened = Database::open(&path).unwrap();
+        let mut users = reopened.table_cursor_by_name("users").unwrap();
+        let mut index = reopened.index_cursor_by_name("idx_users_name").unwrap();
+        let ada = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
+
+        assert_eq!(reopened.table_schema_by_name("users").unwrap().last_row_id, 0);
+        assert!(users.get(1).unwrap().is_none());
+        assert!(index.get(&ada).unwrap().is_none());
+    }
+
+    #[test]
+    fn create_without_explicit_flush_does_not_promise_catalog_durability() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let database = Database::create(&path).unwrap();
+
+        std::mem::forget(database);
+
+        assert!(Database::open(&path).is_err());
     }
 
     #[test]
