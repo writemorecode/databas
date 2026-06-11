@@ -14,6 +14,7 @@ use crate::core::{
         ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind,
         InvalidArgumentError, LimitExceededError, StorageError, StorageResult,
     },
+    log_manager::TxnId,
     pager::Pager,
 };
 
@@ -59,6 +60,18 @@ impl CatalogManager {
     /// Flushes all dirty, currently unpinned pages to disk.
     pub fn flush(&self) -> StorageResult<()> {
         self.pager.flush()
+    }
+
+    pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
+        self.pager.begin_transaction()
+    }
+
+    pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
+        self.pager.commit_transaction(txn_id)
+    }
+
+    pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
+        self.pager.rollback_transaction(txn_id)
     }
 
     /// Creates a cataloged table, allocates its root page, and records its columns.

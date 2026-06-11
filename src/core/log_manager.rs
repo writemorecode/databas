@@ -1,13 +1,13 @@
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
+    io::{Read, Seek, Write},
     path::Path,
 };
 
 use crc::{CRC_32_ISO_HDLC, Crc, Digest};
 use thiserror::Error;
 
-use crate::core::{PageId, SlotId};
+use crate::core::{PAGE_SIZE, PageId};
 
 pub(crate) type TxnId = u64;
 pub(crate) type Lsn = u64;
@@ -15,10 +15,11 @@ pub(crate) const ZERO_LSN: Lsn = 0;
 
 const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const FOOTER_MAGIC: [u8; 8] = *b"DBWALFTR";
-const WAL_FORMAT_VERSION: u16 = 1;
+const WAL_FORMAT_VERSION: u16 = 2;
 const HEADER_LEN: usize = 8 + 2 + 8 + 4 + 8;
 const FOOTER_LEN: usize = 8 + 8 + 4;
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+const WAL_SCAN_BUFFER_LEN: usize = 8192;
 
 const KIND_BEGIN: u8 = 1;
 const KIND_COMMIT: u8 = 2;
@@ -58,6 +59,8 @@ pub enum LogManagerError<'a> {
     TooManyRecords { count: usize },
     #[error("WAL LSN exhausted")]
     LsnExhausted,
+    #[error("WAL full-page image has invalid length: expected {expected}, got {actual}")]
+    InvalidPageImageLength { expected: usize, actual: usize },
 }
 
 #[derive(Debug, Error)]
@@ -81,7 +84,7 @@ pub(crate) enum LogRecordKind<'a> {
     Begin,
     Commit,
     Rollback,
-    PageUpdate { page_id: PageId, slot_id: SlotId, redo_data: &'a [u8], undo_data: &'a [u8] },
+    PageUpdate { page_id: PageId, redo_data: &'a [u8], undo_data: &'a [u8] },
     PageAlloc { page_id: PageId },
 }
 
@@ -95,6 +98,7 @@ pub(crate) struct LogTransaction<'a> {
 pub(crate) struct LogManager {
     wal_file: File,
 
+    highest_txn_id: TxnId,
     highest_appended_lsn: Option<Lsn>,
     highest_durable_lsn: Option<Lsn>,
 }
@@ -103,16 +107,49 @@ impl LogManager {
     pub(crate) fn new(db_file_path: impl AsRef<Path>) -> std::io::Result<Self> {
         let db_file_path = db_file_path.as_ref().to_path_buf();
         let wal_file_path = db_file_path.with_added_extension("wal");
-        let wal_file = OpenOptions::new()
+        let mut wal_file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
             .truncate(false)
             .open(wal_file_path)?;
 
-        // TODO : validation of wal file data
+        let mut highest_appended_lsn = None;
+        let mut highest_txn_id = 0;
+        wal_file.seek(std::io::SeekFrom::Start(0))?;
+        while let Some(frame) = scan_transaction_frame(&mut wal_file).map_err(wal_open_error)? {
+            highest_txn_id = highest_txn_id.max(frame.txn_id);
+            if frame.record_count > 0 {
+                let next_lsn = highest_appended_lsn
+                    .unwrap_or(ZERO_LSN)
+                    .checked_add(u64::from(frame.record_count))
+                    .ok_or(LogManagerError::LsnExhausted)
+                    .map_err(wal_open_error)?;
+                highest_appended_lsn = Some(next_lsn);
+            }
+        }
+        wal_file.seek(std::io::SeekFrom::End(0))?;
 
-        Ok(Self { wal_file, highest_durable_lsn: None, highest_appended_lsn: None })
+        Ok(Self { wal_file, highest_txn_id, highest_durable_lsn: None, highest_appended_lsn })
+    }
+
+    pub(crate) fn highest_txn_id(&self) -> TxnId {
+        self.highest_txn_id
+    }
+
+    pub(crate) fn next_lsn(&self) -> Result<Lsn, LogManagerError<'static>> {
+        self.highest_appended_lsn
+            .unwrap_or(ZERO_LSN)
+            .checked_add(1)
+            .ok_or(LogManagerError::LsnExhausted)
+    }
+
+    pub(crate) fn append_record<'a>(
+        &mut self,
+        txn_id: TxnId,
+        kind: LogRecordKind<'a>,
+    ) -> Result<Lsn, LogManagerError<'a>> {
+        self.append_transaction(txn_id, &[LogRecord { txn_id, kind }])
     }
 
     pub(crate) fn append_transaction<'a>(
@@ -130,12 +167,9 @@ impl LogManager {
             .ok_or(LogManagerError::LsnExhausted)?;
 
         serialize_transaction(&mut self.wal_file, txn_id, records)?;
+        self.highest_txn_id = self.highest_txn_id.max(txn_id);
         if record_count > 0 {
             self.highest_appended_lsn = Some(lsn);
-        }
-        self.wal_file.sync_all()?;
-        if record_count > 0 {
-            self.highest_durable_lsn = Some(lsn);
         }
         Ok(lsn)
     }
@@ -203,6 +237,14 @@ pub(crate) fn serialize_transaction<'a, W: Write>(
 pub(crate) fn deserialize_transaction(
     buf: &'_ [u8],
 ) -> Result<LogTransaction<'_>, LogManagerError<'_>> {
+    let frame_len = transaction_frame_len(buf)?;
+    if buf.len() > frame_len {
+        return Err(LogManagerError::TruncatedFrame {
+            needed: 0,
+            remaining: buf.len() - frame_len,
+        });
+    }
+
     if buf.len() < HEADER_LEN {
         return Err(LogManagerError::TruncatedFrame { needed: HEADER_LEN, remaining: buf.len() });
     }
@@ -283,6 +325,231 @@ pub(crate) fn deserialize_transaction(
     Ok(LogTransaction { txn_id, records })
 }
 
+struct ScannedWalFrame {
+    txn_id: TxnId,
+    record_count: u32,
+}
+
+struct WalFrameHeader {
+    txn_id: TxnId,
+    entry_count: u32,
+    payload_len: u64,
+}
+
+fn scan_transaction_frame<R: Read>(
+    reader: &mut R,
+) -> Result<Option<ScannedWalFrame>, LogManagerError<'static>> {
+    let Some(header_bytes) = read_exact_or_eof::<_, HEADER_LEN>(reader)? else {
+        return Ok(None);
+    };
+    let header = parse_header(&header_bytes)?;
+    let payload_len = usize::try_from(header.payload_len)
+        .map_err(|_| LogManagerError::PayloadLengthTooLarge { payload_len: header.payload_len })?;
+    let mut remaining = payload_len;
+    let mut digest = CRC32.digest();
+    let mut actual_record_count = 0u32;
+
+    while remaining > 0 {
+        scan_log_record_payload(reader, &mut digest, &mut remaining)?;
+        actual_record_count = actual_record_count.checked_add(1).ok_or({
+            LogManagerError::RecordCountMismatch { expected: header.entry_count, actual: u32::MAX }
+        })?;
+    }
+
+    if actual_record_count != header.entry_count {
+        return Err(LogManagerError::RecordCountMismatch {
+            expected: header.entry_count,
+            actual: actual_record_count,
+        });
+    }
+
+    let footer_bytes = read_exact_or_eof::<_, FOOTER_LEN>(reader)?
+        .ok_or(LogManagerError::TruncatedFrame { needed: FOOTER_LEN, remaining: 0 })?;
+    validate_footer(&footer_bytes, header.txn_id, digest.finalize())?;
+    Ok(Some(ScannedWalFrame { txn_id: header.txn_id, record_count: actual_record_count }))
+}
+
+fn scan_log_record_payload<R: Read>(
+    reader: &mut R,
+    digest: &mut Digest<'_, u32>,
+    remaining: &mut usize,
+) -> Result<(), LogManagerError<'static>> {
+    match read_crc_u8(reader, digest, remaining)? {
+        KIND_BEGIN | KIND_COMMIT | KIND_ROLLBACK => Ok(()),
+        KIND_PAGE_ALLOC => {
+            read_crc_u64(reader, digest, remaining)?;
+            Ok(())
+        }
+        KIND_PAGE_UPDATE => {
+            read_crc_u64(reader, digest, remaining)?;
+            let redo_len = read_crc_u32(reader, digest, remaining)? as usize;
+            let undo_len = read_crc_u32(reader, digest, remaining)? as usize;
+            validate_page_image_len_with_lifetime(redo_len)?;
+            validate_page_image_len_with_lifetime(undo_len)?;
+            read_crc_discard(reader, digest, remaining, redo_len)?;
+            read_crc_discard(reader, digest, remaining, undo_len)
+        }
+        kind => Err(LogManagerError::UnknownRecordKind { kind }),
+    }
+}
+
+fn read_exact_or_eof<R: Read, const N: usize>(reader: &mut R) -> std::io::Result<Option<[u8; N]>> {
+    let mut buf = [0; N];
+    let mut read_len = 0;
+    while read_len < N {
+        match reader.read(&mut buf[read_len..])? {
+            0 if read_len == 0 => return Ok(None),
+            0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            len => read_len += len,
+        }
+    }
+    Ok(Some(buf))
+}
+
+fn read_crc_u8<R: Read>(
+    reader: &mut R,
+    digest: &mut Digest<'_, u32>,
+    remaining: &mut usize,
+) -> Result<u8, LogManagerError<'static>> {
+    let bytes = read_crc_array::<_, 1>(reader, digest, remaining)?;
+    Ok(bytes[0])
+}
+
+fn read_crc_u32<R: Read>(
+    reader: &mut R,
+    digest: &mut Digest<'_, u32>,
+    remaining: &mut usize,
+) -> Result<u32, LogManagerError<'static>> {
+    let bytes = read_crc_array::<_, 4>(reader, digest, remaining)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_crc_u64<R: Read>(
+    reader: &mut R,
+    digest: &mut Digest<'_, u32>,
+    remaining: &mut usize,
+) -> Result<u64, LogManagerError<'static>> {
+    let bytes = read_crc_array::<_, 8>(reader, digest, remaining)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn read_crc_array<R: Read, const N: usize>(
+    reader: &mut R,
+    digest: &mut Digest<'_, u32>,
+    remaining: &mut usize,
+) -> Result<[u8; N], LogManagerError<'static>> {
+    if *remaining < N {
+        return Err(LogManagerError::TruncatedFrame { needed: N, remaining: *remaining });
+    }
+    let mut bytes = [0; N];
+    reader.read_exact(&mut bytes)?;
+    digest.update(&bytes);
+    *remaining -= N;
+    Ok(bytes)
+}
+
+fn read_crc_discard<R: Read>(
+    reader: &mut R,
+    digest: &mut Digest<'_, u32>,
+    remaining: &mut usize,
+    len: usize,
+) -> Result<(), LogManagerError<'static>> {
+    if *remaining < len {
+        return Err(LogManagerError::TruncatedFrame { needed: len, remaining: *remaining });
+    }
+
+    let mut buf = [0; WAL_SCAN_BUFFER_LEN];
+    let mut left = len;
+    while left > 0 {
+        let chunk_len = left.min(buf.len());
+        reader.read_exact(&mut buf[..chunk_len])?;
+        digest.update(&buf[..chunk_len]);
+        left -= chunk_len;
+        *remaining -= chunk_len;
+    }
+    Ok(())
+}
+
+fn parse_header(
+    header_bytes: &[u8; HEADER_LEN],
+) -> Result<WalFrameHeader, LogManagerError<'static>> {
+    let header_magic: [u8; 8] = header_bytes[0..8].try_into().expect("header magic len is fixed");
+    if header_magic != HEADER_MAGIC {
+        return Err(LogManagerError::InvalidHeaderMagic { actual: header_magic });
+    }
+
+    let version = u16::from_le_bytes(header_bytes[8..10].try_into().expect("version len fixed"));
+    if version != WAL_FORMAT_VERSION {
+        return Err(LogManagerError::UnsupportedVersion {
+            expected: WAL_FORMAT_VERSION,
+            actual: version,
+        });
+    }
+
+    Ok(WalFrameHeader {
+        txn_id: u64::from_le_bytes(header_bytes[10..18].try_into().expect("txn id len fixed")),
+        entry_count: u32::from_le_bytes(
+            header_bytes[18..22].try_into().expect("entry count len fixed"),
+        ),
+        payload_len: u64::from_le_bytes(
+            header_bytes[22..30].try_into().expect("payload len fixed"),
+        ),
+    })
+}
+
+fn validate_footer(
+    footer_bytes: &[u8; FOOTER_LEN],
+    txn_id: TxnId,
+    actual_crc: u32,
+) -> Result<(), LogManagerError<'static>> {
+    let footer_magic: [u8; 8] = footer_bytes[0..8].try_into().expect("footer magic len is fixed");
+    if footer_magic != FOOTER_MAGIC {
+        return Err(LogManagerError::InvalidFooterMagic { actual: footer_magic });
+    }
+
+    let footer_txn_id =
+        u64::from_le_bytes(footer_bytes[8..16].try_into().expect("footer txn id len fixed"));
+    if footer_txn_id != txn_id {
+        return Err(LogManagerError::FooterTxnIdMismatch {
+            expected: txn_id,
+            actual: footer_txn_id,
+        });
+    }
+
+    let expected_crc =
+        u32::from_le_bytes(footer_bytes[16..20].try_into().expect("footer crc len fixed"));
+    if actual_crc != expected_crc {
+        return Err(LogManagerError::ChecksumMismatch {
+            expected: expected_crc,
+            actual: actual_crc,
+        });
+    }
+
+    Ok(())
+}
+
+fn wal_open_error(err: LogManagerError<'_>) -> std::io::Error {
+    match err {
+        LogManagerError::Io(err) => err,
+        err => std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()),
+    }
+}
+
+fn transaction_frame_len(buf: &'_ [u8]) -> Result<usize, LogManagerError<'_>> {
+    if buf.len() < HEADER_LEN {
+        return Err(LogManagerError::TruncatedFrame { needed: HEADER_LEN, remaining: buf.len() });
+    }
+
+    let header = parse_header(buf[..HEADER_LEN].try_into().expect("header len is fixed"))?;
+    let payload_len = usize::try_from(header.payload_len)
+        .map_err(|_| LogManagerError::PayloadLengthTooLarge { payload_len: header.payload_len })?;
+
+    HEADER_LEN
+        .checked_add(payload_len)
+        .and_then(|len| len.checked_add(FOOTER_LEN))
+        .ok_or(LogManagerError::PayloadLengthOverflow)
+}
+
 fn deserialize_log_record<'a>(
     cursor: &mut Cursor<'a>,
     txn_id: TxnId,
@@ -293,12 +560,13 @@ fn deserialize_log_record<'a>(
         KIND_ROLLBACK => LogRecordKind::Rollback,
         KIND_PAGE_UPDATE => {
             let page_id = cursor.read_u64()?;
-            let slot_id = cursor.read_u16()?;
             let redo_len = cursor.read_u32()? as usize;
             let undo_len = cursor.read_u32()? as usize;
             let redo_data = cursor.read_slice(redo_len)?;
             let undo_data = cursor.read_slice(undo_len)?;
-            LogRecordKind::PageUpdate { page_id, slot_id, redo_data, undo_data }
+            validate_page_image_len(redo_data)?;
+            validate_page_image_len(undo_data)?;
+            LogRecordKind::PageUpdate { page_id, redo_data, undo_data }
         }
         KIND_PAGE_ALLOC => {
             let page_id = cursor.read_u64()?;
@@ -338,15 +606,29 @@ fn serialized_record_len<'a>(kind: &LogRecordKind<'a>) -> Result<u64, LogManager
     match kind {
         LogRecordKind::Begin | LogRecordKind::Commit | LogRecordKind::Rollback => Ok(1),
         LogRecordKind::PageUpdate { redo_data, undo_data, .. } => {
+            validate_page_image_len(redo_data)?;
+            validate_page_image_len(undo_data)?;
             let redo_len = u32::try_from(redo_data.len()).map_err(|_| {
                 LogManagerError::PayloadLengthTooLarge { payload_len: redo_data.len() as u64 }
             })?;
             let undo_len = u32::try_from(undo_data.len()).map_err(|_| {
                 LogManagerError::PayloadLengthTooLarge { payload_len: undo_data.len() as u64 }
             })?;
-            Ok(1 + 8 + 2 + 4 + 4 + u64::from(redo_len) + u64::from(undo_len))
+            Ok(1 + 8 + 4 + 4 + u64::from(redo_len) + u64::from(undo_len))
         }
         LogRecordKind::PageAlloc { .. } => Ok(1 + 8),
+    }
+}
+
+fn validate_page_image_len<'a>(image: &[u8]) -> Result<(), LogManagerError<'a>> {
+    validate_page_image_len_with_lifetime(image.len())
+}
+
+fn validate_page_image_len_with_lifetime<'a>(len: usize) -> Result<(), LogManagerError<'a>> {
+    if len == PAGE_SIZE {
+        Ok(())
+    } else {
+        Err(LogManagerError::InvalidPageImageLength { expected: PAGE_SIZE, actual: len })
     }
 }
 
@@ -382,7 +664,9 @@ fn write_log_record_payload<'a, W: Write>(
         LogRecordKind::Begin => write_crc_u8(writer, digest, KIND_BEGIN)?,
         LogRecordKind::Commit => write_crc_u8(writer, digest, KIND_COMMIT)?,
         LogRecordKind::Rollback => write_crc_u8(writer, digest, KIND_ROLLBACK)?,
-        LogRecordKind::PageUpdate { page_id, slot_id, redo_data, undo_data } => {
+        LogRecordKind::PageUpdate { page_id, redo_data, undo_data } => {
+            validate_page_image_len(redo_data)?;
+            validate_page_image_len(undo_data)?;
             let redo_len = u32::try_from(redo_data.len()).map_err(|_| {
                 LogManagerError::PayloadLengthTooLarge { payload_len: redo_data.len() as u64 }
             })?;
@@ -392,7 +676,6 @@ fn write_log_record_payload<'a, W: Write>(
 
             write_crc_u8(writer, digest, KIND_PAGE_UPDATE)?;
             write_crc_u64(writer, digest, *page_id)?;
-            write_crc_u16(writer, digest, *slot_id)?;
             write_crc_u32(writer, digest, redo_len)?;
             write_crc_u32(writer, digest, undo_len)?;
             write_crc_bytes(writer, digest, redo_data)?;
@@ -412,14 +695,6 @@ fn write_crc_u8<W: Write>(
     value: u8,
 ) -> std::io::Result<()> {
     write_crc_bytes(writer, digest, &[value])
-}
-
-fn write_crc_u16<W: Write>(
-    writer: &mut W,
-    digest: &mut Digest<'_, u32>,
-    value: u16,
-) -> std::io::Result<()> {
-    write_crc_bytes(writer, digest, &value.to_le_bytes())
 }
 
 fn write_crc_u32<W: Write>(
@@ -523,8 +798,8 @@ mod tests {
 
     #[test]
     fn serializes_and_deserializes_transaction_with_all_record_kinds() {
-        let redo = [1, 2, 3, 4];
-        let undo = [9, 8, 7];
+        let redo = [1; PAGE_SIZE];
+        let undo = [9; PAGE_SIZE];
         let records = [
             LogRecord { txn_id: 7, kind: LogRecordKind::Begin },
             LogRecord { txn_id: 7, kind: LogRecordKind::PageAlloc { page_id: 99 } },
@@ -532,7 +807,6 @@ mod tests {
                 txn_id: 7,
                 kind: LogRecordKind::PageUpdate {
                     page_id: 100,
-                    slot_id: 3,
                     redo_data: &redo,
                     undo_data: &undo,
                 },
@@ -549,9 +823,8 @@ mod tests {
         assert!(matches!(transaction.records[0].kind, LogRecordKind::Begin));
         assert!(matches!(transaction.records[1].kind, LogRecordKind::PageAlloc { page_id: 99 }));
         match &transaction.records[2].kind {
-            LogRecordKind::PageUpdate { page_id, slot_id, redo_data, undo_data } => {
+            LogRecordKind::PageUpdate { page_id, redo_data, undo_data } => {
                 assert_eq!(*page_id, 100);
-                assert_eq!(*slot_id, 3);
                 assert_eq!(*redo_data, redo);
                 assert_eq!(*undo_data, undo);
             }
@@ -567,6 +840,23 @@ mod tests {
         let err = serialize_transaction(Vec::new(), 7, &records).unwrap_err();
 
         assert!(matches!(err, LogManagerError::RecordTxnIdMismatch { expected: 7, actual: 8 }));
+    }
+
+    #[test]
+    fn rejects_page_update_without_full_page_images() {
+        let redo = [1, 2, 3, 4];
+        let undo = [9; PAGE_SIZE];
+        let records = [LogRecord {
+            txn_id: 7,
+            kind: LogRecordKind::PageUpdate { page_id: 100, redo_data: &redo, undo_data: &undo },
+        }];
+
+        let err = serialize_transaction(Vec::new(), 7, &records).unwrap_err();
+
+        assert!(matches!(
+            err,
+            LogManagerError::InvalidPageImageLength { expected: PAGE_SIZE, actual: 4 }
+        ));
     }
 
     #[test]
@@ -598,11 +888,11 @@ mod tests {
     fn rejects_unsupported_version() {
         let records = [LogRecord { txn_id: 1, kind: LogRecordKind::Begin }];
         let mut buf = serialize_to_vec(1, &records);
-        buf[8..10].copy_from_slice(&2u16.to_le_bytes());
+        buf[8..10].copy_from_slice(&3u16.to_le_bytes());
 
         assert!(matches!(
             deserialize_transaction(&buf),
-            Err(LogManagerError::UnsupportedVersion { expected: 1, actual: 2 })
+            Err(LogManagerError::UnsupportedVersion { expected: 2, actual: 3 })
         ));
     }
 
@@ -693,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn append_transaction_writes_and_syncs_frame() {
+    fn append_transaction_writes_frame_without_marking_it_durable() {
         let file = NamedTempFile::new().unwrap();
         let mut manager = LogManager::new(file.path()).unwrap();
         let records = [
@@ -705,7 +995,7 @@ mod tests {
 
         assert_eq!(lsn, 2);
         assert_eq!(manager.highest_appended_lsn(), Some(2));
-        assert_eq!(manager.highest_durable_lsn(), Some(2));
+        assert_eq!(manager.highest_durable_lsn(), None);
 
         let mut wal_file = File::open(file.path().with_added_extension("wal")).unwrap();
         let mut buf = Vec::new();
@@ -735,7 +1025,32 @@ mod tests {
         assert_eq!(manager.append_transaction(11, &first_records).unwrap(), 2);
         assert_eq!(manager.append_transaction(12, &second_records).unwrap(), 5);
         assert_eq!(manager.highest_appended_lsn(), Some(5));
-        assert_eq!(manager.highest_durable_lsn(), Some(5));
+        assert_eq!(manager.highest_durable_lsn(), None);
+    }
+
+    #[test]
+    fn new_scans_existing_wal_frames_without_marking_them_durable() {
+        let file = NamedTempFile::new().unwrap();
+        {
+            let mut manager = LogManager::new(file.path()).unwrap();
+            let first_records = [
+                LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+            ];
+            let second_records = [
+                LogRecord { txn_id: 12, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 12, kind: LogRecordKind::PageAlloc { page_id: 7 } },
+                LogRecord { txn_id: 12, kind: LogRecordKind::Commit },
+            ];
+            manager.append_transaction(11, &first_records).unwrap();
+            manager.append_transaction(12, &second_records).unwrap();
+        }
+
+        let manager = LogManager::new(file.path()).unwrap();
+
+        assert_eq!(manager.highest_txn_id(), 12);
+        assert_eq!(manager.highest_appended_lsn(), Some(5));
+        assert_eq!(manager.highest_durable_lsn(), None);
     }
 
     #[test]
@@ -755,6 +1070,7 @@ mod tests {
         let mut manager = LogManager::new(file.path()).unwrap();
         let records = [LogRecord { txn_id: 11, kind: LogRecordKind::Begin }];
         let lsn = manager.append_transaction(11, &records).unwrap();
+        manager.flush_through(lsn).unwrap();
 
         manager.flush_through(lsn).unwrap();
 

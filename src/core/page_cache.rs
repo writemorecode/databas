@@ -25,9 +25,10 @@ use std::{
 use crate::core::{
     error::{PageCacheError, PageCacheResult},
     log_manager::{Lsn, ZERO_LSN},
-    page::{self, NodeMarker, Page, PageResult, Read, Write},
+    page::{NodeMarker, Page, PageResult, Read, Write},
     page_replacement::ClockPolicy,
     storage_runtime::StorageRuntime,
+    transaction_manager::{PageUndo, page_lsn},
     {PAGE_SIZE, PageId},
 };
 
@@ -38,6 +39,7 @@ struct Frame {
     page_id: Cell<Option<PageId>>,
     data: RefCell<[u8; PAGE_SIZE]>,
     dirty: Cell<bool>,
+    lsn: Cell<Lsn>,
     pin_count: Cell<u32>,
 }
 
@@ -48,6 +50,7 @@ impl Frame {
             page_id: Cell::new(None),
             data: RefCell::new([0u8; PAGE_SIZE]),
             dirty: Cell::new(false),
+            lsn: Cell::new(ZERO_LSN),
             pin_count: Cell::new(0),
         }
     }
@@ -77,7 +80,7 @@ impl PageCacheInner {
             };
 
             let page = frame.data.get_mut();
-            let page_lsn = page_lsn(page);
+            let page_lsn = frame.lsn.get().max(page_lsn(page));
             if self
                 .runtime
                 .flush_wal_through(page_lsn)
@@ -167,6 +170,9 @@ impl PageCache {
     pub(crate) fn new_page(&self) -> PageCacheResult<(PageId, PinGuard)> {
         let frame_id = self.select_victim_frame().ok_or(PageCacheError::NoEvictableFrame)?;
         let page_id = self.inner.runtime.new_page()?;
+        if let Err(err) = self.inner.runtime.record_page_alloc(page_id) {
+            return Err(PageCacheError::Transaction(Box::new(err)));
+        }
         self.replace_frame(frame_id, page_id)?;
         Ok((page_id, PinGuard::new(Rc::clone(&self.inner), frame_id, page_id)))
     }
@@ -265,6 +271,7 @@ impl PageCache {
 
         frame.page_id.set(Some(new_page_id));
         frame.dirty.set(false);
+        frame.lsn.set(page_lsn(&data));
         frame.pin_count.set(1);
 
         let mut meta = self.inner.meta.borrow_mut();
@@ -291,22 +298,27 @@ impl PageCache {
             .data
             .try_borrow()
             .map_err(|_| PageCacheError::PageImmutableBorrowConflict { page_id })?;
-        let page_lsn = page_lsn(&page);
-        self.inner.runtime.flush_wal_through(page_lsn)?;
+        let flush_lsn = frame.lsn.get().max(page_lsn(&page));
+        self.inner.runtime.flush_wal_through(flush_lsn)?;
         self.inner.runtime.write_page(page_id, &page)?;
         frame.dirty.set(false);
         Ok(())
     }
-}
 
-fn page_lsn(page: &[u8; PAGE_SIZE]) -> Lsn {
-    let is_current_btree_page = page::format::PageKind::from_raw(page[page::format::KIND_OFFSET])
-        .is_some()
-        && page[page::format::VERSION_OFFSET] == page::format::FORMAT_VERSION;
-    if is_current_btree_page {
-        page::format::read_u64(page, page::format::LSN_OFFSET)
-    } else {
-        ZERO_LSN
+    pub(crate) fn restore_rollback_pages(&self, undo_pages: Vec<PageUndo>) -> PageCacheResult<()> {
+        for undo in undo_pages {
+            let pin = self.fetch_page(undo.page_id)?;
+            let frame = &self.inner.frames[pin.frame_id];
+            {
+                let mut data = frame.data.try_borrow_mut().map_err(|_| {
+                    PageCacheError::PageMutableBorrowConflict { page_id: undo.page_id }
+                })?;
+                *data = undo.before;
+            }
+            frame.dirty.set(true);
+            frame.lsn.set(frame.lsn.get().max(undo.lsn));
+        }
+        Ok(())
     }
 }
 
@@ -360,8 +372,15 @@ impl PinGuard {
             .data
             .try_borrow_mut()
             .map_err(|_| PageCacheError::PageMutableBorrowConflict { page_id: self.page_id })?;
+        let before = *page;
         frame.dirty.set(true);
-        Ok(PageWriteGuard { page })
+        Ok(PageWriteGuard {
+            page,
+            before,
+            runtime: Rc::clone(&self.page_cache.runtime),
+            frame,
+            page_id: self.page_id,
+        })
     }
 }
 
@@ -408,6 +427,10 @@ impl PageReadGuard<'_> {
 /// with it. Creating a write guard marks the frame dirty immediately.
 pub(crate) struct PageWriteGuard<'a> {
     page: RefMut<'a, [u8; PAGE_SIZE]>,
+    before: [u8; PAGE_SIZE],
+    runtime: Rc<StorageRuntime>,
+    frame: &'a Frame,
+    page_id: PageId,
 }
 
 impl PageWriteGuard<'_> {
@@ -438,6 +461,27 @@ impl PageWriteGuard<'_> {
     }
 }
 
+impl Drop for PageWriteGuard<'_> {
+    fn drop(&mut self) {
+        if *self.page == self.before {
+            return;
+        }
+
+        match self.runtime.record_page_update(self.page_id, &self.before, &self.page) {
+            Ok(Some(update)) => {
+                *self.page = update.redo;
+                self.frame.lsn.set(update.lsn);
+            }
+            Ok(None) => {
+                self.frame.lsn.set(self.frame.lsn.get().max(page_lsn(&self.page)));
+            }
+            Err(_) => {
+                self.runtime.record_transaction_failure();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{path::Path, rc::Rc};
@@ -447,6 +491,7 @@ mod tests {
     use super::*;
     use crate::core::disk_manager::DiskManager;
     use crate::core::log_manager::{LogManagerFlushError, LogRecord, LogRecordKind};
+    use crate::core::page;
     use crate::core::page::format::PageKind;
     use crate::core::page::{Leaf, Page, Write};
     use crate::core::storage_runtime::StorageRuntime;

@@ -3,8 +3,9 @@ use std::{cell::RefCell, path::PathBuf};
 use crate::core::{
     PAGE_SIZE, PageId,
     disk_manager::DiskManager,
-    error::DiskManagerError,
+    error::{DiskManagerError, StorageResult},
     log_manager::{LogManager, LogManagerError, LogManagerFlushError, LogRecord, Lsn, TxnId},
+    transaction_manager::{LoggedPageUpdate, PageUndo, TransactionManager},
 };
 
 /// Shared concrete storage runtime for database pages and the write-ahead log.
@@ -16,12 +17,19 @@ pub(crate) struct StorageRuntime {
     path: PathBuf,
     disk: RefCell<DiskManager>,
     log: RefCell<LogManager>,
+    transactions: RefCell<TransactionManager>,
 }
 
 impl StorageRuntime {
     pub(crate) fn new(path: PathBuf, disk: DiskManager) -> std::io::Result<Self> {
         let log = LogManager::new(&path)?;
-        Ok(Self { path, disk: RefCell::new(disk), log: RefCell::new(log) })
+        let max_txn_id = log.highest_txn_id();
+        Ok(Self {
+            path,
+            disk: RefCell::new(disk),
+            log: RefCell::new(log),
+            transactions: RefCell::new(TransactionManager::new(max_txn_id)),
+        })
     }
 
     pub(crate) fn path(&self) -> &std::path::Path {
@@ -34,6 +42,10 @@ impl StorageRuntime {
 
     pub(crate) fn new_page(&self) -> Result<PageId, DiskManagerError> {
         self.disk.borrow_mut().new_page()
+    }
+
+    pub(crate) fn record_page_alloc(&self, page_id: PageId) -> StorageResult<Option<Lsn>> {
+        self.transactions.borrow_mut().record_page_alloc(&mut self.log.borrow_mut(), page_id)
     }
 
     pub(crate) fn read_page(
@@ -62,5 +74,43 @@ impl StorageRuntime {
         records: &[LogRecord<'a>],
     ) -> Result<Lsn, LogManagerError<'a>> {
         self.log.borrow_mut().append_transaction(txn_id, records)
+    }
+
+    pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
+        self.transactions.borrow_mut().begin(&mut self.log.borrow_mut())
+    }
+
+    pub(crate) fn record_page_update(
+        &self,
+        page_id: PageId,
+        before: &[u8; PAGE_SIZE],
+        after: &[u8; PAGE_SIZE],
+    ) -> StorageResult<Option<LoggedPageUpdate>> {
+        let result = self.transactions.borrow_mut().record_page_update(
+            &mut self.log.borrow_mut(),
+            page_id,
+            before,
+            after,
+        );
+        if result.is_err() {
+            self.transactions.borrow_mut().record_failure();
+        }
+        result
+    }
+
+    pub(crate) fn record_transaction_failure(&self) {
+        self.transactions.borrow_mut().record_failure();
+    }
+
+    pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
+        self.transactions.borrow_mut().commit(&mut self.log.borrow_mut(), txn_id)
+    }
+
+    pub(crate) fn take_rollback_pages(&self, txn_id: TxnId) -> StorageResult<Vec<PageUndo>> {
+        self.transactions.borrow_mut().take_rollback_pages(txn_id)
+    }
+
+    pub(crate) fn finish_rollback(&self, txn_id: TxnId) -> StorageResult<()> {
+        self.transactions.borrow_mut().finish_rollback(&mut self.log.borrow_mut(), txn_id)
     }
 }
