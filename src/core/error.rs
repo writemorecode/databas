@@ -2,6 +2,7 @@ use std::{collections::TryReserveError, fmt};
 use thiserror::Error;
 
 use crate::core::{
+    log_manager::{LogManagerFlushError, Lsn},
     page::{CellCorruption, PageCorruption, PageError},
     {PAGE_SIZE, PageId},
 };
@@ -167,6 +168,10 @@ pub enum InvariantViolation {
     CorruptPageTableEntry { page_id: PageId, frame_id: usize, frame_count: usize },
     #[error("invalid slot index {slot_index} for {slot_count} slots")]
     InvalidSlotIndex { slot_index: u16, slot_count: u16 },
+    #[error(
+        "requested WAL flush through LSN {requested_lsn}, but highest appended LSN is {highest_appended_lsn:?}"
+    )]
+    WalFlushLsnNotAppended { requested_lsn: Lsn, highest_appended_lsn: Option<Lsn> },
 }
 
 #[derive(Debug, Error)]
@@ -185,6 +190,10 @@ pub(crate) type DiskManagerResult<T> = Result<T, DiskManagerError>;
 pub enum PageStoreError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error(
+        "requested WAL flush through LSN {requested_lsn}, but highest appended LSN is {highest_appended_lsn:?}"
+    )]
+    WalFlushLsnNotAppended { requested_lsn: Lsn, highest_appended_lsn: Option<Lsn> },
     #[error("invalid page id: {page_id}")]
     InvalidPageId { page_id: PageId },
     #[error("invalid file size (not multiple of page size): {size}")]
@@ -253,6 +262,14 @@ impl From<PageStoreError> for StorageError {
     fn from(err: PageStoreError) -> Self {
         match err {
             PageStoreError::Io(err) => Self::Io(err),
+            PageStoreError::WalFlushLsnNotAppended { requested_lsn, highest_appended_lsn } => {
+                Self::Internal(InternalError::InvariantViolation(
+                    InvariantViolation::WalFlushLsnNotAppended {
+                        requested_lsn,
+                        highest_appended_lsn,
+                    },
+                ))
+            }
             PageStoreError::InvalidPageId { page_id } => {
                 Self::InvalidArgument(InvalidArgumentError::InvalidPageId { page_id })
             }
@@ -261,6 +278,17 @@ impl From<PageStoreError> for StorageError {
                 page_id: None,
                 kind: CorruptionKind::InvalidFileSize { size, page_size: PAGE_SIZE },
             }),
+        }
+    }
+}
+
+impl From<LogManagerFlushError> for PageStoreError {
+    fn from(err: LogManagerFlushError) -> Self {
+        match err {
+            LogManagerFlushError::Io(err) => Self::Io(err),
+            LogManagerFlushError::LsnNotAppended { requested_lsn, highest_appended_lsn } => {
+                Self::WalFlushLsnNotAppended { requested_lsn, highest_appended_lsn }
+            }
         }
     }
 }

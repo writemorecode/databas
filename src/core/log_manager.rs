@@ -60,6 +60,16 @@ pub enum LogManagerError<'a> {
     LsnExhausted,
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum LogManagerFlushError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error(
+        "requested WAL flush through LSN {requested_lsn}, but highest appended LSN is {highest_appended_lsn:?}"
+    )]
+    LsnNotAppended { requested_lsn: Lsn, highest_appended_lsn: Option<Lsn> },
+}
+
 #[derive(Debug)]
 pub(crate) struct LogRecord<'a> {
     pub(crate) txn_id: TxnId,
@@ -122,6 +132,34 @@ impl LogManager {
         self.wal_file.sync_all()?;
         self.highest_durable_lsn = Some(lsn);
         Ok(lsn)
+    }
+
+    pub(crate) fn flush_through(&mut self, requested_lsn: Lsn) -> Result<(), LogManagerFlushError> {
+        if requested_lsn == ZERO_LSN {
+            return Ok(());
+        }
+
+        if self.highest_durable_lsn.unwrap_or(ZERO_LSN) >= requested_lsn {
+            return Ok(());
+        }
+
+        let Some(highest_appended_lsn) = self.highest_appended_lsn else {
+            return Err(LogManagerFlushError::LsnNotAppended {
+                requested_lsn,
+                highest_appended_lsn: None,
+            });
+        };
+
+        if highest_appended_lsn < requested_lsn {
+            return Err(LogManagerFlushError::LsnNotAppended {
+                requested_lsn,
+                highest_appended_lsn: Some(highest_appended_lsn),
+            });
+        }
+
+        self.wal_file.sync_all()?;
+        self.highest_durable_lsn = Some(highest_appended_lsn);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -672,6 +710,60 @@ mod tests {
         assert_eq!(transaction.records.len(), 2);
         assert!(matches!(transaction.records[0].kind, LogRecordKind::Begin));
         assert!(matches!(transaction.records[1].kind, LogRecordKind::Commit));
+    }
+
+    #[test]
+    fn flush_through_zero_lsn_is_noop() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+
+        manager.flush_through(ZERO_LSN).unwrap();
+
+        assert_eq!(manager.highest_appended_lsn(), None);
+        assert_eq!(manager.highest_durable_lsn(), None);
+    }
+
+    #[test]
+    fn flush_through_already_durable_lsn_is_noop() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+        let records = [LogRecord { txn_id: 11, kind: LogRecordKind::Begin }];
+        let lsn = manager.append_transaction(11, &records).unwrap();
+
+        manager.flush_through(lsn).unwrap();
+
+        assert_eq!(manager.highest_appended_lsn(), Some(lsn));
+        assert_eq!(manager.highest_durable_lsn(), Some(lsn));
+    }
+
+    #[test]
+    fn flush_through_non_appended_lsn_returns_error() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+
+        let result = manager.flush_through(9);
+
+        assert!(matches!(
+            result,
+            Err(LogManagerFlushError::LsnNotAppended {
+                requested_lsn: 9,
+                highest_appended_lsn: None
+            })
+        ));
+    }
+
+    #[test]
+    fn flush_through_syncs_wal_and_marks_appended_lsn_durable() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+        let records = [LogRecord { txn_id: 11, kind: LogRecordKind::Begin }];
+        let lsn = manager.append_transaction(11, &records).unwrap();
+        manager.highest_durable_lsn = None;
+
+        manager.flush_through(lsn).unwrap();
+
+        assert_eq!(manager.highest_appended_lsn(), Some(lsn));
+        assert_eq!(manager.highest_durable_lsn(), Some(lsn));
     }
 
     fn rewrite_crc(buf: &mut [u8]) {

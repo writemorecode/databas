@@ -6,6 +6,7 @@ use std::{
 
 use crate::core::{
     error::{DiskManagerError, DiskManagerResult, PageStoreResult},
+    log_manager::{LogManager, Lsn},
     page_store::PageStore,
     {PAGE_SIZE, PageId},
 };
@@ -13,6 +14,7 @@ use crate::core::{
 /// Reads and writes pages to and from a database file.
 pub struct DiskManager {
     file: File,
+    log_manager: LogManager,
     page_count: u64,
 }
 
@@ -40,6 +42,7 @@ impl DiskManager {
 
     fn open_with_options(options: &mut OpenOptions, path: &Path) -> Result<Self, DiskManagerError> {
         let file = options.open(path)?;
+        let log_manager = LogManager::new(path)?;
 
         let file_metadata = file.metadata()?;
         let file_size = file_metadata.len();
@@ -50,7 +53,7 @@ impl DiskManager {
 
         let page_count = file_size / (PAGE_SIZE as u64);
 
-        Ok(Self { file, page_count })
+        Ok(Self { file, log_manager, page_count })
     }
 
     pub(crate) fn page_count(&self) -> u64 {
@@ -121,6 +124,10 @@ impl PageStore for DiskManager {
 
     fn sync(&mut self) -> PageStoreResult<()> {
         self.file.sync_all().map_err(Into::into)
+    }
+
+    fn flush_wal_through(&mut self, lsn: Lsn) -> PageStoreResult<()> {
+        self.log_manager.flush_through(lsn).map_err(Into::into)
     }
 }
 

@@ -2,35 +2,31 @@ use std::path::Path;
 
 use crate::core::{
     IndexSchema, RowId, TableCursor, TableSchema, TupleSchema, catalog_manager::CatalogManager,
-    cursor::IndexCursor, error::StorageResult, log_manager::LogManager,
+    cursor::IndexCursor, error::StorageResult,
 };
 
 /// Public database handle for one database file.
 pub struct Database {
     catalog: CatalogManager,
-    log_manager: LogManager,
 }
 
 impl Database {
     /// Creates a new database file.
     pub fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
         let catalog = CatalogManager::create(&path)?;
-        let log_manager = LogManager::new(path)?;
-        Ok(Self { catalog, log_manager })
+        Ok(Self { catalog })
     }
 
     /// Opens an existing database file.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
         let catalog = CatalogManager::open_existing(&path)?;
-        let log_manager = LogManager::new(path)?;
-        Ok(Self { catalog, log_manager })
+        Ok(Self { catalog })
     }
 
     /// Opens a database file, creating and initializing it if needed.
     pub fn open_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
         let catalog = CatalogManager::open_or_create(&path)?;
-        let log_manager = LogManager::new(path)?;
-        Ok(Self { catalog, log_manager })
+        Ok(Self { catalog })
     }
 
     /// Returns the database-file path associated with this database.
