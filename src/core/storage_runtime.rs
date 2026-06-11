@@ -82,6 +82,11 @@ impl StorageRuntime {
         self.log.borrow_mut().append_transaction(txn_id, records)
     }
 
+    #[cfg(test)]
+    pub(crate) fn force_next_lsn_exhausted_for_test(&self) {
+        self.log.borrow_mut().force_next_lsn_exhausted_for_test();
+    }
+
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
         self.transactions.borrow_mut().begin(&mut self.log.borrow_mut())
     }
