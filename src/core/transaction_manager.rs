@@ -62,6 +62,7 @@ impl TransactionManager {
         log: &mut LogManager,
         page_id: PageId,
     ) -> StorageResult<Option<Lsn>> {
+        // Allocated page ids are not reclaimed on rollback until a freelist exists.
         let Some(active) = self.active.as_mut() else {
             return Ok(None);
         };
@@ -189,5 +190,51 @@ pub(crate) fn page_lsn(page_bytes: &[u8; PAGE_SIZE]) -> Lsn {
         page::format::read_u64(page_bytes, page::format::LSN_OFFSET)
     } else {
         ZERO_LSN
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::NamedTempFile;
+
+    use super::*;
+    use crate::core::log_manager::{
+        LogManager, OwnedLogRecordKind, read_log_record_kinds_for_test,
+    };
+
+    #[test]
+    fn page_alloc_without_active_transaction_does_not_write_wal() {
+        let file = NamedTempFile::new().unwrap();
+        let mut log = LogManager::new(file.path()).unwrap();
+        let mut transactions = TransactionManager::new(0);
+
+        let lsn = transactions.record_page_alloc(&mut log, 7).unwrap();
+
+        assert_eq!(lsn, None);
+        assert_eq!(read_log_record_kinds_for_test(file.path()), []);
+    }
+
+    #[test]
+    fn page_alloc_with_active_transaction_writes_wal_record() {
+        let file = NamedTempFile::new().unwrap();
+        let mut log = LogManager::new(file.path()).unwrap();
+        let mut transactions = TransactionManager::new(0);
+
+        let txn_id = transactions.begin(&mut log).unwrap();
+        let alloc_lsn = transactions.record_page_alloc(&mut log, 7).unwrap();
+        transactions.commit(&mut log, txn_id).unwrap();
+
+        assert_eq!(txn_id, 1);
+        assert_eq!(alloc_lsn, Some(2));
+        assert_eq!(log.highest_appended_lsn(), Some(3));
+        assert_eq!(log.highest_durable_lsn(), Some(3));
+        assert_eq!(
+            read_log_record_kinds_for_test(file.path()),
+            [
+                (1, OwnedLogRecordKind::Begin),
+                (1, OwnedLogRecordKind::PageAlloc { page_id: 7 }),
+                (1, OwnedLogRecordKind::Commit),
+            ]
+        );
     }
 }

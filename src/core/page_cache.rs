@@ -490,7 +490,10 @@ mod tests {
 
     use super::*;
     use crate::core::disk_manager::DiskManager;
-    use crate::core::log_manager::{LogManagerFlushError, LogRecord, LogRecordKind};
+    use crate::core::log_manager::{
+        LogManagerFlushError, LogRecord, LogRecordKind, OwnedLogRecordKind,
+        read_log_record_kinds_for_test,
+    };
     use crate::core::page;
     use crate::core::page::format::PageKind;
     use crate::core::page::{Leaf, Page, Write};
@@ -1110,6 +1113,41 @@ mod tests {
         let (second_page_id, second_guard) = cache.new_page().unwrap();
         assert_eq!(second_page_id, 1);
         drop(second_guard);
+    }
+
+    #[test]
+    fn new_page_without_active_transaction_does_not_write_wal() {
+        let file = NamedTempFile::new().unwrap();
+        let runtime = runtime_for_path(file.path());
+        let cache = PageCache::new(runtime, 1).unwrap();
+
+        let (page_id, guard) = cache.new_page().unwrap();
+        drop(guard);
+
+        assert_eq!(page_id, 0);
+        assert_eq!(read_log_record_kinds_for_test(file.path()), []);
+    }
+
+    #[test]
+    fn new_page_with_active_transaction_writes_page_alloc_wal_record() {
+        let file = NamedTempFile::new().unwrap();
+        let runtime = runtime_for_path(file.path());
+        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+
+        let txn_id = runtime.begin_transaction().unwrap();
+        let (page_id, guard) = cache.new_page().unwrap();
+        drop(guard);
+        runtime.commit_transaction(txn_id).unwrap();
+
+        assert_eq!(page_id, 0);
+        assert_eq!(
+            read_log_record_kinds_for_test(file.path()),
+            [
+                (txn_id, OwnedLogRecordKind::Begin),
+                (txn_id, OwnedLogRecordKind::PageAlloc { page_id }),
+                (txn_id, OwnedLogRecordKind::Commit),
+            ]
+        );
     }
 
     #[test]
