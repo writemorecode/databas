@@ -338,10 +338,12 @@ impl PinGuard {
             .try_borrow_mut()
             .map_err(|_| PageCacheError::PageMutableBorrowConflict { page_id: self.page_id })?;
         let before = *page;
+        let was_dirty = frame.dirty.get();
         frame.dirty.set(true);
         Ok(PageWriteGuard {
             page,
             before,
+            was_dirty,
             runtime: Rc::clone(&self.page_cache.runtime),
             frame,
             page_id: self.page_id,
@@ -393,6 +395,7 @@ impl PageReadGuard<'_> {
 pub(crate) struct PageWriteGuard<'a> {
     page: RefMut<'a, [u8; PAGE_SIZE]>,
     before: [u8; PAGE_SIZE],
+    was_dirty: bool,
     runtime: Rc<StorageRuntime>,
     frame: &'a Frame,
     page_id: PageId,
@@ -441,6 +444,8 @@ impl Drop for PageWriteGuard<'_> {
                 self.frame.lsn.set(self.frame.lsn.get().max(page_lsn(&self.page)));
             }
             Err(_) => {
+                *self.page = self.before;
+                self.frame.dirty.set(self.was_dirty);
                 self.runtime.record_transaction_failure();
             }
         }
@@ -936,6 +941,26 @@ mod tests {
         let page_on_disk = read_disk_page(file.path(), 0);
         assert_eq!(page_on_disk[PAGE_SIZE - 1], page[PAGE_SIZE - 1]);
         assert!(cache.inner.frames[0].dirty.get());
+    }
+
+    #[test]
+    fn wal_logging_failure_restores_page_bytes_and_dirty_state() {
+        let page = formatted_page_with_lsn(17, ZERO_LSN);
+        let (_file, runtime) = create_disk_with_pages(&[page]);
+        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+
+        let txn_id = runtime.begin_transaction().unwrap();
+        runtime.force_next_lsn_exhausted_for_test();
+        let guard = cache.fetch_page(0).unwrap();
+
+        {
+            let mut write = guard.write().unwrap();
+            write.page_mut()[PAGE_SIZE - 1] = 88;
+        }
+
+        assert_eq!(guard.read().unwrap().page(), &page);
+        assert!(!cache.inner.frames[0].dirty.get());
+        assert!(runtime.commit_transaction(txn_id).is_err());
     }
 
     #[test]

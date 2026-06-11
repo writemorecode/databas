@@ -250,6 +250,11 @@ impl LogManager {
     pub(crate) fn highest_durable_lsn(&self) -> Option<Lsn> {
         self.highest_durable_lsn
     }
+
+    #[cfg(test)]
+    pub(crate) fn force_next_lsn_exhausted_for_test(&mut self) {
+        self.highest_appended_lsn = Some(Lsn::MAX);
+    }
 }
 
 pub(crate) fn read_recovery_log(
