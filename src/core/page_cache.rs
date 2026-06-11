@@ -13,8 +13,8 @@
 //!
 //! This split makes the ownership model explicit: pinning controls residency,
 //! while read and write guards control access to the page contents. Dropping a
-//! [`PinGuard`] decrements the frame pin count. Dropping the last cache handle
-//! performs a best-effort flush of dirty, unpinned pages.
+//! [`PinGuard`] decrements the frame pin count. Dirty pages are written only by
+//! explicit flushes or eviction.
 
 use std::{
     cell::{Cell, Ref, RefCell, RefMut},
@@ -65,41 +65,6 @@ struct PageCacheInner {
     runtime: Rc<StorageRuntime>,
     meta: RefCell<CacheMeta>,
     frames: Vec<Frame>,
-}
-
-impl PageCacheInner {
-    /// Attempts to flush all dirty unpinned frames and ignores write errors.
-    fn flush_best_effort_on_drop(&mut self) {
-        for frame in &mut self.frames {
-            if !frame.dirty.get() || frame.pin_count.get() > 0 {
-                continue;
-            }
-
-            let Some(page_id) = frame.page_id.get() else {
-                continue;
-            };
-
-            let page = frame.data.get_mut();
-            let page_lsn = frame.lsn.get().max(page_lsn(page));
-            if self
-                .runtime
-                .flush_wal_through(page_lsn)
-                .map_err(PageCacheError::from)
-                .and_then(|()| self.runtime.write_page(page_id, page).map_err(PageCacheError::from))
-                .is_ok()
-            {
-                frame.dirty.set(false);
-            }
-        }
-    }
-}
-
-impl Drop for PageCacheInner {
-    /// Performs best-effort flushing for dirty unpinned frames when the last
-    /// cache handle and all outstanding pins have been dropped.
-    fn drop(&mut self) {
-        self.flush_best_effort_on_drop();
-    }
 }
 
 /// Shared handle to the single-threaded page cache.
@@ -1071,7 +1036,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_flushes_dirty_unpinned_pages_best_effort() {
+    fn drop_does_not_flush_dirty_unpinned_pages() {
         let page = page_with_pattern(33);
         let pages = [page];
         let (file, disk_manager) = create_disk_with_pages(&pages);
@@ -1086,7 +1051,7 @@ mod tests {
         }
 
         let page_on_disk = read_disk_page(file.path(), 0);
-        assert_eq!(page_on_disk[0], 144);
+        assert_eq!(page_on_disk[0], page[0]);
     }
 
     #[test]
