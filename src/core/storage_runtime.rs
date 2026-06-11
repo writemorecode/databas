@@ -5,6 +5,7 @@ use crate::core::{
     disk_manager::DiskManager,
     error::{DiskManagerError, StorageResult},
     log_manager::{LogManager, LogManagerError, LogManagerFlushError, LogRecord, Lsn, TxnId},
+    recovery::recover_from_wal,
     transaction_manager::{LoggedPageUpdate, PageUndo, TransactionManager},
 };
 
@@ -21,9 +22,10 @@ pub(crate) struct StorageRuntime {
 }
 
 impl StorageRuntime {
-    pub(crate) fn new(path: PathBuf, disk: DiskManager) -> std::io::Result<Self> {
+    pub(crate) fn new(path: PathBuf, mut disk: DiskManager) -> StorageResult<Self> {
+        let recovery = recover_from_wal(&path, &mut disk)?;
         let log = LogManager::new(&path)?;
-        let max_txn_id = log.highest_txn_id();
+        let max_txn_id = recovery.max_txn_id.max(log.highest_txn_id());
         Ok(Self {
             path,
             disk: RefCell::new(disk),

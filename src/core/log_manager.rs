@@ -89,6 +89,29 @@ pub(crate) enum LogRecordKind<'a> {
     PageAlloc { page_id: PageId },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecoveryLogRecord {
+    pub(crate) lsn: Lsn,
+    pub(crate) txn_id: TxnId,
+    pub(crate) kind: RecoveryLogRecordKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RecoveryLogRecordKind {
+    Begin,
+    Commit,
+    Rollback,
+    PageUpdate { page_id: PageId, redo_data: [u8; PAGE_SIZE], undo_data: [u8; PAGE_SIZE] },
+    PageAlloc { page_id: PageId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecoveryLogScan {
+    pub(crate) records: Vec<RecoveryLogRecord>,
+    pub(crate) truncated_tail: bool,
+    pub(crate) max_txn_id: TxnId,
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OwnedLogRecordKind {
@@ -226,6 +249,147 @@ impl LogManager {
     #[cfg(test)]
     pub(crate) fn highest_durable_lsn(&self) -> Option<Lsn> {
         self.highest_durable_lsn
+    }
+}
+
+pub(crate) fn read_recovery_log(
+    db_file_path: impl AsRef<Path>,
+) -> Result<RecoveryLogScan, LogManagerError<'static>> {
+    let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
+    let mut wal_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(wal_file_path)?;
+    let mut buf = Vec::new();
+    wal_file.read_to_end(&mut buf)?;
+
+    let mut records = Vec::new();
+    let mut offset = 0;
+    let mut next_lsn = ZERO_LSN;
+    let mut max_txn_id = 0;
+    let mut truncated_tail = false;
+
+    while offset < buf.len() {
+        if buf.len() - offset < HEADER_LEN {
+            truncated_tail = true;
+            break;
+        }
+
+        let frame_len = match transaction_frame_len(&buf[offset..]) {
+            Ok(frame_len) => frame_len,
+            Err(LogManagerError::TruncatedFrame { .. }) => {
+                truncated_tail = true;
+                break;
+            }
+            Err(err) => return Err(err.into_static()),
+        };
+
+        let frame_end =
+            offset.checked_add(frame_len).ok_or(LogManagerError::PayloadLengthOverflow)?;
+        if frame_end > buf.len() {
+            truncated_tail = true;
+            break;
+        }
+
+        let transaction = deserialize_transaction(&buf[offset..frame_end])
+            .map_err(LogManagerError::into_static)?;
+        max_txn_id = max_txn_id.max(transaction.txn_id);
+        for record in transaction.records {
+            next_lsn = next_lsn.checked_add(1).ok_or(LogManagerError::LsnExhausted)?;
+            records.push(RecoveryLogRecord {
+                lsn: next_lsn,
+                txn_id: record.txn_id,
+                kind: RecoveryLogRecordKind::from_log_record_kind(record.kind)?,
+            });
+        }
+        offset = frame_end;
+    }
+
+    if truncated_tail {
+        wal_file.set_len(offset as u64)?;
+        wal_file.sync_all()?;
+    }
+
+    Ok(RecoveryLogScan { records, truncated_tail, max_txn_id })
+}
+
+pub(crate) fn truncate_wal(db_file_path: impl AsRef<Path>) -> Result<(), LogManagerError<'static>> {
+    let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
+    let wal_file =
+        OpenOptions::new().create(true).write(true).truncate(true).open(wal_file_path)?;
+    wal_file.sync_all()?;
+    Ok(())
+}
+
+impl RecoveryLogRecordKind {
+    fn from_log_record_kind(kind: LogRecordKind<'_>) -> Result<Self, LogManagerError<'static>> {
+        match kind {
+            LogRecordKind::Begin => Ok(Self::Begin),
+            LogRecordKind::Commit => Ok(Self::Commit),
+            LogRecordKind::Rollback => Ok(Self::Rollback),
+            LogRecordKind::PageUpdate { page_id, redo_data, undo_data } => Ok(Self::PageUpdate {
+                page_id,
+                redo_data: page_image_array(redo_data)?,
+                undo_data: page_image_array(undo_data)?,
+            }),
+            LogRecordKind::PageAlloc { page_id } => Ok(Self::PageAlloc { page_id }),
+        }
+    }
+}
+
+fn page_image_array(image: &[u8]) -> Result<[u8; PAGE_SIZE], LogManagerError<'static>> {
+    image.try_into().map_err(|_| LogManagerError::InvalidPageImageLength {
+        expected: PAGE_SIZE,
+        actual: image.len(),
+    })
+}
+
+impl LogManagerError<'_> {
+    fn into_static(self) -> LogManagerError<'static> {
+        match self {
+            LogManagerError::Io(err) => LogManagerError::Io(err),
+            LogManagerError::InvalidDbFilePath { .. } => LogManagerError::InvalidDbFilePath {
+                db_file_path: Path::new("<invalid database file path>"),
+            },
+            LogManagerError::InvalidHeaderMagic { actual } => {
+                LogManagerError::InvalidHeaderMagic { actual }
+            }
+            LogManagerError::InvalidFooterMagic { actual } => {
+                LogManagerError::InvalidFooterMagic { actual }
+            }
+            LogManagerError::UnsupportedVersion { expected, actual } => {
+                LogManagerError::UnsupportedVersion { expected, actual }
+            }
+            LogManagerError::TruncatedFrame { needed, remaining } => {
+                LogManagerError::TruncatedFrame { needed, remaining }
+            }
+            LogManagerError::PayloadLengthTooLarge { payload_len } => {
+                LogManagerError::PayloadLengthTooLarge { payload_len }
+            }
+            LogManagerError::PayloadLengthOverflow => LogManagerError::PayloadLengthOverflow,
+            LogManagerError::ChecksumMismatch { expected, actual } => {
+                LogManagerError::ChecksumMismatch { expected, actual }
+            }
+            LogManagerError::UnknownRecordKind { kind } => {
+                LogManagerError::UnknownRecordKind { kind }
+            }
+            LogManagerError::FooterTxnIdMismatch { expected, actual } => {
+                LogManagerError::FooterTxnIdMismatch { expected, actual }
+            }
+            LogManagerError::RecordTxnIdMismatch { expected, actual } => {
+                LogManagerError::RecordTxnIdMismatch { expected, actual }
+            }
+            LogManagerError::RecordCountMismatch { expected, actual } => {
+                LogManagerError::RecordCountMismatch { expected, actual }
+            }
+            LogManagerError::TooManyRecords { count } => LogManagerError::TooManyRecords { count },
+            LogManagerError::LsnExhausted => LogManagerError::LsnExhausted,
+            LogManagerError::InvalidPageImageLength { expected, actual } => {
+                LogManagerError::InvalidPageImageLength { expected, actual }
+            }
+        }
     }
 }
 
@@ -822,7 +986,7 @@ impl<'a> Cursor<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
+    use std::io::{Read, Write};
 
     use tempfile::NamedTempFile;
 
@@ -1074,6 +1238,88 @@ mod tests {
         assert_eq!(manager.append_transaction(12, &second_records).unwrap(), 5);
         assert_eq!(manager.highest_appended_lsn(), Some(5));
         assert_eq!(manager.highest_durable_lsn(), None);
+    }
+
+    #[test]
+    fn read_recovery_log_assigns_lsns_across_complete_frames() {
+        let file = NamedTempFile::new().unwrap();
+        let redo = [1; PAGE_SIZE];
+        let undo = [9; PAGE_SIZE];
+        {
+            let mut manager = LogManager::new(file.path()).unwrap();
+            manager
+                .append_transaction(
+                    11,
+                    &[
+                        LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+                        LogRecord {
+                            txn_id: 11,
+                            kind: LogRecordKind::PageUpdate {
+                                page_id: 100,
+                                redo_data: &redo,
+                                undo_data: &undo,
+                            },
+                        },
+                        LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+                    ],
+                )
+                .unwrap();
+            manager
+                .append_transaction(
+                    12,
+                    &[
+                        LogRecord { txn_id: 12, kind: LogRecordKind::Begin },
+                        LogRecord { txn_id: 12, kind: LogRecordKind::Rollback },
+                    ],
+                )
+                .unwrap();
+        }
+
+        let scan = read_recovery_log(file.path()).unwrap();
+
+        assert!(!scan.truncated_tail);
+        assert_eq!(scan.max_txn_id, 12);
+        assert_eq!(
+            scan.records.iter().map(|record| record.lsn).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+        assert!(matches!(scan.records[0].kind, RecoveryLogRecordKind::Begin));
+        match &scan.records[1].kind {
+            RecoveryLogRecordKind::PageUpdate { page_id, redo_data, undo_data } => {
+                assert_eq!(*page_id, 100);
+                assert_eq!(redo_data, &redo);
+                assert_eq!(undo_data, &undo);
+            }
+            kind => panic!("unexpected record kind: {kind:?}"),
+        }
+        assert!(matches!(scan.records[2].kind, RecoveryLogRecordKind::Commit));
+        assert!(matches!(scan.records[3].kind, RecoveryLogRecordKind::Begin));
+        assert!(matches!(scan.records[4].kind, RecoveryLogRecordKind::Rollback));
+    }
+
+    #[test]
+    fn read_recovery_log_truncates_incomplete_final_frame_tail() {
+        let file = NamedTempFile::new().unwrap();
+        let valid_frame = serialize_to_vec(
+            11,
+            &[
+                LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+            ],
+        );
+        let wal_file_path = file.path().with_added_extension("wal");
+        {
+            let mut wal_file = File::create(&wal_file_path).unwrap();
+            wal_file.write_all(&valid_frame).unwrap();
+            wal_file.write_all(b"DBWAL").unwrap();
+        }
+
+        let scan = read_recovery_log(file.path()).unwrap();
+
+        assert!(scan.truncated_tail);
+        assert_eq!(scan.max_txn_id, 11);
+        assert_eq!(scan.records.len(), 2);
+        assert_eq!(std::fs::metadata(wal_file_path).unwrap().len(), valid_frame.len() as u64);
     }
 
     #[test]
