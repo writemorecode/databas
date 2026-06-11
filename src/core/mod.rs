@@ -14,6 +14,7 @@ pub(crate) mod pager;
 pub(crate) mod recovery;
 pub(crate) mod storage_runtime;
 pub(crate) mod transaction_manager;
+pub(crate) mod transaction_runtime;
 pub mod tuple;
 
 pub(crate) mod log_manager;
