@@ -214,19 +214,25 @@ impl<'db> Executor<'db> {
         match plan {
             PhysicalPlan::Explain { input } => Ok(ExecutionOutput::Explain(input.to_string())),
             PhysicalPlan::CreateTable { name, schema } => {
-                self.database.create_table(&name, schema)?;
-                Ok(ExecutionOutput::SchemaAffected)
+                self.execute_mutating_statement(|database| {
+                    database.create_table(&name, schema)?;
+                    Ok(ExecutionOutput::SchemaAffected)
+                })
             }
             PhysicalPlan::CreateIndex { name, table, columns } => {
-                let column_names: Vec<&str> = columns.iter().map(|col| col.name.as_str()).collect();
-                let index = self.database.create_index(&name, &table.name, &column_names)?;
-                backfill_index(self.database, &table, &index)?;
-                Ok(ExecutionOutput::SchemaAffected)
+                self.execute_mutating_statement(|database| {
+                    let column_names: Vec<&str> =
+                        columns.iter().map(|col| col.name.as_str()).collect();
+                    let index = database.create_index(&name, &table.name, &column_names)?;
+                    backfill_index(database, &table, &index)?;
+                    Ok(ExecutionOutput::SchemaAffected)
+                })
             }
             PhysicalPlan::Values { rows } => execute_values(rows),
-            PhysicalPlan::InsertValues { table, columns, values } => {
-                execute_insert_values(self.database, table, columns, values)
-            }
+            PhysicalPlan::InsertValues { table, columns, values } => self
+                .execute_mutating_statement(|database| {
+                    execute_insert_values(database, table, columns, values)
+                }),
             PhysicalPlan::OneRow => Ok(ExecutionOutput::Rows {
                 rows: Box::new(std::iter::once_with(|| empty_record(0))),
             }),
@@ -297,6 +303,30 @@ impl<'db> Executor<'db> {
                 let limit = limit as usize;
                 let rows = Box::new(output_inner.into_rows("LIMIT")?.take(limit));
                 Ok(ExecutionOutput::Rows { rows })
+            }
+        }
+    }
+
+    fn execute_mutating_statement(
+        &self,
+        execute: impl FnOnce(&Database) -> ExecutorResult<ExecutionOutput>,
+    ) -> ExecutorResult<ExecutionOutput> {
+        let txn_id = self.database.begin_transaction()?;
+        match execute(self.database) {
+            Ok(output) => match self.database.commit_transaction(txn_id) {
+                Ok(()) => Ok(output),
+                Err(commit_error) => {
+                    if let Err(rollback_error) = self.database.rollback_transaction(txn_id) {
+                        return Err(rollback_error.into());
+                    }
+                    Err(commit_error.into())
+                }
+            },
+            Err(error) => {
+                if let Err(rollback_error) = self.database.rollback_transaction(txn_id) {
+                    return Err(rollback_error.into());
+                }
+                Err(error)
             }
         }
     }
@@ -1347,6 +1377,45 @@ mod tests {
         assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 1);
 
         let mut users = database.table_cursor_by_name("users").unwrap();
+        assert!(users.get(2).unwrap().is_none());
+    }
+
+    #[test]
+    fn failed_multi_row_insert_rolls_back_rows_already_inserted_in_statement() {
+        let dir = tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+        database.create_table("users", users_schema()).unwrap();
+        let mut executor = Executor::new(&database);
+
+        let invalid = insert_values_plan(
+            &database,
+            vec![
+                bound("id", 0, DataType::Integer),
+                bound("name", 1, DataType::Text),
+                bound("active", 2, DataType::Boolean),
+            ],
+            vec![
+                vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(true)],
+                vec![
+                    Value::Integer(2),
+                    Value::String("Grace".to_owned()),
+                    Value::String("yes".to_owned()),
+                ],
+            ],
+        );
+
+        assert!(matches!(
+            executor.execute(invalid),
+            Err(ExecutorError::InsertTypeMismatch {
+                column,
+                expected: DataType::Boolean,
+                actual: Value::String(value),
+            }) if column == "active" && value == "yes"
+        ));
+
+        assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 0);
+        let mut users = database.table_cursor_by_name("users").unwrap();
+        assert!(users.get(1).unwrap().is_none());
         assert!(users.get(2).unwrap().is_none());
     }
 

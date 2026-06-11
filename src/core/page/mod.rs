@@ -20,6 +20,8 @@ pub(crate) mod format;
 mod interior;
 mod leaf;
 
+use crate::core::PAGE_SIZE;
+
 /// Page handles, marker types, access traits, and search helpers for typed page access.
 pub(crate) use core::{BoundResult, Interior, Leaf, NodeMarker, Page, Read, SearchResult, Write};
 /// Errors returned while validating or manipulating encoded pages and cells.
@@ -29,6 +31,15 @@ pub(crate) use error::{CellCorruption, PageCorruption, PageError, PageResult};
 pub(crate) type RawLeaf<A> = Page<A, Leaf>;
 /// Raw B+-tree interior page storing separator byte keys and child pointers.
 pub(crate) type RawInterior<A> = Page<A, Interior>;
+
+pub(crate) fn is_current_btree_page(bytes: &[u8; PAGE_SIZE]) -> bool {
+    format::PageKind::from_raw(bytes[format::KIND_OFFSET]).is_some()
+        && bytes[format::VERSION_OFFSET] == format::FORMAT_VERSION
+}
+
+pub(crate) fn is_overflow_page(bytes: &[u8; PAGE_SIZE]) -> bool {
+    !is_current_btree_page(bytes)
+}
 
 #[cfg(test)]
 mod tests {
@@ -72,6 +83,18 @@ mod tests {
 
         let page = Page::<Read<'_>, Leaf>::open(&bytes).unwrap();
         assert_eq!(page.lsn(), 42);
+    }
+
+    #[test]
+    fn page_kind_helpers_classify_btree_and_overflow_pages() {
+        let mut leaf_bytes = [0; PAGE_SIZE];
+        let _page = Page::<Write<'_>, Leaf>::init(&mut leaf_bytes);
+        let overflow_bytes = [0; PAGE_SIZE];
+
+        assert!(is_current_btree_page(&leaf_bytes));
+        assert!(!is_overflow_page(&leaf_bytes));
+        assert!(!is_current_btree_page(&overflow_bytes));
+        assert!(is_overflow_page(&overflow_bytes));
     }
 
     #[test]

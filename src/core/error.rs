@@ -2,7 +2,7 @@ use std::{collections::TryReserveError, fmt};
 use thiserror::Error;
 
 use crate::core::{
-    log_manager::{LogManagerFlushError, Lsn},
+    log_manager::{LogManagerError, LogManagerFlushError, Lsn, TxnId},
     page::{CellCorruption, PageCorruption, PageError},
     {PAGE_SIZE, PageId},
 };
@@ -172,6 +172,18 @@ pub enum InvariantViolation {
         "requested WAL flush through LSN {requested_lsn}, but highest appended LSN is {highest_appended_lsn:?}"
     )]
     WalFlushLsnNotAppended { requested_lsn: Lsn, highest_appended_lsn: Option<Lsn> },
+    #[error("WAL log error: {message}")]
+    WalLog { message: String },
+    #[error("transaction {txn_id} is already active")]
+    ActiveTransaction { txn_id: TxnId },
+    #[error("no active transaction")]
+    NoActiveTransaction,
+    #[error("active transaction mismatch: expected {expected}, got {actual}")]
+    TransactionMismatch { expected: TxnId, actual: TxnId },
+    #[error("transaction id space exhausted")]
+    TransactionIdExhausted,
+    #[error("transaction {txn_id} failed before commit")]
+    TransactionPoisoned { txn_id: TxnId },
 }
 
 #[derive(Debug, Error)]
@@ -192,6 +204,8 @@ pub(crate) enum PageCacheError {
     Disk(#[from] DiskManagerError),
     #[error("WAL flush error: {0}")]
     WalFlush(#[from] LogManagerFlushError),
+    #[error("transaction error: {0}")]
+    Transaction(Box<StorageError>),
     #[error("no evictable frame available")]
     NoEvictableFrame,
     #[error("page {page_id} is pinned")]
@@ -259,6 +273,7 @@ impl From<PageCacheError> for StorageError {
                     ))
                 }
             },
+            PageCacheError::Transaction(err) => *err,
             PageCacheError::NoEvictableFrame => {
                 Self::LimitExceeded(LimitExceededError::CacheCapacityExhausted)
             }
@@ -284,6 +299,33 @@ impl From<PageCacheError> for StorageError {
             PageCacheError::CorruptPageTableEntry { page_id, frame_id, frame_count } => {
                 Self::Internal(InternalError::InvariantViolation(
                     InvariantViolation::CorruptPageTableEntry { page_id, frame_id, frame_count },
+                ))
+            }
+        }
+    }
+}
+
+impl From<LogManagerError<'_>> for StorageError {
+    fn from(err: LogManagerError<'_>) -> Self {
+        match err {
+            LogManagerError::Io(err) => Self::Io(err),
+            err => Self::Internal(InternalError::InvariantViolation(InvariantViolation::WalLog {
+                message: err.to_string(),
+            })),
+        }
+    }
+}
+
+impl From<LogManagerFlushError> for StorageError {
+    fn from(err: LogManagerFlushError) -> Self {
+        match err {
+            LogManagerFlushError::Io(err) => Self::Io(err),
+            LogManagerFlushError::LsnNotAppended { requested_lsn, highest_appended_lsn } => {
+                Self::Internal(InternalError::InvariantViolation(
+                    InvariantViolation::WalFlushLsnNotAppended {
+                        requested_lsn,
+                        highest_appended_lsn,
+                    },
                 ))
             }
         }

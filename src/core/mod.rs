@@ -12,6 +12,7 @@ pub(crate) mod page_cache;
 pub(crate) mod page_replacement;
 pub(crate) mod pager;
 pub(crate) mod storage_runtime;
+pub(crate) mod transaction_manager;
 pub mod tuple;
 
 pub(crate) mod log_manager;

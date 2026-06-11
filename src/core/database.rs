@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::core::{
     IndexSchema, RowId, TableCursor, TableSchema, TupleSchema, catalog_manager::CatalogManager,
-    cursor::IndexCursor, error::StorageResult,
+    cursor::IndexCursor, error::StorageResult, log_manager::TxnId,
 };
 
 /// Public database handle for one database file.
@@ -37,6 +37,18 @@ impl Database {
     /// Flushes all dirty, currently unpinned pages to disk.
     pub fn flush(&self) -> StorageResult<()> {
         self.catalog.flush()
+    }
+
+    pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
+        self.catalog.begin_transaction()
+    }
+
+    pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
+        self.catalog.commit_transaction(txn_id)
+    }
+
+    pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
+        self.catalog.rollback_transaction(txn_id)
     }
 
     /// Creates a table and records its schema in the system catalog.
