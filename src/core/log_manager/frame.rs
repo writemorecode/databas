@@ -41,14 +41,14 @@ pub(super) fn serialize_transaction<'a, W: Write>(
         .map_err(|_| LogManagerError::TooManyRecords { count: records.len() })?;
     let payload_len = serialized_records_len(records)?;
 
-    write_header(&mut writer, txn_id, entry_count, payload_len)?;
+    write_frame_header(&mut writer, txn_id, entry_count, payload_len)?;
 
     let mut digest = CRC32.digest();
     for record in records {
         write_log_record_payload(&mut writer, &mut digest, &record.kind)?;
     }
 
-    write_footer(&mut writer, txn_id, digest.finalize())?;
+    write_frame_footer(&mut writer, txn_id, digest.finalize())?;
     Ok(())
 }
 
@@ -71,7 +71,7 @@ pub(super) fn deserialize_transaction(
         return Err(LogManagerError::TruncatedFrame { needed: HEADER_LEN, remaining: buf.len() });
     }
 
-    let mut cursor = Cursor::new(buf);
+    let mut cursor = FrameReader::new(buf);
     let header_magic = cursor.read_array::<8>()?;
     if header_magic != HEADER_MAGIC {
         return Err(LogManagerError::InvalidHeaderMagic { actual: header_magic });
@@ -104,7 +104,7 @@ pub(super) fn deserialize_transaction(
     }
 
     let payload = &buf[payload_start..payload_end];
-    let mut payload_cursor = Cursor::new(payload);
+    let mut payload_cursor = FrameReader::new(payload);
     let mut records = Vec::new();
     while payload_cursor.remaining() > 0 {
         records.push(deserialize_log_record(&mut payload_cursor, txn_id)?);
@@ -403,7 +403,7 @@ pub(crate) fn read_log_record_kinds_for_test(
 }
 
 fn deserialize_log_record<'a>(
-    cursor: &mut Cursor<'a>,
+    cursor: &mut FrameReader<'a>,
     txn_id: TxnId,
 ) -> Result<LogRecord<'a>, LogManagerError> {
     let kind = match cursor.read_u8()? {
@@ -484,7 +484,7 @@ fn validate_page_image_len_value(len: usize) -> Result<(), LogManagerError> {
     }
 }
 
-fn write_header<W: Write>(
+fn write_frame_header<W: Write>(
     writer: &mut W,
     txn_id: TxnId,
     entry_count: u32,
@@ -497,7 +497,7 @@ fn write_header<W: Write>(
     writer.write_all(&payload_len.to_le_bytes())
 }
 
-fn write_footer<W: Write>(
+fn write_frame_footer<W: Write>(
     writer: &mut W,
     txn_id: TxnId,
     payload_crc32: u32,
@@ -575,12 +575,12 @@ fn write_crc_bytes<W: Write>(
     Ok(())
 }
 
-struct Cursor<'a> {
+struct FrameReader<'a> {
     buf: &'a [u8],
     position: usize,
 }
 
-impl<'a> Cursor<'a> {
+impl<'a> FrameReader<'a> {
     fn new(buf: &'a [u8]) -> Self {
         Self { buf, position: 0 }
     }
