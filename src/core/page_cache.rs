@@ -432,6 +432,7 @@ impl PageWriteGuard<'_> {
 impl Drop for PageWriteGuard<'_> {
     fn drop(&mut self) {
         if *self.page == self.before {
+            self.frame.dirty.set(self.was_dirty);
             return;
         }
 
@@ -683,6 +684,30 @@ mod tests {
             let guard = cache.fetch_page(0).unwrap();
             let mut page = guard.write().unwrap();
             page.page_mut()[0] = 99;
+        }
+
+        assert!(cache.inner.frames[0].dirty.get());
+    }
+
+    #[test]
+    fn unchanged_page_write_restores_previous_dirty_state() {
+        let page = page_with_pattern(13);
+        let pages = [page];
+        let (_file, disk_manager) = create_disk_with_pages(&pages);
+        let cache = PageCache::new(disk_manager, 1).unwrap();
+        let guard = cache.fetch_page(0).unwrap();
+
+        {
+            let _write = guard.write().unwrap();
+            assert!(cache.inner.frames[0].dirty.get());
+        }
+
+        assert!(!cache.inner.frames[0].dirty.get());
+
+        cache.inner.frames[0].dirty.set(true);
+        {
+            let _write = guard.write().unwrap();
+            assert!(cache.inner.frames[0].dirty.get());
         }
 
         assert!(cache.inner.frames[0].dirty.get());
