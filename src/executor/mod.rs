@@ -68,6 +68,22 @@ pub enum ExecutorError {
         /// Right operand value.
         right: Value,
     },
+    /// A comparison operator received operands with different value types.
+    #[error(
+        "type mismatch in comparison {left:?} {op} {right:?}: expected right operand to be {expected}, got {actual}"
+    )]
+    ComparisonTypeMismatch {
+        /// Left operand value that determines the required comparison type.
+        left: Value,
+        /// Comparison operator being evaluated.
+        op: Op,
+        /// Right operand value rejected by the comparison.
+        right: Value,
+        /// Type required for the right operand.
+        expected: &'static str,
+        /// Type of the rejected right operand.
+        actual: &'static str,
+    },
     /// A logical expression received a non-boolean operand.
     #[error("{op} expected a boolean operand, got {value:?}")]
     NonBooleanLogicalOperand {
@@ -702,7 +718,7 @@ fn evaluate_equality(left: Value, op: Op, right: Value) -> ExecutorResult<Value>
             let equal = left == right;
             Ok(Value::Boolean(if matches!(op, Op::EqualsEquals) { equal } else { !equal }))
         }
-        _ => Err(ExecutorError::UnsupportedBinary { left, op, right }),
+        _ => Err(comparison_type_mismatch(left, op, right)),
     }
 }
 
@@ -716,9 +732,30 @@ fn evaluate_ordering(left: Value, op: Op, right: Value) -> ExecutorResult<Value>
         (Value::UnsignedInteger(left), Value::UnsignedInteger(right)) => {
             compare_ordered(left, op, right)
         }
-        _ => return Err(ExecutorError::UnsupportedBinary { left, op, right }),
+        _ => return Err(comparison_type_mismatch(left, op, right)),
     };
     Ok(Value::Boolean(result))
+}
+
+fn comparison_type_mismatch(left: Value, op: Op, right: Value) -> ExecutorError {
+    ExecutorError::ComparisonTypeMismatch {
+        expected: value_type_name(&left),
+        actual: value_type_name(&right),
+        left,
+        op,
+        right,
+    }
+}
+
+fn value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NULL",
+        Value::String(_) => "text",
+        Value::Boolean(_) => "boolean",
+        Value::Integer(_) => "integer",
+        Value::Float(_) => "float",
+        Value::UnsignedInteger(_) => "unsigned integer",
+    }
 }
 
 /// Applies an ordering operator to values with a Rust [`PartialOrd`] relation.
