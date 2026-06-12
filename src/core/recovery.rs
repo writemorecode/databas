@@ -132,7 +132,7 @@ fn should_apply_redo(page: &[u8; PAGE_SIZE], update_lsn: Lsn) -> bool {
 
 fn should_apply_undo(page: &[u8; PAGE_SIZE], update_lsn: Lsn) -> bool {
     let current_lsn = page_lsn(page);
-    current_lsn == ZERO_LSN || current_lsn >= update_lsn
+    current_lsn == ZERO_LSN || current_lsn == update_lsn
 }
 
 #[cfg(test)]
@@ -419,5 +419,57 @@ mod tests {
         assert!(recover_from_wal(file.path(), &mut disk).is_err());
 
         assert_eq!(wal_len(file.path()), original_len);
+    }
+
+    #[test]
+    fn recovery_does_not_overwrite_newer_committed_update_with_older_loser_undo() {
+        let file = NamedTempFile::new().unwrap();
+        let initial = formatted_page(1, ZERO_LSN);
+        let update1 = formatted_page(2, 2); // LSN 2
+        let update2 = formatted_page(3, 5); // LSN 5
+
+        {
+            let mut disk = DiskManager::new(file.path()).unwrap();
+            disk.ensure_page_exists(0).unwrap();
+            disk.write_page(0, &update2).unwrap();
+        }
+
+        append_transaction(
+            file.path(),
+            1,
+            &[
+                LogRecord { txn_id: 1, kind: LogRecordKind::Begin },
+                LogRecord {
+                    txn_id: 1,
+                    kind: LogRecordKind::PageUpdate {
+                        page_id: 0,
+                        redo_data: &update1,
+                        undo_data: &initial,
+                    },
+                },
+            ],
+        );
+
+        append_transaction(
+            file.path(),
+            2,
+            &[
+                LogRecord { txn_id: 2, kind: LogRecordKind::Begin },
+                LogRecord {
+                    txn_id: 2,
+                    kind: LogRecordKind::PageUpdate {
+                        page_id: 0,
+                        redo_data: &update2,
+                        undo_data: &update1,
+                    },
+                },
+                LogRecord { txn_id: 2, kind: LogRecordKind::Commit },
+            ],
+        );
+
+        let mut disk = DiskManager::new(file.path()).unwrap();
+        recover_from_wal(file.path(), &mut disk).unwrap();
+
+        assert_eq!(read_disk_page(file.path(), 0), update2);
     }
 }
