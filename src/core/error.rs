@@ -180,6 +180,10 @@ pub enum InvariantViolation {
     NoActiveTransaction,
     #[error("active transaction mismatch: expected {expected}, got {actual}")]
     TransactionMismatch { expected: TxnId, actual: TxnId },
+    #[error(
+        "invalid transaction savepoint for transaction {txn_id}: undo length {undo_len} exceeds active undo length {active_undo_len}"
+    )]
+    InvalidTransactionSavepoint { txn_id: TxnId, undo_len: usize, active_undo_len: usize },
     #[error("transaction id space exhausted")]
     TransactionIdExhausted,
     #[error("transaction {txn_id} failed before commit")]

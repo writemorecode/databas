@@ -24,8 +24,17 @@ pub(crate) struct PageUndo {
     pub(crate) page_id: PageId,
     /// Full page image captured before the logged update.
     pub(crate) before: [u8; PAGE_SIZE],
+    /// Full page image installed by the logged update.
+    pub(crate) after: [u8; PAGE_SIZE],
     /// LSN assigned to the update that this image undoes.
     pub(crate) lsn: Lsn,
+}
+
+/// In-memory checkpoint for rolling back one statement inside a transaction.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TransactionSavepoint {
+    txn_id: TxnId,
+    undo_len: usize,
 }
 
 /// WAL metadata returned after a transactional page update is logged.
@@ -165,7 +174,7 @@ impl TransactionManager {
         };
         debug_assert_eq!(appended_lsn, lsn);
         active.last_lsn = lsn;
-        active.undo_pages.push(PageUndo { page_id, before: *before, lsn });
+        active.undo_pages.push(PageUndo { page_id, before: *before, after: redo, lsn });
         Ok(Some(LoggedPageUpdate { lsn, redo }))
     }
 
@@ -177,6 +186,21 @@ impl TransactionManager {
         if let Some(active) = self.active.as_mut() {
             active.poisoned = true;
         }
+    }
+
+    /// Returns the active transaction id, if a transaction is open.
+    pub(crate) fn active_transaction_id(&self) -> Option<TxnId> {
+        self.active.as_ref().map(|active| active.txn_id)
+    }
+
+    /// Returns whether the active transaction has observed an unrecoverable error.
+    pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
+        let active = self.active.as_ref().ok_or_else(no_active_transaction)?;
+        if active.txn_id != txn_id {
+            return Err(transaction_mismatch(active.txn_id, txn_id));
+        }
+
+        Ok(active.poisoned)
     }
 
     /// Commits the active transaction and flushes its commit record to durable storage.
@@ -198,6 +222,79 @@ impl TransactionManager {
         self.active = None;
         log.flush_through(lsn)?;
         Ok(())
+    }
+
+    /// Creates a checkpoint at the current end of the active transaction's undo log.
+    pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
+        let active = self.active.as_ref().ok_or_else(no_active_transaction)?;
+        if active.txn_id != txn_id {
+            return Err(transaction_mismatch(active.txn_id, txn_id));
+        }
+
+        Ok(TransactionSavepoint { txn_id, undo_len: active.undo_pages.len() })
+    }
+
+    /// Logs compensation records and returns page images that restore a savepoint.
+    ///
+    /// The active transaction remains open. Compensation records are ordinary
+    /// page updates in the same transaction, so if the transaction later commits
+    /// crash recovery replays both the failed statement's physical updates and
+    /// these compensating updates in LSN order.
+    pub(crate) fn rollback_to_savepoint(
+        &mut self,
+        log: &mut LogManager,
+        savepoint: TransactionSavepoint,
+    ) -> StorageResult<Vec<PageUndo>> {
+        let active = self.active.as_mut().ok_or_else(no_active_transaction)?;
+        if active.txn_id != savepoint.txn_id {
+            return Err(transaction_mismatch(active.txn_id, savepoint.txn_id));
+        }
+        if savepoint.undo_len > active.undo_pages.len() {
+            return Err(invariant(InvariantViolation::InvalidTransactionSavepoint {
+                txn_id: savepoint.txn_id,
+                undo_len: savepoint.undo_len,
+                active_undo_len: active.undo_pages.len(),
+            }));
+        }
+
+        let rollback_pages = active.undo_pages[savepoint.undo_len..].to_vec();
+        let mut restore_pages = Vec::with_capacity(rollback_pages.len());
+        for undo in rollback_pages.into_iter().rev() {
+            let lsn = match log.next_lsn() {
+                Ok(lsn) => lsn,
+                Err(err) => {
+                    active.poisoned = true;
+                    return Err(err.into());
+                }
+            };
+            let mut redo = undo.before;
+            stamp_page_lsn(&mut redo, lsn);
+            let appended_lsn = match log.append_record(
+                active.txn_id,
+                LogRecordKind::PageUpdate {
+                    page_id: undo.page_id,
+                    redo_data: &redo,
+                    undo_data: &undo.after,
+                },
+            ) {
+                Ok(lsn) => lsn,
+                Err(err) => {
+                    active.poisoned = true;
+                    return Err(err.into());
+                }
+            };
+            debug_assert_eq!(appended_lsn, lsn);
+            active.last_lsn = lsn;
+            restore_pages.push(PageUndo {
+                page_id: undo.page_id,
+                before: redo,
+                after: undo.after,
+                lsn,
+            });
+        }
+
+        active.undo_pages.truncate(savepoint.undo_len);
+        Ok(restore_pages)
     }
 
     /// Removes the active transaction and returns its undo images for rollback.
@@ -320,6 +417,28 @@ mod tests {
                 (1, OwnedLogRecordKind::Commit),
             ]
         );
+    }
+
+    #[test]
+    fn rollback_to_invalid_savepoint_returns_error_without_panicking() {
+        let file = NamedTempFile::new().unwrap();
+        let mut log = LogManager::new(file.path()).unwrap();
+        let mut transactions = TransactionManager::new(0);
+
+        let txn_id = transactions.begin(&mut log).unwrap();
+        let savepoint = TransactionSavepoint { txn_id, undo_len: 1 };
+        let result = transactions.rollback_to_savepoint(&mut log, savepoint);
+
+        assert!(matches!(
+            result,
+            Err(StorageError::Internal(InternalError::InvariantViolation(
+                InvariantViolation::InvalidTransactionSavepoint {
+                    txn_id: actual_txn_id,
+                    undo_len: 1,
+                    active_undo_len: 0,
+                }
+            ))) if actual_txn_id == txn_id
+        ));
     }
 
     #[test]

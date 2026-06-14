@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::core::{
     IndexSchema, RowId, TableCursor, TableSchema, TupleSchema, catalog_manager::CatalogManager,
     cursor::IndexCursor, error::StorageResult, log_manager::TxnId, pager::Pager,
-    transaction_runtime::TransactionRuntime,
+    transaction_manager::TransactionSavepoint, transaction_runtime::TransactionRuntime,
 };
 
 /// Public database handle for one database file.
@@ -55,8 +55,37 @@ impl Database {
         self.transactions.commit_transaction(txn_id)
     }
 
+    pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
+        self.transactions.statement_savepoint(txn_id)
+    }
+
+    pub(crate) fn rollback_to_savepoint(
+        &self,
+        savepoint: TransactionSavepoint,
+    ) -> StorageResult<()> {
+        self.transactions.rollback_to_savepoint(savepoint)
+    }
+
     pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
         self.transactions.rollback_transaction(txn_id)
+    }
+
+    pub(crate) fn active_transaction_id(&self) -> Option<TxnId> {
+        self.transactions.active_transaction_id()
+    }
+
+    pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
+        self.transactions.transaction_is_poisoned(txn_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_next_lsn_exhausted_for_test(&self) {
+        self.transactions.force_next_lsn_exhausted_for_test();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_wal_flush_for_test(&self) {
+        self.transactions.fail_next_wal_flush_for_test();
     }
 
     /// Creates a table and records its schema in the system catalog.
