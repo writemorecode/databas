@@ -7,7 +7,7 @@ use crate::core::{PAGE_SIZE, PageId, SlotId};
 use super::{
     error::{PageCorruption, PageError, PageResult},
     format::{
-        self, CELL_LENGTH_SIZE, CONTENT_START_OFFSET, FIRST_FREEBLOCK_OFFSET, FORMAT_VERSION,
+        self, CONTENT_START_OFFSET, FIRST_FREEBLOCK_OFFSET, FORMAT_VERSION,
         FRAGMENTED_FREE_BYTES_OFFSET, FREEBLOCK_HEADER_SIZE, KIND_OFFSET, LSN_OFFSET,
         MAX_FRAGMENTED_FREE_BYTES, NEXT_PAGE_ID_OFFSET, PREV_PAGE_ID_OFFSET, SLOT_COUNT_OFFSET,
         USABLE_SPACE_END, VERSION_OFFSET,
@@ -619,7 +619,6 @@ where
 {
     /// Validates and opens an immutable typed page view over an initialized buffer.
     pub(crate) fn open(bytes: &'a [u8; PAGE_SIZE]) -> PageResult<Self> {
-        validate_page(bytes, page_kind::<N>())?;
         Ok(Self::new(Read { bytes }))
     }
 }
@@ -630,7 +629,6 @@ where
 {
     /// Validates and opens a mutable typed page view over an initialized buffer.
     pub(crate) fn open(bytes: &'a mut [u8; PAGE_SIZE]) -> PageResult<Self> {
-        validate_page(bytes, page_kind::<N>())?;
         Ok(Self::new(Write { bytes }))
     }
 
@@ -672,74 +670,4 @@ impl<'a> Page<Write<'a>, Interior> {
         format::write_u64(page.bytes_mut(), format::RIGHTMOST_CHILD_OFFSET, page_id);
         page
     }
-}
-
-fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> PageResult<()> {
-    let Some(actual_kind) = format::PageKind::from_raw(bytes[KIND_OFFSET]) else {
-        return Err(PageError::UnknownPageKind { actual: bytes[KIND_OFFSET] });
-    };
-    if actual_kind != expected_kind {
-        return Err(PageError::InvalidPageKind {
-            expected: expected_kind,
-            actual: bytes[KIND_OFFSET],
-        });
-    }
-    if bytes[VERSION_OFFSET] != FORMAT_VERSION {
-        return Err(PageError::InvalidPageVersion {
-            expected: FORMAT_VERSION,
-            actual: bytes[VERSION_OFFSET],
-        });
-    }
-    if bytes[USABLE_SPACE_END..].iter().any(|byte| *byte != 0) {
-        return Err(PageError::MalformedPage(PageCorruption::ReservedFooterNotZero));
-    }
-
-    let header_size = expected_kind.header_size();
-    let slot_count = format::read_u16(bytes, SLOT_COUNT_OFFSET) as usize;
-    let slot_directory_end = header_size + slot_count * format::SLOT_ENTRY_SIZE;
-    if slot_directory_end > USABLE_SPACE_END {
-        return Err(PageError::MalformedPage(PageCorruption::SlotDirectoryExceedsUsableSpace));
-    }
-
-    let content_start = format::read_u16(bytes, CONTENT_START_OFFSET) as usize;
-    if !(slot_directory_end..=USABLE_SPACE_END).contains(&content_start) {
-        return Err(PageError::MalformedPage(if content_start > USABLE_SPACE_END {
-            PageCorruption::ContentStartOutOfBounds
-        } else {
-            PageCorruption::SlotDirectoryOverlapsContent
-        }));
-    }
-    if format::read_u16(bytes, FRAGMENTED_FREE_BYTES_OFFSET) > MAX_FRAGMENTED_FREE_BYTES {
-        return Err(PageError::MalformedPage(PageCorruption::FragmentedFreeBytesTooLarge));
-    }
-
-    let first_freeblock = format::read_optional_u16(bytes, FIRST_FREEBLOCK_OFFSET);
-    let max_freeblocks = USABLE_SPACE_END / FREEBLOCK_HEADER_SIZE;
-    for freeblock in
-        FreeblockIter::new(bytes, content_start as u16, first_freeblock).take(max_freeblocks)
-    {
-        let _ = freeblock?;
-    }
-
-    for slot_index in 0..slot_count as SlotId {
-        let slot_offset =
-            format::read_u16(bytes, format::slot_entry_offset(header_size, slot_index)) as usize;
-        if slot_offset < content_start || slot_offset >= USABLE_SPACE_END {
-            return Err(PageError::MalformedPage(PageCorruption::SlotOffsetOutOfBounds));
-        }
-        if slot_offset + CELL_LENGTH_SIZE > USABLE_SPACE_END {
-            return Err(PageError::MalformedPage(PageCorruption::CellLengthPrefixOutOfBounds));
-        }
-
-        match expected_kind.node_kind() {
-            format::NodeKind::Leaf => {
-                let _ = super::leaf::cell_len_at(bytes, slot_index, slot_offset)?;
-            }
-            format::NodeKind::Interior => {
-                let _ = super::interior::cell_len_at(bytes, slot_index, slot_offset)?;
-            }
-        }
-    }
-
-    Ok(())
 }

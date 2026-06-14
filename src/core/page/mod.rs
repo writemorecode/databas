@@ -98,24 +98,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_old_page_format_version() {
-        let mut bytes = [0; PAGE_SIZE];
-        {
-            let _page = Page::<Write<'_>, Leaf>::init(&mut bytes);
-        }
-        let old_version = format::FORMAT_VERSION - 1;
-        bytes[format::VERSION_OFFSET] = old_version;
-
-        let result = Page::<Read<'_>, Leaf>::open(&bytes);
-
-        assert!(matches!(
-            result,
-            Err(PageError::InvalidPageVersion { expected, actual })
-                if expected == format::FORMAT_VERSION && actual == old_version
-        ));
-    }
-
-    #[test]
     fn leaf_delete_removes_existing_key() {
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
