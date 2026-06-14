@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     core::error::StorageError, executor::ExecutorError, planner::PlannerError,
-    sql_parser::error::SQLError,
+    session::SessionError, sql_parser::error::SQLError,
 };
 
 #[derive(Debug, Error)]
@@ -17,6 +17,8 @@ pub enum DatabaseError<'a> {
     Planner(#[from] PlannerError),
     #[error(transparent)]
     Executor(#[from] ExecutorError),
+    #[error(transparent)]
+    Session(#[from] SessionError),
     #[error(transparent)]
     Io(#[from] io::Error),
 }

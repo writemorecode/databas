@@ -15,7 +15,7 @@
 use crate::{
     core::{
         DataType, Database, IndexSchema, TableRecord, TableSchema, Tuple, TupleView, Value,
-        error::{InternalError, InvariantViolation, StorageError},
+        error::StorageError,
     },
     planner::{BoundColumn, PhysicalPlan, PlannedExpression},
     sql_parser::parser::op::Op,
@@ -162,6 +162,8 @@ pub enum ExecutionOutput {
     RowsAffected(u64),
     /// A schema-level side effect completed.
     SchemaAffected,
+    /// A non-planned command completed.
+    CommandOk,
 }
 
 impl ExecutionOutput {
@@ -174,7 +176,7 @@ impl ExecutionOutput {
         match self {
             Self::Explain(_) => Err(ExecutorError::ExpectedRows { operator }),
             Self::Rows { rows } => Ok(rows),
-            Self::RowsAffected(_) | Self::SchemaAffected => {
+            Self::RowsAffected(_) | Self::SchemaAffected | Self::CommandOk => {
                 Err(ExecutorError::ExpectedRows { operator })
             }
         }
@@ -188,6 +190,7 @@ impl std::fmt::Debug for ExecutionOutput {
             Self::Rows { .. } => f.debug_struct("Rows").field("rows", &"<row stream>").finish(),
             Self::RowsAffected(count) => f.debug_tuple("RowsAffected").field(count).finish(),
             Self::SchemaAffected => f.write_str("SchemaAffected"),
+            Self::CommandOk => f.write_str("CommandOk"),
         }
     }
 }
@@ -201,6 +204,7 @@ impl std::fmt::Display for ExecutionOutput {
                 write!(f, "{count} rows affected.")
             }
             ExecutionOutput::SchemaAffected => write!(f, "Schema affected."),
+            ExecutionOutput::CommandOk => write!(f, "Command executed."),
         }
     }
 }
@@ -230,25 +234,19 @@ impl<'db> Executor<'db> {
         match plan {
             PhysicalPlan::Explain { input } => Ok(ExecutionOutput::Explain(input.to_string())),
             PhysicalPlan::CreateTable { name, schema } => {
-                self.execute_mutating_statement(|database| {
-                    database.create_table(&name, schema)?;
-                    Ok(ExecutionOutput::SchemaAffected)
-                })
+                self.database.create_table(&name, schema)?;
+                Ok(ExecutionOutput::SchemaAffected)
             }
             PhysicalPlan::CreateIndex { name, table, columns } => {
-                self.execute_mutating_statement(|database| {
-                    let column_names: Vec<&str> =
-                        columns.iter().map(|col| col.name.as_str()).collect();
-                    let index = database.create_index(&name, &table.name, &column_names)?;
-                    backfill_index(database, &table, &index)?;
-                    Ok(ExecutionOutput::SchemaAffected)
-                })
+                let column_names: Vec<&str> = columns.iter().map(|col| col.name.as_str()).collect();
+                let index = self.database.create_index(&name, &table.name, &column_names)?;
+                backfill_index(self.database, &table, &index)?;
+                Ok(ExecutionOutput::SchemaAffected)
             }
             PhysicalPlan::Values { rows } => execute_values(rows),
-            PhysicalPlan::InsertValues { table, columns, values } => self
-                .execute_mutating_statement(|database| {
-                    execute_insert_values(database, table, columns, values)
-                }),
+            PhysicalPlan::InsertValues { table, columns, values } => {
+                execute_insert_values(self.database, table, columns, values)
+            }
             PhysicalPlan::OneRow => Ok(ExecutionOutput::Rows {
                 rows: Box::new(std::iter::once_with(|| empty_record(0))),
             }),
@@ -322,41 +320,6 @@ impl<'db> Executor<'db> {
             }
         }
     }
-
-    fn execute_mutating_statement(
-        &self,
-        execute: impl FnOnce(&Database) -> ExecutorResult<ExecutionOutput>,
-    ) -> ExecutorResult<ExecutionOutput> {
-        let txn_id = self.database.begin_transaction()?;
-        match execute(self.database) {
-            Ok(output) => match self.database.commit_transaction(txn_id) {
-                Ok(()) => Ok(output),
-                Err(commit_error) => {
-                    if let Err(rollback_error) = self.database.rollback_transaction(txn_id)
-                        && !is_no_active_transaction(&rollback_error)
-                    {
-                        return Err(rollback_error.into());
-                    }
-                    Err(commit_error.into())
-                }
-            },
-            Err(error) => {
-                if let Err(rollback_error) = self.database.rollback_transaction(txn_id) {
-                    return Err(rollback_error.into());
-                }
-                Err(error)
-            }
-        }
-    }
-}
-
-fn is_no_active_transaction(error: &StorageError) -> bool {
-    matches!(
-        error,
-        StorageError::Internal(InternalError::InvariantViolation(
-            InvariantViolation::NoActiveTransaction
-        ))
-    )
 }
 
 /// Evaluates one planned scalar expression against a record.
@@ -793,8 +756,13 @@ mod tests {
 
     use super::*;
     use crate::{
-        core::{ColumnSchema, DataType, PAGE_SIZE, TupleSchema},
+        core::{
+            ColumnSchema, DataType, PAGE_SIZE, TupleSchema,
+            error::{InternalError, InvariantViolation, StorageError},
+        },
+        error::DatabaseError,
         planner::{BoundColumn, Planner},
+        session::Session,
         sql_parser::parser::Parser,
     };
 
@@ -810,10 +778,27 @@ mod tests {
         output.into_rows("TEST")?.collect()
     }
 
-    fn execute_sql(database: &Database, sql: &str) -> ExecutorResult<ExecutionOutput> {
-        let statement = Parser::new(sql).stmt().unwrap();
-        let plan = Planner::new(database).plan_statement(&statement).unwrap();
-        Executor::new(database).execute(plan.physical)
+    fn execute_sql<'a>(
+        database: &Database,
+        sql: &'a str,
+    ) -> Result<ExecutionOutput, DatabaseError<'a>> {
+        Session::new(database).execute_sql(sql)
+    }
+
+    fn execute_sql_with_session<'a>(
+        session: &mut Session<'_>,
+        sql: &'a str,
+    ) -> Result<ExecutionOutput, DatabaseError<'a>> {
+        session.execute_sql(sql)
+    }
+
+    fn execute_script(database: &Database, sql: &str) {
+        let items = Parser::new(sql).collect::<Result<Vec<_>, _>>().unwrap();
+        let mut session = Session::new(database);
+
+        for item in items {
+            session.execute_item(item).unwrap();
+        }
     }
 
     fn bound(name: &str, ordinal: usize, data_type: DataType) -> BoundColumn {
@@ -1473,38 +1458,119 @@ mod tests {
         let dir = tempdir().unwrap();
         let database = Database::create(dir.path().join("test.db")).unwrap();
         database.create_table("users", users_schema()).unwrap();
-        let mut executor = Executor::new(&database);
 
-        let invalid = insert_values_plan(
+        let result = execute_sql(
             &database,
-            vec![
-                bound("id", 0, DataType::Integer),
-                bound("name", 1, DataType::Text),
-                bound("active", 2, DataType::Boolean),
-            ],
-            vec![
-                vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(true)],
-                vec![
-                    Value::Integer(2),
-                    Value::String("Grace".to_owned()),
-                    Value::String("yes".to_owned()),
-                ],
-            ],
+            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', 'yes');",
         );
 
         assert!(matches!(
-            executor.execute(invalid),
-            Err(ExecutorError::InsertTypeMismatch {
+            result,
+            Err(DatabaseError::Executor(ExecutorError::InsertTypeMismatch {
                 column,
                 expected: DataType::Boolean,
                 actual: Value::String(value),
-            }) if column == "active" && value == "yes"
+            })) if column == "active" && value == "yes"
         ));
 
         assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 0);
         let mut users = database.table_cursor_by_name("users").unwrap();
         assert!(users.get(1).unwrap().is_none());
         assert!(users.get(2).unwrap().is_none());
+    }
+
+    #[test]
+    fn failed_multi_row_insert_in_explicit_transaction_rolls_back_statement_before_commit() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let database = Database::create(&path).unwrap();
+        database.create_table("users", users_schema()).unwrap();
+        database.create_index("idx_users_name", "users", &["name"]).unwrap();
+        database.flush().unwrap();
+
+        let mut session = Session::new(&database);
+        execute_sql_with_session(&mut session, "BEGIN;").unwrap();
+        let result = execute_sql_with_session(
+            &mut session,
+            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', 'yes');",
+        );
+
+        assert!(matches!(
+            result,
+            Err(DatabaseError::Executor(ExecutorError::InsertTypeMismatch {
+                column,
+                expected: DataType::Boolean,
+                actual: Value::String(value),
+            })) if column == "active" && value == "yes"
+        ));
+        execute_sql_with_session(
+            &mut session,
+            "INSERT INTO users (id, name, active) VALUES (2, 'Linus', TRUE);",
+        )
+        .unwrap();
+        execute_sql_with_session(&mut session, "COMMIT;").unwrap();
+        drop(session);
+        std::mem::forget(database);
+
+        let reopened = Database::open(&path).unwrap();
+        let mut users = reopened.table_cursor_by_name("users").unwrap();
+        let mut index = reopened.index_cursor_by_name("idx_users_name").unwrap();
+        let ada = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
+        let linus = Tuple::new(vec![Value::String("Linus".to_owned())]).to_bytes().unwrap();
+        let row = users.get(1).unwrap().expect("successful statement should commit");
+
+        assert_eq!(reopened.table_schema_by_name("users").unwrap().last_row_id, 1);
+        assert_eq!(
+            values(&row),
+            vec![Value::Integer(2), Value::String("Linus".to_owned()), Value::Boolean(true)]
+        );
+        assert!(users.get(2).unwrap().is_none());
+        assert!(index.get(&ada).unwrap().is_none());
+        assert_eq!(index.get(&linus).unwrap().unwrap().row_id, 1);
+    }
+
+    #[test]
+    fn savepoint_rollback_error_takes_precedence_over_executor_error() {
+        let dir = tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+        database.create_table("users", users_schema()).unwrap();
+        let mut session = Session::new(&database);
+
+        execute_sql_with_session(&mut session, "BEGIN;").unwrap();
+        session.fail_next_savepoint_rollback_for_test();
+        let result = execute_sql_with_session(
+            &mut session,
+            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', 'yes');",
+        );
+
+        assert!(matches!(
+            result,
+            Err(DatabaseError::Storage(crate::core::error::StorageError::Internal(
+                InternalError::InvariantViolation(InvariantViolation::WalLog { message })
+            ))) if message == "WAL LSN exhausted"
+        ));
+    }
+
+    #[test]
+    fn wal_logging_failure_during_explicit_statement_is_reported_immediately() {
+        let dir = tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+        database.create_table("users", users_schema()).unwrap();
+        let mut session = Session::new(&database);
+
+        execute_sql_with_session(&mut session, "BEGIN;").unwrap();
+        database.force_next_lsn_exhausted_for_test();
+        let result = execute_sql_with_session(
+            &mut session,
+            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);",
+        );
+
+        assert!(matches!(
+            result,
+            Err(DatabaseError::Storage(StorageError::Internal(InternalError::InvariantViolation(
+                InvariantViolation::TransactionPoisoned { txn_id: 1 }
+            ))))
+        ));
     }
 
     #[test]
@@ -1555,6 +1621,215 @@ mod tests {
         let entry = index.get(&key).unwrap().expect("index entry should track inserted row");
 
         assert_eq!(entry.row_id, 1);
+    }
+
+    #[test]
+    fn explicit_transaction_commit_persists_schema_rows_and_indexes_after_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let database = Database::create(&path).unwrap();
+        database.flush().unwrap();
+
+        execute_script(
+            &database,
+            "\
+BEGIN;
+CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active INT);
+INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1), (2, 'Grace', 0);
+CREATE INDEX idx_users_name ON users (name);
+COMMIT;
+",
+        );
+        std::mem::forget(database);
+
+        let reopened = Database::open(&path).unwrap();
+        let schema = reopened.table_schema_by_name("users").unwrap();
+
+        assert_eq!(schema.name, "users");
+        assert_eq!(schema.row.columns.len(), 3);
+        assert_eq!(schema.last_row_id, 2);
+        assert_name_index_entry(&reopened, "Ada", 1);
+        assert_name_index_entry(&reopened, "Grace", 2);
+    }
+
+    #[test]
+    fn explicit_transaction_rollback_discards_dml_and_ddl_but_preserves_prior_commits() {
+        let dir = tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+
+        execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active INT);")
+            .unwrap();
+        execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1);")
+            .unwrap();
+
+        execute_script(
+            &database,
+            "\
+BEGIN;
+INSERT INTO users (id, name, active) VALUES (2, 'Grace', 0);
+CREATE TABLE rolled_back (id INT PRIMARY KEY);
+CREATE INDEX idx_users_name ON users (name);
+ROLLBACK;
+",
+        );
+
+        let mut users = database.table_cursor_by_name("users").unwrap();
+        assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 1);
+        assert!(users.get(1).unwrap().is_some());
+        assert!(users.get(2).unwrap().is_none());
+        assert!(database.table_schema_by_name("rolled_back").is_err());
+        assert!(database.index_cursor_by_name("idx_users_name").is_err());
+    }
+
+    #[test]
+    fn implicit_transactions_still_commit_before_and_after_explicit_rollback() {
+        let dir = tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+
+        execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active INT);")
+            .unwrap();
+        execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1);")
+            .unwrap();
+
+        execute_script(
+            &database,
+            "\
+BEGIN;
+INSERT INTO users (id, name, active) VALUES (2, 'Grace', 0);
+ROLLBACK;
+",
+        );
+        execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (2, 'Linus', 1);")
+            .unwrap();
+
+        let mut users = database.table_cursor_by_name("users").unwrap();
+        let first = users.get(1).unwrap().expect("pre-transaction row should remain committed");
+        let second = users.get(2).unwrap().expect("post-rollback implicit insert should commit");
+
+        assert_eq!(
+            values(&first),
+            vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Integer(1)]
+        );
+        assert_eq!(
+            values(&second),
+            vec![Value::Integer(2), Value::String("Linus".to_owned()), Value::Integer(1)]
+        );
+    }
+
+    #[test]
+    fn commit_without_active_transaction_errors_and_later_implicit_statement_commits() {
+        let dir = tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+        execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active INT);")
+            .unwrap();
+        let mut session = Session::new(&database);
+
+        assert!(execute_sql_with_session(&mut session, "COMMIT;").is_err());
+        execute_sql_with_session(
+            &mut session,
+            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1);",
+        )
+        .unwrap();
+
+        let mut users = database.table_cursor_by_name("users").unwrap();
+        assert!(users.get(1).unwrap().is_some());
+    }
+
+    #[test]
+    fn failed_commit_clears_session_when_storage_transaction_was_cleared() {
+        let dir = tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+        execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active INT);")
+            .unwrap();
+        let mut session = Session::new(&database);
+
+        execute_sql_with_session(&mut session, "BEGIN;").unwrap();
+        execute_sql_with_session(
+            &mut session,
+            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1);",
+        )
+        .unwrap();
+        database.fail_next_wal_flush_for_test();
+
+        assert!(execute_sql_with_session(&mut session, "COMMIT;").is_err());
+        execute_sql_with_session(
+            &mut session,
+            "INSERT INTO users (id, name, active) VALUES (2, 'Linus', 1);",
+        )
+        .unwrap();
+
+        let mut users = database.table_cursor_by_name("users").unwrap();
+        assert!(users.get(2).unwrap().is_some());
+    }
+
+    #[test]
+    fn rollback_without_active_transaction_errors_and_later_implicit_statement_commits() {
+        let dir = tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+        execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active INT);")
+            .unwrap();
+        let mut session = Session::new(&database);
+
+        assert!(execute_sql_with_session(&mut session, "ROLLBACK;").is_err());
+        execute_sql_with_session(
+            &mut session,
+            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1);",
+        )
+        .unwrap();
+
+        let mut users = database.table_cursor_by_name("users").unwrap();
+        assert!(users.get(1).unwrap().is_some());
+    }
+
+    #[test]
+    fn nested_begin_errors_without_ending_outer_transaction() {
+        let dir = tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+        execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active INT);")
+            .unwrap();
+        let mut session = Session::new(&database);
+
+        execute_sql_with_session(&mut session, "BEGIN;").unwrap();
+        execute_sql_with_session(
+            &mut session,
+            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1);",
+        )
+        .unwrap();
+        assert!(execute_sql_with_session(&mut session, "BEGIN;").is_err());
+        execute_sql_with_session(&mut session, "ROLLBACK;").unwrap();
+
+        let mut users = database.table_cursor_by_name("users").unwrap();
+        assert!(users.get(1).unwrap().is_none());
+    }
+
+    #[test]
+    fn dropping_session_with_active_transaction_rolls_back_and_releases_database_handle() {
+        let dir = tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+        database.create_table("users", users_schema()).unwrap();
+
+        {
+            let mut session = Session::new(&database);
+            execute_sql_with_session(&mut session, "BEGIN;").unwrap();
+            execute_sql_with_session(
+                &mut session,
+                "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);",
+            )
+            .unwrap();
+        }
+
+        execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (2, 'Linus', TRUE);")
+            .unwrap();
+
+        let mut users = database.table_cursor_by_name("users").unwrap();
+        let row = users.get(1).unwrap().expect("new statement should commit after session drop");
+
+        assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 1);
+        assert_eq!(
+            values(&row),
+            vec![Value::Integer(2), Value::String("Linus".to_owned()), Value::Boolean(true)]
+        );
+        assert!(users.get(2).unwrap().is_none());
     }
 
     #[test]
@@ -1652,30 +1927,18 @@ mod tests {
         database.create_index("idx_users_name", "users", &["name"]).unwrap();
         database.flush().unwrap();
 
-        let invalid = insert_values_plan(
+        let result = execute_sql(
             &database,
-            vec![
-                bound("id", 0, DataType::Integer),
-                bound("name", 1, DataType::Text),
-                bound("active", 2, DataType::Boolean),
-            ],
-            vec![
-                vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(true)],
-                vec![
-                    Value::Integer(2),
-                    Value::String("Grace".to_owned()),
-                    Value::String("yes".to_owned()),
-                ],
-            ],
+            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', 'yes');",
         );
 
         assert!(matches!(
-            Executor::new(&database).execute(invalid),
-            Err(ExecutorError::InsertTypeMismatch {
+            result,
+            Err(DatabaseError::Executor(ExecutorError::InsertTypeMismatch {
                 column,
                 expected: DataType::Boolean,
                 actual: Value::String(value),
-            }) if column == "active" && value == "yes"
+            })) if column == "active" && value == "yes"
         ));
         std::mem::forget(database);
 
@@ -1747,14 +2010,8 @@ mod tests {
         let database = Database::create(&path).unwrap();
         database.create_table("users", users_schema()).unwrap();
         database.flush().unwrap();
-        let insert = Parser::new("INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
-            .stmt()
+        execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
             .unwrap();
-        let insert_plan = Planner::new(&database).plan_statement(&insert).unwrap();
-        {
-            let mut executor = Executor::new(&database);
-            executor.execute(insert_plan.physical).unwrap();
-        }
         std::mem::forget(database);
 
         let reopened = Database::open(&path).unwrap();
