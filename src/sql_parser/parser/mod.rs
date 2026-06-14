@@ -2,6 +2,8 @@ pub mod expr;
 pub mod op;
 pub mod stmt;
 
+use std::fmt::Display;
+
 use expr::{AggregateFunction, AggregateFunctionKind, Expression, Literal};
 use op::Op;
 use stmt::Statement;
@@ -17,11 +19,43 @@ pub struct Parser<'a> {
     lexer: Lexer<'a>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    Begin,
+    Commit,
+    Rollback,
+}
+
+impl Display for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Command::Begin => write!(f, "BEGIN;"),
+            Command::Commit => write!(f, "COMMIT;"),
+            Command::Rollback => write!(f, "ROLLBACK;"),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SqlItem<'a> {
+    Statement(Statement<'a>),
+    Command(Command),
+}
+
+impl Display for SqlItem<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SqlItem::Statement(statement) => statement.fmt(f),
+            SqlItem::Command(command) => command.fmt(f),
+        }
+    }
+}
+
 impl<'a> Iterator for Parser<'a> {
-    type Item = Result<Statement<'a>, SQLError<'a>>;
+    type Item = Result<SqlItem<'a>, SQLError<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.stmt() {
+        match self.item() {
             Err(SQLError { kind: SQLErrorKind::UnexpectedEnd, .. }) => None,
             other => Some(other),
         }
@@ -110,11 +144,37 @@ impl<'a> Parser<'a> {
             })?
     }
 
+    pub fn item(&mut self) -> Result<SqlItem<'a>, SQLError<'a>> {
+        let token = self
+            .lexer
+            .next()
+            .ok_or(SQLError { kind: SQLErrorKind::UnexpectedEnd, pos: self.lexer.position })??;
+        match token.kind {
+            TokenKind::Keyword(Keyword::Begin) => {
+                Ok(SqlItem::Command(self.parse_command(Command::Begin)?))
+            }
+            TokenKind::Keyword(Keyword::Commit) => {
+                Ok(SqlItem::Command(self.parse_command(Command::Commit)?))
+            }
+            TokenKind::Keyword(Keyword::Rollback) => {
+                Ok(SqlItem::Command(self.parse_command(Command::Rollback)?))
+            }
+            _ => self.parse_statement_from_token(token).map(SqlItem::Statement),
+        }
+    }
+
     pub fn stmt(&mut self) -> Result<Statement<'a>, SQLError<'a>> {
         let token = self
             .lexer
             .next()
             .ok_or(SQLError { kind: SQLErrorKind::UnexpectedEnd, pos: self.lexer.position })??;
+        self.parse_statement_from_token(token)
+    }
+
+    fn parse_statement_from_token(
+        &mut self,
+        token: Token<'a>,
+    ) -> Result<Statement<'a>, SQLError<'a>> {
         match token.kind {
             TokenKind::Keyword(Keyword::Explain) => Ok(Statement::Explain(Box::new(self.stmt()?))),
             TokenKind::Keyword(Keyword::Select) => {
@@ -126,6 +186,11 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Create) => self.parse_create_query(),
             other => Err(SQLError::new(SQLErrorKind::Other(other), token.offset)),
         }
+    }
+
+    fn parse_command(&mut self, command: Command) -> Result<Command, SQLError<'a>> {
+        self.lexer.expect_token(TokenKind::Semicolon)?;
+        Ok(command)
     }
 
     fn parse_create_query(&mut self) -> Result<Statement<'a>, SQLError<'a>> {

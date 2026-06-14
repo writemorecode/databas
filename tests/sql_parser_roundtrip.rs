@@ -1,4 +1,4 @@
-use databas::sql_parser::parser::{Parser, stmt::Statement};
+use databas::sql_parser::parser::{Parser, SqlItem, stmt::Statement};
 use hegel::TestCase;
 use hegel::generators as gs;
 
@@ -88,27 +88,40 @@ fn assert_round_trips(sql: &str) {
     assert_eq!(parsed, reparsed, "SQL did not round-trip: {sql}\ndisplayed as: {displayed}");
 }
 
-fn parse_statements(sql: &str) -> Vec<Statement<'_>> {
+fn parse_item(sql: &str) -> SqlItem<'_> {
+    Parser::new(sql).item().unwrap_or_else(|err| panic!("failed to parse `{sql}`: {err:?}"))
+}
+
+fn assert_item_round_trips(sql: &str) {
+    let parsed = parse_item(sql);
+    let displayed = parsed.to_string();
+    let reparsed = parse_item(&displayed);
+
+    assert_eq!(parsed, reparsed, "SQL item did not round-trip: {sql}\ndisplayed as: {displayed}");
+}
+
+fn parse_items(sql: &str) -> Vec<SqlItem<'_>> {
     Parser::new(sql)
         .collect::<Result<Vec<_>, _>>()
         .unwrap_or_else(|err| panic!("failed to parse `{sql}`: {err:?}"))
 }
 
-fn assert_statements_round_trip(sql: &str) {
-    let parsed = parse_statements(sql);
+fn assert_items_round_trip(sql: &str) {
+    let parsed = parse_items(sql);
     let displayed = parsed.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
-    let reparsed = parse_statements(&displayed);
+    let reparsed = parse_items(&displayed);
 
     assert_eq!(parsed, reparsed, "SQL did not round-trip: {sql}\ndisplayed as: {displayed}");
 }
 
 fn draw_statement(tc: &TestCase) -> String {
-    match draw_index(tc, 5) {
+    match draw_index(tc, 6) {
         0 => draw_insert(tc),
         1 => draw_select(tc),
         2 => draw_create_table(tc),
         3 => draw_create_index(tc),
         4 => draw_explain_select(tc),
+        5 => draw_transaction_control(tc),
         _ => unreachable!(),
     }
 }
@@ -205,6 +218,15 @@ fn draw_create_index(tc: &TestCase) -> String {
     format!("CREATE INDEX {index} ON {table} ({});", columns.join(", "))
 }
 
+fn draw_transaction_control(tc: &TestCase) -> String {
+    match draw_index(tc, 3) {
+        0 => "BEGIN;".to_owned(),
+        1 => "COMMIT;".to_owned(),
+        2 => "ROLLBACK;".to_owned(),
+        _ => unreachable!(),
+    }
+}
+
 #[hegel::test(test_cases = 250)]
 fn insert_queries_round_trip_through_display(tc: TestCase) {
     let sql = draw_insert(&tc);
@@ -250,12 +272,33 @@ fn create_index_queries_round_trip_through_display(tc: TestCase) {
     assert_round_trips(&sql);
 }
 
+#[test]
+fn transaction_control_queries_round_trip_through_display() {
+    assert_item_round_trips("BEGIN;");
+    assert_item_round_trips("COMMIT;");
+    assert_item_round_trips("ROLLBACK;");
+}
+
+#[test]
+fn transaction_control_queries_round_trip_in_mixed_script() {
+    assert_items_round_trip(
+        "\
+BEGIN;
+CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
+INSERT INTO users (id, name) VALUES (1, 'Ada');
+COMMIT;
+BEGIN;
+ROLLBACK;
+",
+    );
+}
+
 #[hegel::test(test_cases = 250)]
 fn multiple_queries_round_trip_through_display(tc: TestCase) {
     let sql =
         (0..draw_non_empty_len(&tc, 8)).map(|_| draw_statement(&tc)).collect::<Vec<_>>().join("\n");
     tc.note(&sql);
-    assert_statements_round_trip(&sql);
+    assert_items_round_trip(&sql);
 }
 
 #[test]

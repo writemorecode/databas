@@ -38,7 +38,7 @@ impl<'a> Parser<'a> {
 mod tests {
     use super::*;
     use crate::sql_parser::parser::{
-        Parser,
+        Parser, SqlItem,
         stmt::{Statement, lists::IdentifierList},
     };
 
@@ -53,7 +53,7 @@ mod tests {
             columns: IdentifierList(vec!["name"]),
         };
 
-        assert_eq!(Some(Ok(Statement::CreateIndex(expected))), parser.next());
+        assert_eq!(Some(Ok(SqlItem::Statement(Statement::CreateIndex(expected)))), parser.next());
     }
 
     #[test]
@@ -67,7 +67,7 @@ mod tests {
             columns: IdentifierList(vec!["customer_id", "created_at"]),
         };
 
-        assert_eq!(Some(Ok(Statement::CreateIndex(expected))), parser.next());
+        assert_eq!(Some(Ok(SqlItem::Statement(Statement::CreateIndex(expected)))), parser.next());
     }
 
     #[test]

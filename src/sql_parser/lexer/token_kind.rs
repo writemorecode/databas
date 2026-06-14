@@ -60,6 +60,9 @@ pub enum Keyword {
     Primary,
     Key,
     Nullable,
+    Begin,
+    Commit,
+    Rollback,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -111,6 +114,9 @@ impl Display for Keyword {
             Keyword::Primary => write!(f, "PRIMARY"),
             Keyword::Key => write!(f, "KEY"),
             Keyword::Nullable => write!(f, "NULLABLE"),
+            Keyword::Begin => write!(f, "BEGIN"),
+            Keyword::Commit => write!(f, "COMMIT"),
+            Keyword::Rollback => write!(f, "ROLLBACK"),
         }
     }
 }
@@ -182,6 +188,9 @@ impl<'a> From<&'a str> for TokenKind<'a> {
             "PRIMARY" => TokenKind::Keyword(Keyword::Primary),
             "KEY" => TokenKind::Keyword(Keyword::Key),
             "NULLABLE" => TokenKind::Keyword(Keyword::Nullable),
+            "BEGIN" => TokenKind::Keyword(Keyword::Begin),
+            "COMMIT" => TokenKind::Keyword(Keyword::Commit),
+            "ROLLBACK" => TokenKind::Keyword(Keyword::Rollback),
 
             _ => TokenKind::Identifier(value),
         }
