@@ -12,7 +12,7 @@ use crate::core::{
     transaction_runtime::TransactionRuntime,
 };
 
-const DEFAULT_PAGE_CACHE_SIZE: usize = 64;
+const DEFAULT_PAGE_CACHE_SIZE: usize = 16384;
 
 /// Configuration for [`crate::core::Database`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
