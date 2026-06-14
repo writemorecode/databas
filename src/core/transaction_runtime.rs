@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::core::{
     error::StorageResult, log_manager::TxnId, page_cache::PageCache,
-    storage_runtime::StorageRuntime,
+    storage_runtime::StorageRuntime, transaction_manager::TransactionSavepoint,
 };
 
 /// Transaction-facing runtime for a database file.
@@ -29,11 +29,45 @@ impl TransactionRuntime {
         self.runtime.commit_transaction(txn_id)
     }
 
+    pub(crate) fn active_transaction_id(&self) -> Option<TxnId> {
+        self.runtime.active_transaction_id()
+    }
+
+    pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
+        self.runtime.transaction_is_poisoned(txn_id)
+    }
+
+    pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
+        self.runtime.statement_savepoint(txn_id)
+    }
+
+    pub(crate) fn rollback_to_savepoint(
+        &self,
+        savepoint: TransactionSavepoint,
+    ) -> StorageResult<()> {
+        let undo_pages = self.runtime.rollback_to_savepoint(savepoint)?;
+        if let Err(err) = self.page_cache.restore_rollback_pages(undo_pages) {
+            self.runtime.record_transaction_failure();
+            return Err(err.into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
         let undo_pages = self.runtime.take_rollback_pages(txn_id)?;
         self.page_cache.restore_rollback_pages(undo_pages)?;
         self.page_cache.flush_all()?;
         self.runtime.sync_database_file()?;
         self.runtime.finish_rollback(txn_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_next_lsn_exhausted_for_test(&self) {
+        self.runtime.force_next_lsn_exhausted_for_test();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_wal_flush_for_test(&self) {
+        self.runtime.fail_next_wal_flush_for_test();
     }
 }

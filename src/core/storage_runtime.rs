@@ -6,7 +6,7 @@ use crate::core::{
     error::{DiskManagerError, StorageResult},
     log_manager::{LogManager, LogManagerError, LogManagerFlushError, LogRecord, Lsn, TxnId},
     recovery::recover_from_wal,
-    transaction_manager::{LoggedPageUpdate, PageUndo, TransactionManager},
+    transaction_manager::{LoggedPageUpdate, PageUndo, TransactionManager, TransactionSavepoint},
 };
 
 /// Shared concrete storage runtime for database pages and the write-ahead log.
@@ -87,6 +87,11 @@ impl StorageRuntime {
         self.log.borrow_mut().force_next_lsn_exhausted_for_test();
     }
 
+    #[cfg(test)]
+    pub(crate) fn fail_next_wal_flush_for_test(&self) {
+        self.log.borrow_mut().fail_next_flush_for_test();
+    }
+
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
         self.transactions.borrow_mut().begin(&mut self.log.borrow_mut())
     }
@@ -113,8 +118,27 @@ impl StorageRuntime {
         self.transactions.borrow_mut().record_failure();
     }
 
+    pub(crate) fn active_transaction_id(&self) -> Option<TxnId> {
+        self.transactions.borrow().active_transaction_id()
+    }
+
+    pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
+        self.transactions.borrow().transaction_is_poisoned(txn_id)
+    }
+
     pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
         self.transactions.borrow_mut().commit(&mut self.log.borrow_mut(), txn_id)
+    }
+
+    pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
+        self.transactions.borrow().statement_savepoint(txn_id)
+    }
+
+    pub(crate) fn rollback_to_savepoint(
+        &self,
+        savepoint: TransactionSavepoint,
+    ) -> StorageResult<Vec<PageUndo>> {
+        self.transactions.borrow_mut().rollback_to_savepoint(&mut self.log.borrow_mut(), savepoint)
     }
 
     pub(crate) fn take_rollback_pages(&self, txn_id: TxnId) -> StorageResult<Vec<PageUndo>> {
