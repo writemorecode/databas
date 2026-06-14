@@ -63,6 +63,28 @@ impl TreeCursor {
         Ok(children)
     }
 
+    /// Reads one child page id from an interior page in logical left-to-right order.
+    pub(super) fn read_interior_child_page_id(
+        &self,
+        page_id: PageId,
+        child_index: usize,
+    ) -> StorageResult<PageId> {
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let page = pin.read()?;
+        let interior = page.open::<Interior>()?;
+        let slot_count = interior.slot_count();
+        if child_index > slot_count as usize {
+            let slot_index = child_index.try_into().unwrap_or(u16::MAX);
+            return Err(PageError::InvalidSlotIndex { slot_index, slot_count }.into());
+        }
+        if child_index == slot_count as usize {
+            return Ok(interior.rightmost_child());
+        }
+
+        let (left_child, _, _, _) = interior.cell_payload_parts(child_index as u16)?;
+        Ok(left_child)
+    }
+
     /// Returns whether `child_page_id` is still linked from `parent_page_id`.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn interior_page_has_child(
@@ -842,13 +864,14 @@ impl TreeCursor {
 
         let mut child_index = 0;
         loop {
-            let child_page_ids = self.read_interior_child_page_ids(page_id)?;
-            let Some(&child_page_id) = child_page_ids.get(child_index) else {
+            let child_count = self.raw_interior_slot_count(page_id)? as usize + 1;
+            if child_index >= child_count {
                 break;
-            };
+            }
+            let child_page_id = self.read_interior_child_page_id(page_id, child_index)?;
 
             if let Some(pending) = self.refresh_subtree_separators_once(child_page_id)? {
-                let child_ref = if child_index + 1 == child_page_ids.len() {
+                let child_ref = if child_index + 1 == child_count {
                     ChildSlotRef::Rightmost
                 } else {
                     ChildSlotRef::Slot(child_index as u16)
