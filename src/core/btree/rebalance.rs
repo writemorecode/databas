@@ -1,4 +1,4 @@
-use super::payload::{read_interior_cell, read_leaf_cell};
+use super::payload::{materialize_key, read_interior_cell};
 use super::root::read_page_kind;
 use super::*;
 
@@ -25,17 +25,6 @@ impl TreeCursor {
         Ok((interior.prev_page_id(), interior.next_page_id()))
     }
 
-    /// Materializes all leaf cells in slot order for rebalance planning.
-    pub(super) fn read_leaf_cells(&self, page_id: PageId) -> StorageResult<Vec<LeafSplitCell>> {
-        let slot_count = self.raw_leaf_slot_count(page_id)?;
-        let mut cells = Vec::with_capacity(slot_count as usize);
-        for slot_index in 0..slot_count {
-            let (key, value) = read_leaf_cell(&self.page_cache, page_id, slot_index)?;
-            cells.push(LeafSplitCell { key, value });
-        }
-        Ok(cells)
-    }
-
     /// Returns the largest key in a leaf page, or `None` when the page is empty.
     pub(super) fn read_leaf_max_key(&self, page_id: PageId) -> StorageResult<Option<Vec<u8>>> {
         let slot_count = self.raw_leaf_slot_count(page_id)?;
@@ -43,7 +32,23 @@ impl TreeCursor {
             return Ok(None);
         }
 
-        read_leaf_cell(&self.page_cache, page_id, slot_count - 1).map(|(key, _)| Some(key))
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let key = {
+            let page = pin.read()?;
+            let leaf = page.open::<Leaf>()?;
+            let (key_len, _, first_overflow_page_id, inline_range) =
+                leaf.cell_payload_parts(slot_count - 1)?;
+            materialize_key(
+                &self.page_cache,
+                page_id,
+                &page.page()[inline_range],
+                first_overflow_page_id,
+                key_len,
+            )?
+        };
+        drop(pin);
+
+        Ok(Some(key))
     }
 
     /// Reads child page ids from an interior page in logical left-to-right order.
@@ -170,7 +175,7 @@ impl TreeCursor {
     pub(super) fn rewrite_leaf_page(
         &self,
         page_id: PageId,
-        cells: &[LeafSplitCell],
+        cells: &[LeafSplitCell<'_>],
         prev_page_id: Option<PageId>,
         next_page_id: Option<PageId>,
     ) -> StorageResult<()> {
@@ -300,7 +305,7 @@ impl TreeCursor {
     }
 
     /// Returns whether a leaf rebuilt from `cells` would be underoccupied.
-    pub(super) fn leaf_cells_underoccupied(cells: &[LeafSplitCell]) -> bool {
+    pub(super) fn leaf_cells_underoccupied(cells: &[LeafSplitCell<'_>]) -> bool {
         let occupied_variable_bytes = cells.len() * page::format::SLOT_ENTRY_SIZE
             + cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
         let usable_variable_bytes =
@@ -309,7 +314,7 @@ impl TreeCursor {
     }
 
     /// Chooses a split index that keeps both leaf siblings fit and occupied.
-    pub(super) fn choose_leaf_rebalance_split(cells: &[LeafSplitCell]) -> Option<usize> {
+    pub(super) fn choose_leaf_rebalance_split(cells: &[LeafSplitCell<'_>]) -> Option<usize> {
         let total_cell_len = cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
         let mut left_cell_len = 0;
         let mut best = None;
@@ -335,7 +340,7 @@ impl TreeCursor {
     }
 
     /// Chooses a split index that keeps both leaf siblings within page capacity.
-    pub(super) fn choose_leaf_fitting_split(cells: &[LeafSplitCell]) -> Option<usize> {
+    pub(super) fn choose_leaf_fitting_split(cells: &[LeafSplitCell<'_>]) -> Option<usize> {
         let total_cell_len = cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
         let mut left_cell_len = 0;
         let mut best = None;
@@ -483,7 +488,7 @@ impl TreeCursor {
         &self,
         left_page_id: PageId,
         right_page_id: PageId,
-        cells: &[LeafSplitCell],
+        cells: &[LeafSplitCell<'_>],
         split_index: usize,
     ) -> StorageResult<()> {
         let (left_prev_page_id, _) = self.read_leaf_page_links(left_page_id)?;
@@ -507,7 +512,7 @@ impl TreeCursor {
         &self,
         survivor_page_id: PageId,
         removed_page_id: PageId,
-        cells: &[LeafSplitCell],
+        cells: &[LeafSplitCell<'_>],
     ) -> StorageResult<()> {
         let (survivor_prev_page_id, _) = self.read_leaf_page_links(survivor_page_id)?;
         let (_, removed_next_page_id) = self.read_leaf_page_links(removed_page_id)?;
@@ -523,7 +528,7 @@ impl TreeCursor {
         Ok(())
     }
 
-    pub(super) fn sort_leaf_cells(cells: &mut [LeafSplitCell]) {
+    pub(super) fn sort_leaf_cells(cells: &mut [LeafSplitCell<'_>]) {
         cells.sort_by(|left, right| left.key().cmp(right.key()));
     }
 
@@ -540,9 +545,14 @@ impl TreeCursor {
 
         if child_index > 0 {
             let left_page_id = parent_children[child_index - 1];
-            let mut cells = self.read_leaf_cells(left_page_id)?;
-            cells.extend(self.read_leaf_cells(leaf_page_id)?);
-            Self::sort_leaf_cells(&mut cells);
+            let mut left_snapshot = [0; PAGE_SIZE];
+            let mut leaf_snapshot = [0; PAGE_SIZE];
+            let cells = self.snapshot_leaf_pair_cells_sorted(
+                left_page_id,
+                &mut left_snapshot,
+                leaf_page_id,
+                &mut leaf_snapshot,
+            )?;
             if let Some(split_index) = Self::choose_leaf_rebalance_split(&cells) {
                 self.redistribute_leaf_pair(left_page_id, leaf_page_id, &cells, split_index)?;
                 return Ok(false);
@@ -551,9 +561,14 @@ impl TreeCursor {
 
         if child_index + 1 < parent_children.len() {
             let right_page_id = parent_children[child_index + 1];
-            let mut cells = self.read_leaf_cells(leaf_page_id)?;
-            cells.extend(self.read_leaf_cells(right_page_id)?);
-            Self::sort_leaf_cells(&mut cells);
+            let mut leaf_snapshot = [0; PAGE_SIZE];
+            let mut right_snapshot = [0; PAGE_SIZE];
+            let cells = self.snapshot_leaf_pair_cells_sorted(
+                leaf_page_id,
+                &mut leaf_snapshot,
+                right_page_id,
+                &mut right_snapshot,
+            )?;
             if let Some(split_index) = Self::choose_leaf_rebalance_split(&cells) {
                 self.redistribute_leaf_pair(leaf_page_id, right_page_id, &cells, split_index)?;
                 return Ok(false);
@@ -562,9 +577,14 @@ impl TreeCursor {
 
         if child_index > 0 {
             let left_page_id = parent_children[child_index - 1];
-            let mut cells = self.read_leaf_cells(left_page_id)?;
-            cells.extend(self.read_leaf_cells(leaf_page_id)?);
-            Self::sort_leaf_cells(&mut cells);
+            let mut left_snapshot = [0; PAGE_SIZE];
+            let mut leaf_snapshot = [0; PAGE_SIZE];
+            let cells = self.snapshot_leaf_pair_cells_sorted(
+                left_page_id,
+                &mut left_snapshot,
+                leaf_page_id,
+                &mut leaf_snapshot,
+            )?;
             if Self::leaf_cells_fit(&cells) {
                 self.merge_leaf_pages(left_page_id, leaf_page_id, &cells)?;
                 self.remove_child_from_parent(parent_page_id, leaf_page_id)?;
@@ -579,9 +599,14 @@ impl TreeCursor {
 
         if child_index + 1 < parent_children.len() {
             let right_page_id = parent_children[child_index + 1];
-            let mut cells = self.read_leaf_cells(leaf_page_id)?;
-            cells.extend(self.read_leaf_cells(right_page_id)?);
-            Self::sort_leaf_cells(&mut cells);
+            let mut leaf_snapshot = [0; PAGE_SIZE];
+            let mut right_snapshot = [0; PAGE_SIZE];
+            let cells = self.snapshot_leaf_pair_cells_sorted(
+                leaf_page_id,
+                &mut leaf_snapshot,
+                right_page_id,
+                &mut right_snapshot,
+            )?;
             if Self::leaf_cells_fit(&cells) {
                 self.merge_leaf_pages(leaf_page_id, right_page_id, &cells)?;
                 self.remove_child_from_parent(parent_page_id, right_page_id)?;

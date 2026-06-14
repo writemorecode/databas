@@ -473,6 +473,53 @@ fn unchanged_path_separator_refresh_does_not_grow_file() {
 }
 
 #[test]
+fn snapshot_leaf_cells_borrow_inline_payload() {
+    let mut cursor = temp_tree_cursor(8);
+
+    cursor.insert(b"alpha", b"value").unwrap();
+
+    let page_id = cursor.leaf_page_for_key(b"alpha").unwrap();
+    let mut snapshot_bytes = [0; PAGE_SIZE];
+    let cells = cursor.snapshot_leaf_cells(page_id, &mut snapshot_bytes).unwrap();
+
+    assert_eq!(cells.len(), 1);
+    assert_eq!(cells[0].key(), b"alpha");
+    assert_eq!(cells[0].value(), b"value");
+    assert_eq!(TreeCursor::leaf_cell_storage_is_borrowed_for_test(&cells[0]), (true, true));
+}
+
+#[test]
+fn snapshot_leaf_cells_own_overflow_payload() {
+    let mut cursor = temp_tree_cursor(8);
+    let value = vec![42; PAGE_SIZE];
+
+    cursor.insert(b"alpha", &value).unwrap();
+
+    let page_id = cursor.leaf_page_for_key(b"alpha").unwrap();
+    let mut snapshot_bytes = [0; PAGE_SIZE];
+    let cells = cursor.snapshot_leaf_cells(page_id, &mut snapshot_bytes).unwrap();
+
+    assert_eq!(cells.len(), 1);
+    assert_eq!(cells[0].key(), b"alpha");
+    assert_eq!(cells[0].value(), value.as_slice());
+    assert_eq!(TreeCursor::leaf_cell_storage_is_owned_for_test(&cells[0]), (true, true));
+}
+
+#[test]
+fn read_leaf_max_key_copies_only_inline_key() {
+    let mut cursor = temp_tree_cursor(8);
+    let value = vec![7; MAX_INLINE_OVERFLOW_PAYLOAD_BYTES - b"bravo".len()];
+
+    cursor.insert(b"alpha", b"small").unwrap();
+    cursor.insert(b"bravo", &value).unwrap();
+
+    let page_id = cursor.leaf_page_for_key(b"bravo").unwrap();
+    let max_key = cursor.read_leaf_max_key(page_id).unwrap();
+
+    assert_eq!(max_key.as_deref(), Some(b"bravo".as_slice()));
+}
+
+#[test]
 fn inline_record_is_page_resident() {
     let mut cursor = temp_tree_cursor(4);
 

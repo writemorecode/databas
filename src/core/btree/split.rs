@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use super::payload::{cell_corruption, materialize_payload};
 use super::root::read_page_kind;
 use super::*;
@@ -82,7 +84,7 @@ impl TreeCursor {
     }
 
     /// Returns whether the provided leaf cells fit into one leaf page.
-    pub(super) fn leaf_cells_fit(cells: &[LeafSplitCell]) -> bool {
+    pub(super) fn leaf_cells_fit(cells: &[LeafSplitCell<'_>]) -> bool {
         let used_bytes = PageKind::RawLeaf.header_size()
             + cells.len() * page::format::SLOT_ENTRY_SIZE
             + cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
@@ -90,7 +92,7 @@ impl TreeCursor {
     }
 
     /// Chooses the leaf split point with the smallest byte imbalance.
-    pub(super) fn choose_leaf_split_index(cells: &[LeafSplitCell]) -> StorageResult<usize> {
+    pub(super) fn choose_leaf_split_index(cells: &[LeafSplitCell<'_>]) -> StorageResult<usize> {
         debug_assert!(cells.len() >= 2, "leaf splits need at least two cells");
 
         let total_cell_len = cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
@@ -130,31 +132,105 @@ impl TreeCursor {
         }
     }
 
-    /// Materializes all leaf cells from a stable page snapshot.
-    pub(super) fn read_leaf_cells_from_snapshot(
+    /// Reads all leaf cells from a stable page snapshot.
+    pub(super) fn read_leaf_cells_from_snapshot<'a>(
         &self,
         leaf_page_id: PageId,
-        leaf_snapshot_bytes: &[u8; PAGE_SIZE],
+        leaf_snapshot_bytes: &'a [u8; PAGE_SIZE],
         leaf_snapshot: &RawLeaf<Read<'_>>,
-    ) -> StorageResult<Vec<LeafSplitCell>> {
+    ) -> StorageResult<Vec<LeafSplitCell<'a>>> {
         let mut cells = Vec::with_capacity(leaf_snapshot.slot_count() as usize);
         for slot_index in 0..leaf_snapshot.slot_count() {
             let (key_len, value_len, first_overflow_page_id, inline_range) =
                 leaf_snapshot.cell_payload_parts(slot_index)?;
-            let mut payload = materialize_payload(
-                &self.page_cache,
-                leaf_page_id,
-                &leaf_snapshot_bytes[inline_range],
-                first_overflow_page_id,
-                key_len + value_len,
-            )?;
-            if payload.len() < key_len {
-                return Err(cell_corruption(leaf_page_id, CorruptionKind::CellLengthOutOfBounds));
-            }
-            let value = payload.split_off(key_len);
-            cells.push(LeafSplitCell { key: payload, value });
+            let inline_payload = &leaf_snapshot_bytes[inline_range];
+            let cell = match first_overflow_page_id {
+                None => {
+                    if inline_payload.len() != key_len + value_len {
+                        return Err(cell_corruption(
+                            leaf_page_id,
+                            CorruptionKind::CellLengthOutOfBounds,
+                        ));
+                    }
+                    let (key, value) = inline_payload.split_at(key_len);
+                    LeafSplitCell::borrowed(key, value)
+                }
+                Some(_) => {
+                    let mut payload = materialize_payload(
+                        &self.page_cache,
+                        leaf_page_id,
+                        inline_payload,
+                        first_overflow_page_id,
+                        key_len + value_len,
+                    )?;
+                    if payload.len() < key_len {
+                        return Err(cell_corruption(
+                            leaf_page_id,
+                            CorruptionKind::CellLengthOutOfBounds,
+                        ));
+                    }
+                    let value = payload.split_off(key_len);
+                    LeafSplitCell::owned(payload, value)
+                }
+            };
+            cells.push(cell);
         }
         Ok(cells)
+    }
+
+    pub(super) fn snapshot_leaf_cells<'a>(
+        &self,
+        page_id: PageId,
+        snapshot_bytes: &'a mut [u8; PAGE_SIZE],
+    ) -> StorageResult<Vec<LeafSplitCell<'a>>> {
+        let pin = self.page_cache.fetch_page(page_id)?;
+        {
+            let page = pin.read()?;
+            *snapshot_bytes = *page.page();
+        }
+        drop(pin);
+
+        let snapshot = RawLeaf::<Read<'_>>::open(snapshot_bytes)?;
+        self.read_leaf_cells_from_snapshot(page_id, snapshot_bytes, &snapshot)
+    }
+
+    pub(super) fn snapshot_leaf_pair_cells<'a>(
+        &self,
+        first_page_id: PageId,
+        first_snapshot_bytes: &'a mut [u8; PAGE_SIZE],
+        second_page_id: PageId,
+        second_snapshot_bytes: &'a mut [u8; PAGE_SIZE],
+    ) -> StorageResult<Vec<LeafSplitCell<'a>>> {
+        let mut cells = self.snapshot_leaf_cells(first_page_id, first_snapshot_bytes)?;
+        cells.extend(self.snapshot_leaf_cells(second_page_id, second_snapshot_bytes)?);
+        Ok(cells)
+    }
+
+    pub(super) fn snapshot_leaf_pair_cells_sorted<'a>(
+        &self,
+        first_page_id: PageId,
+        first_snapshot_bytes: &'a mut [u8; PAGE_SIZE],
+        second_page_id: PageId,
+        second_snapshot_bytes: &'a mut [u8; PAGE_SIZE],
+    ) -> StorageResult<Vec<LeafSplitCell<'a>>> {
+        let mut cells = self.snapshot_leaf_pair_cells(
+            first_page_id,
+            first_snapshot_bytes,
+            second_page_id,
+            second_snapshot_bytes,
+        )?;
+        Self::sort_leaf_cells(&mut cells);
+        Ok(cells)
+    }
+
+    #[cfg(test)]
+    pub(super) fn leaf_cell_storage_is_borrowed_for_test(cell: &LeafSplitCell<'_>) -> (bool, bool) {
+        (matches!(cell.key, Cow::Borrowed(_)), matches!(cell.value, Cow::Borrowed(_)))
+    }
+
+    #[cfg(test)]
+    pub(super) fn leaf_cell_storage_is_owned_for_test(cell: &LeafSplitCell<'_>) -> (bool, bool) {
+        (matches!(cell.key, Cow::Owned(_)), matches!(cell.value, Cow::Owned(_)))
     }
 
     /// Rebuilds a split leaf pair from ordered materialized cells.
@@ -164,7 +240,7 @@ impl TreeCursor {
         leaf_guard: &mut PageWriteGuard<'_>,
         prev_page_id: Option<PageId>,
         next_page_id: Option<PageId>,
-        cells: &[LeafSplitCell],
+        cells: &[LeafSplitCell<'_>],
         target_key: &[u8],
     ) -> StorageResult<PendingSplit> {
         let split_index = Self::choose_leaf_split_index(cells)?;
@@ -231,7 +307,7 @@ impl TreeCursor {
             Ok(_) => return Err(PageError::DuplicateKey.into()),
             Err(insert_index) => insert_index,
         };
-        cells.insert(idx, LeafSplitCell { key: key.to_vec(), value: value.to_vec() });
+        cells.insert(idx, LeafSplitCell::owned(key.to_vec(), value.to_vec()));
 
         self.split_leaf_cells(leaf_page_id, leaf_guard, prev_page_id, next_page_id, &cells, key)
     }
@@ -254,8 +330,8 @@ impl TreeCursor {
         let target = cells
             .get_mut(slot_index as usize)
             .ok_or_else(|| cell_corruption(leaf_page_id, CorruptionKind::CellLengthOutOfBounds))?;
-        target.value = value.to_vec();
-        let target_key = target.key.clone();
+        target.value = Cow::Owned(value.to_vec());
+        let target_key = target.key().to_vec();
 
         self.split_leaf_cells(
             leaf_page_id,
