@@ -4,13 +4,7 @@ use std::{
     process,
 };
 
-use databas::{
-    core::Database,
-    error::DatabaseError,
-    executor::{ExecutionOutput, Executor},
-    planner::Planner,
-    sql_parser::parser::Parser,
-};
+use databas::{core::Database, error::DatabaseError, executor::ExecutionOutput, session::Session};
 
 pub fn run() -> Result<(), DatabaseError<'static>> {
     let mut args = env::args();
@@ -69,8 +63,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Cli, ()> {
 }
 
 fn run_repl(db: Database) -> Result<(), DatabaseError<'static>> {
-    let planner = Planner::new(&db);
-    let mut executor = Executor::new(&db);
+    let mut session = Session::new(&db);
 
     println!("Databas");
 
@@ -92,7 +85,7 @@ fn run_repl(db: Database) -> Result<(), DatabaseError<'static>> {
             break;
         }
         let timer = std::time::Instant::now();
-        let exec_res = execute_query(buf, &planner, &mut executor);
+        let exec_res = session.execute_sql(buf);
         match exec_res {
             Ok(output) => {
                 let mut stdout = stdout();
@@ -114,10 +107,9 @@ fn run_repl(db: Database) -> Result<(), DatabaseError<'static>> {
 
 fn run_command(db: Database, command: String) -> Result<(), DatabaseError<'static>> {
     let command = command_with_trailing_semicolon(command);
-    let planner = Planner::new(&db);
-    let mut executor = Executor::new(&db);
+    let mut session = Session::new(&db);
 
-    match execute_query(&command, &planner, &mut executor) {
+    match session.execute_sql(&command) {
         Ok(output) => {
             let mut stdout = stdout();
             if let Err(err) = write_execution_output(output, &mut stdout) {
@@ -145,17 +137,6 @@ fn command_with_trailing_semicolon(mut command: String) -> String {
         command.push(';');
     }
     command
-}
-
-fn execute_query<'a>(
-    query: &'a str,
-    planner: &Planner<'_>,
-    executor: &mut Executor<'_>,
-) -> Result<ExecutionOutput, DatabaseError<'a>> {
-    let query = Parser::new(query).stmt()?;
-    let plan = planner.plan_statement(&query)?;
-    let output = executor.execute(plan.physical)?;
-    Ok(output)
 }
 
 fn write_execution_output(
