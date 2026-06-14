@@ -4,7 +4,7 @@
 //! only with raw byte keys and raw byte values stored in `RawLeaf` pages
 //! and separator byte keys stored in `RawInterior` pages.
 
-use std::{cell::Cell, cmp::Ordering, rc::Rc};
+use std::{borrow::Cow, cell::Cell, cmp::Ordering, rc::Rc};
 
 use crate::core::{
     PAGE_SIZE, PageId,
@@ -98,9 +98,9 @@ struct PendingSplit {
 
 /// Temporary description of one leaf cell while rebuilding split pages.
 #[derive(Debug, Clone)]
-struct LeafSplitCell {
-    key: Vec<u8>,
-    value: Vec<u8>,
+struct LeafSplitCell<'a> {
+    key: Cow<'a, [u8]>,
+    value: Cow<'a, [u8]>,
 }
 
 /// Child pointer plus the maximum key reachable through that child.
@@ -110,7 +110,15 @@ struct ChildEntry {
     max_key: Option<Vec<u8>>,
 }
 
-impl LeafSplitCell {
+impl<'a> LeafSplitCell<'a> {
+    fn borrowed(key: &'a [u8], value: &'a [u8]) -> Self {
+        Self { key: Cow::Borrowed(key), value: Cow::Borrowed(value) }
+    }
+
+    fn owned(key: Vec<u8>, value: Vec<u8>) -> Self {
+        Self { key: Cow::Owned(key), value: Cow::Owned(value) }
+    }
+
     /// Returns the key length this cell will occupy after the split.
     fn key_len(&self) -> usize {
         self.key.len()
@@ -128,12 +136,12 @@ impl LeafSplitCell {
 
     /// Returns the key bytes from either the page snapshot or owned storage.
     fn key(&self) -> &[u8] {
-        &self.key
+        self.key.as_ref()
     }
 
     /// Returns the value bytes from either the page snapshot or owned storage.
     fn value(&self) -> &[u8] {
-        &self.value
+        self.value.as_ref()
     }
 }
 

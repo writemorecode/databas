@@ -120,6 +120,50 @@ fn append_overflow_chain_exact(
     Ok(())
 }
 
+fn append_overflow_prefix(
+    page_cache: &PageCache,
+    first_overflow_page_id: PageId,
+    payload: &mut Vec<u8>,
+    total_payload_len: usize,
+) -> StorageResult<()> {
+    let initial_len = payload.len();
+    let expected_overflow_len = total_payload_len - initial_len;
+    let mut page_id = Some(first_overflow_page_id);
+
+    while payload.len() < total_payload_len {
+        let Some(current_page_id) = page_id else {
+            return Err(overflow_corruption(
+                None,
+                CorruptionKind::OverflowChainTooShort {
+                    expected: expected_overflow_len,
+                    actual: payload.len() - initial_len,
+                },
+            ));
+        };
+
+        if current_page_id == NO_OVERFLOW_PAGE_ID {
+            return Err(overflow_corruption(
+                Some(current_page_id),
+                CorruptionKind::OverflowChainTooShort {
+                    expected: expected_overflow_len,
+                    actual: payload.len() - initial_len,
+                },
+            ));
+        }
+
+        let pin = page_cache.fetch_page(current_page_id)?;
+        let page = pin.read()?;
+        let remaining = total_payload_len - payload.len();
+        let take = remaining.min(overflow::OVERFLOW_PAYLOAD_SIZE);
+        payload.extend_from_slice(
+            &page.page()[OVERFLOW_NEXT_PAGE_ID_SIZE..OVERFLOW_NEXT_PAGE_ID_SIZE + take],
+        );
+        page_id = read_overflow_next_page_id(page.page());
+    }
+
+    Ok(())
+}
+
 pub(super) fn materialize_payload(
     page_cache: &PageCache,
     page_id: PageId,
@@ -152,6 +196,31 @@ pub(super) fn materialize_payload(
     Ok(payload)
 }
 
+pub(super) fn materialize_key(
+    page_cache: &PageCache,
+    page_id: PageId,
+    inline_payload: &[u8],
+    first_overflow_page_id: Option<PageId>,
+    key_len: usize,
+) -> StorageResult<Vec<u8>> {
+    let inline_key_len = key_len.min(inline_payload.len());
+    let mut key = Vec::with_capacity(key_len);
+    key.extend_from_slice(&inline_payload[..inline_key_len]);
+
+    if key.len() == key_len {
+        return Ok(key);
+    }
+
+    let first_overflow_page_id = first_overflow_page_id
+        .ok_or_else(|| cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds))?;
+    append_overflow_prefix(page_cache, first_overflow_page_id, &mut key, key_len)?;
+
+    if key.len() != key_len {
+        return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
+    }
+    Ok(key)
+}
+
 pub(super) fn materialize_leaf_cell(
     page_cache: &PageCache,
     page_id: PageId,
@@ -173,34 +242,6 @@ pub(super) fn materialize_leaf_cell(
 
     let value = payload.split_off(key_len);
     Ok((payload.into_boxed_slice(), value.into_boxed_slice()))
-}
-
-pub(super) fn read_leaf_cell(
-    page_cache: &PageCache,
-    page_id: PageId,
-    slot_index: u16,
-) -> StorageResult<(Vec<u8>, Vec<u8>)> {
-    let pin = page_cache.fetch_page(page_id)?;
-    let payload = {
-        let page = pin.read()?;
-        let leaf = page.open::<Leaf>()?;
-        let (key_len, value_len, first_overflow_page_id, inline_range) =
-            leaf.cell_payload_parts(slot_index)?;
-        let mut payload = materialize_payload(
-            page_cache,
-            page_id,
-            &page.page()[inline_range],
-            first_overflow_page_id,
-            key_len + value_len,
-        )?;
-        if payload.len() < key_len {
-            return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
-        }
-        let value = payload.split_off(key_len);
-        (payload, value)
-    };
-    drop(pin);
-    Ok(payload)
 }
 
 pub(super) fn read_interior_cell(
