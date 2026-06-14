@@ -59,7 +59,7 @@ impl<'a> Parser<'a> {
 mod tests {
     use super::*;
     use crate::sql_parser::parser::{
-        Parser,
+        Parser, SqlItem,
         expr::{Expression, Literal},
         stmt::{
             Statement,
@@ -88,6 +88,6 @@ mod tests {
                 ]),
             ]),
         };
-        assert_eq!(Some(Ok(Statement::Insert(expected))), got);
+        assert_eq!(Some(Ok(SqlItem::Statement(Statement::Insert(expected)))), got);
     }
 }
