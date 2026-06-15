@@ -120,7 +120,7 @@ fn append_overflow_chain_exact(
     Ok(())
 }
 
-fn append_overflow_prefix(
+pub(super) fn append_overflow_prefix(
     page_cache: &PageCache,
     first_overflow_page_id: PageId,
     payload: &mut Vec<u8>,
@@ -196,31 +196,6 @@ pub(super) fn materialize_payload(
     Ok(payload)
 }
 
-pub(super) fn materialize_key(
-    page_cache: &PageCache,
-    page_id: PageId,
-    inline_payload: &[u8],
-    first_overflow_page_id: Option<PageId>,
-    key_len: usize,
-) -> StorageResult<Vec<u8>> {
-    let inline_key_len = key_len.min(inline_payload.len());
-    let mut key = Vec::with_capacity(key_len);
-    key.extend_from_slice(&inline_payload[..inline_key_len]);
-
-    if key.len() == key_len {
-        return Ok(key);
-    }
-
-    let first_overflow_page_id = first_overflow_page_id
-        .ok_or_else(|| cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds))?;
-    append_overflow_prefix(page_cache, first_overflow_page_id, &mut key, key_len)?;
-
-    if key.len() != key_len {
-        return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
-    }
-    Ok(key)
-}
-
 pub(super) fn materialize_leaf_cell(
     page_cache: &PageCache,
     page_id: PageId,
@@ -242,31 +217,6 @@ pub(super) fn materialize_leaf_cell(
 
     let value = payload.split_off(key_len);
     Ok((payload.into_boxed_slice(), value.into_boxed_slice()))
-}
-
-pub(super) fn read_interior_cell(
-    page_cache: &PageCache,
-    page_id: PageId,
-    slot_index: u16,
-) -> StorageResult<(PageId, Vec<u8>)> {
-    let pin = page_cache.fetch_page(page_id)?;
-    let (left_child, key) = {
-        let page = pin.read()?;
-        let interior = page.open::<Interior>()?;
-        let (left_child, key_len, first_overflow_page_id, inline_range) =
-            interior.cell_payload_parts(slot_index)?;
-        let key = materialize_payload(
-            page_cache,
-            page_id,
-            &page.page()[inline_range],
-            first_overflow_page_id,
-            key_len,
-        )?;
-        (left_child, key)
-    };
-    drop(pin);
-
-    Ok((left_child, key))
 }
 
 pub(super) fn compare_key_prefix(

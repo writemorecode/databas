@@ -1,4 +1,4 @@
-use super::payload::{materialize_key, read_interior_cell};
+use super::payload::{append_overflow_prefix, cell_corruption};
 use super::root::read_page_kind;
 use super::*;
 
@@ -27,28 +27,94 @@ impl TreeCursor {
 
     /// Returns the largest key in a leaf page, or `None` when the page is empty.
     pub(super) fn read_leaf_max_key(&self, page_id: PageId) -> StorageResult<Option<Vec<u8>>> {
-        let slot_count = self.raw_leaf_slot_count(page_id)?;
-        if slot_count == 0 {
-            return Ok(None);
-        }
-
         let pin = self.page_cache.fetch_page(page_id)?;
         let key = {
             let page = pin.read()?;
             let leaf = page.open::<Leaf>()?;
+            let slot_count = leaf.slot_count();
+            if slot_count == 0 {
+                return Ok(None);
+            }
+
             let (key_len, _, first_overflow_page_id, inline_range) =
                 leaf.cell_payload_parts(slot_count - 1)?;
-            materialize_key(
-                &self.page_cache,
-                page_id,
-                &page.page()[inline_range],
-                first_overflow_page_id,
-                key_len,
-            )?
+            let inline_payload = &page.page()[inline_range];
+            let inline_key_len = key_len.min(inline_payload.len());
+            let mut key = Vec::with_capacity(key_len);
+            key.extend_from_slice(&inline_payload[..inline_key_len]);
+            if key.len() < key_len {
+                let first_overflow_page_id = first_overflow_page_id.ok_or_else(|| {
+                    cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds)
+                })?;
+                append_overflow_prefix(
+                    &self.page_cache,
+                    first_overflow_page_id,
+                    &mut key,
+                    key_len,
+                )?;
+                if key.len() != key_len {
+                    return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
+                }
+            }
+            key
         };
         drop(pin);
 
         Ok(Some(key))
+    }
+
+    /// Executes `f` with the largest key reachable from the subtree rooted at `page_id`.
+    ///
+    /// Inline leaf keys are borrowed from the page for the duration of `f`; keys
+    /// that cross into overflow are materialized before the callback.
+    pub(super) fn with_subtree_max_key<R>(
+        &self,
+        page_id: PageId,
+        f: impl FnOnce(Option<&[u8]>) -> StorageResult<R>,
+    ) -> StorageResult<R> {
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let page = pin.read()?;
+        match read_page_kind(page.page(), page_id)? {
+            PageKind::RawLeaf => {
+                let leaf = page.open::<Leaf>()?;
+                let slot_count = leaf.slot_count();
+                if slot_count == 0 {
+                    return f(None);
+                }
+
+                let (key_len, _, first_overflow_page_id, inline_range) =
+                    leaf.cell_payload_parts(slot_count - 1)?;
+                let inline_payload = &page.page()[inline_range];
+                let inline_key_len = key_len.min(inline_payload.len());
+                if inline_key_len == key_len {
+                    return f(Some(&inline_payload[..inline_key_len]));
+                }
+
+                let mut key = Vec::with_capacity(key_len);
+                key.extend_from_slice(&inline_payload[..inline_key_len]);
+                let first_overflow_page_id = first_overflow_page_id.ok_or_else(|| {
+                    cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds)
+                })?;
+                append_overflow_prefix(
+                    &self.page_cache,
+                    first_overflow_page_id,
+                    &mut key,
+                    key_len,
+                )?;
+                if key.len() != key_len {
+                    return Err(cell_corruption(page_id, CorruptionKind::CellLengthOutOfBounds));
+                }
+
+                f(Some(&key))
+            }
+            PageKind::RawInterior => {
+                let interior = page.open::<Interior>()?;
+                let next = interior.rightmost_child();
+                drop(page);
+                drop(pin);
+                self.with_subtree_max_key(next, f)
+            }
+        }
     }
 
     /// Reads child page ids from an interior page in logical left-to-right order.
@@ -248,28 +314,21 @@ impl TreeCursor {
     }
 
     /// Returns whether an interior page already matches refreshed child maxima.
-    pub(super) fn interior_page_matches_children(
+    pub(super) fn interior_page_matches_child_max_keys(
         &self,
         page_id: PageId,
-        children: &[ChildEntry],
     ) -> StorageResult<bool> {
-        let current_children = self.read_interior_child_page_ids(page_id)?;
-        if current_children.len() != children.len()
-            || current_children
-                .iter()
-                .zip(children)
-                .any(|(&current, desired)| current != desired.page_id)
+        let child_page_ids = self.read_interior_child_page_ids(page_id)?;
+        for (slot_index, &child_page_id) in
+            child_page_ids[..child_page_ids.len() - 1].iter().enumerate()
         {
-            return Ok(false);
-        }
-
-        for (slot_index, child) in children[..children.len() - 1].iter().enumerate() {
-            let expected_key = child
-                .max_key
-                .as_deref()
-                .ok_or_else(|| Self::missing_child_max_key_error(page_id))?;
-            let (_, actual_key) = read_interior_cell(&self.page_cache, page_id, slot_index as u16)?;
-            if actual_key != expected_key {
+            let matches = self.with_subtree_max_key(child_page_id, |expected_key| {
+                let expected_key =
+                    expected_key.ok_or_else(|| Self::missing_child_max_key_error(page_id))?;
+                self.compare_interior_key(page_id, slot_index as u16, expected_key)
+                    .map(|ordering| ordering == Ordering::Equal)
+            })?;
+            if !matches {
                 return Ok(false);
             }
         }
@@ -279,10 +338,11 @@ impl TreeCursor {
 
     /// Refreshes one interior page only when one of its separators changed.
     pub(super) fn refresh_interior_page_separators(&self, page_id: PageId) -> StorageResult<()> {
-        let children = self.read_interior_child_entries(page_id)?;
-        if self.interior_page_matches_children(page_id, &children)? {
+        if self.interior_page_matches_child_max_keys(page_id)? {
             return Ok(());
         }
+
+        let children = self.read_interior_child_entries(page_id)?;
 
         let (prev_page_id, next_page_id) = self.read_interior_page_links(page_id)?;
         self.rewrite_interior_page(page_id, &children, prev_page_id, next_page_id)
@@ -911,11 +971,11 @@ impl TreeCursor {
             }
         }
 
-        let children = self.read_interior_child_entries(page_id)?;
-        if self.interior_page_matches_children(page_id, &children)? {
+        if self.interior_page_matches_child_max_keys(page_id)? {
             return Ok(None);
         }
 
+        let children = self.read_interior_child_entries(page_id)?;
         if Self::interior_children_fit(&children) {
             let (prev_page_id, next_page_id) = self.read_interior_page_links(page_id)?;
             self.rewrite_interior_page(page_id, &children, prev_page_id, next_page_id)?;
