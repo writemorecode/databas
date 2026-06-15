@@ -183,7 +183,7 @@ impl TreeCursor {
         drop(leaf_guard);
         drop(leaf_pin_guard);
         self.propagate_split(&tree_path, pending)?;
-        self.refresh_subtree_separators()
+        self.refresh_path_separators(&tree_path)
     }
 
     /// Replaces the value stored for an existing `key`.
@@ -219,7 +219,7 @@ impl TreeCursor {
         drop(leaf_guard);
         drop(leaf_pin_guard);
         self.propagate_split(&tree_path, pending)?;
-        self.refresh_subtree_separators()
+        self.refresh_path_separators(&tree_path)
     }
 
     /// Deletes the record identified by `key`.
