@@ -1,4 +1,4 @@
-use super::payload::{append_overflow_prefix, cell_corruption};
+use super::payload::{append_overflow_prefix, cell_corruption, materialize_payload};
 use super::root::read_page_kind;
 use super::*;
 
@@ -210,6 +210,76 @@ impl TreeCursor {
             });
         }
         Ok(children)
+    }
+
+    /// Collects ordered child entries using separator keys already stored in one interior page.
+    pub(super) fn read_interior_child_entries_from_page(
+        &self,
+        page_id: PageId,
+    ) -> StorageResult<Vec<ChildEntry>> {
+        let snapshot = {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let page = pin.read()?;
+            *page.page()
+        };
+        let interior = RawInterior::<Read<'_>>::open(&snapshot)?;
+        let mut children = Vec::with_capacity(interior.slot_count() as usize + 1);
+        for slot_index in 0..interior.slot_count() {
+            let (left_child, key_len, first_overflow_page_id, inline_range) =
+                interior.cell_payload_parts(slot_index)?;
+            let key = materialize_payload(
+                &self.page_cache,
+                page_id,
+                &snapshot[inline_range],
+                first_overflow_page_id,
+                key_len,
+            )?;
+            children.push(ChildEntry { page_id: left_child, max_key: Some(key) });
+        }
+        children.push(ChildEntry { page_id: interior.rightmost_child(), max_key: None });
+        Ok(children)
+    }
+
+    /// Rewrites one stored separator while preserving the rest of the interior page.
+    pub(super) fn replace_interior_separator(
+        &self,
+        page_id: PageId,
+        slot_index: u16,
+        key: &[u8],
+    ) -> StorageResult<()> {
+        let mut children = self.read_interior_child_entries_from_page(page_id)?;
+        let child_index = slot_index as usize;
+        if child_index + 1 >= children.len() {
+            return Err(StorageError::Corruption(CorruptionError {
+                component: CorruptionComponent::InteriorPage,
+                page_id: Some(page_id),
+                kind: CorruptionKind::CellLengthOutOfBounds,
+            }));
+        }
+        let child = &mut children[child_index];
+        child.max_key = Some(key.to_vec());
+
+        let (prev_page_id, next_page_id) = self.read_interior_page_links(page_id)?;
+        self.rewrite_interior_page(page_id, &children, prev_page_id, next_page_id)
+    }
+
+    /// Updates ancestors after a leaf max key changed without changing tree shape.
+    pub(super) fn refresh_insert_path_after_leaf_max_change(
+        &self,
+        tree_path: &[PathFrame],
+        max_key: &[u8],
+    ) -> StorageResult<()> {
+        for frame in tree_path.iter().rev() {
+            match frame.child_ref {
+                ChildSlotRef::Slot(slot_index) => {
+                    self.replace_interior_separator(frame.page_id, slot_index, max_key)?;
+                    return Ok(());
+                }
+                ChildSlotRef::Rightmost => {}
+            }
+        }
+
+        Ok(())
     }
 
     /// Locates a child page within its parent's ordered child list.

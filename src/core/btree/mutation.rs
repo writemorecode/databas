@@ -156,21 +156,25 @@ impl TreeCursor {
         };
         let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
         let mut leaf_guard = leaf_pin_guard.write()?;
-        let has_capacity = {
+        let (has_capacity, old_slot_count) = {
             let page = leaf_guard.open::<Leaf>()?;
             let needed = self.leaf_cell_local_size(key, value)? + page::format::SLOT_ENTRY_SIZE;
-            page.total_reclaimable_space()? >= needed
+            (page.total_reclaimable_space()? >= needed, page.slot_count())
         };
 
         if has_capacity {
+            let inserted_new_leaf_max;
             {
                 let mut page = leaf_guard.open_mut::<Leaf>()?;
                 let slot_index = self.insert_leaf_payload_at(&mut page, slot_index, key, value)?;
                 self.set_positioned_state(leaf_page_id, slot_index);
+                inserted_new_leaf_max = slot_index == old_slot_count;
             }
             drop(leaf_guard);
             drop(leaf_pin_guard);
-            self.refresh_subtree_separators()?;
+            if inserted_new_leaf_max {
+                self.refresh_insert_path_after_leaf_max_change(&tree_path, key)?;
+            }
             return Ok(());
         }
 
