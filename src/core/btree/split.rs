@@ -352,7 +352,7 @@ impl TreeCursor {
         let PendingSplit { separator, left_page_id, right_page_id: incoming_right_page_id } =
             pending;
         let (prev_page_id, next_page_id) = self.read_interior_page_links(parent_frame.page_id)?;
-        let mut children = self.read_interior_child_entries(parent_frame.page_id)?;
+        let mut children = self.read_interior_child_entries_from_page(parent_frame.page_id)?;
         let child_index = match parent_frame.child_ref {
             ChildSlotRef::Slot(slot_index) => slot_index as usize,
             ChildSlotRef::Rightmost => children.len() - 1,
