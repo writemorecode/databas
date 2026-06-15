@@ -436,11 +436,8 @@ impl TreeCursor {
 
     /// Returns whether a leaf rebuilt from `cells` would be underoccupied.
     pub(super) fn leaf_cells_underoccupied(cells: &[LeafSplitCell<'_>]) -> bool {
-        let occupied_variable_bytes = cells.len() * page::format::SLOT_ENTRY_SIZE
-            + cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
-        let usable_variable_bytes =
-            page::format::USABLE_SPACE_END - PageKind::RawLeaf.header_size();
-        occupied_variable_bytes * 2 < usable_variable_bytes
+        let cell_bytes = cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
+        Self::leaf_cell_bytes_underoccupied(cells.len(), cell_bytes)
     }
 
     /// Chooses a split index that keeps both leaf siblings fit and occupied.
@@ -451,15 +448,15 @@ impl TreeCursor {
 
         for split_index in 1..cells.len() {
             left_cell_len += cells[split_index - 1].encoded_size();
-            if !Self::leaf_cells_fit(&cells[..split_index])
-                || !Self::leaf_cells_fit(&cells[split_index..])
-                || Self::leaf_cells_underoccupied(&cells[..split_index])
-                || Self::leaf_cells_underoccupied(&cells[split_index..])
+            let right_cell_len = total_cell_len - left_cell_len;
+            if !Self::leaf_cell_bytes_fit(split_index, left_cell_len)
+                || !Self::leaf_cell_bytes_fit(cells.len() - split_index, right_cell_len)
+                || Self::leaf_cell_bytes_underoccupied(split_index, left_cell_len)
+                || Self::leaf_cell_bytes_underoccupied(cells.len() - split_index, right_cell_len)
             {
                 continue;
             }
 
-            let right_cell_len = total_cell_len - left_cell_len;
             let imbalance = left_cell_len.abs_diff(right_cell_len);
             if best.is_none_or(|(best_imbalance, _)| imbalance < best_imbalance) {
                 best = Some((imbalance, split_index));
@@ -477,13 +474,13 @@ impl TreeCursor {
 
         for split_index in 1..cells.len() {
             left_cell_len += cells[split_index - 1].encoded_size();
-            if !Self::leaf_cells_fit(&cells[..split_index])
-                || !Self::leaf_cells_fit(&cells[split_index..])
+            let right_cell_len = total_cell_len - left_cell_len;
+            if !Self::leaf_cell_bytes_fit(split_index, left_cell_len)
+                || !Self::leaf_cell_bytes_fit(cells.len() - split_index, right_cell_len)
             {
                 continue;
             }
 
-            let right_cell_len = total_cell_len - left_cell_len;
             let imbalance = left_cell_len.abs_diff(right_cell_len);
             if best.is_none_or(|(best_imbalance, _)| imbalance < best_imbalance) {
                 best = Some((imbalance, split_index));
