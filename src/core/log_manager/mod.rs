@@ -18,7 +18,7 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::{BufReader, Read, Seek},
+    io::{BufReader, BufWriter, Read, Seek, Write},
     path::{Path, PathBuf},
 };
 
@@ -45,6 +45,7 @@ pub(crate) type Lsn = u64;
 pub(crate) const ZERO_LSN: Lsn = 0;
 
 const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
+const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 
 /// Errors raised while opening, writing, or decoding WAL frames.
 #[derive(Debug, Error)]
@@ -207,7 +208,7 @@ pub(crate) struct LogTransaction<'a> {
 /// dirty page whose page header references a logged LSN.
 #[derive(Debug)]
 pub(crate) struct LogManager {
-    wal_file: File,
+    wal_writer: BufWriter<File>,
 
     highest_txn_id: TxnId,
     highest_appended_lsn: Option<Lsn>,
@@ -254,8 +255,10 @@ impl LogManager {
         }
         wal_file.seek(std::io::SeekFrom::End(0))?;
 
+        let wal_writer = BufWriter::with_capacity(WAL_WRITE_BUFFER_LEN, wal_file);
+
         Ok(Self {
-            wal_file,
+            wal_writer,
             highest_txn_id,
             highest_durable_lsn: None,
             highest_appended_lsn,
@@ -310,7 +313,8 @@ impl LogManager {
             .checked_add(record_count)
             .ok_or(LogManagerError::LsnExhausted)?;
 
-        serialize_transaction(&mut self.wal_file, txn_id, records)?;
+        serialize_transaction(&mut self.wal_writer, txn_id, records)?;
+
         self.highest_txn_id = self.highest_txn_id.max(txn_id);
         if record_count > 0 {
             self.highest_appended_lsn = Some(lsn);
@@ -347,6 +351,8 @@ impl LogManager {
             });
         }
 
+        self.wal_writer.flush()?;
+
         #[cfg(test)]
         if self.fail_next_flush {
             self.fail_next_flush = false;
@@ -355,7 +361,7 @@ impl LogManager {
             )));
         }
 
-        self.wal_file.sync_all()?;
+        self.wal_writer.get_ref().sync_all()?;
         self.highest_durable_lsn = Some(highest_appended_lsn);
         Ok(())
     }
@@ -378,6 +384,11 @@ impl LogManager {
     #[cfg(test)]
     pub(crate) fn fail_next_flush_for_test(&mut self) {
         self.fail_next_flush = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flush_buffer_for_test(&mut self) -> std::io::Result<()> {
+        self.wal_writer.flush()
     }
 }
 
@@ -705,6 +716,9 @@ mod tests {
 
         assert_eq!(lsn, 2);
         assert_eq!(manager.highest_appended_lsn(), Some(2));
+        assert_eq!(manager.highest_durable_lsn(), None);
+
+        manager.flush_buffer_for_test().unwrap();
         assert_eq!(manager.highest_durable_lsn(), None);
 
         let mut wal_file = File::open(file.path().with_added_extension("wal")).unwrap();
