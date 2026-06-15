@@ -85,10 +85,22 @@ impl TreeCursor {
 
     /// Returns whether the provided leaf cells fit into one leaf page.
     pub(super) fn leaf_cells_fit(cells: &[LeafSplitCell<'_>]) -> bool {
+        let cell_bytes = cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
+        Self::leaf_cell_bytes_fit(cells.len(), cell_bytes)
+    }
+
+    pub(super) fn leaf_cell_bytes_fit(cell_count: usize, cell_bytes: usize) -> bool {
         let used_bytes = PageKind::RawLeaf.header_size()
-            + cells.len() * page::format::SLOT_ENTRY_SIZE
-            + cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
+            + cell_count * page::format::SLOT_ENTRY_SIZE
+            + cell_bytes;
         used_bytes <= page::format::USABLE_SPACE_END
+    }
+
+    pub(super) fn leaf_cell_bytes_underoccupied(cell_count: usize, cell_bytes: usize) -> bool {
+        let occupied_variable_bytes = cell_count * page::format::SLOT_ENTRY_SIZE + cell_bytes;
+        let usable_variable_bytes =
+            page::format::USABLE_SPACE_END - PageKind::RawLeaf.header_size();
+        occupied_variable_bytes * 2 < usable_variable_bytes
     }
 
     /// Chooses the leaf split point with the smallest byte imbalance.
@@ -101,13 +113,13 @@ impl TreeCursor {
 
         for split_index in 1..cells.len() {
             left_cell_len += cells[split_index - 1].encoded_size();
-            if !Self::leaf_cells_fit(&cells[..split_index])
-                || !Self::leaf_cells_fit(&cells[split_index..])
+            let right_cell_len = total_cell_len - left_cell_len;
+            if !Self::leaf_cell_bytes_fit(split_index, left_cell_len)
+                || !Self::leaf_cell_bytes_fit(cells.len() - split_index, right_cell_len)
             {
                 continue;
             }
 
-            let right_cell_len = total_cell_len - left_cell_len;
             let imbalance = left_cell_len.abs_diff(right_cell_len);
             let is_better = match best {
                 Some((best_imbalance, best_left_cell_len, _)) => {
