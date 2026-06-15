@@ -673,29 +673,32 @@ impl TreeCursor {
         let child_index = self.child_index_in_parent(parent_page_id, leaf_page_id)?;
         let parent_children = self.read_interior_child_page_ids(parent_page_id)?;
 
-        if child_index > 0 {
+        let mut left_snapshot = [0; PAGE_SIZE];
+        let mut left_leaf_snapshot = [0; PAGE_SIZE];
+        let left_cells = if child_index > 0 {
             let left_page_id = parent_children[child_index - 1];
-            let mut left_snapshot = [0; PAGE_SIZE];
-            let mut leaf_snapshot = [0; PAGE_SIZE];
             let cells = self.snapshot_leaf_pair_cells_sorted(
                 left_page_id,
                 &mut left_snapshot,
                 leaf_page_id,
-                &mut leaf_snapshot,
+                &mut left_leaf_snapshot,
             )?;
             if let Some(split_index) = Self::choose_leaf_rebalance_split(&cells) {
                 self.redistribute_leaf_pair(left_page_id, leaf_page_id, &cells, split_index)?;
                 return Ok(false);
             }
-        }
+            Some(cells)
+        } else {
+            None
+        };
 
-        if child_index + 1 < parent_children.len() {
+        let mut right_leaf_snapshot = [0; PAGE_SIZE];
+        let mut right_snapshot = [0; PAGE_SIZE];
+        let right_cells = if child_index + 1 < parent_children.len() {
             let right_page_id = parent_children[child_index + 1];
-            let mut leaf_snapshot = [0; PAGE_SIZE];
-            let mut right_snapshot = [0; PAGE_SIZE];
             let cells = self.snapshot_leaf_pair_cells_sorted(
                 leaf_page_id,
-                &mut leaf_snapshot,
+                &mut right_leaf_snapshot,
                 right_page_id,
                 &mut right_snapshot,
             )?;
@@ -703,48 +706,35 @@ impl TreeCursor {
                 self.redistribute_leaf_pair(leaf_page_id, right_page_id, &cells, split_index)?;
                 return Ok(false);
             }
-        }
+            Some(cells)
+        } else {
+            None
+        };
 
-        if child_index > 0 {
+        if let Some(cells) = left_cells.as_ref() {
             let left_page_id = parent_children[child_index - 1];
-            let mut left_snapshot = [0; PAGE_SIZE];
-            let mut leaf_snapshot = [0; PAGE_SIZE];
-            let cells = self.snapshot_leaf_pair_cells_sorted(
-                left_page_id,
-                &mut left_snapshot,
-                leaf_page_id,
-                &mut leaf_snapshot,
-            )?;
-            if Self::leaf_cells_fit(&cells) {
-                self.merge_leaf_pages(left_page_id, leaf_page_id, &cells)?;
+            if Self::leaf_cells_fit(cells) {
+                self.merge_leaf_pages(left_page_id, leaf_page_id, cells)?;
                 self.remove_child_from_parent(parent_page_id, leaf_page_id)?;
                 self.set_page_state(left_page_id);
                 return Ok(true);
             }
-            if let Some(split_index) = Self::choose_leaf_fitting_split(&cells) {
-                self.redistribute_leaf_pair(left_page_id, leaf_page_id, &cells, split_index)?;
+            if let Some(split_index) = Self::choose_leaf_fitting_split(cells) {
+                self.redistribute_leaf_pair(left_page_id, leaf_page_id, cells, split_index)?;
                 return Ok(false);
             }
         }
 
-        if child_index + 1 < parent_children.len() {
+        if let Some(cells) = right_cells.as_ref() {
             let right_page_id = parent_children[child_index + 1];
-            let mut leaf_snapshot = [0; PAGE_SIZE];
-            let mut right_snapshot = [0; PAGE_SIZE];
-            let cells = self.snapshot_leaf_pair_cells_sorted(
-                leaf_page_id,
-                &mut leaf_snapshot,
-                right_page_id,
-                &mut right_snapshot,
-            )?;
-            if Self::leaf_cells_fit(&cells) {
-                self.merge_leaf_pages(leaf_page_id, right_page_id, &cells)?;
+            if Self::leaf_cells_fit(cells) {
+                self.merge_leaf_pages(leaf_page_id, right_page_id, cells)?;
                 self.remove_child_from_parent(parent_page_id, right_page_id)?;
                 self.set_page_state(leaf_page_id);
                 return Ok(true);
             }
-            if let Some(split_index) = Self::choose_leaf_fitting_split(&cells) {
-                self.redistribute_leaf_pair(leaf_page_id, right_page_id, &cells, split_index)?;
+            if let Some(split_index) = Self::choose_leaf_fitting_split(cells) {
+                self.redistribute_leaf_pair(leaf_page_id, right_page_id, cells, split_index)?;
                 return Ok(false);
             }
         }
@@ -837,7 +827,7 @@ impl TreeCursor {
         let child_index = self.child_index_in_parent(parent_page_id, interior_page_id)?;
         let parent_children = self.read_interior_child_page_ids(parent_page_id)?;
 
-        if child_index > 0 {
+        let left_children = if child_index > 0 {
             let left_page_id = parent_children[child_index - 1];
             let mut children = self.read_interior_child_entries(left_page_id)?;
             children.extend(self.read_interior_child_entries(interior_page_id)?);
@@ -850,9 +840,12 @@ impl TreeCursor {
                 )?;
                 return Ok(false);
             }
-        }
+            Some(children)
+        } else {
+            None
+        };
 
-        if child_index + 1 < parent_children.len() {
+        let right_children = if child_index + 1 < parent_children.len() {
             let right_page_id = parent_children[child_index + 1];
             let mut children = self.read_interior_child_entries(interior_page_id)?;
             children.extend(self.read_interior_child_entries(right_page_id)?);
@@ -865,42 +858,41 @@ impl TreeCursor {
                 )?;
                 return Ok(false);
             }
-        }
+            Some(children)
+        } else {
+            None
+        };
 
-        if child_index > 0 {
+        if let Some(children) = left_children.as_ref() {
             let left_page_id = parent_children[child_index - 1];
-            let mut children = self.read_interior_child_entries(left_page_id)?;
-            children.extend(self.read_interior_child_entries(interior_page_id)?);
-            if Self::interior_children_fit(&children) {
-                self.merge_interior_pages(left_page_id, interior_page_id, &children)?;
+            if Self::interior_children_fit(children) {
+                self.merge_interior_pages(left_page_id, interior_page_id, children)?;
                 self.remove_child_from_parent(parent_page_id, interior_page_id)?;
                 return Ok(true);
             }
-            if let Some(split_index) = Self::choose_interior_fitting_split(&children) {
+            if let Some(split_index) = Self::choose_interior_fitting_split(children) {
                 self.redistribute_interior_pair(
                     left_page_id,
                     interior_page_id,
-                    &children,
+                    children,
                     split_index,
                 )?;
                 return Ok(false);
             }
         }
 
-        if child_index + 1 < parent_children.len() {
+        if let Some(children) = right_children.as_ref() {
             let right_page_id = parent_children[child_index + 1];
-            let mut children = self.read_interior_child_entries(interior_page_id)?;
-            children.extend(self.read_interior_child_entries(right_page_id)?);
-            if Self::interior_children_fit(&children) {
-                self.merge_interior_pages(interior_page_id, right_page_id, &children)?;
+            if Self::interior_children_fit(children) {
+                self.merge_interior_pages(interior_page_id, right_page_id, children)?;
                 self.remove_child_from_parent(parent_page_id, right_page_id)?;
                 return Ok(true);
             }
-            if let Some(split_index) = Self::choose_interior_fitting_split(&children) {
+            if let Some(split_index) = Self::choose_interior_fitting_split(children) {
                 self.redistribute_interior_pair(
                     interior_page_id,
                     right_page_id,
-                    &children,
+                    children,
                     split_index,
                 )?;
                 return Ok(false);
