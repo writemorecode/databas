@@ -19,7 +19,7 @@ use crate::core::{
             PageKind,
         },
     },
-    page_cache::{PageCache, PageWriteGuard, PinGuard},
+    page_cache::{PageCache, PinGuard},
 };
 
 mod mutation;

@@ -249,7 +249,7 @@ impl TreeCursor {
     pub(super) fn split_leaf_cells(
         &mut self,
         leaf_page_id: PageId,
-        leaf_guard: &mut PageWriteGuard<'_>,
+        leaf_pin_guard: &PinGuard,
         prev_page_id: Option<PageId>,
         next_page_id: Option<PageId>,
         cells: &[LeafSplitCell<'_>],
@@ -259,22 +259,35 @@ impl TreeCursor {
         let (left_cells, right_cells) = cells.split_at(split_index);
 
         let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
-        let mut right_guard = right_page_guard.write()?;
-        let mut right_page = RawLeaf::<Write<'_>>::initialize(right_guard.page_mut());
+        drop(right_page_guard);
 
-        let mut leaf_page = RawLeaf::<Write<'_>>::initialize(leaf_guard.page_mut());
-        leaf_page.set_prev_page_id(prev_page_id);
-        leaf_page.set_next_page_id(Some(right_page_id));
-        right_page.set_prev_page_id(Some(leaf_page_id));
-        right_page.set_next_page_id(next_page_id);
+        let mut left_page_image = [0; PAGE_SIZE];
+        let mut right_page_image = [0; PAGE_SIZE];
+        {
+            let mut leaf_page = RawLeaf::<Write<'_>>::initialize(&mut left_page_image);
+            let mut right_page = RawLeaf::<Write<'_>>::initialize(&mut right_page_image);
 
-        for cell in left_cells {
-            let slot_index = leaf_page.slot_count();
-            self.insert_leaf_payload_at(&mut leaf_page, slot_index, cell.key(), cell.value())?;
+            leaf_page.set_prev_page_id(prev_page_id);
+            leaf_page.set_next_page_id(Some(right_page_id));
+            right_page.set_prev_page_id(Some(leaf_page_id));
+            right_page.set_next_page_id(next_page_id);
+
+            for cell in left_cells {
+                let slot_index = leaf_page.slot_count();
+                self.insert_leaf_payload_at(&mut leaf_page, slot_index, cell.key(), cell.value())?;
+            }
+            for cell in right_cells {
+                let slot_index = right_page.slot_count();
+                self.insert_leaf_payload_at(&mut right_page, slot_index, cell.key(), cell.value())?;
+            }
         }
-        for cell in right_cells {
-            let slot_index = right_page.slot_count();
-            self.insert_leaf_payload_at(&mut right_page, slot_index, cell.key(), cell.value())?;
+
+        {
+            let right_page_guard = self.page_cache.fetch_page(right_page_id)?;
+            let mut leaf_guard = leaf_pin_guard.write()?;
+            let mut right_guard = right_page_guard.write()?;
+            *leaf_guard.page_mut() = left_page_image;
+            *right_guard.page_mut() = right_page_image;
         }
 
         if let Some(next_page_id) = next_page_id {
@@ -303,11 +316,14 @@ impl TreeCursor {
     pub(super) fn insert_with_leaf_page_split(
         &mut self,
         leaf_page_id: PageId,
-        leaf_guard: &mut PageWriteGuard<'_>,
+        leaf_pin_guard: &PinGuard,
         key: &[u8],
         value: &[u8],
     ) -> StorageResult<PendingSplit> {
-        let leaf_snapshot_bytes = *leaf_guard.page();
+        let leaf_snapshot_bytes = {
+            let leaf_guard = leaf_pin_guard.read()?;
+            *leaf_guard.page()
+        };
         let leaf_snapshot = RawLeaf::<Read<'_>>::open(&leaf_snapshot_bytes)?;
 
         let prev_page_id = leaf_snapshot.prev_page_id();
@@ -321,18 +337,21 @@ impl TreeCursor {
         };
         cells.insert(idx, LeafSplitCell::owned(key.to_vec(), value.to_vec()));
 
-        self.split_leaf_cells(leaf_page_id, leaf_guard, prev_page_id, next_page_id, &cells, key)
+        self.split_leaf_cells(leaf_page_id, leaf_pin_guard, prev_page_id, next_page_id, &cells, key)
     }
 
     /// Splits a full leaf page while replacing one existing cell value.
     pub(super) fn update_with_leaf_page_split(
         &mut self,
         leaf_page_id: PageId,
-        leaf_guard: &mut PageWriteGuard<'_>,
+        leaf_pin_guard: &PinGuard,
         slot_index: u16,
         value: &[u8],
     ) -> StorageResult<PendingSplit> {
-        let leaf_snapshot_bytes = *leaf_guard.page();
+        let leaf_snapshot_bytes = {
+            let leaf_guard = leaf_pin_guard.read()?;
+            *leaf_guard.page()
+        };
         let leaf_snapshot = RawLeaf::<Read<'_>>::open(&leaf_snapshot_bytes)?;
 
         let prev_page_id = leaf_snapshot.prev_page_id();
@@ -347,7 +366,7 @@ impl TreeCursor {
 
         self.split_leaf_cells(
             leaf_page_id,
-            leaf_guard,
+            leaf_pin_guard,
             prev_page_id,
             next_page_id,
             &cells,
