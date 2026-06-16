@@ -149,18 +149,23 @@ impl TreeCursor {
 
     /// Inserts a new raw key/value record into the tree.
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
-        let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
-        let slot_index = match self.search_leaf_slot(leaf_page_id, key)? {
-            SearchResult::Found(_) => return Err(PageError::DuplicateKey.into()),
-            SearchResult::InsertAt(slot_index) => slot_index,
-        };
-        let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
-        let mut leaf_guard = leaf_pin_guard.write()?;
-        let (has_capacity, old_slot_count) = {
-            let page = leaf_guard.open::<Leaf>()?;
+        let (leaf_page_id, leaf_pin_guard, tree_path) = self.leaf_page_pin_path_for_key(key)?;
+        let (slot_index, has_capacity, old_slot_count) = {
+            let leaf_read_guard = leaf_pin_guard.read()?;
+            let page = leaf_read_guard.open::<Leaf>()?;
+            let slot_index = match self.search_leaf_slot_in_page(
+                leaf_page_id,
+                leaf_read_guard.page(),
+                &page,
+                key,
+            )? {
+                SearchResult::Found(_) => return Err(PageError::DuplicateKey.into()),
+                SearchResult::InsertAt(slot_index) => slot_index,
+            };
             let needed = self.leaf_cell_local_size(key, value)? + page::format::SLOT_ENTRY_SIZE;
-            (page.total_reclaimable_space()? >= needed, page.slot_count())
+            (slot_index, page.total_reclaimable_space()? >= needed, page.slot_count())
         };
+        let mut leaf_guard = leaf_pin_guard.write()?;
 
         if has_capacity {
             let inserted_new_leaf_max;

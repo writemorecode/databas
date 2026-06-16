@@ -259,7 +259,7 @@ impl TreeCursor {
         self.search_leaf_slot_in_page(page_id, page.page(), &leaf, key)
     }
 
-    fn search_leaf_slot_in_page(
+    pub(super) fn search_leaf_slot_in_page(
         &self,
         page_id: PageId,
         page_bytes: &[u8; PAGE_SIZE],
@@ -503,6 +503,60 @@ impl TreeCursor {
                 }
             };
             page_id = next;
+        }
+    }
+
+    /// Descends to the target leaf, records the interior path, and keeps the leaf pinned.
+    pub(super) fn leaf_page_pin_path_for_key(
+        &self,
+        key: &[u8],
+    ) -> StorageResult<(PageId, PinGuard, Vec<PathFrame>)> {
+        let mut path = Vec::new();
+        let mut page_id = self.root_page_id();
+
+        loop {
+            let pin = self.page_cache.fetch_page(page_id)?;
+            let next = {
+                let page = pin.read()?;
+                match read_page_kind(page.page(), page_id)? {
+                    PageKind::RawLeaf => {
+                        let _ = page.open::<Leaf>()?;
+                        None
+                    }
+                    PageKind::RawInterior => {
+                        let interior = page.open::<Interior>()?;
+                        let child_page_id = match self.lower_bound_interior_slot_in_page(
+                            page_id,
+                            page.page(),
+                            &interior,
+                            key,
+                        )? {
+                            BoundResult::At(slot_index) => {
+                                let (child_page_id, _, _, _) =
+                                    interior.cell_payload_parts(slot_index)?;
+                                path.push(PathFrame {
+                                    page_id,
+                                    child_ref: ChildSlotRef::Slot(slot_index),
+                                });
+                                child_page_id
+                            }
+                            BoundResult::PastEnd => {
+                                path.push(PathFrame {
+                                    page_id,
+                                    child_ref: ChildSlotRef::Rightmost,
+                                });
+                                interior.rightmost_child()
+                            }
+                        };
+                        Some(child_page_id)
+                    }
+                }
+            };
+
+            match next {
+                Some(next_page_id) => page_id = next_page_id,
+                None => return Ok((page_id, pin, path)),
+            }
         }
     }
 
