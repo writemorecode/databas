@@ -199,13 +199,14 @@ impl TreeCursor {
             SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound.into()),
         };
         let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
-        let mut leaf_guard = leaf_pin_guard.write()?;
         let has_capacity = {
-            let page = leaf_guard.open::<Leaf>()?;
+            let leaf_read_guard = leaf_pin_guard.read()?;
+            let page = leaf_read_guard.open::<Leaf>()?;
             let old_len = page.cell_len(slot_index)?;
             let needed = self.leaf_cell_local_size(key, value)?;
             page.total_reclaimable_space()? + old_len >= needed
         };
+        let mut leaf_guard = leaf_pin_guard.write()?;
 
         if has_capacity {
             {

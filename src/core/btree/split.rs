@@ -48,20 +48,21 @@ impl TreeCursor {
         parent_frame: PathFrame,
         pending: PendingSplit,
     ) -> StorageResult<Option<PendingSplit>> {
-        let insert_slot_index = match parent_frame.child_ref {
-            ChildSlotRef::Slot(slot_index) => slot_index,
-            ChildSlotRef::Rightmost => self.raw_interior_slot_count(parent_frame.page_id)?,
-        };
         let interior_page_guard = self.page_cache.fetch_page(parent_frame.page_id)?;
-        let mut interior_guard = interior_page_guard.write()?;
-        let has_capacity = {
-            let page = interior_guard.open::<Interior>()?;
+        let (insert_slot_index, has_capacity) = {
+            let interior_read_guard = interior_page_guard.read()?;
+            let page = interior_read_guard.open::<Interior>()?;
+            let insert_slot_index = match parent_frame.child_ref {
+                ChildSlotRef::Slot(slot_index) => slot_index,
+                ChildSlotRef::Rightmost => page.slot_count(),
+            };
             let needed =
                 self.interior_cell_local_size(&pending.separator)? + page::format::SLOT_ENTRY_SIZE;
-            page.total_reclaimable_space()? >= needed
+            (insert_slot_index, page.total_reclaimable_space()? >= needed)
         };
 
         if has_capacity {
+            let mut interior_guard = interior_page_guard.write()?;
             let mut interior_page = interior_guard.open_mut::<Interior>()?;
             let inserted_slot_index = self.insert_interior_payload_at(
                 &mut interior_page,
@@ -77,7 +78,6 @@ impl TreeCursor {
             )
             .map(|()| None)
         } else {
-            drop(interior_guard);
             drop(interior_page_guard);
             self.insert_with_interior_page_split(parent_frame, pending).map(Some)
         }
