@@ -166,19 +166,27 @@ impl TreeCursor {
         slot_index: u16,
         key: &[u8],
     ) -> StorageResult<Ordering> {
-        let (inline_key_len, first_overflow_page_id, key_len) = {
-            let pin = self.page_cache.fetch_page(page_id)?;
-            let page = pin.read()?;
-            let leaf = page.open::<Leaf>()?;
-            let (key_len, _, first_overflow_page_id, inline_range) =
-                leaf.cell_payload_parts(slot_index)?;
-            let inline_key_len = key_len.min(inline_range.len());
-            let inline_key = &page.page()[inline_range.start..inline_range.start + inline_key_len];
-            if let Some(ordering) = compare_key_prefix(page_id, inline_key, key_len, key)? {
-                return Ok(ordering);
-            }
-            (inline_key_len, first_overflow_page_id, key_len)
-        };
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let page = pin.read()?;
+        let leaf = page.open::<Leaf>()?;
+        self.compare_leaf_key_in_page(page_id, page.page(), &leaf, slot_index, key)
+    }
+
+    fn compare_leaf_key_in_page(
+        &self,
+        page_id: PageId,
+        page_bytes: &[u8; PAGE_SIZE],
+        leaf: &RawLeaf<Read<'_>>,
+        slot_index: u16,
+        key: &[u8],
+    ) -> StorageResult<Ordering> {
+        let (key_len, _, first_overflow_page_id, inline_range) =
+            leaf.cell_payload_parts(slot_index)?;
+        let inline_key_len = key_len.min(inline_range.len());
+        let inline_key = &page_bytes[inline_range.start..inline_range.start + inline_key_len];
+        if let Some(ordering) = compare_key_prefix(page_id, inline_key, key_len, key)? {
+            return Ok(ordering);
+        }
 
         compare_overflow_key(
             &self.page_cache,
@@ -196,19 +204,27 @@ impl TreeCursor {
         slot_index: u16,
         key: &[u8],
     ) -> StorageResult<Ordering> {
-        let (inline_key_len, first_overflow_page_id, key_len) = {
-            let pin = self.page_cache.fetch_page(page_id)?;
-            let page = pin.read()?;
-            let interior = page.open::<Interior>()?;
-            let (_, key_len, first_overflow_page_id, inline_range) =
-                interior.cell_payload_parts(slot_index)?;
-            let inline_key_len = key_len.min(inline_range.len());
-            let inline_key = &page.page()[inline_range.start..inline_range.start + inline_key_len];
-            if let Some(ordering) = compare_key_prefix(page_id, inline_key, key_len, key)? {
-                return Ok(ordering);
-            }
-            (inline_key_len, first_overflow_page_id, key_len)
-        };
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let page = pin.read()?;
+        let interior = page.open::<Interior>()?;
+        self.compare_interior_key_in_page(page_id, page.page(), &interior, slot_index, key)
+    }
+
+    fn compare_interior_key_in_page(
+        &self,
+        page_id: PageId,
+        page_bytes: &[u8; PAGE_SIZE],
+        interior: &RawInterior<Read<'_>>,
+        slot_index: u16,
+        key: &[u8],
+    ) -> StorageResult<Ordering> {
+        let (_, key_len, first_overflow_page_id, inline_range) =
+            interior.cell_payload_parts(slot_index)?;
+        let inline_key_len = key_len.min(inline_range.len());
+        let inline_key = &page_bytes[inline_range.start..inline_range.start + inline_key_len];
+        if let Some(ordering) = compare_key_prefix(page_id, inline_key, key_len, key)? {
+            return Ok(ordering);
+        }
 
         compare_overflow_key(
             &self.page_cache,
@@ -237,12 +253,25 @@ impl TreeCursor {
         page_id: PageId,
         key: &[u8],
     ) -> StorageResult<SearchResult> {
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let page = pin.read()?;
+        let leaf = page.open::<Leaf>()?;
+        self.search_leaf_slot_in_page(page_id, page.page(), &leaf, key)
+    }
+
+    fn search_leaf_slot_in_page(
+        &self,
+        page_id: PageId,
+        page_bytes: &[u8; PAGE_SIZE],
+        leaf: &RawLeaf<Read<'_>>,
+        key: &[u8],
+    ) -> StorageResult<SearchResult> {
         let mut low: u16 = 0;
-        let mut high = self.raw_leaf_slot_count(page_id)?;
+        let mut high = leaf.slot_count();
 
         while low < high {
             let mid = low + (high - low) / 2;
-            match self.compare_leaf_key(page_id, mid, key)? {
+            match self.compare_leaf_key_in_page(page_id, page_bytes, leaf, mid, key)? {
                 Ordering::Less => low = mid + 1,
                 Ordering::Greater => high = mid,
                 Ordering::Equal => return Ok(SearchResult::Found(mid)),
@@ -257,13 +286,27 @@ impl TreeCursor {
         page_id: PageId,
         key: &[u8],
     ) -> StorageResult<BoundResult> {
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let page = pin.read()?;
+        let leaf = page.open::<Leaf>()?;
+        self.lower_bound_leaf_slot_in_page(page_id, page.page(), &leaf, key)
+    }
+
+    fn lower_bound_leaf_slot_in_page(
+        &self,
+        page_id: PageId,
+        page_bytes: &[u8; PAGE_SIZE],
+        leaf: &RawLeaf<Read<'_>>,
+        key: &[u8],
+    ) -> StorageResult<BoundResult> {
         let mut low: u16 = 0;
-        let slot_count = self.raw_leaf_slot_count(page_id)?;
+        let slot_count = leaf.slot_count();
         let mut high = slot_count;
 
         while low < high {
             let mid = low + (high - low) / 2;
-            if self.compare_leaf_key(page_id, mid, key)? == Ordering::Less {
+            if self.compare_leaf_key_in_page(page_id, page_bytes, leaf, mid, key)? == Ordering::Less
+            {
                 low = mid + 1;
             } else {
                 high = mid;
@@ -278,13 +321,28 @@ impl TreeCursor {
         page_id: PageId,
         key: &[u8],
     ) -> StorageResult<BoundResult> {
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let page = pin.read()?;
+        let interior = page.open::<Interior>()?;
+        self.lower_bound_interior_slot_in_page(page_id, page.page(), &interior, key)
+    }
+
+    fn lower_bound_interior_slot_in_page(
+        &self,
+        page_id: PageId,
+        page_bytes: &[u8; PAGE_SIZE],
+        interior: &RawInterior<Read<'_>>,
+        key: &[u8],
+    ) -> StorageResult<BoundResult> {
         let mut low: u16 = 0;
-        let slot_count = self.raw_interior_slot_count(page_id)?;
+        let slot_count = interior.slot_count();
         let mut high = slot_count;
 
         while low < high {
             let mid = low + (high - low) / 2;
-            if self.compare_interior_key(page_id, mid, key)? == Ordering::Less {
+            if self.compare_interior_key_in_page(page_id, page_bytes, interior, mid, key)?
+                == Ordering::Less
+            {
                 low = mid + 1;
             } else {
                 high = mid;
@@ -299,14 +357,15 @@ impl TreeCursor {
         page_id: PageId,
         key: &[u8],
     ) -> StorageResult<PageId> {
-        match self.lower_bound_interior_slot(page_id, key)? {
-            BoundResult::At(slot_index) => self.read_interior_left_child(page_id, slot_index),
-            BoundResult::PastEnd => {
-                let pin = self.page_cache.fetch_page(page_id)?;
-                let page = pin.read()?;
-                let interior = page.open::<Interior>()?;
-                Ok(interior.rightmost_child())
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let page = pin.read()?;
+        let interior = page.open::<Interior>()?;
+        match self.lower_bound_interior_slot_in_page(page_id, page.page(), &interior, key)? {
+            BoundResult::At(slot_index) => {
+                let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
+                Ok(left_child)
             }
+            BoundResult::PastEnd => Ok(interior.rightmost_child()),
         }
     }
 
@@ -377,9 +436,20 @@ impl TreeCursor {
                         return Ok(page_id);
                     }
                     PageKind::RawInterior => {
-                        drop(page);
-                        drop(pin);
-                        self.interior_child_for_key(page_id, key)?
+                        let interior = page.open::<Interior>()?;
+                        match self.lower_bound_interior_slot_in_page(
+                            page_id,
+                            page.page(),
+                            &interior,
+                            key,
+                        )? {
+                            BoundResult::At(slot_index) => {
+                                let (left_child, _, _, _) =
+                                    interior.cell_payload_parts(slot_index)?;
+                                left_child
+                            }
+                            BoundResult::PastEnd => interior.rightmost_child(),
+                        }
                     }
                 }
             };
@@ -405,12 +475,16 @@ impl TreeCursor {
                         return Ok((page_id, path));
                     }
                     PageKind::RawInterior => {
-                        drop(page);
-                        drop(pin);
-                        match self.lower_bound_interior_slot(page_id, key)? {
+                        let interior = page.open::<Interior>()?;
+                        match self.lower_bound_interior_slot_in_page(
+                            page_id,
+                            page.page(),
+                            &interior,
+                            key,
+                        )? {
                             BoundResult::At(slot_index) => {
-                                let child_page_id =
-                                    self.read_interior_left_child(page_id, slot_index)?;
+                                let (child_page_id, _, _, _) =
+                                    interior.cell_payload_parts(slot_index)?;
                                 path.push(PathFrame {
                                     page_id,
                                     child_ref: ChildSlotRef::Slot(slot_index),
@@ -422,9 +496,6 @@ impl TreeCursor {
                                     page_id,
                                     child_ref: ChildSlotRef::Rightmost,
                                 });
-                                let pin = self.page_cache.fetch_page(page_id)?;
-                                let page = pin.read()?;
-                                let interior = page.open::<Interior>()?;
                                 interior.rightmost_child()
                             }
                         }
