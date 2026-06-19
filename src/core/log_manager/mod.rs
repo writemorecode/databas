@@ -5,20 +5,24 @@
 //! frames:
 //!
 //! ```text
-//! header magic | format version | transaction id | record count | payload length
-//! payload records...
-//! footer magic | transaction id | payload CRC32
+//! WAL file header | transaction frame...
+//!
+//! transaction frame:
+//!   header magic | format version | transaction id | record count | payload length
+//!   payload records...
+//!   footer magic | transaction id | payload CRC32
 //! ```
 //!
-//! LSNs are not stored explicitly in the frame. They are assigned logically by
-//! record position across complete frames, starting at 1. Appending advances
-//! the highest appended LSN, while [`LogManager::flush_through`] is responsible
-//! for making appended bytes durable before pages protected by those LSNs are
-//! written to the database file.
+//! LSNs are not stored explicitly in transaction frames. The WAL file header
+//! stores the durable high-water LSN before the current WAL segment, and records
+//! in complete frames are assigned logical LSNs after that value. Appending
+//! advances the highest appended LSN, while [`LogManager::flush_through`] is
+//! responsible for making appended bytes durable before pages protected by
+//! those LSNs are written to the database file.
 
 use std::{
     fs::{File, OpenOptions},
-    io::{BufReader, BufWriter, Read, Seek, Write},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -46,6 +50,9 @@ pub(crate) const ZERO_LSN: Lsn = 0;
 
 const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
+const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
+const WAL_FILE_HEADER_VERSION: u16 = 1;
+const WAL_FILE_HEADER_LEN: usize = 24;
 
 /// Errors raised while opening, writing, or decoding WAL frames.
 #[derive(Debug, Error)]
@@ -180,6 +187,8 @@ pub(crate) struct RecoveryLogScan {
     pub(crate) truncated_tail: bool,
     /// Largest transaction id observed in complete frames.
     pub(crate) max_txn_id: TxnId,
+    /// Highest LSN assigned before this WAL segment plus all complete records.
+    pub(crate) last_assigned_lsn: Lsn,
 }
 
 #[cfg(test)]
@@ -198,6 +207,56 @@ pub(crate) struct LogTransaction<'a> {
     pub(crate) txn_id: TxnId,
     /// Records decoded from the frame payload.
     pub(crate) records: Vec<LogRecord<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalFileHeader {
+    last_assigned_lsn: Lsn,
+}
+
+fn ensure_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
+    if wal_file.metadata()?.len() == 0 {
+        write_wal_file_header(wal_file, ZERO_LSN)?;
+        wal_file.sync_all()?;
+        return Ok(WalFileHeader { last_assigned_lsn: ZERO_LSN });
+    }
+    read_wal_file_header(wal_file)
+}
+
+fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
+    let mut header = [0; WAL_FILE_HEADER_LEN];
+    wal_file.seek(SeekFrom::Start(0))?;
+    wal_file.read_exact(&mut header)?;
+
+    let magic: [u8; 8] = header[0..8].try_into().expect("slice length is fixed");
+    if magic != WAL_FILE_HEADER_MAGIC {
+        return Err(LogManagerError::InvalidHeaderMagic { actual: magic });
+    }
+
+    let version = u16::from_le_bytes(header[8..10].try_into().expect("slice length is fixed"));
+    if version != WAL_FILE_HEADER_VERSION {
+        return Err(LogManagerError::UnsupportedVersion {
+            expected: WAL_FILE_HEADER_VERSION,
+            actual: version,
+        });
+    }
+
+    let last_assigned_lsn =
+        u64::from_le_bytes(header[16..24].try_into().expect("slice length is fixed"));
+    Ok(WalFileHeader { last_assigned_lsn })
+}
+
+fn write_wal_file_header(
+    wal_file: &mut File,
+    last_assigned_lsn: Lsn,
+) -> Result<(), LogManagerError> {
+    let mut header = [0; WAL_FILE_HEADER_LEN];
+    header[0..8].copy_from_slice(&WAL_FILE_HEADER_MAGIC);
+    header[8..10].copy_from_slice(&WAL_FILE_HEADER_VERSION.to_le_bytes());
+    header[16..24].copy_from_slice(&last_assigned_lsn.to_le_bytes());
+    wal_file.seek(SeekFrom::Start(0))?;
+    wal_file.write_all(&header)?;
+    Ok(())
 }
 
 /// Append-only manager for the database write-ahead log.
@@ -230,13 +289,18 @@ impl LogManager {
         let mut wal_file = OpenOptions::new()
             .create(true)
             .read(true)
-            .append(true)
+            .write(true)
             .truncate(false)
             .open(wal_file_path)?;
+        let wal_header = ensure_wal_file_header(&mut wal_file).map_err(wal_open_error)?;
 
-        let mut highest_appended_lsn = None;
+        let mut highest_appended_lsn = if wal_header.last_assigned_lsn == ZERO_LSN {
+            None
+        } else {
+            Some(wal_header.last_assigned_lsn)
+        };
         let mut highest_txn_id = 0;
-        wal_file.seek(std::io::SeekFrom::Start(0))?;
+        wal_file.seek(SeekFrom::Start(WAL_FILE_HEADER_LEN as u64))?;
         {
             let mut wal_reader = BufReader::with_capacity(WAL_READ_BUFFER_LEN, &mut wal_file);
             while let Some(frame) =
@@ -253,7 +317,7 @@ impl LogManager {
                 }
             }
         }
-        wal_file.seek(std::io::SeekFrom::End(0))?;
+        wal_file.seek(SeekFrom::End(0))?;
 
         let wal_writer = BufWriter::with_capacity(WAL_WRITE_BUFFER_LEN, wal_file);
 
@@ -408,12 +472,14 @@ pub(crate) fn read_recovery_log(
         .write(true)
         .truncate(false)
         .open(wal_file_path)?;
+    let wal_header = ensure_wal_file_header(&mut wal_file)?;
     let mut buf = Vec::new();
+    wal_file.seek(SeekFrom::Start(0))?;
     wal_file.read_to_end(&mut buf)?;
 
-    let mut records = Vec::new();
-    let mut offset = 0;
-    let mut next_lsn = ZERO_LSN;
+    let mut frame_ranges = Vec::new();
+    let mut offset = WAL_FILE_HEADER_LEN;
+    let mut complete_record_count = 0u64;
     let mut max_txn_id = 0;
     let mut truncated_tail = false;
 
@@ -441,14 +507,12 @@ pub(crate) fn read_recovery_log(
 
         let transaction = deserialize_transaction(&buf[offset..frame_end])?;
         max_txn_id = max_txn_id.max(transaction.txn_id);
-        for record in transaction.records {
-            next_lsn = next_lsn.checked_add(1).ok_or(LogManagerError::LsnExhausted)?;
-            records.push(RecoveryLogRecord {
-                lsn: next_lsn,
-                txn_id: record.txn_id,
-                kind: RecoveryLogRecordKind::from_log_record_kind(record.kind)?,
-            });
-        }
+        complete_record_count = complete_record_count
+            .checked_add(
+                u64::try_from(transaction.records.len()).expect("usize record count fits in u64"),
+            )
+            .ok_or(LogManagerError::LsnExhausted)?;
+        frame_ranges.push((offset, frame_end));
         offset = frame_end;
     }
 
@@ -457,14 +521,41 @@ pub(crate) fn read_recovery_log(
         wal_file.sync_all()?;
     }
 
-    Ok(RecoveryLogScan { records, truncated_tail, max_txn_id })
+    let last_assigned_lsn = wal_header
+        .last_assigned_lsn
+        .checked_add(complete_record_count)
+        .ok_or(LogManagerError::LsnExhausted)?;
+    let mut next_lsn = wal_header.last_assigned_lsn;
+    let mut records = Vec::new();
+    for (frame_start, frame_end) in frame_ranges {
+        let transaction = deserialize_transaction(&buf[frame_start..frame_end])?;
+        for record in transaction.records {
+            next_lsn = next_lsn.checked_add(1).ok_or(LogManagerError::LsnExhausted)?;
+            records.push(RecoveryLogRecord {
+                lsn: next_lsn,
+                txn_id: record.txn_id,
+                kind: RecoveryLogRecordKind::from_log_record_kind(record.kind)?,
+            });
+        }
+    }
+
+    Ok(RecoveryLogScan { records, truncated_tail, max_txn_id, last_assigned_lsn })
 }
 
 /// Removes all WAL contents after recovery has made the database file consistent.
-pub(crate) fn truncate_wal(db_file_path: impl AsRef<Path>) -> Result<(), LogManagerError> {
+pub(crate) fn truncate_wal(
+    db_file_path: impl AsRef<Path>,
+    last_assigned_lsn: Lsn,
+) -> Result<(), LogManagerError> {
     let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
-    let wal_file =
-        OpenOptions::new().create(true).write(true).truncate(true).open(wal_file_path)?;
+    let mut wal_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(wal_file_path)?;
+    write_wal_file_header(&mut wal_file, last_assigned_lsn)?;
+    wal_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
     wal_file.sync_all()?;
     Ok(())
 }
@@ -724,7 +815,7 @@ mod tests {
         let mut wal_file = File::open(file.path().with_added_extension("wal")).unwrap();
         let mut buf = Vec::new();
         wal_file.read_to_end(&mut buf).unwrap();
-        let transaction = deserialize_transaction(&buf).unwrap();
+        let transaction = deserialize_transaction(&buf[WAL_FILE_HEADER_LEN..]).unwrap();
 
         assert_eq!(transaction.txn_id, 11);
         assert_eq!(transaction.records.len(), 2);
@@ -821,7 +912,8 @@ mod tests {
         );
         let wal_file_path = file.path().with_added_extension("wal");
         {
-            let mut wal_file = File::create(&wal_file_path).unwrap();
+            let _manager = LogManager::new(file.path()).unwrap();
+            let mut wal_file = OpenOptions::new().append(true).open(&wal_file_path).unwrap();
             wal_file.write_all(&valid_frame).unwrap();
             wal_file.write_all(b"DBWAL").unwrap();
         }
@@ -831,7 +923,10 @@ mod tests {
         assert!(scan.truncated_tail);
         assert_eq!(scan.max_txn_id, 11);
         assert_eq!(scan.records.len(), 2);
-        assert_eq!(std::fs::metadata(wal_file_path).unwrap().len(), valid_frame.len() as u64);
+        assert_eq!(
+            std::fs::metadata(wal_file_path).unwrap().len(),
+            (WAL_FILE_HEADER_LEN + valid_frame.len()) as u64
+        );
     }
 
     #[test]

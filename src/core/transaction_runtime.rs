@@ -54,11 +54,12 @@ impl TransactionRuntime {
     }
 
     pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        let undo_pages = self.runtime.take_rollback_pages(txn_id)?;
-        self.page_cache.restore_rollback_pages(undo_pages)?;
+        let rollback = self.runtime.prepare_rollback_pages(txn_id)?;
+        self.page_cache.restore_rollback_pages(rollback.pages)?;
         self.page_cache.flush_all()?;
         self.runtime.sync_database_file()?;
-        self.runtime.finish_rollback(txn_id)
+        self.runtime.finish_rollback(txn_id)?;
+        Ok(())
     }
 
     #[cfg(test)]

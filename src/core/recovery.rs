@@ -37,10 +37,11 @@ pub(crate) fn recover_from_wal(
     let max_txn_id = scan.max_txn_id;
     if scan.records.is_empty() {
         if max_txn_id > 0 || scan.truncated_tail {
-            truncate_wal(path)?;
+            truncate_wal(path, scan.last_assigned_lsn)?;
         }
         return Ok(RecoveryResult { max_txn_id });
     }
+    let last_assigned_lsn = scan.last_assigned_lsn;
 
     let mut transactions: HashMap<TxnId, TransactionRecovery> = HashMap::new();
     let mut committed_page_allocs = Vec::new();
@@ -98,7 +99,7 @@ pub(crate) fn recover_from_wal(
     }
 
     disk.sync()?;
-    truncate_wal(path)?;
+    truncate_wal(path, last_assigned_lsn)?;
     Ok(RecoveryResult { max_txn_id })
 }
 
@@ -151,6 +152,8 @@ mod tests {
         page::format::PageKind,
         storage_runtime::StorageRuntime,
     };
+
+    const WAL_FILE_HEADER_LEN: u64 = 24;
 
     fn formatted_page(seed: u8, lsn: Lsn) -> [u8; PAGE_SIZE] {
         let mut page = [seed; PAGE_SIZE];
@@ -376,8 +379,87 @@ mod tests {
                 .unwrap();
 
         assert_eq!(read_disk_page(file.path(), 0), after);
-        assert_eq!(wal_len(file.path()), 0);
+        assert_eq!(wal_len(file.path()), WAL_FILE_HEADER_LEN);
         assert_eq!(runtime.begin_transaction().unwrap(), 42);
+    }
+
+    #[test]
+    fn recovery_redoes_update_after_wal_truncation_despite_stale_page_lsn() {
+        let file = NamedTempFile::new().unwrap();
+        let initial = formatted_page(1, ZERO_LSN);
+        let first_update = formatted_page(2, 2);
+        let second_update = formatted_page(3, 3);
+        let old_wal_update = formatted_page(4, 4);
+        let new_wal_update = formatted_page(5, 2);
+
+        {
+            let mut disk = DiskManager::new(file.path()).unwrap();
+            disk.ensure_page_exists(0).unwrap();
+            disk.write_page(0, &initial).unwrap();
+        }
+
+        append_transaction(
+            file.path(),
+            1,
+            &[
+                LogRecord { txn_id: 1, kind: LogRecordKind::Begin },
+                LogRecord {
+                    txn_id: 1,
+                    kind: LogRecordKind::PageUpdate {
+                        page_id: 0,
+                        redo_data: &first_update,
+                        undo_data: &initial,
+                    },
+                },
+                LogRecord {
+                    txn_id: 1,
+                    kind: LogRecordKind::PageUpdate {
+                        page_id: 0,
+                        redo_data: &second_update,
+                        undo_data: &first_update,
+                    },
+                },
+                LogRecord {
+                    txn_id: 1,
+                    kind: LogRecordKind::PageUpdate {
+                        page_id: 0,
+                        redo_data: &old_wal_update,
+                        undo_data: &second_update,
+                    },
+                },
+                LogRecord { txn_id: 1, kind: LogRecordKind::Commit },
+            ],
+        );
+
+        {
+            let mut disk = DiskManager::new(file.path()).unwrap();
+            recover_from_wal(file.path(), &mut disk).unwrap();
+        }
+
+        assert_eq!(read_disk_page(file.path(), 0), old_wal_update);
+        assert_eq!(wal_len(file.path()), WAL_FILE_HEADER_LEN);
+
+        append_transaction(
+            file.path(),
+            2,
+            &[
+                LogRecord { txn_id: 2, kind: LogRecordKind::Begin },
+                LogRecord {
+                    txn_id: 2,
+                    kind: LogRecordKind::PageUpdate {
+                        page_id: 0,
+                        redo_data: &new_wal_update,
+                        undo_data: &old_wal_update,
+                    },
+                },
+                LogRecord { txn_id: 2, kind: LogRecordKind::Commit },
+            ],
+        );
+
+        let mut disk = DiskManager::new(file.path()).unwrap();
+        recover_from_wal(file.path(), &mut disk).unwrap();
+
+        assert_eq!(read_disk_page(file.path(), 0), new_wal_update);
     }
 
     #[test]

@@ -206,8 +206,6 @@ pub(crate) type DiskManagerResult<T> = Result<T, DiskManagerError>;
 pub(crate) enum PageCacheError {
     #[error("disk manager error: {0}")]
     Disk(#[from] DiskManagerError),
-    #[error("WAL flush error: {0}")]
-    WalFlush(#[from] LogManagerFlushError),
     #[error("transaction error: {0}")]
     Transaction(Box<StorageError>),
     #[error("no evictable frame available")]
@@ -266,17 +264,6 @@ impl From<PageCacheError> for StorageError {
     fn from(err: PageCacheError) -> Self {
         match err {
             PageCacheError::Disk(err) => err.into(),
-            PageCacheError::WalFlush(err) => match err {
-                LogManagerFlushError::Io(err) => Self::Io(err),
-                LogManagerFlushError::LsnNotAppended { requested_lsn, highest_appended_lsn } => {
-                    Self::Internal(InternalError::InvariantViolation(
-                        InvariantViolation::WalFlushLsnNotAppended {
-                            requested_lsn,
-                            highest_appended_lsn,
-                        },
-                    ))
-                }
-            },
             PageCacheError::Transaction(err) => *err,
             PageCacheError::NoEvictableFrame => {
                 Self::LimitExceeded(LimitExceededError::CacheCapacityExhausted)

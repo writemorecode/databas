@@ -4,9 +4,12 @@ use crate::core::{
     PAGE_SIZE, PageId,
     disk_manager::DiskManager,
     error::{DiskManagerError, StorageResult},
-    log_manager::{LogManager, LogManagerError, LogManagerFlushError, LogRecord, Lsn, TxnId},
+    log_manager::{LogManager, Lsn, TxnId},
     recovery::recover_from_wal,
-    transaction_manager::{LoggedPageUpdate, PageUndo, TransactionManager, TransactionSavepoint},
+    transaction_manager::{
+        LoggedPageUpdate, PageRestore, TransactionManager, TransactionRollback,
+        TransactionSavepoint,
+    },
 };
 
 /// Shared concrete storage runtime for database pages and the write-ahead log.
@@ -47,7 +50,7 @@ impl StorageRuntime {
     }
 
     pub(crate) fn record_page_alloc(&self, page_id: PageId) -> StorageResult<Option<Lsn>> {
-        self.transactions.borrow_mut().record_page_alloc(&mut self.log.borrow_mut(), page_id)
+        self.transactions.borrow_mut().record_page_alloc(page_id)
     }
 
     pub(crate) fn read_page(
@@ -70,21 +73,18 @@ impl StorageRuntime {
         self.disk.borrow().sync()
     }
 
-    pub(crate) fn flush_wal_through(&self, lsn: Lsn) -> Result<(), LogManagerFlushError> {
-        self.log.borrow_mut().flush_through(lsn)
-    }
-
-    pub(crate) fn append_log_transaction<'a>(
-        &self,
-        txn_id: TxnId,
-        records: &[LogRecord<'a>],
-    ) -> Result<Lsn, LogManagerError> {
-        self.log.borrow_mut().append_transaction(txn_id, records)
+    pub(crate) fn flush_wal_through(&self, lsn: Lsn) -> StorageResult<()> {
+        let mut log = self.log.borrow_mut();
+        self.transactions.borrow_mut().append_pending_through(&mut log, lsn)?;
+        log.flush_through(lsn)?;
+        Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn force_next_lsn_exhausted_for_test(&self) {
-        self.log.borrow_mut().force_next_lsn_exhausted_for_test();
+        if !self.transactions.borrow_mut().force_next_lsn_exhausted_for_test() {
+            self.log.borrow_mut().force_next_lsn_exhausted_for_test();
+        }
     }
 
     #[cfg(test)]
@@ -102,12 +102,7 @@ impl StorageRuntime {
         before: &[u8; PAGE_SIZE],
         after: &[u8; PAGE_SIZE],
     ) -> StorageResult<Option<LoggedPageUpdate>> {
-        let result = self.transactions.borrow_mut().record_page_update(
-            &mut self.log.borrow_mut(),
-            page_id,
-            before,
-            after,
-        );
+        let result = self.transactions.borrow_mut().record_page_update(page_id, before, after);
         if result.is_err() {
             self.transactions.borrow_mut().record_failure();
         }
@@ -137,12 +132,15 @@ impl StorageRuntime {
     pub(crate) fn rollback_to_savepoint(
         &self,
         savepoint: TransactionSavepoint,
-    ) -> StorageResult<Vec<PageUndo>> {
-        self.transactions.borrow_mut().rollback_to_savepoint(&mut self.log.borrow_mut(), savepoint)
+    ) -> StorageResult<Vec<PageRestore>> {
+        self.transactions.borrow_mut().rollback_to_savepoint(savepoint)
     }
 
-    pub(crate) fn take_rollback_pages(&self, txn_id: TxnId) -> StorageResult<Vec<PageUndo>> {
-        self.transactions.borrow_mut().take_rollback_pages(txn_id)
+    pub(crate) fn prepare_rollback_pages(
+        &self,
+        txn_id: TxnId,
+    ) -> StorageResult<TransactionRollback> {
+        self.transactions.borrow_mut().prepare_rollback_pages(txn_id)
     }
 
     pub(crate) fn finish_rollback(&self, txn_id: TxnId) -> StorageResult<()> {
