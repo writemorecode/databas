@@ -28,7 +28,7 @@ use crate::core::{
     page::{NodeMarker, Page, PageResult, Read, Write},
     page_replacement::ClockPolicy,
     storage_runtime::StorageRuntime,
-    transaction_manager::{PageUndo, page_lsn},
+    transaction_manager::PageRestore,
     {PAGE_SIZE, PageId},
 };
 
@@ -236,7 +236,7 @@ impl PageCache {
 
         frame.page_id.set(Some(new_page_id));
         frame.dirty.set(false);
-        frame.lsn.set(page_lsn(&data));
+        frame.lsn.set(ZERO_LSN);
         frame.pin_count.set(1);
 
         let mut meta = self.inner.meta.borrow_mut();
@@ -263,25 +263,30 @@ impl PageCache {
             .data
             .try_borrow()
             .map_err(|_| PageCacheError::PageImmutableBorrowConflict { page_id })?;
-        let flush_lsn = frame.lsn.get().max(page_lsn(&page));
-        self.inner.runtime.flush_wal_through(flush_lsn)?;
+        self.inner
+            .runtime
+            .flush_wal_through(frame.lsn.get())
+            .map_err(|err| PageCacheError::Transaction(Box::new(err)))?;
         self.inner.runtime.write_page(page_id, &page)?;
         frame.dirty.set(false);
         Ok(())
     }
 
-    pub(crate) fn restore_rollback_pages(&self, undo_pages: Vec<PageUndo>) -> PageCacheResult<()> {
-        for undo in undo_pages {
-            let pin = self.fetch_page(undo.page_id)?;
+    pub(crate) fn restore_rollback_pages(
+        &self,
+        restore_pages: Vec<PageRestore>,
+    ) -> PageCacheResult<()> {
+        for restore in restore_pages {
+            let pin = self.fetch_page(restore.page_id)?;
             let frame = &self.inner.frames[pin.frame_id];
             {
                 let mut data = frame.data.try_borrow_mut().map_err(|_| {
-                    PageCacheError::PageMutableBorrowConflict { page_id: undo.page_id }
+                    PageCacheError::PageMutableBorrowConflict { page_id: restore.page_id }
                 })?;
-                *data = undo.before;
+                *data = restore.image;
             }
             frame.dirty.set(true);
-            frame.lsn.set(frame.lsn.get().max(undo.lsn));
+            frame.lsn.set(restore.wal_flush_lsn);
         }
         Ok(())
     }
@@ -442,7 +447,7 @@ impl Drop for PageWriteGuard<'_> {
                 self.frame.lsn.set(update.lsn);
             }
             Ok(None) => {
-                self.frame.lsn.set(self.frame.lsn.get().max(page_lsn(&self.page)));
+                self.frame.lsn.set(ZERO_LSN);
             }
             Err(_) => {
                 *self.page = self.before;
@@ -461,14 +466,12 @@ mod tests {
 
     use super::*;
     use crate::core::disk_manager::DiskManager;
-    use crate::core::log_manager::{
-        LogManagerFlushError, LogRecord, LogRecordKind, OwnedLogRecordKind,
-        read_log_record_kinds_for_test,
-    };
+    use crate::core::log_manager::{OwnedLogRecordKind, read_log_record_kinds_for_test};
     use crate::core::page;
     use crate::core::page::format::PageKind;
     use crate::core::page::{Leaf, Page, Write};
     use crate::core::storage_runtime::StorageRuntime;
+    use crate::core::transaction_runtime::TransactionRuntime;
 
     /// Generates a deterministic page payload from a seed byte.
     fn page_with_pattern(seed: u8) -> [u8; PAGE_SIZE] {
@@ -516,14 +519,6 @@ mod tests {
         let mut page = [0u8; PAGE_SIZE];
         disk_manager.read_page(page_id, &mut page).unwrap();
         page
-    }
-
-    fn append_wal_through(runtime: &StorageRuntime, target_lsn: Lsn) {
-        for txn_id in 1..=target_lsn {
-            runtime
-                .append_log_transaction(txn_id, &[LogRecord { txn_id, kind: LogRecordKind::Begin }])
-                .unwrap();
-        }
     }
 
     #[test]
@@ -876,10 +871,9 @@ mod tests {
     }
 
     #[test]
-    fn flush_page_forces_wal_through_page_lsn_before_write() {
+    fn flush_page_ignores_lsn_loaded_from_disk() {
         let page = formatted_page_with_lsn(15, 7);
         let (file, runtime) = create_disk_with_pages(&[page]);
-        append_wal_through(&runtime, 7);
         let cache = PageCache::new(runtime, 1).unwrap();
 
         {
@@ -895,11 +889,10 @@ mod tests {
     }
 
     #[test]
-    fn dirty_page_eviction_forces_wal_through_page_lsn_before_write() {
+    fn dirty_page_eviction_ignores_lsn_loaded_from_disk() {
         let page0 = formatted_page_with_lsn(1, 13);
         let page1 = page_with_pattern(2);
         let (file, runtime) = create_disk_with_pages(&[page0, page1]);
-        append_wal_through(&runtime, 13);
         let cache = PageCache::new(runtime, 1).unwrap();
 
         {
@@ -916,11 +909,10 @@ mod tests {
     }
 
     #[test]
-    fn flush_all_forces_wal_through_each_dirty_page_lsn_before_each_write() {
+    fn flush_all_ignores_lsn_loaded_from_disk() {
         let page0 = formatted_page_with_lsn(4, 21);
         let page1 = formatted_page_with_lsn(5, 34);
         let (file, runtime) = create_disk_with_pages(&[page0, page1]);
-        append_wal_through(&runtime, 34);
         let cache = PageCache::new(runtime, 2).unwrap();
 
         {
@@ -944,28 +936,176 @@ mod tests {
     }
 
     #[test]
-    fn wal_flush_failure_prevents_page_write_and_leaves_frame_dirty() {
-        let page = formatted_page_with_lsn(15, 55);
+    fn transactional_page_flush_appends_and_flushes_pending_wal_before_write() {
+        let page = formatted_page_with_lsn(15, ZERO_LSN);
         let (file, runtime) = create_disk_with_pages(&[page]);
-        let cache = PageCache::new(runtime, 1).unwrap();
+        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+
+        let txn_id = runtime.begin_transaction().unwrap();
 
         {
             let guard = cache.fetch_page(0).unwrap();
             guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
         }
 
+        cache.flush_page(0).unwrap();
+
+        let flushed_page = read_disk_page(file.path(), 0);
+        assert_eq!(flushed_page[PAGE_SIZE - 1], 177);
+        assert!(!cache.inner.frames[0].dirty.get());
+        assert_eq!(
+            read_log_record_kinds_for_test(file.path()),
+            [
+                (txn_id, OwnedLogRecordKind::Begin),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 0 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn transactional_page_flush_after_repeated_update_appends_one_latest_page_update() {
+        let page = formatted_page_with_lsn(15, ZERO_LSN);
+        let (file, runtime) = create_disk_with_pages(&[page]);
+        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+
+        let txn_id = runtime.begin_transaction().unwrap();
+
+        {
+            let guard = cache.fetch_page(0).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+        }
+        {
+            let guard = cache.fetch_page(0).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 222;
+        }
+
+        cache.flush_page(0).unwrap();
+
+        let flushed_page = read_disk_page(file.path(), 0);
+        assert_eq!(flushed_page[PAGE_SIZE - 1], 222);
+        assert!(!cache.inner.frames[0].dirty.get());
+        assert_eq!(
+            read_log_record_kinds_for_test(file.path()),
+            [
+                (txn_id, OwnedLogRecordKind::Begin),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 0 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn wal_flush_failure_prevents_transactional_page_write_and_leaves_frame_dirty() {
+        let page = formatted_page_with_lsn(15, ZERO_LSN);
+        let (file, runtime) = create_disk_with_pages(&[page]);
+        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+
+        runtime.begin_transaction().unwrap();
+        {
+            let guard = cache.fetch_page(0).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+        }
+        runtime.fail_next_wal_flush_for_test();
+
         let result = cache.flush_page(0);
 
-        assert!(matches!(
-            result,
-            Err(PageCacheError::WalFlush(LogManagerFlushError::LsnNotAppended {
-                requested_lsn: 55,
-                highest_appended_lsn: None,
-            }))
-        ));
+        assert!(matches!(result, Err(PageCacheError::Transaction(_))));
         let page_on_disk = read_disk_page(file.path(), 0);
         assert_eq!(page_on_disk[PAGE_SIZE - 1], page[PAGE_SIZE - 1]);
         assert!(cache.inner.frames[0].dirty.get());
+    }
+
+    #[test]
+    fn rollback_without_forced_wal_flush_restores_page_and_drops_buffered_records() {
+        let page = formatted_page_with_lsn(15, ZERO_LSN);
+        let (file, runtime) = create_disk_with_pages(&[page]);
+        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+
+        let txn_id = runtime.begin_transaction().unwrap();
+        {
+            let guard = cache.fetch_page(0).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+        }
+
+        let rollback = runtime.prepare_rollback_pages(txn_id).unwrap();
+        cache.restore_rollback_pages(rollback.pages).unwrap();
+        cache.flush_all().unwrap();
+        runtime.sync_database_file().unwrap();
+        runtime.finish_rollback(txn_id).unwrap();
+
+        assert_eq!(read_disk_page(file.path(), 0), page);
+        assert_eq!(read_log_record_kinds_for_test(file.path()), []);
+    }
+
+    #[test]
+    fn rollback_after_steal_flush_restores_page_and_writes_rollback_record() {
+        let page = formatted_page_with_lsn(15, ZERO_LSN);
+        let (file, runtime) = create_disk_with_pages(&[page]);
+        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+
+        let txn_id = runtime.begin_transaction().unwrap();
+        {
+            let guard = cache.fetch_page(0).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+        }
+        cache.flush_page(0).unwrap();
+
+        let rollback = runtime.prepare_rollback_pages(txn_id).unwrap();
+        cache.restore_rollback_pages(rollback.pages).unwrap();
+        cache.flush_all().unwrap();
+        runtime.sync_database_file().unwrap();
+        runtime.finish_rollback(txn_id).unwrap();
+
+        assert_eq!(read_disk_page(file.path(), 0), page);
+        assert_eq!(
+            read_log_record_kinds_for_test(file.path()),
+            [
+                (txn_id, OwnedLogRecordKind::Begin),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 0 }),
+                (txn_id, OwnedLogRecordKind::Rollback),
+            ]
+        );
+    }
+
+    #[test]
+    fn prepared_rollback_keeps_pending_wal_available_for_cache_eviction() {
+        let pages = [
+            formatted_page_with_lsn(10, ZERO_LSN),
+            formatted_page_with_lsn(20, ZERO_LSN),
+            formatted_page_with_lsn(30, ZERO_LSN),
+        ];
+        let (file, runtime) = create_disk_with_pages(&pages);
+        let cache = PageCache::new(Rc::clone(&runtime), 2).unwrap();
+        let transactions = TransactionRuntime::new(Rc::clone(&runtime), cache.clone());
+
+        let txn_id = transactions.begin_transaction().unwrap();
+        {
+            let guard = cache.fetch_page(0).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 100;
+        }
+        {
+            let guard = cache.fetch_page(1).unwrap();
+            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 110;
+        }
+
+        let rollback = runtime.prepare_rollback_pages(txn_id).unwrap();
+        {
+            let _guard = cache.fetch_page(2).unwrap();
+        }
+        cache.restore_rollback_pages(rollback.pages).unwrap();
+        cache.flush_all().unwrap();
+        runtime.sync_database_file().unwrap();
+        runtime.finish_rollback(txn_id).unwrap();
+
+        assert_eq!(read_disk_page(file.path(), 0), pages[0]);
+        assert_eq!(read_disk_page(file.path(), 1), pages[1]);
+        assert_eq!(
+            read_log_record_kinds_for_test(file.path()),
+            [
+                (txn_id, OwnedLogRecordKind::Begin),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 0 }),
+                (txn_id, OwnedLogRecordKind::Rollback),
+            ]
+        );
     }
 
     #[test]

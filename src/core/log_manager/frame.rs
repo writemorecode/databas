@@ -380,7 +380,7 @@ pub(crate) fn read_log_record_kinds_for_test(
     wal_file.read_to_end(&mut buf).unwrap();
 
     let mut records = Vec::new();
-    let mut offset = 0;
+    let mut offset = super::WAL_FILE_HEADER_LEN;
     while offset < buf.len() {
         let frame_len = transaction_frame_len(&buf[offset..]).unwrap();
         let transaction = deserialize_transaction(&buf[offset..offset + frame_len]).unwrap();
