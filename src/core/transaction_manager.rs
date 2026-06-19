@@ -7,6 +7,8 @@
 //! commits. Rollback uses the in-memory undo images accumulated here; crash
 //! recovery uses the durable WAL records written by [`LogManager`].
 
+use std::collections::HashMap;
+
 use crate::core::{
     PAGE_SIZE, PageId,
     error::{InternalError, InvariantViolation, StorageError, StorageResult},
@@ -82,6 +84,7 @@ struct ActiveTransaction {
     txn_id: TxnId,
     last_lsn: Lsn,
     pending_records: Vec<PendingLogRecord>,
+    pending_page_updates: HashMap<PageId, usize>,
     undo_pages: Vec<PageUndo>,
     poisoned: bool,
 }
@@ -133,6 +136,7 @@ impl TransactionManager {
                 kind: PendingLogRecordKind::Begin,
                 appended: false,
             }],
+            pending_page_updates: HashMap::new(),
             undo_pages: Vec::new(),
             poisoned: false,
         });
@@ -187,6 +191,30 @@ impl TransactionManager {
             return Ok(None);
         };
 
+        if let Some(&pending_record_index) = active.pending_page_updates.get(&page_id) {
+            let record = &mut active.pending_records[pending_record_index];
+            if let PendingLogRecordKind::PageUpdate { redo_data, .. } = &mut record.kind {
+                let mut redo = *after;
+                stamp_page_lsn(&mut redo, record.lsn);
+                **redo_data = redo;
+                active.undo_pages.push(PageUndo {
+                    page_id,
+                    before: *before,
+                    after: redo,
+                    lsn: record.lsn,
+                    pending_record_index,
+                });
+                return Ok(Some(LoggedPageUpdate { lsn: record.lsn, redo }));
+            }
+
+            active.poisoned = true;
+            return Err(invariant(InvariantViolation::WalLog {
+                message: format!(
+                    "pending page-update index {pending_record_index} for page {page_id} did not point to a PageUpdate record"
+                ),
+            }));
+        }
+
         let lsn = match next_lsn(active.last_lsn) {
             Ok(lsn) => lsn,
             Err(err) => {
@@ -215,6 +243,7 @@ impl TransactionManager {
             lsn,
             pending_record_index,
         });
+        active.pending_page_updates.insert(page_id, pending_record_index);
         Ok(Some(LoggedPageUpdate { lsn, redo }))
     }
 
@@ -270,6 +299,17 @@ impl TransactionManager {
 
         for record in &mut active.pending_records[start..end] {
             record.appended = true;
+        }
+        for pending_record_index in start..end {
+            if let PendingLogRecordKind::PageUpdate { page_id, .. } =
+                &active.pending_records[pending_record_index].kind
+                && active
+                    .pending_page_updates
+                    .get(page_id)
+                    .is_some_and(|index| *index == pending_record_index)
+            {
+                active.pending_page_updates.remove(page_id);
+            }
         }
         Ok(())
     }
@@ -393,6 +433,7 @@ impl TransactionManager {
             };
             let mut redo = undo.before;
             stamp_page_lsn(&mut redo, lsn);
+            active.pending_page_updates.remove(&undo.page_id);
             active.pending_records.push(PendingLogRecord {
                 lsn,
                 kind: PendingLogRecordKind::PageUpdate {
@@ -555,7 +596,10 @@ mod tests {
     use super::*;
     use crate::core::{
         error::{InternalError, InvariantViolation},
-        log_manager::{LogManager, OwnedLogRecordKind, read_log_record_kinds_for_test},
+        log_manager::{
+            LogManager, OwnedLogRecordKind, RecoveryLogRecordKind, read_log_record_kinds_for_test,
+            read_recovery_log,
+        },
     };
 
     #[test]
@@ -597,7 +641,87 @@ mod tests {
     }
 
     #[test]
-    fn pending_page_updates_append_through_requested_lsn() {
+    fn repeated_page_updates_commit_as_one_page_update_record() {
+        let file = NamedTempFile::new().unwrap();
+        let mut log = LogManager::new(file.path()).unwrap();
+        let mut transactions = TransactionManager::new(0);
+        let before = [0; PAGE_SIZE];
+        let after_first = [1; PAGE_SIZE];
+        let after_second = [2; PAGE_SIZE];
+
+        let txn_id = transactions.begin(&mut log).unwrap();
+        let first_update = transactions.record_page_update(7, &before, &after_first).unwrap();
+        let second_update =
+            transactions.record_page_update(7, &after_first, &after_second).unwrap();
+        transactions.commit(&mut log, txn_id).unwrap();
+
+        assert_eq!(first_update.as_ref().map(|update| update.lsn), Some(2));
+        assert_eq!(second_update.as_ref().map(|update| update.lsn), Some(2));
+        assert_eq!(
+            read_log_record_kinds_for_test(file.path()),
+            [
+                (txn_id, OwnedLogRecordKind::Begin),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 7 }),
+                (txn_id, OwnedLogRecordKind::Commit),
+            ]
+        );
+    }
+
+    #[test]
+    fn coalesced_page_update_keeps_first_undo_and_latest_redo_image() {
+        let file = NamedTempFile::new().unwrap();
+        let mut log = LogManager::new(file.path()).unwrap();
+        let mut transactions = TransactionManager::new(0);
+        let before = [0; PAGE_SIZE];
+        let after_first = [1; PAGE_SIZE];
+        let after_second = [2; PAGE_SIZE];
+
+        let txn_id = transactions.begin(&mut log).unwrap();
+        transactions.record_page_update(7, &before, &after_first).unwrap();
+        transactions.record_page_update(7, &after_first, &after_second).unwrap();
+        transactions.commit(&mut log, txn_id).unwrap();
+
+        let scan = read_recovery_log(file.path()).unwrap();
+        match &scan.records[1].kind {
+            RecoveryLogRecordKind::PageUpdate { page_id, redo_data, undo_data } => {
+                assert_eq!(*page_id, 7);
+                assert_eq!(undo_data.as_ref(), &before);
+                assert_eq!(redo_data.as_ref(), &after_second);
+            }
+            kind => panic!("unexpected record kind: {kind:?}"),
+        }
+    }
+
+    #[test]
+    fn mixed_page_updates_coalesce_per_page_without_reordering() {
+        let file = NamedTempFile::new().unwrap();
+        let mut log = LogManager::new(file.path()).unwrap();
+        let mut transactions = TransactionManager::new(0);
+        let before_a = [0; PAGE_SIZE];
+        let after_a_first = [1; PAGE_SIZE];
+        let before_b = [10; PAGE_SIZE];
+        let after_b = [11; PAGE_SIZE];
+        let after_a_second = [2; PAGE_SIZE];
+
+        let txn_id = transactions.begin(&mut log).unwrap();
+        transactions.record_page_update(7, &before_a, &after_a_first).unwrap();
+        transactions.record_page_update(8, &before_b, &after_b).unwrap();
+        transactions.record_page_update(7, &after_a_first, &after_a_second).unwrap();
+        transactions.commit(&mut log, txn_id).unwrap();
+
+        assert_eq!(
+            read_log_record_kinds_for_test(file.path()),
+            [
+                (txn_id, OwnedLogRecordKind::Begin),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 7 }),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 8 }),
+                (txn_id, OwnedLogRecordKind::Commit),
+            ]
+        );
+    }
+
+    #[test]
+    fn page_update_after_append_creates_new_record_for_same_page() {
         let file = NamedTempFile::new().unwrap();
         let mut log = LogManager::new(file.path()).unwrap();
         let mut transactions = TransactionManager::new(0);
@@ -640,7 +764,7 @@ mod tests {
 
         assert_eq!(restore_pages.len(), 1);
         assert_eq!(restore_pages[0].page_id, 7);
-        assert_eq!(restore_pages[0].wal_flush_lsn, 4);
+        assert_eq!(restore_pages[0].wal_flush_lsn, 3);
         assert_eq!(read_log_record_kinds_for_test(file.path()), []);
 
         transactions.commit(&mut log, txn_id).unwrap();
@@ -649,7 +773,6 @@ mod tests {
             read_log_record_kinds_for_test(file.path()),
             [
                 (txn_id, OwnedLogRecordKind::Begin),
-                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 7 }),
                 (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 7 }),
                 (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 7 }),
                 (txn_id, OwnedLogRecordKind::Commit),
