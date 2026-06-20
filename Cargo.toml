@@ -6,7 +6,6 @@ edition = '2024'
 repository = 'https://github.com/writemorecode/databas'
 
 [dependencies]
-csv = "1.4.0"
 crc = "3.4.0"
 thiserror = "2.0.18"
 
