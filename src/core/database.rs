@@ -141,11 +141,6 @@ impl Database {
         Ok(TableScan { cursor: self.catalog.table_cursor_by_name(&table.name)?, done: false })
     }
 
-    /// Allocates and persists the next row id for a table.
-    pub fn allocate_table_row_id(&self, table: &TableSchema) -> StorageResult<RowId> {
-        self.catalog.allocate_table_row_id(table)
-    }
-
     /// Inserts a fully-shaped table row and mirrors it into secondary indexes.
     pub fn insert_table_row(
         &self,
