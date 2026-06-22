@@ -14,8 +14,8 @@
 
 use crate::{
     core::{
-        DataType, Database, IndexSchema, TableRecord, TableSchema, Tuple, TupleView, Value,
-        error::StorageError,
+        DataType, Database, IndexSchema, OwnedTableRecord as TableRecord, TableSchema, Tuple,
+        TupleView, Value, error::StorageError,
     },
     planner::{BoundColumn, PhysicalPlan, PlannedExpression},
     sql_parser::parser::op::Op,
@@ -251,18 +251,15 @@ impl<'db> Executor<'db> {
                 rows: Box::new(std::iter::once_with(|| empty_record(0))),
             }),
             PhysicalPlan::FullTableScan { table } => {
-                let table_cursor = self.database.table_cursor_by_name(&table.name)?;
-                let mut tree_cursor = table_cursor.into_inner();
+                let mut table_cursor = self.database.table_cursor_by_name(&table.name)?;
                 let mut done = false;
                 let rows = std::iter::from_fn(move || {
                     if done {
                         return None;
                     }
 
-                    match tree_cursor.next_owned_record() {
-                        Ok(Some(record)) => {
-                            Some(TableRecord::try_from(record).map_err(ExecutorError::Storage))
-                        }
+                    match table_cursor.next_owned_record() {
+                        Ok(Some(record)) => Some(Ok(record)),
                         Ok(None) => {
                             done = true;
                             None
@@ -468,12 +465,10 @@ fn backfill_index(
     table: &TableSchema,
     index: &IndexSchema,
 ) -> ExecutorResult<()> {
-    let table_cursor = database.table_cursor_by_name(&table.name)?;
-    let mut table_cursor = table_cursor.into_inner();
+    let mut table_cursor = database.table_cursor_by_name(&table.name)?;
     let mut index_cursor = database.index_cursor_by_name(&index.name)?;
 
     while let Some(record) = table_cursor.next_owned_record()? {
-        let record = TableRecord::try_from(record).map_err(ExecutorError::Storage)?;
         let key = index_key_from_record(index, &record)?;
         index_cursor.insert(&key, record.row_id)?;
     }

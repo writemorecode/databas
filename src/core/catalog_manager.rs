@@ -1,9 +1,8 @@
 use std::path::Path;
 
 use crate::core::{
-    CatalogError, IndexSchema, PageId, RowId, TableCatalogRow, TableRecord, TableSchema, Tuple,
-    TupleSchema,
-    btree::OwnedRecord,
+    CatalogError, IndexSchema, OwnedTableRecord, PageId, RowId, TableCatalogRow, TableSchema,
+    Tuple, TupleSchema,
     catalog::{
         CatalogObjectKind, ColumnCatalogRow, ColumnSchema, IndexCatalogRow, IndexColumnSchema,
         SYS_COLUMNS_ROOT_PAGE_ID, SYS_INDEXES_ROOT_PAGE_ID, SYS_TABLES_ROOT_PAGE_ID,
@@ -351,14 +350,14 @@ impl CatalogManager {
         catalog_table_name: &'static str,
         decode: impl Fn(&Tuple) -> Result<T, CatalogError>,
     ) -> StorageResult<Vec<T>> {
-        let mut cursor = self.pager.table_cursor(root_page_id)?.into_inner();
+        let mut cursor = self.pager.table_cursor(root_page_id)?;
         let mut rows = Vec::new();
         if !cursor.seek_to_first()? {
             return Ok(rows);
         }
 
         let mut record = cursor
-            .current_owned()?
+            .current_owned_record()?
             .expect("positioned catalog cursor should have a current record");
         loop {
             rows.push(decode_catalog_record(catalog_table_name, record, &decode)?);
@@ -418,10 +417,9 @@ fn unexpected_system_catalog_root(expected: PageId, actual: PageId) -> StorageEr
 
 fn decode_catalog_record<T>(
     catalog_table_name: &'static str,
-    record: OwnedRecord,
+    record: OwnedTableRecord,
     decode: &impl Fn(&Tuple) -> Result<T, CatalogError>,
 ) -> StorageResult<T> {
-    let record = TableRecord::try_from(record)?;
     let tuple = Tuple::from_bytes(&record.record)
         .map_err(|error| invalid_catalog_row(catalog_table_name, error))?;
     decode(&tuple).map_err(|error| invalid_catalog_row(catalog_table_name, error))

@@ -27,7 +27,8 @@ pub use catalog::{
     TableCatalogRow, TableSchema, TupleSchema,
 };
 pub use cursor::{
-    IndexCursor, IndexEntry, IndexEntryRef, TableCursor, TableRecord, TableRecordRef,
+    IndexCursor, IndexEntry, IndexEntryView, OwnedIndexEntry, OwnedTableRecord, TableCursor,
+    TableRecord, TableRecordView,
 };
 pub use database::Database;
 pub use pager::PagerOptions;
