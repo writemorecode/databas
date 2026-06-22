@@ -8,14 +8,13 @@
 //! [`RowStream`].
 //!
 //! This module is also responsible for evaluating planned scalar expressions
-//! against encoded table records, validating inserted rows against catalog
-//! schemas, backfilling newly-created secondary indexes, and keeping existing
-//! secondary indexes up to date when new rows are inserted.
+//! against encoded table records and shaping inserted values into the target
+//! table layout before handing the write to storage.
 
 use crate::{
     core::{
-        DataType, Database, IndexSchema, OwnedTableRecord as TableRecord, TableSchema, Tuple,
-        TupleView, Value, error::StorageError,
+        Database, OwnedTableRecord as TableRecord, TableSchema, Tuple, TupleView, Value,
+        error::StorageError,
     },
     planner::{BoundColumn, PhysicalPlan, PlannedExpression},
     sql_parser::parser::op::Op,
@@ -121,22 +120,6 @@ pub enum ExecutorError {
         /// Number of values supplied by the row.
         values: usize,
     },
-    /// An inserted row left a non-nullable column as `NULL`.
-    #[error("column {column} does not accept NULL values")]
-    InsertNullConstraint {
-        /// Column that rejected `NULL`.
-        column: String,
-    },
-    /// An inserted value did not match its target column type.
-    #[error("column {column} expects {expected:?}, got {actual:?}")]
-    InsertTypeMismatch {
-        /// Target column name.
-        column: String,
-        /// Column type recorded in the catalog.
-        expected: DataType,
-        /// Value rejected by the column.
-        actual: Value,
-    },
 }
 
 /// Result type returned by executor operations.
@@ -239,8 +222,7 @@ impl<'db> Executor<'db> {
             }
             PhysicalPlan::CreateIndex { name, table, columns } => {
                 let column_names: Vec<&str> = columns.iter().map(|col| col.name.as_str()).collect();
-                let index = self.database.create_index(&name, &table.name, &column_names)?;
-                backfill_index(self.database, &table, &index)?;
+                self.database.create_index(&name, &table.name, &column_names)?;
                 Ok(ExecutionOutput::SchemaAffected)
             }
             PhysicalPlan::Values { rows } => execute_values(rows),
@@ -366,17 +348,14 @@ fn offset_rows(mut rows: RowStream, mut remaining: usize) -> RowStream {
 
 /// Executes an `INSERT ... VALUES` plan.
 ///
-/// Each value row is evaluated, expanded into the target table layout, checked
-/// against nullability and type constraints, inserted into the table B+-tree,
-/// and then mirrored into every existing secondary index for that table.
+/// Each value row is evaluated, expanded into the target table layout, and then
+/// handed to storage for validation and insertion.
 fn execute_insert_values(
     database: &Database,
     table: TableSchema,
     columns: Vec<BoundColumn>,
     values: Vec<Vec<PlannedExpression>>,
 ) -> ExecutorResult<ExecutionOutput> {
-    let mut cursor = database.table_cursor_by_name(&table.name)?;
-    let indexes = database.index_schemas_for_table(&table)?;
     let mut affected = 0;
 
     for expressions in values {
@@ -402,104 +381,11 @@ fn execute_insert_values(
             })?;
             *slot = value;
         }
-        validate_insert_row(&table, &row_values)?;
-
-        let record = record_bytes_from_values(row_values)?;
-        let row_id = database.allocate_table_row_id(&table)?;
-        cursor.insert(row_id, &record)?;
-        let record = TableRecord { row_id, record: record.into_boxed_slice() };
-        insert_index_entries(database, &indexes, &record)?;
+        database.insert_table_row(&table, row_values)?;
         affected += 1;
     }
 
     Ok(ExecutionOutput::RowsAffected(affected))
-}
-
-/// Validates one fully-shaped table row against the table schema.
-///
-/// Missing target columns are represented as [`Value::Null`] before this
-/// function runs, so omitted non-nullable and primary-key columns are rejected
-/// by the same logic as explicit `NULL` values.
-fn validate_insert_row(table: &TableSchema, values: &[Value]) -> ExecutorResult<()> {
-    for (column, value) in table.row.columns.iter().zip(values.iter()) {
-        if matches!(value, Value::Null) {
-            if !column.nullable || column.primary_key {
-                return Err(ExecutorError::InsertNullConstraint { column: column.name.clone() });
-            }
-            continue;
-        }
-
-        if !value_matches_data_type(value, column.data_type) {
-            return Err(ExecutorError::InsertTypeMismatch {
-                column: column.name.clone(),
-                expected: column.data_type,
-                actual: value.clone(),
-            });
-        }
-    }
-
-    Ok(())
-}
-
-/// Inserts secondary-index entries for a newly inserted table record.
-///
-/// Index keys are reconstructed from the encoded table record so this code path
-/// uses the same key derivation as index backfill.
-fn insert_index_entries(
-    database: &Database,
-    indexes: &[IndexSchema],
-    record: &TableRecord,
-) -> ExecutorResult<()> {
-    for index in indexes {
-        let key = index_key_from_record(index, record)?;
-        let mut index_cursor = database.index_cursor_by_name(&index.name)?;
-        index_cursor.insert(&key, record.row_id)?;
-    }
-
-    Ok(())
-}
-
-/// Populates a newly-created secondary index from existing table rows.
-fn backfill_index(
-    database: &Database,
-    table: &TableSchema,
-    index: &IndexSchema,
-) -> ExecutorResult<()> {
-    let mut table_cursor = database.table_cursor_by_name(&table.name)?;
-    let mut index_cursor = database.index_cursor_by_name(&index.name)?;
-
-    while let Some(record) = table_cursor.next_owned_record()? {
-        let key = index_key_from_record(index, &record)?;
-        index_cursor.insert(&key, record.row_id)?;
-    }
-
-    Ok(())
-}
-
-/// Builds the encoded key tuple for an index entry.
-///
-/// Index column metadata records the ordinal of each source table column. The
-/// key is an encoded tuple containing those source values in index-column order.
-fn index_key_from_record(index: &IndexSchema, record: &TableRecord) -> ExecutorResult<Vec<u8>> {
-    let context = EvaluationContext::from_record(record)?;
-    let values = index
-        .columns
-        .iter()
-        .map(|column| context.value_at(column.source_column_ordinal as usize, &column.column.name))
-        .collect::<ExecutorResult<Vec<_>>>()?;
-    record_bytes_from_values(values)
-}
-
-/// Returns whether a non-null value can be stored in a column of `data_type`.
-fn value_matches_data_type(value: &Value, data_type: DataType) -> bool {
-    matches!(
-        (value, data_type),
-        (Value::String(_), DataType::Text)
-            | (Value::Boolean(_), DataType::Boolean)
-            | (Value::Integer(_), DataType::Integer)
-            | (Value::Float(_), DataType::Float)
-            | (Value::UnsignedInteger(_), DataType::UnsignedInteger)
-    )
 }
 
 /// Evaluates a projection list against one input record.
@@ -753,7 +639,7 @@ mod tests {
     use crate::{
         core::{
             ColumnSchema, DataType, PAGE_SIZE, TupleSchema,
-            error::{InternalError, InvariantViolation, StorageError},
+            error::{ConstraintError, InternalError, InvariantViolation, StorageError},
         },
         error::DatabaseError,
         planner::{BoundColumn, Planner},
@@ -793,6 +679,47 @@ mod tests {
 
         for item in items {
             session.execute_item(item).unwrap();
+        }
+    }
+
+    fn is_null_value_error(error: ExecutorError, expected_column: &str) -> bool {
+        matches!(
+            error,
+            ExecutorError::Storage(StorageError::Constraint(ConstraintError::NullValue {
+                column,
+            })) if column == expected_column
+        )
+    }
+
+    fn is_type_mismatch_error(
+        error: ExecutorError,
+        expected_column: &str,
+        expected_type: DataType,
+        actual_type: &'static str,
+    ) -> bool {
+        matches!(
+            error,
+            ExecutorError::Storage(StorageError::Constraint(
+                ConstraintError::ColumnTypeMismatch {
+                    column,
+                    expected,
+                    actual,
+                },
+            )) if column == expected_column && expected == expected_type && actual == actual_type
+        )
+    }
+
+    fn is_database_type_mismatch_error(
+        error: DatabaseError<'_>,
+        expected_column: &str,
+        expected_type: DataType,
+        actual_type: &'static str,
+    ) -> bool {
+        match error {
+            DatabaseError::Executor(executor_error) => {
+                is_type_mismatch_error(executor_error, expected_column, expected_type, actual_type)
+            }
+            _ => false,
         }
     }
 
@@ -1346,10 +1273,7 @@ mod tests {
         );
         let mut executor = Executor::new(&database);
 
-        assert!(matches!(
-            executor.execute(plan),
-            Err(ExecutorError::InsertNullConstraint { column }) if column == "active"
-        ));
+        assert!(executor.execute(plan).is_err_and(|error| is_null_value_error(error, "active")));
         assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 0);
     }
 
@@ -1366,14 +1290,12 @@ mod tests {
         let plan = Planner::new(&database).plan_statement(&statement).unwrap();
         let mut executor = Executor::new(&database);
 
-        assert!(matches!(
-            executor.execute(plan.physical),
-            Err(ExecutorError::InsertTypeMismatch {
-                column,
-                expected: DataType::Integer,
-                actual: Value::String(value),
-            }) if column == "id" && value == "one"
-        ));
+        assert!(executor.execute(plan.physical).is_err_and(|error| is_type_mismatch_error(
+            error,
+            "id",
+            DataType::Integer,
+            "text"
+        )));
         assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 0);
     }
 
@@ -1394,10 +1316,7 @@ mod tests {
         );
         let mut executor = Executor::new(&database);
 
-        assert!(matches!(
-            executor.execute(plan),
-            Err(ExecutorError::InsertNullConstraint { column }) if column == "name"
-        ));
+        assert!(executor.execute(plan).is_err_and(|error| is_null_value_error(error, "name")));
         assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 0);
     }
 
@@ -1434,14 +1353,9 @@ mod tests {
             ]],
         );
 
-        assert!(matches!(
-            executor.execute(invalid),
-            Err(ExecutorError::InsertTypeMismatch {
-                column,
-                expected: DataType::Boolean,
-                actual: Value::String(value),
-            }) if column == "active" && value == "yes"
-        ));
+        assert!(executor.execute(invalid).is_err_and(|error| {
+            is_type_mismatch_error(error, "active", DataType::Boolean, "text")
+        }));
         assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 1);
 
         let mut users = database.table_cursor_by_name("users").unwrap();
@@ -1459,14 +1373,9 @@ mod tests {
             "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', 'yes');",
         );
 
-        assert!(matches!(
-            result,
-            Err(DatabaseError::Executor(ExecutorError::InsertTypeMismatch {
-                column,
-                expected: DataType::Boolean,
-                actual: Value::String(value),
-            })) if column == "active" && value == "yes"
-        ));
+        assert!(result.is_err_and(|error| {
+            is_database_type_mismatch_error(error, "active", DataType::Boolean, "text")
+        }));
 
         assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 0);
         let mut users = database.table_cursor_by_name("users").unwrap();
@@ -1490,14 +1399,9 @@ mod tests {
             "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', 'yes');",
         );
 
-        assert!(matches!(
-            result,
-            Err(DatabaseError::Executor(ExecutorError::InsertTypeMismatch {
-                column,
-                expected: DataType::Boolean,
-                actual: Value::String(value),
-            })) if column == "active" && value == "yes"
-        ));
+        assert!(result.is_err_and(|error| {
+            is_database_type_mismatch_error(error, "active", DataType::Boolean, "text")
+        }));
         execute_sql_with_session(
             &mut session,
             "INSERT INTO users (id, name, active) VALUES (2, 'Linus', TRUE);",
@@ -1927,14 +1831,9 @@ ROLLBACK;
             "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', 'yes');",
         );
 
-        assert!(matches!(
-            result,
-            Err(DatabaseError::Executor(ExecutorError::InsertTypeMismatch {
-                column,
-                expected: DataType::Boolean,
-                actual: Value::String(value),
-            })) if column == "active" && value == "yes"
-        ));
+        assert!(result.is_err_and(|error| {
+            is_database_type_mismatch_error(error, "active", DataType::Boolean, "text")
+        }));
         std::mem::forget(database);
 
         let reopened = Database::open(&path).unwrap();
