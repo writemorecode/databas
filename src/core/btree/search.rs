@@ -310,20 +310,20 @@ impl TreeCursor {
         if low == slot_count { Ok(BoundResult::PastEnd) } else { Ok(BoundResult::At(low)) }
     }
 
-    pub(super) fn interior_child_for_key(
+    /// Chooses the child pointer to follow for `key` from an already-open interior page.
+    fn interior_child_for_key_in_page(
         &self,
         page_id: PageId,
+        page_bytes: &[u8; PAGE_SIZE],
+        interior: &RawInterior<Read<'_>>,
         key: &[u8],
-    ) -> StorageResult<PageId> {
-        let pin = self.page_cache.fetch_page(page_id)?;
-        let page = pin.read()?;
-        let interior = page.open::<Interior>()?;
-        match self.lower_bound_interior_slot_in_page(page_id, page.page(), &interior, key)? {
+    ) -> StorageResult<(PageId, ChildSlotRef)> {
+        match self.lower_bound_interior_slot_in_page(page_id, page_bytes, interior, key)? {
             BoundResult::At(slot_index) => {
                 let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
-                Ok(left_child)
+                Ok((left_child, ChildSlotRef::Slot(slot_index)))
             }
-            BoundResult::PastEnd => Ok(interior.rightmost_child()),
+            BoundResult::PastEnd => Ok((interior.rightmost_child(), ChildSlotRef::Rightmost)),
         }
     }
 
@@ -395,19 +395,13 @@ impl TreeCursor {
                     }
                     PageKind::RawInterior => {
                         let interior = page.open::<Interior>()?;
-                        match self.lower_bound_interior_slot_in_page(
+                        let (child_page_id, _) = self.interior_child_for_key_in_page(
                             page_id,
                             page.page(),
                             &interior,
                             key,
-                        )? {
-                            BoundResult::At(slot_index) => {
-                                let (left_child, _, _, _) =
-                                    interior.cell_payload_parts(slot_index)?;
-                                left_child
-                            }
-                            BoundResult::PastEnd => interior.rightmost_child(),
-                        }
+                        )?;
+                        child_page_id
                     }
                 }
             };
@@ -434,29 +428,14 @@ impl TreeCursor {
                     }
                     PageKind::RawInterior => {
                         let interior = page.open::<Interior>()?;
-                        match self.lower_bound_interior_slot_in_page(
+                        let (child_page_id, child_ref) = self.interior_child_for_key_in_page(
                             page_id,
                             page.page(),
                             &interior,
                             key,
-                        )? {
-                            BoundResult::At(slot_index) => {
-                                let (child_page_id, _, _, _) =
-                                    interior.cell_payload_parts(slot_index)?;
-                                path.push(PathFrame {
-                                    page_id,
-                                    child_ref: ChildSlotRef::Slot(slot_index),
-                                });
-                                child_page_id
-                            }
-                            BoundResult::PastEnd => {
-                                path.push(PathFrame {
-                                    page_id,
-                                    child_ref: ChildSlotRef::Rightmost,
-                                });
-                                interior.rightmost_child()
-                            }
-                        }
+                        )?;
+                        path.push(PathFrame { page_id, child_ref });
+                        child_page_id
                     }
                 }
             };
@@ -483,29 +462,13 @@ impl TreeCursor {
                     }
                     PageKind::RawInterior => {
                         let interior = page.open::<Interior>()?;
-                        let child_page_id = match self.lower_bound_interior_slot_in_page(
+                        let (child_page_id, child_ref) = self.interior_child_for_key_in_page(
                             page_id,
                             page.page(),
                             &interior,
                             key,
-                        )? {
-                            BoundResult::At(slot_index) => {
-                                let (child_page_id, _, _, _) =
-                                    interior.cell_payload_parts(slot_index)?;
-                                path.push(PathFrame {
-                                    page_id,
-                                    child_ref: ChildSlotRef::Slot(slot_index),
-                                });
-                                child_page_id
-                            }
-                            BoundResult::PastEnd => {
-                                path.push(PathFrame {
-                                    page_id,
-                                    child_ref: ChildSlotRef::Rightmost,
-                                });
-                                interior.rightmost_child()
-                            }
-                        };
+                        )?;
+                        path.push(PathFrame { page_id, child_ref });
                         Some(child_page_id)
                     }
                 }
