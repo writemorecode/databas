@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::core::{
     log_manager::{LogManagerError, LogManagerFlushError, Lsn, TxnId},
     page::{CellCorruption, PageCorruption, PageError},
-    {PAGE_SIZE, PageId},
+    {PAGE_SIZE, PageId, RowId},
 };
 
 #[derive(Debug, Error)]
@@ -106,6 +106,8 @@ pub enum CorruptionKind {
     UnexpectedSystemCatalogRoot { expected: PageId, actual: PageId },
     #[error("invalid catalog row in {table}: {reason}")]
     InvalidCatalogRow { table: &'static str, reason: String },
+    #[error("invalid table record in {table} row {row_id}: {reason}")]
+    InvalidTableRecord { table: String, row_id: RowId, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -116,6 +118,10 @@ pub enum ConstraintError {
     DuplicateTableName { name: String },
     #[error("duplicate index name: {name}")]
     DuplicateIndexName { name: String },
+    #[error("column {column} does not accept NULL values")]
+    NullValue { column: String },
+    #[error("column {column} expects {expected:?}, got {actual}")]
+    ColumnTypeMismatch { column: String, expected: crate::core::DataType, actual: &'static str },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -132,6 +138,8 @@ pub enum InvalidArgumentError {
     ColumnNotFound { table: String, column: String },
     #[error("index column list cannot be empty")]
     EmptyIndexColumns,
+    #[error("table {table} row has {values} values for {columns} columns")]
+    TableRowValueCount { table: String, columns: usize, values: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
