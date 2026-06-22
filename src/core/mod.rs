@@ -1,10 +1,10 @@
-pub mod btree;
-pub mod catalog;
+pub(crate) mod btree;
+pub(crate) mod catalog;
 mod catalog_manager;
-pub mod cursor;
-pub mod database;
+pub(crate) mod cursor;
+pub(crate) mod database;
 pub(crate) mod database_header;
-pub mod disk_manager;
+pub(crate) mod disk_manager;
 pub mod error;
 pub(crate) mod overflow;
 pub(crate) mod page;
@@ -15,23 +15,22 @@ pub(crate) mod recovery;
 pub(crate) mod storage_runtime;
 pub(crate) mod transaction_manager;
 pub(crate) mod transaction_runtime;
-pub mod tuple;
+pub(crate) mod tuple;
 
 pub(crate) mod log_manager;
 
-pub use btree::{CursorState, OwnedRecord, Record, RecordView, TreeCursor};
 pub use catalog::{
-    CatalogError, CatalogObjectKind, ColumnCatalogRow, ColumnSchema, DataType, IndexCatalogRow,
-    IndexColumnSchema, IndexSchema, SYS_COLUMNS_ROOT_PAGE_ID, SYS_COLUMNS_TABLE_ID,
-    SYS_INDEXES_ROOT_PAGE_ID, SYS_INDEXES_TABLE_ID, SYS_TABLES_ROOT_PAGE_ID, SYS_TABLES_TABLE_ID,
-    TableCatalogRow, TableSchema, TupleSchema,
+    ColumnSchema, DataType, IndexColumnSchema, IndexSchema, TableSchema, TupleSchema,
 };
 pub use cursor::{
     IndexCursor, IndexEntry, IndexEntryView, OwnedIndexEntry, OwnedTableRecord, TableCursor,
     TableRecord, TableRecordView,
 };
 pub use database::Database;
-pub use pager::PagerOptions;
+pub use error::{
+    ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InternalError,
+    InvalidArgumentError, LimitExceededError, StorageError, StorageResult,
+};
 pub use tuple::{EncodedTupleView, Tuple, TupleRef, TupleView, Value, ValueRef};
 
 pub(crate) const PAGE_SIZE: usize = 4096;

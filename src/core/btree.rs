@@ -33,7 +33,7 @@ mod split;
 #[cfg(test)]
 mod tests;
 
-pub use record::{OwnedRecord, Record, RecordView};
+pub use record::{OwnedRecord, Record};
 pub(crate) use root::{initialize_empty_root, validate_tree_page_formats};
 
 #[cfg(test)]

@@ -106,21 +106,6 @@ impl TreeCursor {
         self.state
     }
 
-    /// Returns the page currently referenced by the cursor, if any.
-    pub fn current_page_id(&self) -> Option<PageId> {
-        match self.state {
-            CursorState::Page { page_id } | CursorState::Positioned { page_id, .. } => {
-                Some(page_id)
-            }
-            CursorState::Exhausted => None,
-        }
-    }
-
-    /// Returns `true` when the cursor is currently positioned on a record.
-    pub fn is_positioned(&self) -> bool {
-        matches!(self.state, CursorState::Positioned { .. })
-    }
-
     /// Resets the cursor back to the tree root page.
     pub fn seek_to_root(&mut self) {
         self.state = CursorState::Page { page_id: self.root_page_id() };

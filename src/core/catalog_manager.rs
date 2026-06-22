@@ -1,12 +1,11 @@
 use std::path::Path;
 
 use crate::core::{
-    CatalogError, IndexSchema, OwnedTableRecord, PageId, RowId, TableCatalogRow, TableSchema,
-    Tuple, TupleSchema,
+    IndexSchema, OwnedTableRecord, PageId, RowId, TableSchema, Tuple, TupleSchema,
     catalog::{
-        CatalogObjectKind, ColumnCatalogRow, ColumnSchema, IndexCatalogRow, IndexColumnSchema,
-        SYS_COLUMNS_ROOT_PAGE_ID, SYS_INDEXES_ROOT_PAGE_ID, SYS_TABLES_ROOT_PAGE_ID,
-        system_column_rows, system_table_schemas,
+        CatalogError, CatalogObjectKind, ColumnCatalogRow, ColumnSchema, IndexCatalogRow,
+        IndexColumnSchema, SYS_COLUMNS_ROOT_PAGE_ID, SYS_INDEXES_ROOT_PAGE_ID,
+        SYS_TABLES_ROOT_PAGE_ID, TableCatalogRow, system_column_rows, system_table_schemas,
     },
     cursor::{IndexCursor, TableCursor},
     error::{
@@ -470,10 +469,10 @@ mod tests {
 
     use super::*;
     use crate::core::{
-        ColumnCatalogRow, ColumnSchema, DataType, IndexCatalogRow, RowId, Tuple, TupleSchema,
+        RowId, Tuple, TupleSchema,
         catalog::{
-            SYS_COLUMNS_TABLE_ID, SYS_INDEXES_TABLE_ID, SYS_TABLES_TABLE_ID, TableCatalogRow,
-            system_column_rows,
+            ColumnCatalogRow, ColumnSchema, DataType, IndexCatalogRow, SYS_COLUMNS_TABLE_ID,
+            SYS_INDEXES_TABLE_ID, SYS_TABLES_TABLE_ID, TableCatalogRow, system_column_rows,
         },
         database_header::DatabaseHeader,
         disk_manager::DiskManager,

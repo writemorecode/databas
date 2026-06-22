@@ -150,18 +150,13 @@ impl TableCursor {
     }
 
     /// Returns the root page id that anchors this table tree.
-    pub fn root_page_id(&self) -> crate::core::PageId {
+    pub(crate) fn root_page_id(&self) -> crate::core::PageId {
         self.inner.root_page_id()
     }
 
     /// Returns the cursor's current logical state.
-    pub fn state(&self) -> CursorState {
+    pub(crate) fn state(&self) -> CursorState {
         self.inner.state()
-    }
-
-    /// Returns the page currently referenced by the cursor, if any.
-    pub fn current_page_id(&self) -> Option<crate::core::PageId> {
-        self.inner.current_page_id()
     }
 
     /// Resets the cursor back to the table root page.
@@ -251,18 +246,13 @@ impl IndexCursor {
     }
 
     /// Returns the root page id that anchors this index tree.
-    pub fn root_page_id(&self) -> crate::core::PageId {
+    pub(crate) fn root_page_id(&self) -> crate::core::PageId {
         self.inner.root_page_id()
     }
 
     /// Returns the cursor's current logical state.
-    pub fn state(&self) -> CursorState {
+    pub(crate) fn state(&self) -> CursorState {
         self.inner.state()
-    }
-
-    /// Returns the page currently referenced by the cursor, if any.
-    pub fn current_page_id(&self) -> Option<crate::core::PageId> {
-        self.inner.current_page_id()
     }
 
     /// Resets the cursor back to the index root page.
