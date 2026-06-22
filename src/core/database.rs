@@ -21,6 +21,12 @@ pub struct Database {
     transactions: TransactionRuntime,
 }
 
+/// Iterator over owned records in one table.
+pub struct TableScan {
+    cursor: TableCursor,
+    done: bool,
+}
+
 impl Database {
     /// Creates a new database file.
     pub fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
@@ -130,6 +136,11 @@ impl Database {
         self.catalog.table_cursor_by_name(name)
     }
 
+    /// Returns a lazy full-table scan over owned table records.
+    pub fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
+        Ok(TableScan { cursor: self.catalog.table_cursor_by_name(&table.name)?, done: false })
+    }
+
     /// Allocates and persists the next row id for a table.
     pub fn allocate_table_row_id(&self, table: &TableSchema) -> StorageResult<RowId> {
         self.catalog.allocate_table_row_id(table)
@@ -182,6 +193,28 @@ impl Database {
         }
 
         Ok(())
+    }
+}
+
+impl Iterator for TableScan {
+    type Item = StorageResult<OwnedTableRecord>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        match self.cursor.next_owned_record() {
+            Ok(Some(record)) => Some(Ok(record)),
+            Ok(None) => {
+                self.done = true;
+                None
+            }
+            Err(error) => {
+                self.done = true;
+                Some(Err(error))
+            }
+        }
     }
 }
 
