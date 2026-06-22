@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 use std::cmp::Ordering;
 
-use crate::core::log_manager::{Lsn, ZERO_LSN};
+use crate::core::log_manager::ZERO_LSN;
 use crate::core::{PAGE_SIZE, PageId, SlotId};
 
 use super::{
@@ -225,11 +225,6 @@ where
         format::read_optional_u64(self.bytes(), NEXT_PAGE_ID_OFFSET)
     }
 
-    /// Returns the latest log sequence number persisted in this page header.
-    pub(crate) fn lsn(&self) -> Lsn {
-        format::read_u64(self.bytes(), LSN_OFFSET)
-    }
-
     /// Returns the contiguous free space between the slot directory and cell content.
     pub(crate) fn free_space(&self) -> usize {
         self.content_start() as usize - self.slot_directory_end()
@@ -346,11 +341,6 @@ where
     /// Updates the next sibling page id stored in the page header.
     pub(crate) fn set_next_page_id(&mut self, page_id: Option<PageId>) {
         format::write_optional_u64(self.bytes_mut(), NEXT_PAGE_ID_OFFSET, page_id);
-    }
-
-    /// Updates the latest log sequence number stored in the page header.
-    pub(crate) fn set_lsn(&mut self, lsn: Lsn) {
-        format::write_u64(self.bytes_mut(), LSN_OFFSET, lsn);
     }
 
     pub(crate) fn set_fragmented_free_bytes(&mut self, fragmented_free_bytes: u16) {
