@@ -41,10 +41,6 @@ impl StorageRuntime {
         &self.path
     }
 
-    pub(crate) fn page_count(&self) -> u64 {
-        self.disk.borrow().page_count()
-    }
-
     pub(crate) fn new_page(&self) -> Result<PageId, DiskManagerError> {
         self.disk.borrow_mut().new_page()
     }

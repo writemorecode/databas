@@ -417,14 +417,6 @@ impl PageWriteGuard<'_> {
         &mut self.page
     }
 
-    /// Opens a typed immutable view over the page bytes.
-    pub(crate) fn open<N>(&self) -> PageResult<Page<Read<'_>, N>>
-    where
-        N: NodeMarker,
-    {
-        Page::<Read<'_>, N>::open(self.page())
-    }
-
     /// Opens a typed mutable view over the page bytes.
     pub(crate) fn open_mut<N>(&mut self) -> PageResult<Page<Write<'_>, N>>
     where
@@ -654,7 +646,10 @@ mod tests {
             let mut write = guard.write().unwrap();
             let _ = Page::<Write<'_>, Leaf>::init(write.page_mut());
 
-            assert_eq!(write.open::<Leaf>().unwrap().kind(), PageKind::RawLeaf);
+            assert_eq!(
+                Page::<Read<'_>, Leaf>::open(write.page()).unwrap().kind(),
+                PageKind::RawLeaf
+            );
             assert_eq!(write.open_mut::<Leaf>().unwrap().kind(), PageKind::RawLeaf);
         }
 

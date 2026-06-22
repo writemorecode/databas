@@ -434,12 +434,6 @@ impl TreeCursor {
         Ok(interior.is_underoccupied()?)
     }
 
-    /// Returns whether a leaf rebuilt from `cells` would be underoccupied.
-    pub(super) fn leaf_cells_underoccupied(cells: &[LeafSplitCell<'_>]) -> bool {
-        let cell_bytes = cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
-        Self::leaf_cell_bytes_underoccupied(cells.len(), cell_bytes)
-    }
-
     /// Chooses a split index that keeps both leaf siblings fit and occupied.
     pub(super) fn choose_leaf_rebalance_split(cells: &[LeafSplitCell<'_>]) -> Option<usize> {
         let total_cell_len = cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();

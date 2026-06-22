@@ -34,24 +34,6 @@ impl CatalogManager {
         Ok(manager)
     }
 
-    /// Creates a catalog manager with default pager options.
-    pub(crate) fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let pager = Pager::create(path)?;
-        Self::from_pager(pager)
-    }
-
-    /// Opens a catalog manager, creating an empty database file if needed.
-    pub(crate) fn open_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let pager = Pager::open_or_create(path)?;
-        Self::from_pager(pager)
-    }
-
-    /// Opens a catalog manager with default pager options.
-    pub(crate) fn open_existing(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let pager = Pager::open(path)?;
-        Self::from_pager(pager)
-    }
-
     /// Returns the database-file path associated with this manager.
     pub fn path(&self) -> &Path {
         self.pager.path()
@@ -500,7 +482,7 @@ mod tests {
     };
 
     fn open(path: impl AsRef<Path>) -> StorageResult<CatalogManager> {
-        CatalogManager::open_or_create(path)
+        CatalogManager::from_pager(Pager::open_or_create(path)?)
     }
 
     #[test]

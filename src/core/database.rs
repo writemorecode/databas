@@ -134,23 +134,7 @@ mod tests {
     use tempfile::{NamedTempFile, tempdir};
 
     use super::*;
-    use crate::core::{
-        ColumnSchema, DataType,
-        disk_manager::DiskManager,
-        error::{CorruptionError, CorruptionKind, StorageError},
-        page::format,
-    };
-
-    fn single_int_schema() -> TupleSchema {
-        TupleSchema {
-            columns: vec![ColumnSchema {
-                name: "id".to_owned(),
-                data_type: DataType::Integer,
-                nullable: false,
-                primary_key: true,
-            }],
-        }
-    }
+    use crate::core::error::{CorruptionError, CorruptionKind, StorageError};
 
     #[test]
     fn create_initializes_database_that_can_be_opened() {

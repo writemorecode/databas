@@ -146,30 +146,11 @@ impl TreeCursor {
         Record::new(&self.page_cache, page_id, slot_index)
     }
 
-    pub(super) fn raw_leaf_slot_count(&self, page_id: PageId) -> StorageResult<u16> {
-        let pin = self.page_cache.fetch_page(page_id)?;
-        let page = pin.read()?;
-        let leaf = page.open::<Leaf>()?;
-        Ok(leaf.slot_count())
-    }
-
     pub(super) fn raw_interior_slot_count(&self, page_id: PageId) -> StorageResult<u16> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
         let interior = page.open::<Interior>()?;
         Ok(interior.slot_count())
-    }
-
-    pub(super) fn compare_leaf_key(
-        &self,
-        page_id: PageId,
-        slot_index: u16,
-        key: &[u8],
-    ) -> StorageResult<Ordering> {
-        let pin = self.page_cache.fetch_page(page_id)?;
-        let page = pin.read()?;
-        let leaf = page.open::<Leaf>()?;
-        self.compare_leaf_key_in_page(page_id, page.page(), &leaf, slot_index, key)
     }
 
     fn compare_leaf_key_in_page(
@@ -234,18 +215,6 @@ impl TreeCursor {
             first_overflow_page_id,
             key_len,
         )
-    }
-
-    pub(super) fn read_interior_left_child(
-        &self,
-        page_id: PageId,
-        slot_index: u16,
-    ) -> StorageResult<PageId> {
-        let pin = self.page_cache.fetch_page(page_id)?;
-        let page = pin.read()?;
-        let interior = page.open::<Interior>()?;
-        let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
-        Ok(left_child)
     }
 
     pub(super) fn search_leaf_slot(
@@ -314,17 +283,6 @@ impl TreeCursor {
         }
 
         if low == slot_count { Ok(BoundResult::PastEnd) } else { Ok(BoundResult::At(low)) }
-    }
-
-    pub(super) fn lower_bound_interior_slot(
-        &self,
-        page_id: PageId,
-        key: &[u8],
-    ) -> StorageResult<BoundResult> {
-        let pin = self.page_cache.fetch_page(page_id)?;
-        let page = pin.read()?;
-        let interior = page.open::<Interior>()?;
-        self.lower_bound_interior_slot_in_page(page_id, page.page(), &interior, key)
     }
 
     fn lower_bound_interior_slot_in_page(
