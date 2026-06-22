@@ -34,7 +34,7 @@ mod split;
 mod tests;
 
 pub use record::{OwnedRecord, Record, RecordView};
-pub(crate) use root::{initialize_empty_root, validate_root_page};
+pub(crate) use root::{initialize_empty_root, validate_tree_page_formats};
 
 #[cfg(test)]
 use record::RecordStorage;

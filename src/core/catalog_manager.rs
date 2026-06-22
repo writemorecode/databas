@@ -30,6 +30,7 @@ impl CatalogManager {
     pub(crate) fn from_pager(pager: Pager) -> StorageResult<Self> {
         let manager = Self { pager };
         manager.initialize_or_validate_system_catalog()?;
+        manager.validate_page_formats()?;
         Ok(manager)
     }
 
@@ -204,7 +205,16 @@ impl CatalogManager {
             0 => Err(crate::core::database_header::missing_header()),
             1 => self.initialize_system_catalog(),
             2..=3 => Err(missing_system_catalog_root(self.pager.opened_page_count())),
-            _ => self.validate_system_catalog(),
+            _ => Ok(()),
+        }
+    }
+
+    fn initialize_system_root(&self, expected_page_id: PageId) -> StorageResult<()> {
+        let actual_page_id = self.pager.create_table_tree()?.root_page_id();
+        if actual_page_id == expected_page_id {
+            Ok(())
+        } else {
+            Err(unexpected_system_catalog_root(expected_page_id, actual_page_id))
         }
     }
 
@@ -232,19 +242,25 @@ impl CatalogManager {
         Ok(())
     }
 
-    fn initialize_system_root(&self, expected_page_id: PageId) -> StorageResult<()> {
-        let actual_page_id = self.pager.create_table_tree()?.root_page_id();
-        if actual_page_id == expected_page_id {
-            Ok(())
-        } else {
-            Err(unexpected_system_catalog_root(expected_page_id, actual_page_id))
+    fn validate_page_formats(&self) -> StorageResult<()> {
+        let system_roots =
+            [SYS_TABLES_ROOT_PAGE_ID, SYS_INDEXES_ROOT_PAGE_ID, SYS_COLUMNS_ROOT_PAGE_ID];
+        for root_page_id in system_roots {
+            self.pager.validate_tree_page_formats(root_page_id)?;
         }
-    }
 
-    fn validate_system_catalog(&self) -> StorageResult<()> {
-        self.pager.table_cursor(SYS_TABLES_ROOT_PAGE_ID)?;
-        self.pager.table_cursor(SYS_INDEXES_ROOT_PAGE_ID)?;
-        self.pager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID)?;
+        let mut roots = system_roots.to_vec();
+        roots.extend(self.table_catalog_rows()?.into_iter().map(|row| row.root_page_id));
+        roots.extend(self.index_catalog_rows()?.into_iter().map(|row| row.root_page_id));
+        roots.sort_unstable();
+        roots.dedup();
+
+        for root_page_id in roots {
+            if system_roots.contains(&root_page_id) {
+                continue;
+            }
+            self.pager.validate_tree_page_formats(root_page_id)?;
+        }
         Ok(())
     }
 

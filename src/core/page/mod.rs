@@ -23,7 +23,9 @@ mod leaf;
 use crate::core::PAGE_SIZE;
 
 /// Page handles, marker types, access traits, and search helpers for typed page access.
-pub(crate) use core::{BoundResult, Interior, Leaf, NodeMarker, Page, Read, SearchResult, Write};
+pub(crate) use core::{
+    BoundResult, Interior, Leaf, NodeMarker, Page, Read, SearchResult, Write, validate_btree_page,
+};
 /// Errors returned while validating or manipulating encoded pages and cells.
 pub(crate) use error::{CellCorruption, PageCorruption, PageError, PageResult};
 

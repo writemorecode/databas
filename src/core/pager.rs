@@ -2,7 +2,7 @@ use std::{path::Path, rc::Rc};
 
 use crate::core::{
     PageId,
-    btree::{TreeCursor, initialize_empty_root, validate_root_page},
+    btree::{TreeCursor, initialize_empty_root, validate_tree_page_formats},
     cursor::{IndexCursor, TableCursor},
     database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header},
     disk_manager::DiskManager,
@@ -137,14 +137,17 @@ impl Pager {
 
     /// Returns a typed cursor rooted at an existing table tree.
     pub(crate) fn table_cursor(&self, root_page_id: PageId) -> StorageResult<TableCursor> {
-        validate_root_page(&self.page_cache, root_page_id)?;
         Ok(TableCursor::new(TreeCursor::new(self.page_cache.clone(), root_page_id)))
     }
 
     /// Returns a typed cursor rooted at an existing secondary-index tree.
     pub(crate) fn index_cursor(&self, root_page_id: PageId) -> StorageResult<IndexCursor> {
-        validate_root_page(&self.page_cache, root_page_id)?;
         Ok(IndexCursor::new(TreeCursor::new(self.page_cache.clone(), root_page_id)))
+    }
+
+    /// Validates every B+-tree page reachable from `root_page_id`.
+    pub(crate) fn validate_tree_page_formats(&self, root_page_id: PageId) -> StorageResult<()> {
+        validate_tree_page_formats(&self.page_cache, root_page_id)
     }
 }
 

@@ -8,22 +8,50 @@ pub(crate) fn initialize_empty_root(page_cache: &PageCache) -> StorageResult<Pag
     Ok(page_id)
 }
 
-/// Verifies that `root_page_id` names a raw leaf or raw interior page.
-pub(crate) fn validate_root_page(
+/// Validates every B+-tree page reachable from `root_page_id`.
+pub(crate) fn validate_tree_page_formats(
     page_cache: &PageCache,
     root_page_id: PageId,
 ) -> StorageResult<()> {
-    let pin = page_cache.fetch_page(root_page_id)?;
-    let page = pin.read()?;
-    match read_page_kind(page.page(), root_page_id)? {
-        PageKind::RawLeaf => {
-            let _ = page.open::<Leaf>()?;
+    let mut pending = vec![root_page_id];
+    let mut visited = Vec::new();
+
+    while let Some(page_id) = pending.pop() {
+        if visited.contains(&page_id) {
+            continue;
         }
-        PageKind::RawInterior => {
-            let _ = page.open::<Interior>()?;
+        visited.push(page_id);
+
+        let pin = page_cache.fetch_page(page_id)?;
+        let page = pin.read()?;
+        validate_btree_page_format(page.page(), page_id)?;
+
+        match read_page_kind(page.page(), page_id)? {
+            PageKind::RawLeaf => {}
+            PageKind::RawInterior => {
+                let interior = page.open::<Interior>()?;
+                for slot_index in 0..interior.slot_count() {
+                    let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
+                    pending.push(left_child);
+                }
+                pending.push(interior.rightmost_child());
+            }
         }
     }
+
     Ok(())
+}
+
+fn validate_btree_page_format(bytes: &[u8; PAGE_SIZE], page_id: PageId) -> StorageResult<()> {
+    page::validate_btree_page(bytes).map_err(|err| page_error_with_id(err, page_id))
+}
+
+fn page_error_with_id(err: PageError, page_id: PageId) -> StorageError {
+    let mut err = StorageError::from(err);
+    if let StorageError::Corruption(corruption) = &mut err {
+        corruption.page_id = Some(page_id);
+    }
+    err
 }
 
 pub(super) fn read_page_kind(bytes: &[u8; PAGE_SIZE], page_id: PageId) -> StorageResult<PageKind> {
