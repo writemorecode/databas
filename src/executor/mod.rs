@@ -240,25 +240,8 @@ impl<'db> Executor<'db> {
                 rows: Box::new(std::iter::once_with(|| empty_record(0))),
             }),
             PhysicalPlan::FullTableScan { table } => {
-                let mut table_cursor = self.database.table_cursor_by_name(&table.name)?;
-                let mut done = false;
-                let rows = std::iter::from_fn(move || {
-                    if done {
-                        return None;
-                    }
-
-                    match table_cursor.next_owned_record() {
-                        Ok(Some(record)) => Some(Ok(record)),
-                        Ok(None) => {
-                            done = true;
-                            None
-                        }
-                        Err(error) => {
-                            done = true;
-                            Some(Err(error.into()))
-                        }
-                    }
-                });
+                let rows =
+                    self.database.scan_table(&table)?.map(|record| record.map_err(Into::into));
                 Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
             }
             PhysicalPlan::Filter { input, predicate } => {
