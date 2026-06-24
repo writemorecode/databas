@@ -17,6 +17,7 @@ use thiserror::Error;
 use crate::{
     core::{
         ColumnSchema, DataType, Database, TableSchema, TupleSchema, Value,
+        access::SchemaAccess,
         error::{InvalidArgumentError, StorageError},
     },
     sql_parser::{
@@ -377,13 +378,13 @@ pub enum PlannerError {
 /// column references. It does not mutate the catalog; DDL statements are only
 /// represented as plan nodes until executed.
 pub struct Planner<'db> {
-    database: &'db Database,
+    schema: &'db dyn SchemaAccess,
 }
 
 impl<'db> Planner<'db> {
     /// Creates a planner that resolves names through `database`.
     pub fn new(database: &'db Database) -> Self {
-        Self { database }
+        Self { schema: database }
     }
 
     /// Plans one parsed SQL statement.
@@ -612,7 +613,7 @@ impl<'db> Planner<'db> {
     }
 
     fn table_schema(&self, name: &str) -> PlannerResult<TableSchema> {
-        self.database.table_schema_by_name(name).map_err(|error| match error {
+        self.schema.table_schema_by_name(name).map_err(|error| match error {
             StorageError::InvalidArgument(InvalidArgumentError::TableNotFound { name }) => {
                 PlannerError::TableNotFound { name }
             }

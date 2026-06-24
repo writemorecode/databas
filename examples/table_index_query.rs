@@ -1,86 +1,32 @@
-use databas::core::{
-    ColumnSchema, DataType, Database, EncodedTupleView, Tuple, TupleRef, TupleSchema, Value,
-    ValueRef,
-};
+use databas::{core::Database, executor::ExecutionOutput, session::Session};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_dir = tempfile::tempdir()?;
     let db_path = db_dir.path().join("example.db");
     let database = Database::create(&db_path)?;
-    database.create_table(
-        "users",
-        TupleSchema {
-            columns: vec![
-                ColumnSchema {
-                    name: "id".to_owned(),
-                    data_type: DataType::Integer,
-                    nullable: false,
-                    primary_key: true,
-                },
-                ColumnSchema {
-                    name: "name".to_owned(),
-                    data_type: DataType::Text,
-                    nullable: false,
-                    primary_key: false,
-                },
-                ColumnSchema {
-                    name: "email".to_owned(),
-                    data_type: DataType::Text,
-                    nullable: false,
-                    primary_key: false,
-                },
-            ],
-        },
+    let mut session = Session::new(&database);
+
+    session.execute_sql(
+        "CREATE TABLE users (
+            id INT PRIMARY KEY,
+            name TEXT,
+            email TEXT
+        );",
     )?;
-    database.create_index("idx_users_email", "users", &["email"])?;
+    session.execute_sql("CREATE INDEX idx_users_email ON users (email);")?;
+    session.execute_sql(
+        "INSERT INTO users (id, name, email) VALUES
+            (1, 'Ada Lovelace', 'ada@example.test');",
+    )?;
 
-    let mut users = database.table_cursor_by_name("users")?;
-    let mut users_by_email = database.index_cursor_by_name("idx_users_email")?;
+    let output = session.execute_sql("SELECT id, name, email FROM users WHERE id = 1;")?;
+    let rows = match output {
+        ExecutionOutput::Rows { rows } => rows.collect::<Result<Vec<_>, _>>()?,
+        other => panic!("SELECT should return rows, got {other:?}"),
+    };
 
-    let row_id = 1;
-    let tuple_row_id = 1;
-    let email = b"ada@example.test";
-    let user_values = [
-        ValueRef::Integer(tuple_row_id),
-        ValueRef::String("Ada Lovelace"),
-        ValueRef::String("ada@example.test"),
-    ];
-    let user_tuple = TupleRef::new(&user_values);
-    let encoded_user = user_tuple.to_bytes()?;
-
-    users.insert(row_id, &encoded_user)?;
-    users_by_email.insert(email, row_id)?;
-
-    let index_entry =
-        users_by_email.get_entry(email)?.expect("email index should contain the inserted user");
-    let user = users
-        .get_record(index_entry.row_id())?
-        .expect("table should contain the row referenced by the index");
-
-    assert_eq!(index_entry.row_id(), row_id);
-    assert_eq!(user.row_id(), row_id);
-    let decoded_user = user.with_record(Tuple::from_bytes)??;
-    assert_eq!(decoded_user, Tuple::new(user_values.into_iter().map(Value::from).collect()));
-
-    user.with_record(|record| {
-        let tuple = EncodedTupleView::parse(record)?;
-        assert_eq!(
-            tuple.values().collect::<Vec<_>>(),
-            vec![
-                ValueRef::Integer(tuple_row_id),
-                ValueRef::String("Ada Lovelace"),
-                ValueRef::String("ada@example.test"),
-            ]
-        );
-
-        println!(
-            "found row {} via email index: {:?}",
-            user.row_id(),
-            tuple.values().collect::<Vec<_>>()
-        );
-
-        Ok::<(), std::io::Error>(())
-    })??;
+    assert_eq!(rows.len(), 1);
+    println!("found user: {}", rows[0]);
 
     Ok(())
 }

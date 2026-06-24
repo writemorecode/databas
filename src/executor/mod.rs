@@ -12,7 +12,10 @@
 //! table layout before handing the write to storage.
 
 use crate::{
-    core::{Database, OwnedTableRecord as TableRecord, Value, error::StorageError},
+    core::{
+        Database, OwnedTableRecord as TableRecord, Value, access::ExecutionAccess,
+        error::StorageError,
+    },
     planner::PhysicalPlan,
     sql_parser::parser::op::Op,
 };
@@ -205,7 +208,7 @@ impl std::fmt::Display for ExecutionOutput {
 /// operations through that handle. It owns no transaction state; mutation
 /// ordering is encoded directly in each operator implementation.
 pub struct Executor<'db> {
-    database: &'db Database,
+    database: &'db dyn ExecutionAccess,
 }
 
 impl<'db> Executor<'db> {

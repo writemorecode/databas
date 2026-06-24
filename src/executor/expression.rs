@@ -1,5 +1,7 @@
 use crate::{
-    core::{Database, OwnedTableRecord as TableRecord, TableSchema, Tuple, TupleView, Value},
+    core::{
+        OwnedTableRecord as TableRecord, TableSchema, Tuple, TupleView, Value, access::RecordAccess,
+    },
     planner::{BoundColumn, PlannedExpression},
     sql_parser::parser::op::Op,
 };
@@ -55,8 +57,8 @@ pub(super) fn offset_rows(mut rows: RowStream, mut remaining: usize) -> RowStrea
 ///
 /// Each value row is evaluated, expanded into the target table layout, and then
 /// handed to storage for validation and insertion.
-pub(super) fn execute_insert_values(
-    database: &Database,
+pub(super) fn execute_insert_values<R: RecordAccess + ?Sized>(
+    records: &R,
     table: TableSchema,
     columns: Vec<BoundColumn>,
     values: Vec<Vec<PlannedExpression>>,
@@ -86,7 +88,7 @@ pub(super) fn execute_insert_values(
             })?;
             *slot = value;
         }
-        database.insert_table_row(&table, row_values)?;
+        records.insert_table_row(&table, row_values)?;
         affected += 1;
     }
 
