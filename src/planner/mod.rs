@@ -29,6 +29,7 @@ use crate::{
                 Statement,
                 create_index::CreateIndexQuery,
                 create_table::CreateTableQuery,
+                delete::DeleteQuery,
                 insert::InsertQuery,
                 select::{Ordering, SelectQuery},
             },
@@ -69,6 +70,8 @@ pub enum LogicalPlan {
     Values { rows: Vec<Vec<PlannedExpression>> },
     /// Insert rows from an input plan into bound table columns.
     Insert { table: TableSchema, columns: Vec<BoundColumn>, input: Box<LogicalPlan> },
+    /// Delete rows from a table selected by an input plan.
+    Delete { table: TableSchema, input: Box<LogicalPlan> },
     /// Synthetic single-row input used for projection-only selects without a
     /// `FROM` clause.
     OneRow,
@@ -128,6 +131,13 @@ pub enum PhysicalPlan {
         columns: Vec<BoundColumn>,
         /// Literal value rows to insert.
         values: Vec<Vec<PlannedExpression>>,
+    },
+    /// Delete rows from a table selected by an input operator.
+    Delete {
+        /// Target table.
+        table: TableSchema,
+        /// Row-producing operator that yields target table records.
+        input: Box<PhysicalPlan>,
     },
     /// Produce exactly one empty row.
     OneRow,
@@ -206,6 +216,7 @@ fn format_physical_plan(
 fn physical_plan_input(plan: &PhysicalPlan) -> Option<&PhysicalPlan> {
     match plan {
         PhysicalPlan::Explain { input }
+        | PhysicalPlan::Delete { input, .. }
         | PhysicalPlan::Filter { input, .. }
         | PhysicalPlan::Sort { input, .. }
         | PhysicalPlan::Project { input, .. }
@@ -236,6 +247,7 @@ fn physical_plan_label(plan: &PhysicalPlan) -> String {
             display_list(columns),
             values.len()
         ),
+        PhysicalPlan::Delete { table, .. } => format!("Delete table={}", table.name),
         PhysicalPlan::OneRow => "OneRow".to_owned(),
         PhysicalPlan::FullTableScan { table } => format!("FullTableScan table={}", table.name),
         PhysicalPlan::Filter { predicate, .. } => format!("Filter predicate={predicate}"),
@@ -403,6 +415,7 @@ impl<'db> Planner<'db> {
             Statement::CreateTable(query) => self.plan_create_table(query),
             Statement::CreateIndex(query) => self.plan_create_index(query),
             Statement::Insert(query) => self.plan_insert(query),
+            Statement::Delete(query) => self.plan_delete(query),
             Statement::Select(query) => self.plan_select(query),
         }
     }
@@ -469,6 +482,20 @@ impl<'db> Planner<'db> {
         }
 
         Ok(LogicalPlan::Insert { table, columns, input: Box::new(LogicalPlan::Values { rows }) })
+    }
+
+    fn plan_delete(&self, query: &DeleteQuery<'_>) -> PlannerResult<LogicalPlan> {
+        let table = self.table_schema(query.table)?;
+        let mut input = LogicalPlan::TableScan { table: table.clone() };
+
+        if let Some(predicate) = &query.where_clause {
+            input = LogicalPlan::Filter {
+                input: Box::new(input),
+                predicate: self.bind_expression(predicate, Some(&table))?,
+            };
+        }
+
+        Ok(LogicalPlan::Delete { table, input: Box::new(input) })
     }
 
     fn plan_select(&self, query: &SelectQuery<'_>) -> PlannerResult<LogicalPlan> {
@@ -538,6 +565,10 @@ impl<'db> Planner<'db> {
                 }),
                 _ => Err(PlannerError::InvalidInsertInput),
             },
+            LogicalPlan::Delete { table, input } => Ok(PhysicalPlan::Delete {
+                table: table.clone(),
+                input: Box::new(self.physical_plan(input)?),
+            }),
             LogicalPlan::OneRow => Ok(PhysicalPlan::OneRow),
             LogicalPlan::TableScan { table } => {
                 Ok(PhysicalPlan::FullTableScan { table: table.clone() })
@@ -812,6 +843,68 @@ mod tests {
     }
 
     #[test]
+    fn delete_all_plans_full_table_scan_under_delete() {
+        let (_dir, database) = database_with_users();
+        let planner = Planner::new(&database);
+        let statement = parse("DELETE FROM users;");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let LogicalPlan::Delete { table, input } = &plan.logical else {
+            panic!("expected logical delete plan: {plan:?}");
+        };
+        assert_eq!(table.name, "users");
+        assert!(
+            matches!(input.as_ref(), LogicalPlan::TableScan { table } if table.name == "users")
+        );
+
+        let PhysicalPlan::Delete { table, input } = &plan.physical else {
+            panic!("expected physical delete plan: {plan:?}");
+        };
+        assert_eq!(table.name, "users");
+        assert!(
+            matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        );
+    }
+
+    #[test]
+    fn delete_where_binds_column_refs_in_filter() {
+        let (_dir, database) = database_with_users();
+        let planner = Planner::new(&database);
+        let statement = parse("DELETE FROM users WHERE id == 1;");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let LogicalPlan::Delete { input, .. } = &plan.logical else {
+            panic!("expected logical delete plan: {plan:?}");
+        };
+        let LogicalPlan::Filter { input, predicate } = input.as_ref() else {
+            panic!("expected filter below delete: {plan:?}");
+        };
+        assert!(
+            matches!(input.as_ref(), LogicalPlan::TableScan { table } if table.name == "users")
+        );
+        assert_eq!(
+            predicate,
+            &PlannedExpression::Binary {
+                left: Box::new(PlannedExpression::Column(bound(
+                    "users",
+                    "id",
+                    0,
+                    DataType::Integer
+                ))),
+                op: Op::EqualsEquals,
+                right: Box::new(PlannedExpression::Literal(Value::Integer(1))),
+            }
+        );
+
+        let PhysicalPlan::Delete { input, .. } = &plan.physical else {
+            panic!("expected physical delete plan: {plan:?}");
+        };
+        assert!(matches!(input.as_ref(), PhysicalPlan::Filter { .. }));
+    }
+
+    #[test]
     fn select_star_projects_all_columns_over_full_table_scan() {
         let (_dir, database) = database_with_users();
         let planner = Planner::new(&database);
@@ -942,6 +1035,14 @@ mod tests {
         ));
         assert!(matches!(
             planner.plan_statement(&parse("SELECT missing FROM users;")),
+            Err(PlannerError::ColumnNotFound { column }) if column == "missing"
+        ));
+        assert!(matches!(
+            planner.plan_statement(&parse("DELETE FROM missing;")),
+            Err(PlannerError::TableNotFound { name }) if name == "missing"
+        ));
+        assert!(matches!(
+            planner.plan_statement(&parse("DELETE FROM users WHERE missing == 1;")),
             Err(PlannerError::ColumnNotFound { column }) if column == "missing"
         ));
         assert!(matches!(

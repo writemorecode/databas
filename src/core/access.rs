@@ -26,6 +26,9 @@ pub(crate) trait RecordAccess {
         table: &TableSchema,
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord>;
+
+    fn delete_table_row(&self, table: &TableSchema, record: &OwnedTableRecord)
+    -> StorageResult<()>;
 }
 
 pub(crate) trait ExecutionAccess: DdlAccess + RecordAccess {}

@@ -166,6 +166,17 @@ fn assert_name_index_entry(database: &Database, name: &str, row_id: u64) {
     assert_eq!(entry.row_id, row_id);
 }
 
+fn assert_user_row_absent(database: &Database, row_id: u64) {
+    let mut users = database.table_cursor_by_name("users").unwrap();
+    assert!(users.get(row_id).unwrap().is_none());
+}
+
+fn assert_name_index_absent(database: &Database, name: &str) {
+    let mut index = database.index_cursor_by_name("idx_users_name").unwrap();
+    let key = Tuple::new(vec![Value::String(name.to_owned())]).to_bytes().unwrap();
+    assert!(index.get(&key).unwrap().is_none());
+}
+
 #[test]
 fn single_literal_expression_produces_one_column_record() {
     let input = record(7, vec![Value::Integer(1)]);
@@ -878,6 +889,96 @@ fn insert_values_updates_existing_secondary_indexes() {
 }
 
 #[test]
+fn delete_all_rows_returns_count_and_empties_table() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
+    )
+    .unwrap();
+
+    let output = execute_sql(&database, "DELETE FROM users;").unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(2)));
+    assert_user_row_absent(&database, 1);
+    assert_user_row_absent(&database, 2);
+}
+
+#[test]
+fn delete_where_removes_only_matching_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
+    )
+    .unwrap();
+
+    let output = execute_sql(&database, "DELETE FROM users WHERE active == FALSE;").unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(1)));
+    assert_user_row(&database, 1, "Ada");
+    assert_user_row_absent(&database, 2);
+}
+
+#[test]
+fn delete_without_matches_returns_zero_rows_affected() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+        .unwrap();
+
+    let output = execute_sql(&database, "DELETE FROM users WHERE id == 99;").unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(0)));
+    assert_user_row(&database, 1, "Ada");
+}
+
+#[test]
+fn delete_removes_secondary_index_entries() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', TRUE);",
+    )
+    .unwrap();
+
+    let output = execute_sql(&database, "DELETE FROM users WHERE name == 'Ada';").unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(1)));
+    assert_user_row_absent(&database, 1);
+    assert_name_index_absent(&database, "Ada");
+    assert_user_row(&database, 2, "Grace");
+    assert_name_index_entry(&database, "Grace", 2);
+}
+
+#[test]
+fn delete_with_non_boolean_where_does_not_delete_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+        .unwrap();
+
+    let result = execute_sql(&database, "DELETE FROM users WHERE id;");
+
+    assert!(matches!(
+        result,
+        Err(DatabaseError::Executor(ExecutorError::NonBooleanPredicate {
+            value: Value::Integer(1)
+        }))
+    ));
+    assert_user_row(&database, 1, "Ada");
+}
+
+#[test]
 fn explicit_transaction_commit_persists_schema_rows_and_indexes_after_reopen() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
@@ -932,6 +1033,34 @@ ROLLBACK;
     assert!(users.get(2).unwrap().is_none());
     assert!(database.table_schema_by_name("rolled_back").is_err());
     assert!(database.index_cursor_by_name("idx_users_name").is_err());
+}
+
+#[test]
+fn explicit_transaction_rollback_restores_deleted_rows_and_indexes() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', TRUE);",
+    )
+    .unwrap();
+    let mut session = Session::new(&database);
+
+    execute_sql_with_session(&mut session, "BEGIN;").unwrap();
+    let output =
+        execute_sql_with_session(&mut session, "DELETE FROM users WHERE id == 1;").unwrap();
+    assert!(matches!(output, ExecutionOutput::RowsAffected(1)));
+    assert_user_row_absent(&database, 1);
+    assert_name_index_absent(&database, "Ada");
+
+    execute_sql_with_session(&mut session, "ROLLBACK;").unwrap();
+
+    assert_user_row(&database, 1, "Ada");
+    assert_name_index_entry(&database, "Ada", 1);
+    assert_user_row(&database, 2, "Grace");
+    assert_name_index_entry(&database, "Grace", 2);
 }
 
 #[test]
@@ -1267,6 +1396,55 @@ fn committed_insert_recovers_from_wal_after_crash_without_database_flush() {
         values(&row),
         vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(true),]
     );
+}
+
+#[test]
+fn committed_delete_recovers_from_wal_after_crash() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    let database = Database::create(&path).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    database.flush().unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', TRUE);",
+    )
+    .unwrap();
+    execute_sql(&database, "DELETE FROM users WHERE name == 'Ada';").unwrap();
+    std::mem::forget(database);
+
+    let reopened = Database::open(&path).unwrap();
+
+    assert_user_row_absent(&reopened, 1);
+    assert_name_index_absent(&reopened, "Ada");
+    assert_user_row(&reopened, 2, "Grace");
+    assert_name_index_entry(&reopened, "Grace", 2);
+}
+
+#[test]
+fn uncommitted_flushed_delete_is_undone_during_recovery() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    let database = Database::create(&path).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    database.flush().unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+        .unwrap();
+    database.flush().unwrap();
+    let mut session = Session::new(&database);
+
+    execute_sql_with_session(&mut session, "BEGIN;").unwrap();
+    execute_sql_with_session(&mut session, "DELETE FROM users WHERE id == 1;").unwrap();
+    database.flush().unwrap();
+    std::mem::forget(session);
+    std::mem::forget(database);
+
+    let reopened = Database::open(&path).unwrap();
+
+    assert_user_row(&reopened, 1, "Ada");
+    assert_name_index_entry(&reopened, "Ada", 1);
 }
 
 #[test]

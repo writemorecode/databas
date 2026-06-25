@@ -239,6 +239,18 @@ impl<'db> Executor<'db> {
             PhysicalPlan::InsertValues { table, columns, values } => {
                 execute_insert_values(self.database, table, columns, values)
             }
+            PhysicalPlan::Delete { table, input } => {
+                let output_inner = self.execute(*input)?;
+                let records =
+                    output_inner.into_rows("DELETE")?.collect::<ExecutorResult<Vec<_>>>()?;
+                let affected = records.len() as u64;
+
+                for record in records {
+                    self.database.delete_table_row(&table, &record)?;
+                }
+
+                Ok(ExecutionOutput::RowsAffected(affected))
+            }
             PhysicalPlan::OneRow => Ok(ExecutionOutput::Rows {
                 rows: Box::new(std::iter::once_with(|| empty_record(0))),
             }),

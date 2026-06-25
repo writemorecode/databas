@@ -140,6 +140,14 @@ impl Database {
         self.records.insert_table_row(table, values)
     }
 
+    pub(crate) fn delete_table_row(
+        &self,
+        table: &TableSchema,
+        record: &OwnedTableRecord,
+    ) -> StorageResult<()> {
+        self.records.delete_table_row(table, record)
+    }
+
     pub(crate) fn index_cursor_by_name(&self, name: &str) -> StorageResult<IndexCursor> {
         self.catalog.index_cursor_by_name(name)
     }
@@ -177,6 +185,14 @@ impl RecordAccess for Database {
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord> {
         Database::insert_table_row(self, table, values)
+    }
+
+    fn delete_table_row(
+        &self,
+        table: &TableSchema,
+        record: &OwnedTableRecord,
+    ) -> StorageResult<()> {
+        Database::delete_table_row(self, table, record)
     }
 }
 

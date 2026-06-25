@@ -44,6 +44,16 @@ impl RecordManager {
         self.indexes.insert_index_entries(table, &record)?;
         Ok(record)
     }
+
+    pub(crate) fn delete_table_row(
+        &self,
+        table: &TableSchema,
+        record: &OwnedTableRecord,
+    ) -> StorageResult<()> {
+        self.indexes.delete_index_entries(table, record)?;
+        let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
+        table_cursor.delete(record.row_id)
+    }
 }
 
 impl Iterator for TableScan {

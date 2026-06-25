@@ -230,7 +230,10 @@ impl Drop for Session<'_> {
 
 fn statement_is_mutating(statement: &Statement<'_>) -> bool {
     match statement {
-        Statement::CreateTable(_) | Statement::CreateIndex(_) | Statement::Insert(_) => true,
+        Statement::CreateTable(_)
+        | Statement::CreateIndex(_)
+        | Statement::Insert(_)
+        | Statement::Delete(_) => true,
         Statement::Select(_) | Statement::Explain(_) => false,
     }
 }
