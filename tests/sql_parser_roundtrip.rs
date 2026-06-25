@@ -115,13 +115,14 @@ fn assert_items_round_trip(sql: &str) {
 }
 
 fn draw_statement(tc: &TestCase) -> String {
-    match draw_index(tc, 6) {
+    match draw_index(tc, 7) {
         0 => draw_insert(tc),
         1 => draw_select(tc),
         2 => draw_create_table(tc),
         3 => draw_create_index(tc),
         4 => draw_explain_select(tc),
         5 => draw_transaction_control(tc),
+        6 => draw_delete(tc),
         _ => unreachable!(),
     }
 }
@@ -176,6 +177,19 @@ fn draw_select(tc: &TestCase) -> String {
     if draw_bool(tc) {
         sql.push_str(" OFFSET ");
         sql.push_str(&draw_u32(tc).to_string());
+    }
+
+    sql.push(';');
+    sql
+}
+
+fn draw_delete(tc: &TestCase) -> String {
+    let table = draw_identifier(tc);
+    let mut sql = format!("DELETE FROM {table}");
+
+    if draw_bool(tc) {
+        sql.push_str(" WHERE ");
+        sql.push_str(&draw_expression(tc, false));
     }
 
     sql.push(';');
@@ -256,6 +270,13 @@ fn explain_select_parses_as_explain_statement() {
         panic!("expected EXPLAIN statement");
     };
     assert!(matches!(statement.as_ref(), Statement::Select(_)));
+}
+
+#[hegel::test(test_cases = 250)]
+fn delete_queries_round_trip_through_display(tc: TestCase) {
+    let sql = draw_delete(&tc);
+    tc.note(&sql);
+    assert_round_trips(&sql);
 }
 
 #[hegel::test(test_cases = 250)]

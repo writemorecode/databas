@@ -41,6 +41,20 @@ impl IndexManager {
         Ok(())
     }
 
+    pub(crate) fn delete_index_entries(
+        &self,
+        table: &TableSchema,
+        record: &OwnedTableRecord,
+    ) -> StorageResult<()> {
+        for index in self.catalog.index_schemas_for_table(table)? {
+            let key = index_key_from_record(table, &index, record)?;
+            let mut index_cursor = self.catalog.index_cursor_by_name(&index.name)?;
+            index_cursor.delete(&key)?;
+        }
+
+        Ok(())
+    }
+
     fn backfill_index(&self, table: &TableSchema, index: &IndexSchema) -> StorageResult<()> {
         let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
         let mut index_cursor = self.catalog.index_cursor_by_name(&index.name)?;
