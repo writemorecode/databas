@@ -27,7 +27,7 @@ pub use expression::evaluate_expression;
 use expression::record_from_values;
 use expression::{
     EvaluationContext, empty_record, evaluate_expressions, evaluate_value, execute_insert_values,
-    execute_values, offset_rows,
+    execute_update, execute_values, offset_rows,
 };
 
 /// Errors that can occur while executing a physical query plan.
@@ -238,6 +238,12 @@ impl<'db> Executor<'db> {
             PhysicalPlan::Values { rows } => execute_values(rows),
             PhysicalPlan::InsertValues { table, columns, values } => {
                 execute_insert_values(self.database, table, columns, values)
+            }
+            PhysicalPlan::Update { table, assignments, input } => {
+                let output_inner = self.execute(*input)?;
+                let records =
+                    output_inner.into_rows("UPDATE")?.collect::<ExecutorResult<Vec<_>>>()?;
+                execute_update(self.database, table, assignments, records)
             }
             PhysicalPlan::Delete { table, input } => {
                 let output_inner = self.execute(*input)?;

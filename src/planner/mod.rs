@@ -32,6 +32,7 @@ use crate::{
                 delete::DeleteQuery,
                 insert::InsertQuery,
                 select::{Ordering, SelectQuery},
+                update::UpdateQuery,
             },
         },
     },
@@ -70,6 +71,8 @@ pub enum LogicalPlan {
     Values { rows: Vec<Vec<PlannedExpression>> },
     /// Insert rows from an input plan into bound table columns.
     Insert { table: TableSchema, columns: Vec<BoundColumn>, input: Box<LogicalPlan> },
+    /// Update rows in a table selected by an input plan.
+    Update { table: TableSchema, assignments: Vec<UpdateAssignment>, input: Box<LogicalPlan> },
     /// Delete rows from a table selected by an input plan.
     Delete { table: TableSchema, input: Box<LogicalPlan> },
     /// Synthetic single-row input used for projection-only selects without a
@@ -131,6 +134,15 @@ pub enum PhysicalPlan {
         columns: Vec<BoundColumn>,
         /// Literal value rows to insert.
         values: Vec<Vec<PlannedExpression>>,
+    },
+    /// Update rows from a table selected by an input operator.
+    Update {
+        /// Target table.
+        table: TableSchema,
+        /// Bound column assignments.
+        assignments: Vec<UpdateAssignment>,
+        /// Row-producing operator that yields target table records.
+        input: Box<PhysicalPlan>,
     },
     /// Delete rows from a table selected by an input operator.
     Delete {
@@ -216,6 +228,7 @@ fn format_physical_plan(
 fn physical_plan_input(plan: &PhysicalPlan) -> Option<&PhysicalPlan> {
     match plan {
         PhysicalPlan::Explain { input }
+        | PhysicalPlan::Update { input, .. }
         | PhysicalPlan::Delete { input, .. }
         | PhysicalPlan::Filter { input, .. }
         | PhysicalPlan::Sort { input, .. }
@@ -247,6 +260,9 @@ fn physical_plan_label(plan: &PhysicalPlan) -> String {
             display_list(columns),
             values.len()
         ),
+        PhysicalPlan::Update { table, assignments, .. } => {
+            format!("Update table={} assignments=[{}]", table.name, display_list(assignments))
+        }
         PhysicalPlan::Delete { table, .. } => format!("Delete table={}", table.name),
         PhysicalPlan::OneRow => "OneRow".to_owned(),
         PhysicalPlan::FullTableScan { table } => format!("FullTableScan table={}", table.name),
@@ -312,6 +328,21 @@ impl fmt::Display for BoundColumn {
     }
 }
 
+/// One bound column assignment from an `UPDATE ... SET` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateAssignment {
+    /// Target column to overwrite.
+    pub column: BoundColumn,
+    /// Expression evaluated against the original row.
+    pub expression: PlannedExpression,
+}
+
+impl fmt::Display for UpdateAssignment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} = {}", self.column, self.expression)
+    }
+}
+
 /// One bound column and optional direction from an `ORDER BY` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SortTerm {
@@ -355,6 +386,9 @@ pub enum PlannerError {
     /// An `INSERT` column list named the same column more than once.
     #[error("duplicate insert column: {column}")]
     DuplicateInsertColumn { column: String },
+    /// An `UPDATE` assignment list named the same column more than once.
+    #[error("duplicate update column: {column}")]
+    DuplicateUpdateColumn { column: String },
     /// A `CREATE INDEX` column list named the same column more than once.
     #[error("duplicate index column: {column}")]
     DuplicateIndexColumn { column: String },
@@ -415,6 +449,7 @@ impl<'db> Planner<'db> {
             Statement::CreateTable(query) => self.plan_create_table(query),
             Statement::CreateIndex(query) => self.plan_create_index(query),
             Statement::Insert(query) => self.plan_insert(query),
+            Statement::Update(query) => self.plan_update(query),
             Statement::Delete(query) => self.plan_delete(query),
             Statement::Select(query) => self.plan_select(query),
         }
@@ -498,6 +533,34 @@ impl<'db> Planner<'db> {
         Ok(LogicalPlan::Delete { table, input: Box::new(input) })
     }
 
+    fn plan_update(&self, query: &UpdateQuery<'_>) -> PlannerResult<LogicalPlan> {
+        let table = self.table_schema(query.table)?;
+        let mut seen = HashSet::new();
+        let mut assignments = Vec::new();
+
+        for assignment in &query.assignments.0 {
+            if !seen.insert(assignment.column) {
+                return Err(PlannerError::DuplicateUpdateColumn {
+                    column: assignment.column.to_owned(),
+                });
+            }
+            assignments.push(UpdateAssignment {
+                column: bind_column(&table, assignment.column)?,
+                expression: self.bind_expression(&assignment.expression, Some(&table))?,
+            });
+        }
+
+        let mut input = LogicalPlan::TableScan { table: table.clone() };
+        if let Some(predicate) = &query.where_clause {
+            input = LogicalPlan::Filter {
+                input: Box::new(input),
+                predicate: self.bind_expression(predicate, Some(&table))?,
+            };
+        }
+
+        Ok(LogicalPlan::Update { table, assignments, input: Box::new(input) })
+    }
+
     fn plan_select(&self, query: &SelectQuery<'_>) -> PlannerResult<LogicalPlan> {
         let table = query.table.map(|name| self.table_schema(name)).transpose()?;
         let mut plan = match &table {
@@ -565,6 +628,11 @@ impl<'db> Planner<'db> {
                 }),
                 _ => Err(PlannerError::InvalidInsertInput),
             },
+            LogicalPlan::Update { table, assignments, input } => Ok(PhysicalPlan::Update {
+                table: table.clone(),
+                assignments: assignments.clone(),
+                input: Box::new(self.physical_plan(input)?),
+            }),
             LogicalPlan::Delete { table, input } => Ok(PhysicalPlan::Delete {
                 table: table.clone(),
                 input: Box::new(self.physical_plan(input)?),
@@ -840,6 +908,104 @@ mod tests {
             ["id", "name"]
         );
         assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn update_all_plans_full_table_scan_under_update() {
+        let (_dir, database) = database_with_users();
+        let planner = Planner::new(&database);
+        let statement = parse("UPDATE users SET name = 'Ada';");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let LogicalPlan::Update { table, assignments, input } = &plan.logical else {
+            panic!("expected logical update plan: {plan:?}");
+        };
+        assert_eq!(table.name, "users");
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].column, bound("users", "name", 1, DataType::Text));
+        assert_eq!(
+            assignments[0].expression,
+            PlannedExpression::Literal(Value::String("Ada".to_owned()))
+        );
+        assert!(
+            matches!(input.as_ref(), LogicalPlan::TableScan { table } if table.name == "users")
+        );
+
+        let PhysicalPlan::Update { table, assignments, input } = &plan.physical else {
+            panic!("expected physical update plan: {plan:?}");
+        };
+        assert_eq!(table.name, "users");
+        assert_eq!(assignments.len(), 1);
+        assert!(
+            matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        );
+    }
+
+    #[test]
+    fn update_where_binds_filter_and_assignment_column_refs() {
+        let (_dir, database) = database_with_users();
+        let planner = Planner::new(&database);
+        let statement = parse("UPDATE users SET age = age + 1 WHERE id == 1;");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let LogicalPlan::Update { assignments, input, .. } = &plan.logical else {
+            panic!("expected logical update plan: {plan:?}");
+        };
+        assert_eq!(
+            assignments,
+            &[UpdateAssignment {
+                column: bound("users", "age", 2, DataType::Integer),
+                expression: PlannedExpression::Binary {
+                    left: Box::new(PlannedExpression::Column(bound(
+                        "users",
+                        "age",
+                        2,
+                        DataType::Integer
+                    ))),
+                    op: Op::Add,
+                    right: Box::new(PlannedExpression::Literal(Value::Integer(1))),
+                },
+            }]
+        );
+
+        let LogicalPlan::Filter { input, predicate } = input.as_ref() else {
+            panic!("expected filter below update: {plan:?}");
+        };
+        assert!(
+            matches!(input.as_ref(), LogicalPlan::TableScan { table } if table.name == "users")
+        );
+        assert_eq!(
+            predicate,
+            &PlannedExpression::Binary {
+                left: Box::new(PlannedExpression::Column(bound(
+                    "users",
+                    "id",
+                    0,
+                    DataType::Integer
+                ))),
+                op: Op::EqualsEquals,
+                right: Box::new(PlannedExpression::Literal(Value::Integer(1))),
+            }
+        );
+
+        let PhysicalPlan::Update { input, .. } = &plan.physical else {
+            panic!("expected physical update plan: {plan:?}");
+        };
+        assert!(matches!(input.as_ref(), PhysicalPlan::Filter { .. }));
+    }
+
+    #[test]
+    fn update_rejects_duplicate_assignment_columns() {
+        let (_dir, database) = database_with_users();
+        let planner = Planner::new(&database);
+        let statement = parse("UPDATE users SET name = 'Ada', name = 'Grace';");
+
+        assert!(matches!(
+            planner.plan_statement(&statement),
+            Err(PlannerError::DuplicateUpdateColumn { column }) if column == "name"
+        ));
     }
 
     #[test]

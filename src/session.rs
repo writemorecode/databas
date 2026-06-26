@@ -233,6 +233,7 @@ fn statement_is_mutating(statement: &Statement<'_>) -> bool {
         Statement::CreateTable(_)
         | Statement::CreateIndex(_)
         | Statement::Insert(_)
+        | Statement::Update(_)
         | Statement::Delete(_) => true,
         Statement::Select(_) | Statement::Explain(_) => false,
     }

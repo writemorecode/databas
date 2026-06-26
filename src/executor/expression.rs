@@ -2,7 +2,7 @@ use crate::{
     core::{
         OwnedTableRecord as TableRecord, TableSchema, Tuple, TupleView, Value, access::RecordAccess,
     },
-    planner::{BoundColumn, PlannedExpression},
+    planner::{BoundColumn, PlannedExpression, UpdateAssignment},
     sql_parser::parser::op::Op,
 };
 
@@ -90,6 +90,38 @@ pub(super) fn execute_insert_values<R: RecordAccess + ?Sized>(
         }
         records.insert_table_row(&table, row_values)?;
         affected += 1;
+    }
+
+    Ok(ExecutionOutput::RowsAffected(affected))
+}
+
+/// Executes an `UPDATE` plan against a materialized target row set.
+pub(super) fn execute_update<R: RecordAccess + ?Sized>(
+    records: &R,
+    table: TableSchema,
+    assignments: Vec<UpdateAssignment>,
+    target_rows: Vec<TableRecord>,
+) -> ExecutorResult<ExecutionOutput> {
+    let affected = target_rows.len() as u64;
+
+    for row in target_rows {
+        let context = EvaluationContext::from_record(&row)?;
+        let mut values = context.tuple.to_owned_tuple().into_values();
+
+        for assignment in &assignments {
+            let len = values.len();
+            let value = evaluate_value(&assignment.expression, &context)?;
+            let slot = values.get_mut(assignment.column.ordinal).ok_or_else(|| {
+                ExecutorError::ColumnOrdinalOutOfBounds {
+                    column: assignment.column.name.clone(),
+                    ordinal: assignment.column.ordinal,
+                    len,
+                }
+            })?;
+            *slot = value;
+        }
+
+        records.update_table_row(&table, &row, values)?;
     }
 
     Ok(ExecutionOutput::RowsAffected(affected))

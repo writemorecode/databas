@@ -5,6 +5,7 @@ pub mod create_table;
 pub mod delete;
 pub mod insert;
 pub mod select;
+pub mod update;
 
 pub mod lists;
 
@@ -13,11 +14,13 @@ use create_table::CreateTableQuery;
 use delete::DeleteQuery;
 use insert::InsertQuery;
 use select::SelectQuery;
+use update::UpdateQuery;
 
 #[derive(Debug, PartialEq)]
 pub enum Statement<'a> {
     Explain(Box<Statement<'a>>),
     Select(SelectQuery<'a>),
+    Update(UpdateQuery<'a>),
     Delete(DeleteQuery<'a>),
     Insert(InsertQuery<'a>),
     CreateTable(CreateTableQuery<'a>),
@@ -29,6 +32,7 @@ impl Display for Statement<'_> {
         match self {
             Statement::Explain(statement) => write!(f, "EXPLAIN {statement}"),
             Statement::Select(query) => query.fmt(f),
+            Statement::Update(query) => query.fmt(f),
             Statement::Delete(query) => query.fmt(f),
             Statement::Insert(query) => query.fmt(f),
             Statement::CreateTable(query) => query.fmt(f),

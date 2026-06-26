@@ -115,7 +115,7 @@ fn assert_items_round_trip(sql: &str) {
 }
 
 fn draw_statement(tc: &TestCase) -> String {
-    match draw_index(tc, 7) {
+    match draw_index(tc, 8) {
         0 => draw_insert(tc),
         1 => draw_select(tc),
         2 => draw_create_table(tc),
@@ -123,6 +123,7 @@ fn draw_statement(tc: &TestCase) -> String {
         4 => draw_explain_select(tc),
         5 => draw_transaction_control(tc),
         6 => draw_delete(tc),
+        7 => draw_update(tc),
         _ => unreachable!(),
     }
 }
@@ -186,6 +187,22 @@ fn draw_select(tc: &TestCase) -> String {
 fn draw_delete(tc: &TestCase) -> String {
     let table = draw_identifier(tc);
     let mut sql = format!("DELETE FROM {table}");
+
+    if draw_bool(tc) {
+        sql.push_str(" WHERE ");
+        sql.push_str(&draw_expression(tc, false));
+    }
+
+    sql.push(';');
+    sql
+}
+
+fn draw_update(tc: &TestCase) -> String {
+    let table = draw_identifier(tc);
+    let assignments = (0..draw_non_empty_len(tc, 4))
+        .map(|_| format!("{} = {}", draw_identifier(tc), draw_expression(tc, false)))
+        .collect::<Vec<_>>();
+    let mut sql = format!("UPDATE {table} SET {}", assignments.join(", "));
 
     if draw_bool(tc) {
         sql.push_str(" WHERE ");
@@ -275,6 +292,13 @@ fn explain_select_parses_as_explain_statement() {
 #[hegel::test(test_cases = 250)]
 fn delete_queries_round_trip_through_display(tc: TestCase) {
     let sql = draw_delete(&tc);
+    tc.note(&sql);
+    assert_round_trips(&sql);
+}
+
+#[hegel::test(test_cases = 250)]
+fn update_queries_round_trip_through_display(tc: TestCase) {
+    let sql = draw_update(&tc);
     tc.note(&sql);
     assert_round_trips(&sql);
 }
