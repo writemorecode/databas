@@ -979,6 +979,186 @@ fn delete_with_non_boolean_where_does_not_delete_rows() {
 }
 
 #[test]
+fn update_all_rows_returns_count_and_replaces_values() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
+    )
+    .unwrap();
+
+    let output =
+        execute_sql(&database, "UPDATE users SET name = 'Updated', active = TRUE;").unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(2)));
+    assert_user_row(&database, 1, "Updated");
+    assert_user_row(&database, 2, "Updated");
+}
+
+#[test]
+fn update_where_replaces_only_matching_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
+    )
+    .unwrap();
+
+    let output =
+        execute_sql(&database, "UPDATE users SET name = 'Linus' WHERE active == FALSE;").unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(1)));
+    assert_user_row(&database, 1, "Ada");
+    let mut users = database.table_cursor_by_name("users").unwrap();
+    let row = users.get(2).unwrap().expect("updated row should exist");
+    assert_eq!(
+        values(&row),
+        vec![Value::Integer(2), Value::String("Linus".to_owned()), Value::Boolean(false)]
+    );
+}
+
+#[test]
+fn update_without_matches_returns_zero_rows_affected() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+        .unwrap();
+
+    let output = execute_sql(&database, "UPDATE users SET name = 'Linus' WHERE id == 99;").unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(0)));
+    assert_user_row(&database, 1, "Ada");
+}
+
+#[test]
+fn update_assignment_expression_reads_original_row_values() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+        .unwrap();
+
+    execute_sql(&database, "UPDATE users SET id = id + 1, active = NOT active WHERE id == 1;")
+        .unwrap();
+
+    let mut users = database.table_cursor_by_name("users").unwrap();
+    let row = users.get(1).unwrap().expect("row id should be preserved");
+    assert_eq!(
+        values(&row),
+        vec![Value::Integer(2), Value::String("Ada".to_owned()), Value::Boolean(false)]
+    );
+    assert!(users.get(2).unwrap().is_none());
+}
+
+#[test]
+fn update_rejects_wrong_type_without_changing_row() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+        .unwrap();
+
+    let result = execute_sql(&database, "UPDATE users SET active = 'yes' WHERE id == 1;");
+
+    assert!(result.is_err_and(|error| {
+        is_database_type_mismatch_error(error, "active", DataType::Boolean, "text")
+    }));
+    assert_user_row(&database, 1, "Ada");
+}
+
+#[test]
+fn update_with_non_boolean_where_does_not_change_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+        .unwrap();
+
+    let result = execute_sql(&database, "UPDATE users SET name = 'Linus' WHERE id;");
+
+    assert!(matches!(
+        result,
+        Err(DatabaseError::Executor(ExecutorError::NonBooleanPredicate {
+            value: Value::Integer(1)
+        }))
+    ));
+    assert_user_row(&database, 1, "Ada");
+}
+
+#[test]
+fn update_refreshes_secondary_index_entries() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', TRUE);",
+    )
+    .unwrap();
+
+    let output =
+        execute_sql(&database, "UPDATE users SET name = 'Linus' WHERE name == 'Ada';").unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(1)));
+    assert_name_index_absent(&database, "Ada");
+    assert_name_index_entry(&database, "Linus", 1);
+    assert_name_index_entry(&database, "Grace", 2);
+}
+
+#[test]
+fn failed_multi_row_update_rolls_back_rows_already_updated_in_statement() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', TRUE);",
+    )
+    .unwrap();
+
+    let result = execute_sql(
+        &database,
+        "UPDATE users SET name = 'Updated', active = id == 1 OR 1 / (2 - id) == 0;",
+    );
+
+    assert!(matches!(result, Err(DatabaseError::Executor(ExecutorError::DivisionByZero))));
+    assert_user_row(&database, 1, "Ada");
+    assert_user_row(&database, 2, "Grace");
+}
+
+#[test]
+fn explicit_transaction_rollback_restores_updated_rows_and_indexes() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+        .unwrap();
+    let mut session = Session::new(&database);
+
+    execute_sql_with_session(&mut session, "BEGIN;").unwrap();
+    let output =
+        execute_sql_with_session(&mut session, "UPDATE users SET name = 'Linus' WHERE id == 1;")
+            .unwrap();
+    assert!(matches!(output, ExecutionOutput::RowsAffected(1)));
+    assert_user_row(&database, 1, "Linus");
+    assert_name_index_absent(&database, "Ada");
+    assert_name_index_entry(&database, "Linus", 1);
+
+    execute_sql_with_session(&mut session, "ROLLBACK;").unwrap();
+
+    assert_user_row(&database, 1, "Ada");
+    assert_name_index_entry(&database, "Ada", 1);
+    assert_name_index_absent(&database, "Linus");
+}
+
+#[test]
 fn explicit_transaction_commit_persists_schema_rows_and_indexes_after_reopen() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
@@ -1423,6 +1603,32 @@ fn committed_delete_recovers_from_wal_after_crash() {
 }
 
 #[test]
+fn committed_update_recovers_from_wal_after_crash() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    let database = Database::create(&path).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    database.flush().unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+        .unwrap();
+    execute_sql(&database, "UPDATE users SET name = 'Linus', active = FALSE WHERE id == 1;")
+        .unwrap();
+    std::mem::forget(database);
+
+    let reopened = Database::open(&path).unwrap();
+    let mut users = reopened.table_cursor_by_name("users").unwrap();
+    let row = users.get(1).unwrap().expect("updated row should recover from WAL");
+
+    assert_eq!(
+        values(&row),
+        vec![Value::Integer(1), Value::String("Linus".to_owned()), Value::Boolean(false)]
+    );
+    assert_name_index_absent(&reopened, "Ada");
+    assert_name_index_entry(&reopened, "Linus", 1);
+}
+
+#[test]
 fn uncommitted_flushed_delete_is_undone_during_recovery() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
@@ -1445,6 +1651,33 @@ fn uncommitted_flushed_delete_is_undone_during_recovery() {
 
     assert_user_row(&reopened, 1, "Ada");
     assert_name_index_entry(&reopened, "Ada", 1);
+}
+
+#[test]
+fn uncommitted_flushed_update_is_undone_during_recovery() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    let database = Database::create(&path).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    database.flush().unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+        .unwrap();
+    database.flush().unwrap();
+    let mut session = Session::new(&database);
+
+    execute_sql_with_session(&mut session, "BEGIN;").unwrap();
+    execute_sql_with_session(&mut session, "UPDATE users SET name = 'Linus' WHERE id == 1;")
+        .unwrap();
+    database.flush().unwrap();
+    std::mem::forget(session);
+    std::mem::forget(database);
+
+    let reopened = Database::open(&path).unwrap();
+
+    assert_user_row(&reopened, 1, "Ada");
+    assert_name_index_entry(&reopened, "Ada", 1);
+    assert_name_index_absent(&reopened, "Linus");
 }
 
 #[test]

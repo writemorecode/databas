@@ -180,6 +180,9 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Select) => {
                 Ok(Statement::Select(self.parse_select_query()?))
             }
+            TokenKind::Keyword(Keyword::Update) => {
+                Ok(Statement::Update(self.parse_update_query()?))
+            }
             TokenKind::Keyword(Keyword::Delete) => {
                 Ok(Statement::Delete(self.parse_delete_query()?))
             }

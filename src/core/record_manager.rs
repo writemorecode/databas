@@ -54,6 +54,26 @@ impl RecordManager {
         let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
         table_cursor.delete(record.row_id)
     }
+
+    pub(crate) fn update_table_row(
+        &self,
+        table: &TableSchema,
+        record: &OwnedTableRecord,
+        values: Vec<Value>,
+    ) -> StorageResult<OwnedTableRecord> {
+        validate_table_row(table, &values)?;
+
+        let updated = Tuple::new(values).to_bytes()?;
+        let updated =
+            OwnedTableRecord { row_id: record.row_id, record: updated.into_boxed_slice() };
+
+        self.indexes.delete_index_entries(table, record)?;
+        let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
+        table_cursor.update(record.row_id, &updated.record)?;
+        self.indexes.insert_index_entries(table, &updated)?;
+
+        Ok(updated)
+    }
 }
 
 impl Iterator for TableScan {
