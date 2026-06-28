@@ -6,7 +6,7 @@ use crate::core::{
 pub(crate) const DATABASE_HEADER_PAGE_ID: PageId = 0;
 
 const MAGIC: &[u8; 8] = b"DATABAS\0";
-const FORMAT_VERSION: u16 = 1;
+const FORMAT_VERSION: u16 = 2;
 const HEADER_LEN: usize = 12;
 
 /// Fixed-format database file header stored on page 0.
