@@ -1,4 +1,43 @@
+//! Tuple value serialization.
+//!
+//! A tuple is encoded as a value count followed by that many typed value
+//! fields:
+//!
+//! ```text
+//! u32 value_count_le
+//! repeat value_count times:
+//!   u8  value_tag
+//!   u32 payload_len_be
+//!   [u8; payload_len] canonical_payload
+//! ```
+//!
+//! The tuple count is little-endian for compatibility with the existing tuple
+//! container format. Per-value lengths are big-endian so the value header is
+//! canonical and future raw-byte comparators do not need mixed-endian value
+//! metadata.
+//!
+//! Value payloads use the following encodings:
+//!
+//! ```text
+//! NULL             tag 0x05, len 0, no payload
+//! Text             tag 0x01, len N, raw UTF-8 bytes
+//! Boolean          tag 0x02, len 1, 0x00 false or 0x01 true
+//! Integer(i32)     tag 0x03, len 4, (value ^ i32::MIN).to_be_bytes()
+//! Float(f32)       tag 0x04, len 4, sortable IEEE-754 bits in big-endian order
+//! UnsignedInteger  tag 0x06, len 8, value.to_be_bytes()
+//! ```
+//!
+//! Fixed-width numeric payloads are encoded so bytewise comparison of payloads
+//! matches their logical ascending order. Float values reject NaN and normalize
+//! both zero signs to `+0.0` during serialization and decoding. Strings keep
+//! length-based framing and compare by raw UTF-8 bytes when a caller slices out
+//! each payload.
+//!
+//! [`TupleView`] validates all tags, lengths, UTF-8 text, boolean payloads,
+//! float payloads, and trailing bytes before exposing zero-copy borrowed values.
+
 use std::{
+    cmp::Ordering,
     fmt::Display,
     io::{self, Read, Write},
     ops::Range,
@@ -134,7 +173,7 @@ impl Tuple {
 
         for _ in 0..value_count {
             let tag = read_u8(reader)?;
-            let len = read_u32(reader)?;
+            let len = read_value_len(reader)?;
             values.push(read_value(reader, tag, len)?);
         }
 
@@ -209,7 +248,7 @@ impl<'a> EncodedTupleView<'a> {
 
         for _ in 0..value_count {
             let (tag, next_offset) = read_u8_from_slice(bytes, offset)?;
-            let (len, value_offset) = read_u32_from_slice(bytes, next_offset)?;
+            let (len, value_offset) = read_value_len_from_slice(bytes, next_offset)?;
             let value_len = usize::try_from(len).map_err(invalid_data)?;
             let value_end = value_offset.checked_add(value_len).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "tuple value length overflows usize")
@@ -269,13 +308,13 @@ fn value_ref_from_field<'a>(bytes: &'a [u8], field: &ValueField) -> ValueRef<'a>
             ValueRef::String(std::str::from_utf8(payload).expect("validated string payload"))
         }
         TAG_BOOLEAN => ValueRef::Boolean(payload[0] == 1),
-        TAG_INTEGER => ValueRef::Integer(i32::from_le_bytes(
+        TAG_INTEGER => ValueRef::Integer(decode_ordered_i32(
             payload.try_into().expect("validated i32 payload"),
         )),
         TAG_FLOAT => {
-            ValueRef::Float(f32::from_le_bytes(payload.try_into().expect("validated f32 payload")))
+            ValueRef::Float(decode_ordered_f32(payload.try_into().expect("validated f32 payload")))
         }
-        TAG_UNSIGNED_INTEGER => ValueRef::UnsignedInteger(u64::from_le_bytes(
+        TAG_UNSIGNED_INTEGER => ValueRef::UnsignedInteger(u64::from_be_bytes(
             payload.try_into().expect("validated u64 payload"),
         )),
         _ => unreachable!("validated tuple value tag"),
@@ -414,22 +453,23 @@ fn write_value_ref<W: Write>(writer: &mut W, value: ValueRef<'_>) -> io::Result<
         }
         ValueRef::Integer(value) => {
             write_tlv_header(writer, TAG_INTEGER, I32_LENGTH)?;
-            writer.write_all(&value.to_le_bytes())
+            writer.write_all(&encode_ordered_i32(value))
         }
         ValueRef::Float(value) => {
+            let bytes = encode_ordered_f32(value)?;
             write_tlv_header(writer, TAG_FLOAT, F32_LENGTH)?;
-            writer.write_all(&value.to_le_bytes())
+            writer.write_all(&bytes)
         }
         ValueRef::UnsignedInteger(value) => {
             write_tlv_header(writer, TAG_UNSIGNED_INTEGER, U64_LENGTH)?;
-            writer.write_all(&value.to_le_bytes())
+            writer.write_all(&value.to_be_bytes())
         }
     }
 }
 
 fn write_tlv_header<W: Write>(writer: &mut W, tag: u8, len: u32) -> io::Result<()> {
     writer.write_all(&[tag])?;
-    writer.write_all(&len.to_le_bytes())
+    writer.write_all(&len.to_be_bytes())
 }
 
 fn read_value<R: Read>(reader: &mut R, tag: u8, len: u32) -> io::Result<Value> {
@@ -465,19 +505,21 @@ fn read_value<R: Read>(reader: &mut R, tag: u8, len: u32) -> io::Result<Value> {
             validate_len(tag, len, I32_LENGTH)?;
             let mut bytes = [0; size_of::<i32>()];
             reader.read_exact(&mut bytes)?;
-            Ok(Value::Integer(i32::from_le_bytes(bytes)))
+            Ok(Value::Integer(decode_ordered_i32(bytes)))
         }
         TAG_FLOAT => {
             validate_len(tag, len, F32_LENGTH)?;
             let mut bytes = [0; size_of::<f32>()];
             reader.read_exact(&mut bytes)?;
-            Ok(Value::Float(f32::from_le_bytes(bytes)))
+            let value = decode_ordered_f32(bytes);
+            validate_float(value)?;
+            Ok(Value::Float(value))
         }
         TAG_UNSIGNED_INTEGER => {
             validate_len(tag, len, U64_LENGTH)?;
             let mut bytes = [0; size_of::<u64>()];
             reader.read_exact(&mut bytes)?;
-            Ok(Value::UnsignedInteger(u64::from_le_bytes(bytes)))
+            Ok(Value::UnsignedInteger(u64::from_be_bytes(bytes)))
         }
         actual => Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -504,7 +546,10 @@ fn validate_value_payload(tag: u8, payload: &[u8]) -> io::Result<()> {
             }
         }
         TAG_INTEGER => validate_len(tag, payload.len() as u32, I32_LENGTH),
-        TAG_FLOAT => validate_len(tag, payload.len() as u32, F32_LENGTH),
+        TAG_FLOAT => {
+            validate_len(tag, payload.len() as u32, F32_LENGTH)?;
+            validate_float(decode_ordered_f32(payload.try_into().expect("validated f32 payload")))
+        }
         TAG_UNSIGNED_INTEGER => validate_len(tag, payload.len() as u32, U64_LENGTH),
         actual => Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -536,6 +581,12 @@ fn read_u32<R: Read>(reader: &mut R) -> io::Result<u32> {
     Ok(u32::from_le_bytes(bytes))
 }
 
+fn read_value_len<R: Read>(reader: &mut R) -> io::Result<u32> {
+    let mut bytes = [0; size_of::<u32>()];
+    reader.read_exact(&mut bytes)?;
+    Ok(u32::from_be_bytes(bytes))
+}
+
 fn invalid_data(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
@@ -553,6 +604,106 @@ fn read_u32_from_slice(bytes: &[u8], offset: usize) -> io::Result<(u32, usize)> 
     Ok((u32::from_le_bytes(value.try_into().expect("u32 slice has fixed width")), end))
 }
 
+fn read_value_len_from_slice(bytes: &[u8], offset: usize) -> io::Result<(u32, usize)> {
+    let end = offset
+        .checked_add(size_of::<u32>())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "offset overflows usize"))?;
+    let value = bytes.get(offset..end).ok_or_else(unexpected_eof)?;
+    Ok((u32::from_be_bytes(value.try_into().expect("u32 slice has fixed width")), end))
+}
+
+fn encode_ordered_i32(value: i32) -> [u8; size_of::<i32>()] {
+    ((value as u32) ^ 0x8000_0000).to_be_bytes()
+}
+
+fn decode_ordered_i32(bytes: [u8; size_of::<i32>()]) -> i32 {
+    (u32::from_be_bytes(bytes) ^ 0x8000_0000) as i32
+}
+
+fn encode_ordered_f32(value: f32) -> io::Result<[u8; size_of::<f32>()]> {
+    validate_float(value)?;
+    let value = if value == 0.0 { 0.0 } else { value };
+    let bits = value.to_bits();
+    let ordered = if bits & 0x8000_0000 == 0 { bits ^ 0x8000_0000 } else { !bits };
+    Ok(ordered.to_be_bytes())
+}
+
+fn decode_ordered_f32(bytes: [u8; size_of::<f32>()]) -> f32 {
+    let ordered = u32::from_be_bytes(bytes);
+    let bits = if ordered & 0x8000_0000 == 0 { !ordered } else { ordered ^ 0x8000_0000 };
+    let value = f32::from_bits(bits);
+    if value == 0.0 { 0.0 } else { value }
+}
+
+fn validate_float(value: f32) -> io::Result<()> {
+    if value.is_nan() {
+        Err(io::Error::new(io::ErrorKind::InvalidData, "NaN tuple floats are not supported"))
+    } else {
+        Ok(())
+    }
+}
+
+#[allow(dead_code)]
+struct EncodedValueItem<'a> {
+    bytes: &'a [u8],
+    field: ValueField,
+}
+
+impl EncodedValueItem<'_> {
+    fn payload(&self) -> &[u8] {
+        &self.bytes[self.field.value_range.clone()]
+    }
+}
+
+impl PartialEq for EncodedValueItem<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for EncodedValueItem<'_> {}
+
+impl PartialOrd for EncodedValueItem<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for EncodedValueItem<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self.field.tag == TAG_NULL, other.field.tag == TAG_NULL) {
+            (true, true) => return Ordering::Equal,
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            (false, false) => {}
+        }
+
+        match self.field.tag.cmp(&other.field.tag) {
+            Ordering::Equal => self.payload().cmp(other.payload()),
+            ordering => ordering,
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn parse_encoded_value_item(bytes: &[u8]) -> io::Result<EncodedValueItem<'_>> {
+    let (tag, next_offset) = read_u8_from_slice(bytes, 0)?;
+    let (len, value_offset) = read_value_len_from_slice(bytes, next_offset)?;
+    let value_len = usize::try_from(len).map_err(invalid_data)?;
+    let value_end = value_offset.checked_add(value_len).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "tuple value length overflows usize")
+    })?;
+    let payload = bytes.get(value_offset..value_end).ok_or_else(unexpected_eof)?;
+    validate_value_payload(tag, payload)?;
+    if value_end != bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "trailing bytes after tuple value payload",
+        ));
+    }
+    Ok(EncodedValueItem { bytes, field: ValueField { tag, value_range: value_offset..value_end } })
+}
+
 fn unexpected_eof() -> io::Error {
     io::Error::new(io::ErrorKind::UnexpectedEof, "truncated tuple payload")
 }
@@ -565,6 +716,23 @@ mod tests {
 
     fn read(bytes: &[u8]) -> io::Result<Tuple> {
         Tuple::read_from(&mut Cursor::new(bytes))
+    }
+
+    fn encoded_value(value: ValueRef<'_>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        value.write_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    fn assert_encoded_value_order(left: ValueRef<'_>, right: ValueRef<'_>, expected: Ordering) {
+        let left = encoded_value(left);
+        let right = encoded_value(right);
+        assert_eq!(
+            parse_encoded_value_item(&left)
+                .unwrap()
+                .cmp(&parse_encoded_value_item(&right).unwrap()),
+            expected
+        );
     }
 
     #[test]
@@ -627,11 +795,11 @@ mod tests {
         let mut expected = Vec::new();
         expected.extend_from_slice(&2u32.to_le_bytes());
         expected.push(TAG_BOOLEAN);
-        expected.extend_from_slice(&1u32.to_le_bytes());
+        expected.extend_from_slice(&1u32.to_be_bytes());
         expected.push(0);
         expected.push(TAG_INTEGER);
-        expected.extend_from_slice(&4u32.to_le_bytes());
-        expected.extend_from_slice(&258i32.to_le_bytes());
+        expected.extend_from_slice(&4u32.to_be_bytes());
+        expected.extend_from_slice(&encode_ordered_i32(258));
 
         assert_eq!(tuple.to_bytes().unwrap(), expected);
     }
@@ -641,7 +809,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.push(0xff);
-        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
 
         let error = read(&bytes).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -654,7 +822,7 @@ mod tests {
             bytes.extend_from_slice(&1u32.to_le_bytes());
             bytes.push(tag);
             let invalid_len = if tag == TAG_NULL { 1_u32 } else { 0 };
-            bytes.extend_from_slice(&invalid_len.to_le_bytes());
+            bytes.extend_from_slice(&invalid_len.to_be_bytes());
 
             let error = read(&bytes).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -666,7 +834,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.push(TAG_BOOLEAN);
-        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
         bytes.push(2);
 
         let error = read(&bytes).unwrap_err();
@@ -678,7 +846,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.push(TAG_STRING);
-        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
         bytes.push(0xff);
 
         let error = read(&bytes).unwrap_err();
@@ -729,8 +897,8 @@ mod tests {
 
         let mut expected = Vec::new();
         expected.push(TAG_INTEGER);
-        expected.extend_from_slice(&4u32.to_le_bytes());
-        expected.extend_from_slice(&258i32.to_le_bytes());
+        expected.extend_from_slice(&4u32.to_be_bytes());
+        expected.extend_from_slice(&encode_ordered_i32(258));
 
         assert_eq!(bytes, expected);
     }
@@ -782,14 +950,14 @@ mod tests {
                 let mut bytes = Vec::new();
                 bytes.extend_from_slice(&1u32.to_le_bytes());
                 bytes.push(0xff);
-                bytes.extend_from_slice(&0u32.to_le_bytes());
+                bytes.extend_from_slice(&0u32.to_be_bytes());
                 bytes
             },
             {
                 let mut bytes = Vec::new();
                 bytes.extend_from_slice(&1u32.to_le_bytes());
                 bytes.push(TAG_BOOLEAN);
-                bytes.extend_from_slice(&1u32.to_le_bytes());
+                bytes.extend_from_slice(&1u32.to_be_bytes());
                 bytes.push(2);
                 bytes
             },
@@ -797,7 +965,7 @@ mod tests {
                 let mut bytes = Vec::new();
                 bytes.extend_from_slice(&1u32.to_le_bytes());
                 bytes.push(TAG_STRING);
-                bytes.extend_from_slice(&1u32.to_le_bytes());
+                bytes.extend_from_slice(&1u32.to_be_bytes());
                 bytes.push(0xff);
                 bytes
             },
@@ -816,5 +984,73 @@ mod tests {
 
         let error = TupleView::parse(&bytes[..bytes.len() - 1]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn encoded_values_compare_in_logical_order() {
+        assert_encoded_value_order(ValueRef::Null, ValueRef::Boolean(false), Ordering::Less);
+        assert_encoded_value_order(
+            ValueRef::Boolean(false),
+            ValueRef::Boolean(true),
+            Ordering::Less,
+        );
+        assert_encoded_value_order(ValueRef::Integer(-1), ValueRef::Integer(0), Ordering::Less);
+        assert_encoded_value_order(ValueRef::Integer(0), ValueRef::Integer(1), Ordering::Less);
+        assert_encoded_value_order(
+            ValueRef::UnsignedInteger(9),
+            ValueRef::UnsignedInteger(10),
+            Ordering::Less,
+        );
+        assert_encoded_value_order(ValueRef::Float(-1.5), ValueRef::Float(0.0), Ordering::Less);
+        assert_encoded_value_order(ValueRef::Float(0.0), ValueRef::Float(2.25), Ordering::Less);
+        assert_encoded_value_order(ValueRef::String("a"), ValueRef::String("aa"), Ordering::Less);
+        assert_encoded_value_order(ValueRef::String("aa"), ValueRef::String("b"), Ordering::Less);
+    }
+
+    #[test]
+    fn fixed_width_payload_bytes_are_canonical_for_ordering() {
+        let integers = [-42, -1, 0, 1, 42];
+        for pair in integers.windows(2) {
+            assert!(encode_ordered_i32(pair[0]) < encode_ordered_i32(pair[1]));
+        }
+
+        let unsigned = [0_u64, 1, 42, u64::MAX];
+        for pair in unsigned.windows(2) {
+            assert!(pair[0].to_be_bytes() < pair[1].to_be_bytes());
+        }
+
+        let floats = [-12.5_f32, -0.25, 0.0, 0.5, 9.75];
+        for pair in floats.windows(2) {
+            assert!(encode_ordered_f32(pair[0]).unwrap() < encode_ordered_f32(pair[1]).unwrap());
+        }
+    }
+
+    #[test]
+    fn rejects_little_endian_value_length_as_malformed_big_endian_length() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(TAG_BOOLEAN);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(1);
+
+        let error = read(&bytes).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_nan_float_during_serialization_and_validation() {
+        let error = Tuple::new(vec![Value::Float(f32::NAN)]).to_bytes().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(TAG_FLOAT);
+        bytes.extend_from_slice(&4u32.to_be_bytes());
+        bytes.extend_from_slice(&(f32::NAN.to_bits() ^ 0x8000_0000).to_be_bytes());
+
+        let error = read(&bytes).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let error = TupleView::parse(&bytes).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }
