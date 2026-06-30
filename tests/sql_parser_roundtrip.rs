@@ -219,24 +219,20 @@ fn draw_explain_select(tc: &TestCase) -> String {
 
 fn draw_create_table(tc: &TestCase) -> String {
     let table = draw_identifier(tc);
-    let columns = (0..draw_non_empty_len(tc, 5))
-        .map(|_| {
-            let column_type = match draw_index(tc, 3) {
-                0 => "INT",
-                1 => "FLOAT",
-                2 => "TEXT",
-                _ => unreachable!(),
-            };
-            let mut column = format!("{} {column_type}", draw_identifier(tc));
-            if draw_bool(tc) {
-                column.push_str(" PRIMARY KEY");
-            }
-            if draw_bool(tc) {
-                column.push_str(" NULLABLE");
-            }
-            column
-        })
-        .collect::<Vec<_>>();
+    let mut columns = vec![format!("{} INT PRIMARY KEY", draw_identifier(tc))];
+    columns.extend((0..draw_index(tc, 5)).map(|_| {
+        let column_type = match draw_index(tc, 3) {
+            0 => "INT",
+            1 => "FLOAT",
+            2 => "TEXT",
+            _ => unreachable!(),
+        };
+        let mut column = format!("{} {column_type}", draw_identifier(tc));
+        if draw_bool(tc) {
+            column.push_str(" NULLABLE");
+        }
+        column
+    }));
 
     format!("CREATE TABLE {table} ({});", columns.join(", "))
 }

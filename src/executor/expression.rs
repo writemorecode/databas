@@ -1,6 +1,7 @@
 use crate::{
     core::{
-        OwnedTableRecord as TableRecord, TableSchema, Tuple, TupleView, Value, access::RecordAccess,
+        OwnedTableRecord as TableRecord, TableKey, TableSchema, Tuple, TupleView, Value,
+        access::RecordAccess,
     },
     planner::{BoundColumn, PlannedExpression, UpdateAssignment},
     sql_parser::parser::op::Op,
@@ -11,7 +12,7 @@ use super::{ExecutionOutput, ExecutorError, ExecutorResult, RowStream};
 /// Evaluates one planned scalar expression against a record.
 ///
 /// The result is represented as a single-column [`TableRecord`] that preserves
-/// the input record's row id. This is primarily useful for tests and callers
+/// the input record's table key. This is primarily useful for tests and callers
 /// that need expression evaluation without building a full projection plan.
 pub fn evaluate_expression(
     expression: &PlannedExpression,
@@ -23,10 +24,10 @@ pub fn evaluate_expression(
 /// Executes a `VALUES` plan as a stream of evaluated literal rows.
 ///
 /// Each values row is evaluated against an empty synthetic record. The row's
-/// position in the `VALUES` list becomes the result row id.
+/// position in the `VALUES` list becomes the result table key.
 pub(super) fn execute_values(rows: Vec<Vec<PlannedExpression>>) -> ExecutorResult<ExecutionOutput> {
-    let rows = rows.into_iter().enumerate().map(|(row_id, expressions)| {
-        let input = empty_record(row_id as u64)?;
+    let rows = rows.into_iter().enumerate().map(|(table_key, expressions)| {
+        let input = empty_record(table_key as TableKey)?;
         evaluate_expressions(&expressions, &input)
     });
     Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
@@ -145,7 +146,7 @@ fn evaluate_expressions_in_context(
         .iter()
         .map(|expression| evaluate_value(expression, context))
         .collect::<ExecutorResult<Vec<_>>>()?;
-    record_from_values(context.row_id, values)
+    record_from_values(context.table_key, values)
 }
 
 /// Evaluates a scalar expression to one typed value.
@@ -177,11 +178,11 @@ pub(super) fn evaluate_value(
 
 /// Parsed view of an input record used while evaluating expressions.
 ///
-/// The context keeps the original row id so projected records preserve their
+/// The context keeps the original table key so projected records preserve their
 /// source identity, and it keeps a zero-copy tuple view so column references can
 /// read typed values by ordinal.
 pub(super) struct EvaluationContext<'a> {
-    row_id: u64,
+    table_key: TableKey,
     tuple: TupleView<'a>,
 }
 
@@ -189,7 +190,7 @@ impl<'a> EvaluationContext<'a> {
     /// Parses the encoded tuple bytes from `record`.
     pub(super) fn from_record(record: &'a TableRecord) -> ExecutorResult<Self> {
         let tuple = TupleView::parse(&record.record).map_err(ExecutorError::InvalidTuple)?;
-        Ok(Self { row_id: record.row_id, tuple })
+        Ok(Self { table_key: record.table_key, tuple })
     }
 
     /// Reads the value for a planner-bound column reference.
@@ -352,15 +353,18 @@ fn compare_ordered<T: PartialOrd>(left: &T, op: Op, right: &T) -> bool {
     }
 }
 
-/// Builds an encoded empty record with the provided row id.
-pub(super) fn empty_record(row_id: u64) -> ExecutorResult<TableRecord> {
-    record_from_values(row_id, Vec::new())
+/// Builds an encoded empty record with the provided table key.
+pub(super) fn empty_record(table_key: TableKey) -> ExecutorResult<TableRecord> {
+    record_from_values(table_key, Vec::new())
 }
 
 /// Builds a table record from owned typed values.
-pub(super) fn record_from_values(row_id: u64, values: Vec<Value>) -> ExecutorResult<TableRecord> {
+pub(super) fn record_from_values(
+    table_key: TableKey,
+    values: Vec<Value>,
+) -> ExecutorResult<TableRecord> {
     let record = record_bytes_from_values(values)?;
-    Ok(TableRecord { row_id, record: record.into_boxed_slice() })
+    Ok(TableRecord { table_key, record: record.into_boxed_slice() })
 }
 
 /// Serializes typed values using the tuple storage format.

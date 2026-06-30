@@ -3,43 +3,43 @@
 use std::fmt::{self, Display};
 
 use crate::core::{
-    RowId, Tuple,
+    TableKey, Tuple,
     btree::{CursorState, OwnedRecord, Record, TreeCursor},
     error::StorageResult,
     page::{CellCorruption, PageError},
 };
 
-const ROW_ID_SIZE: usize = size_of::<RowId>();
+const TABLE_KEY_SIZE: usize = size_of::<TableKey>();
 
-fn encode_table_row_id(row_id: RowId) -> [u8; ROW_ID_SIZE] {
-    row_id.to_be_bytes()
+fn encode_table_key(table_key: TableKey) -> [u8; TABLE_KEY_SIZE] {
+    (table_key ^ TableKey::MIN).to_be_bytes()
 }
 
-fn decode_table_row_id(key: &[u8]) -> StorageResult<RowId> {
-    let bytes: [u8; ROW_ID_SIZE] = key.try_into().map_err(|_| PageError::CorruptCell {
+fn decode_table_key(key: &[u8]) -> StorageResult<TableKey> {
+    let bytes: [u8; TABLE_KEY_SIZE] = key.try_into().map_err(|_| PageError::CorruptCell {
         slot_index: 0,
-        kind: CellCorruption::InvalidTableRowIdKeyLength { actual: key.len() },
+        kind: CellCorruption::InvalidTableKeyLength { actual: key.len() },
     })?;
-    Ok(RowId::from_be_bytes(bytes))
+    Ok(TableKey::from_be_bytes(bytes) ^ TableKey::MIN)
 }
 
-fn encode_index_row_id(row_id: RowId) -> [u8; ROW_ID_SIZE] {
-    row_id.to_le_bytes()
+fn encode_index_table_key(table_key: TableKey) -> [u8; TABLE_KEY_SIZE] {
+    encode_table_key(table_key)
 }
 
-fn decode_index_row_id(value: &[u8]) -> StorageResult<RowId> {
-    let bytes: [u8; ROW_ID_SIZE] = value.try_into().map_err(|_| PageError::CorruptCell {
+fn decode_index_table_key(value: &[u8]) -> StorageResult<TableKey> {
+    let bytes: [u8; TABLE_KEY_SIZE] = value.try_into().map_err(|_| PageError::CorruptCell {
         slot_index: 0,
-        kind: CellCorruption::InvalidIndexRowIdValueLength { actual: value.len() },
+        kind: CellCorruption::InvalidIndexTableKeyValueLength { actual: value.len() },
     })?;
-    Ok(RowId::from_le_bytes(bytes))
+    Ok(TableKey::from_be_bytes(bytes) ^ TableKey::MIN)
 }
 
 /// Stable, owned table record snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedTableRecord {
-    /// Row id that identifies this table record.
-    pub row_id: RowId,
+    /// Primary-key table key that identifies this table record.
+    pub table_key: TableKey,
     /// Encoded table record bytes.
     pub record: Box<[u8]>,
 }
@@ -61,18 +61,18 @@ impl Display for OwnedTableRecord {
 /// Borrowed table record view valid only for the callback that receives it.
 #[derive(Debug, Clone, Copy)]
 pub struct TableRecordView<'a> {
-    row_id: RowId,
+    table_key: TableKey,
     record: &'a [u8],
 }
 
 impl<'a> TableRecordView<'a> {
-    fn new(row_id: RowId, record: &'a [u8]) -> Self {
-        Self { row_id, record }
+    fn new(table_key: TableKey, record: &'a [u8]) -> Self {
+        Self { table_key, record }
     }
 
-    /// Returns the row id that identifies this table record.
-    pub fn row_id(&self) -> RowId {
-        self.row_id
+    /// Returns the primary-key table key that identifies this table record.
+    pub fn table_key(&self) -> TableKey {
+        self.table_key
     }
 
     /// Returns the encoded table record bytes.
@@ -86,20 +86,20 @@ impl<'a> TableRecordView<'a> {
 pub struct OwnedIndexEntry {
     /// Encoded secondary-index key bytes.
     pub key: Box<[u8]>,
-    /// Table row id referenced by this secondary-index key.
-    pub row_id: RowId,
+    /// Table primary-key value referenced by this secondary-index key.
+    pub table_key: TableKey,
 }
 
 /// Borrowed secondary-index entry view valid only for the callback that receives it.
 #[derive(Debug, Clone, Copy)]
 pub struct IndexEntryView<'a> {
     key: &'a [u8],
-    row_id: RowId,
+    table_key: TableKey,
 }
 
 impl<'a> IndexEntryView<'a> {
-    fn new(key: &'a [u8], row_id: RowId) -> Self {
-        Self { key, row_id }
+    fn new(key: &'a [u8], table_key: TableKey) -> Self {
+        Self { key, table_key }
     }
 
     /// Returns the encoded secondary-index key bytes.
@@ -107,9 +107,9 @@ impl<'a> IndexEntryView<'a> {
         self.key
     }
 
-    /// Returns the table row id referenced by this secondary-index key.
-    pub fn row_id(&self) -> RowId {
-        self.row_id
+    /// Returns the table primary-key value referenced by this secondary-index key.
+    pub fn table_key(&self) -> TableKey {
+        self.table_key
     }
 }
 
@@ -118,7 +118,7 @@ impl<'a> IndexEntryView<'a> {
 /// Inline records keep the backing page pinned internally and expose bytes only
 /// through callbacks. Overflow records may still be materialized by the raw tree.
 pub struct TableRecord {
-    row_id: RowId,
+    table_key: TableKey,
     raw: Record,
 }
 
@@ -127,11 +127,11 @@ pub struct TableRecord {
 /// Inline entries keep the backing page pinned internally and expose key bytes
 /// only through callbacks. Overflow keys may still be materialized by the raw tree.
 pub struct IndexEntry {
-    row_id: RowId,
+    table_key: TableKey,
     raw: Record,
 }
 
-/// Typed cursor for a table B+-tree keyed by row id.
+/// Typed cursor for a table B+-tree keyed by table key.
 #[derive(Clone)]
 pub struct TableCursor {
     inner: TreeCursor,
@@ -169,73 +169,99 @@ impl TableCursor {
         self.inner.seek_to_first()
     }
 
-    /// Positions the cursor on the first table record whose row id is greater
-    /// than or equal to `row_id`.
-    pub fn seek_to_row_id(&mut self, row_id: RowId) -> StorageResult<bool> {
-        self.inner.seek_to_key(&encode_table_row_id(row_id))
+    /// Positions the cursor on the first table record whose key is greater than
+    /// or equal to `table_key`.
+    pub fn seek_to_table_key(&mut self, table_key: TableKey) -> StorageResult<bool> {
+        self.inner.seek_to_key(&encode_table_key(table_key))
     }
 
     /// Reads the currently selected table record, if any.
     pub fn current_record(&self) -> StorageResult<Option<TableRecord>> {
-        self.inner.current()?.map(TableRecord::try_from).transpose()
+        self.inner.current()?.map(|record| self.table_record_from_raw(record)).transpose()
     }
 
     /// Reads the currently selected table record as a stable owned snapshot, if any.
     pub fn current_owned_record(&self) -> StorageResult<Option<OwnedTableRecord>> {
-        self.inner.current_owned()?.map(OwnedTableRecord::try_from).transpose()
+        self.inner
+            .current_owned()?
+            .map(|record| self.owned_table_record_from_raw(record))
+            .transpose()
     }
 
-    /// Advances to the next table record in row-id order.
+    /// Advances to the next table record in table key order.
     pub fn next_record(&mut self) -> StorageResult<Option<TableRecord>> {
-        self.inner.next_record()?.map(TableRecord::try_from).transpose()
+        self.inner.next_record()?.map(|record| self.table_record_from_raw(record)).transpose()
     }
 
     /// Advances to the next table record and returns a stable owned snapshot.
     pub fn next_owned_record(&mut self) -> StorageResult<Option<OwnedTableRecord>> {
-        self.inner.next_owned_record()?.map(OwnedTableRecord::try_from).transpose()
+        self.inner
+            .next_owned_record()?
+            .map(|record| self.owned_table_record_from_raw(record))
+            .transpose()
     }
 
-    /// Moves to the previous table record in row-id order.
+    /// Moves to the previous table record in table key order.
     pub fn prev_record(&mut self) -> StorageResult<Option<TableRecord>> {
-        self.inner.prev_record()?.map(TableRecord::try_from).transpose()
+        self.inner.prev_record()?.map(|record| self.table_record_from_raw(record)).transpose()
     }
 
     /// Moves to the previous table record and returns a stable owned snapshot.
     pub fn prev_owned_record(&mut self) -> StorageResult<Option<OwnedTableRecord>> {
-        self.inner.prev_owned_record()?.map(OwnedTableRecord::try_from).transpose()
-    }
-
-    /// Inserts a table record keyed by `row_id`.
-    pub fn insert(&mut self, row_id: RowId, record: &[u8]) -> StorageResult<()> {
-        self.inner.insert(&encode_table_row_id(row_id), record)
-    }
-
-    /// Looks up a table record by row id.
-    pub fn get(&mut self, row_id: RowId) -> StorageResult<Option<OwnedTableRecord>> {
         self.inner
-            .get_owned(&encode_table_row_id(row_id))?
-            .map(OwnedTableRecord::try_from)
+            .prev_owned_record()?
+            .map(|record| self.owned_table_record_from_raw(record))
             .transpose()
     }
 
-    /// Looks up a table record by row id and returns a stable owned snapshot.
-    pub fn get_owned_record(&mut self, row_id: RowId) -> StorageResult<Option<OwnedTableRecord>> {
-        self.get(row_id)
+    /// Inserts a table record keyed by `table_key`.
+    pub fn insert(&mut self, table_key: TableKey, record: &[u8]) -> StorageResult<()> {
+        self.inner.insert(&encode_table_key(table_key), record)
     }
 
-    /// Looks up a table record by row id without eagerly copying page-resident bytes.
-    pub fn get_record(&mut self, row_id: RowId) -> StorageResult<Option<TableRecord>> {
-        self.inner.get(&encode_table_row_id(row_id))?.map(TableRecord::try_from).transpose()
+    /// Looks up a table record by table key.
+    pub fn get(&mut self, table_key: TableKey) -> StorageResult<Option<OwnedTableRecord>> {
+        self.inner
+            .get_owned(&encode_table_key(table_key))?
+            .map(|record| self.owned_table_record_from_raw(record))
+            .transpose()
     }
 
-    /// Replaces the encoded record bytes stored for an existing `row_id`.
-    pub fn update(&mut self, row_id: RowId, record: &[u8]) -> StorageResult<()> {
-        self.inner.update(&encode_table_row_id(row_id), record)
+    /// Looks up a table record by table key and returns a stable owned snapshot.
+    pub fn get_owned_record(
+        &mut self,
+        table_key: TableKey,
+    ) -> StorageResult<Option<OwnedTableRecord>> {
+        self.get(table_key)
     }
 
-    /// Deletes the table record identified by `row_id`.
-    pub fn delete(&mut self, row_id: RowId) -> StorageResult<()> {
-        self.inner.delete(&encode_table_row_id(row_id))
+    /// Looks up a table record by table key without eagerly copying page-resident bytes.
+    pub fn get_record(&mut self, table_key: TableKey) -> StorageResult<Option<TableRecord>> {
+        self.inner
+            .get(&encode_table_key(table_key))?
+            .map(|record| self.table_record_from_raw(record))
+            .transpose()
+    }
+
+    /// Replaces the encoded record bytes stored for an existing `table_key`.
+    pub fn update(&mut self, table_key: TableKey, record: &[u8]) -> StorageResult<()> {
+        self.inner.update(&encode_table_key(table_key), record)
+    }
+
+    /// Deletes the table record identified by `table_key`.
+    pub fn delete(&mut self, table_key: TableKey) -> StorageResult<()> {
+        self.inner.delete(&encode_table_key(table_key))
+    }
+
+    fn owned_table_record_from_raw(&self, raw: OwnedRecord) -> StorageResult<OwnedTableRecord> {
+        raw.with_key_value(|key, value| {
+            Ok(OwnedTableRecord { table_key: decode_table_key(key)?, record: value.into() })
+        })
+    }
+
+    fn table_record_from_raw(&self, raw: Record) -> StorageResult<TableRecord> {
+        let table_key = raw.with_key(decode_table_key)??;
+        Ok(TableRecord { table_key, raw })
     }
 }
 
@@ -301,9 +327,9 @@ impl IndexCursor {
         self.inner.prev_owned_record()?.map(OwnedIndexEntry::try_from).transpose()
     }
 
-    /// Inserts an index entry from `key` to `row_id`.
-    pub fn insert(&mut self, key: &[u8], row_id: RowId) -> StorageResult<()> {
-        self.inner.insert(key, &encode_index_row_id(row_id))
+    /// Inserts an index entry from `key` to `table_key`.
+    pub fn insert(&mut self, key: &[u8], table_key: TableKey) -> StorageResult<()> {
+        self.inner.insert(key, &encode_index_table_key(table_key))
     }
 
     /// Looks up an index entry by key.
@@ -321,9 +347,9 @@ impl IndexCursor {
         self.inner.get(key)?.map(IndexEntry::try_from).transpose()
     }
 
-    /// Replaces the row id stored for an existing index `key`.
-    pub fn update(&mut self, key: &[u8], row_id: RowId) -> StorageResult<()> {
-        self.inner.update(key, &encode_index_row_id(row_id))
+    /// Replaces the table key stored for an existing index `key`.
+    pub fn update(&mut self, key: &[u8], table_key: TableKey) -> StorageResult<()> {
+        self.inner.update(key, &encode_index_table_key(table_key))
     }
 
     /// Deletes the index entry identified by `key`.
@@ -333,14 +359,14 @@ impl IndexCursor {
 }
 
 impl TableRecord {
-    /// Returns the row id that identifies this table record.
-    pub fn row_id(&self) -> RowId {
-        self.row_id
+    /// Returns the primary-key table key that identifies this table record.
+    pub fn table_key(&self) -> TableKey {
+        self.table_key
     }
 
     /// Executes `f` with a borrowed table record view.
     pub fn with_view<R>(&self, f: impl FnOnce(TableRecordView<'_>) -> R) -> StorageResult<R> {
-        self.raw.with_value(|record| f(TableRecordView::new(self.row_id, record)))
+        self.raw.with_value(|record| f(TableRecordView::new(self.table_key, record)))
     }
 
     /// Executes `f` with a borrowed view of the encoded table record bytes.
@@ -350,19 +376,22 @@ impl TableRecord {
 
     /// Returns a stable, owned snapshot of this table record.
     pub fn to_owned_record(&self) -> StorageResult<OwnedTableRecord> {
-        self.raw.to_owned_record()?.try_into()
+        self.raw.with_value(|record| OwnedTableRecord {
+            table_key: self.table_key,
+            record: record.into(),
+        })
     }
 }
 
 impl IndexEntry {
-    /// Returns the table row id referenced by this secondary-index key.
-    pub fn row_id(&self) -> RowId {
-        self.row_id
+    /// Returns the table primary-key value referenced by this secondary-index key.
+    pub fn table_key(&self) -> TableKey {
+        self.table_key
     }
 
     /// Executes `f` with a borrowed secondary-index entry view.
     pub fn with_view<R>(&self, f: impl FnOnce(IndexEntryView<'_>) -> R) -> StorageResult<R> {
-        self.raw.with_key(|key| f(IndexEntryView::new(key, self.row_id)))
+        self.raw.with_key(|key| f(IndexEntryView::new(key, self.table_key)))
     }
 
     /// Executes `f` with a borrowed view of the encoded secondary-index key bytes.
@@ -396,32 +425,19 @@ impl fmt::Debug for IndexCursor {
 
 impl fmt::Debug for TableRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TableRecord").field("row_id", &self.row_id).field("raw", &self.raw).finish()
+        f.debug_struct("TableRecord")
+            .field("table_key", &self.table_key)
+            .field("raw", &self.raw)
+            .finish()
     }
 }
 
 impl fmt::Debug for IndexEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IndexEntry").field("row_id", &self.row_id).field("raw", &self.raw).finish()
-    }
-}
-
-impl TryFrom<OwnedRecord> for OwnedTableRecord {
-    type Error = crate::core::error::StorageError;
-
-    fn try_from(raw: OwnedRecord) -> Result<Self, Self::Error> {
-        raw.with_key_value(|key, value| {
-            Ok(Self { row_id: decode_table_row_id(key)?, record: value.into() })
-        })
-    }
-}
-
-impl TryFrom<Record> for TableRecord {
-    type Error = crate::core::error::StorageError;
-
-    fn try_from(raw: Record) -> Result<Self, Self::Error> {
-        let row_id = raw.with_key(decode_table_row_id)??;
-        Ok(Self { row_id, raw })
+        f.debug_struct("IndexEntry")
+            .field("table_key", &self.table_key)
+            .field("raw", &self.raw)
+            .finish()
     }
 }
 
@@ -429,8 +445,8 @@ impl TryFrom<Record> for IndexEntry {
     type Error = crate::core::error::StorageError;
 
     fn try_from(raw: Record) -> Result<Self, Self::Error> {
-        let row_id = raw.with_value(decode_index_row_id)??;
-        Ok(Self { row_id, raw })
+        let table_key = raw.with_value(decode_index_table_key)??;
+        Ok(Self { table_key, raw })
     }
 }
 
@@ -439,7 +455,7 @@ impl TryFrom<OwnedRecord> for OwnedIndexEntry {
 
     fn try_from(raw: OwnedRecord) -> Result<Self, Self::Error> {
         raw.with_key_value(|key, value| {
-            Ok(Self { key: key.into(), row_id: decode_index_row_id(value)? })
+            Ok(Self { key: key.into(), table_key: decode_index_table_key(value)? })
         })
     }
 }
@@ -487,13 +503,13 @@ mod tests {
         cursor.insert(42, b"old record").unwrap();
         assert_eq!(
             cursor.get(42).unwrap(),
-            Some(OwnedTableRecord { row_id: 42, record: Box::from(&b"old record"[..]) })
+            Some(OwnedTableRecord { table_key: 42, record: Box::from(&b"old record"[..]) })
         );
 
         cursor.update(42, b"new record").unwrap();
         assert_eq!(
             cursor.get(42).unwrap(),
-            Some(OwnedTableRecord { row_id: 42, record: Box::from(&b"new record"[..]) })
+            Some(OwnedTableRecord { table_key: 42, record: Box::from(&b"new record"[..]) })
         );
 
         cursor.delete(42).unwrap();
@@ -507,11 +523,11 @@ mod tests {
         cursor.insert(42, b"record bytes").unwrap();
         let record = cursor.get_record(42).unwrap().expect("record should exist");
 
-        assert_eq!(record.row_id(), 42);
+        assert_eq!(record.table_key(), 42);
         assert_eq!(record.with_record(|bytes| bytes.to_vec()).unwrap(), b"record bytes");
         assert_eq!(
             record.to_owned_record().unwrap(),
-            OwnedTableRecord { row_id: 42, record: Box::from(&b"record bytes"[..]) }
+            OwnedTableRecord { table_key: 42, record: Box::from(&b"record bytes"[..]) }
         );
         assert!(cursor.get_record(404).unwrap().is_none());
     }
@@ -525,27 +541,27 @@ mod tests {
 
         assert!(cursor.seek_to_first().unwrap());
         let first = cursor.current_record().unwrap().expect("first record should exist");
-        assert_eq!(first.row_id(), 10);
+        assert_eq!(first.table_key(), 10);
         assert_eq!(first.with_record(|bytes| bytes.to_vec()).unwrap(), b"ten");
 
         assert_eq!(
             cursor.next_owned_record().unwrap(),
-            Some(OwnedTableRecord { row_id: 20, record: Box::from(&b"twenty"[..]) })
+            Some(OwnedTableRecord { table_key: 20, record: Box::from(&b"twenty"[..]) })
         );
         assert_eq!(
             cursor.next_owned_record().unwrap(),
-            Some(OwnedTableRecord { row_id: 30, record: Box::from(&b"thirty"[..]) })
+            Some(OwnedTableRecord { table_key: 30, record: Box::from(&b"thirty"[..]) })
         );
         assert!(cursor.next_owned_record().unwrap().is_none());
 
-        assert!(cursor.seek_to_row_id(20).unwrap());
+        assert!(cursor.seek_to_table_key(20).unwrap());
         assert_eq!(
             cursor.current_owned_record().unwrap(),
-            Some(OwnedTableRecord { row_id: 20, record: Box::from(&b"twenty"[..]) })
+            Some(OwnedTableRecord { table_key: 20, record: Box::from(&b"twenty"[..]) })
         );
         assert_eq!(
             cursor.prev_owned_record().unwrap(),
-            Some(OwnedTableRecord { row_id: 10, record: Box::from(&b"ten"[..]) })
+            Some(OwnedTableRecord { table_key: 10, record: Box::from(&b"ten"[..]) })
         );
     }
 
@@ -556,13 +572,13 @@ mod tests {
         cursor.insert(b"email:ada@example.test", 7).unwrap();
         assert_eq!(
             cursor.get(b"email:ada@example.test").unwrap(),
-            Some(OwnedIndexEntry { key: Box::from(&b"email:ada@example.test"[..]), row_id: 7 })
+            Some(OwnedIndexEntry { key: Box::from(&b"email:ada@example.test"[..]), table_key: 7 })
         );
 
         cursor.update(b"email:ada@example.test", 9).unwrap();
         assert_eq!(
             cursor.get(b"email:ada@example.test").unwrap(),
-            Some(OwnedIndexEntry { key: Box::from(&b"email:ada@example.test"[..]), row_id: 9 })
+            Some(OwnedIndexEntry { key: Box::from(&b"email:ada@example.test"[..]), table_key: 9 })
         );
 
         cursor.delete(b"email:ada@example.test").unwrap();
@@ -577,11 +593,11 @@ mod tests {
         let entry =
             cursor.get_entry(b"email:ada@example.test").unwrap().expect("entry should exist");
 
-        assert_eq!(entry.row_id(), 7);
+        assert_eq!(entry.table_key(), 7);
         assert_eq!(entry.with_key(|key| key.to_vec()).unwrap(), b"email:ada@example.test");
         assert_eq!(
             entry.to_owned_entry().unwrap(),
-            OwnedIndexEntry { key: Box::from(&b"email:ada@example.test"[..]), row_id: 7 }
+            OwnedIndexEntry { key: Box::from(&b"email:ada@example.test"[..]), table_key: 7 }
         );
         assert!(cursor.get_entry(b"missing").unwrap().is_none());
     }
@@ -595,31 +611,31 @@ mod tests {
 
         assert!(cursor.seek_to_first().unwrap());
         let first = cursor.current_entry().unwrap().expect("first entry should exist");
-        assert_eq!(first.row_id(), 10);
+        assert_eq!(first.table_key(), 10);
         assert_eq!(first.with_key(|key| key.to_vec()).unwrap(), b"alpha");
         assert_eq!(
-            first.with_view(|entry| (entry.key().to_vec(), entry.row_id())).unwrap(),
+            first.with_view(|entry| (entry.key().to_vec(), entry.table_key())).unwrap(),
             (b"alpha".to_vec(), 10)
         );
 
         assert_eq!(
             cursor.next_owned_entry().unwrap(),
-            Some(OwnedIndexEntry { key: Box::from(&b"bravo"[..]), row_id: 20 })
+            Some(OwnedIndexEntry { key: Box::from(&b"bravo"[..]), table_key: 20 })
         );
         assert_eq!(
             cursor.next_owned_entry().unwrap(),
-            Some(OwnedIndexEntry { key: Box::from(&b"charlie"[..]), row_id: 30 })
+            Some(OwnedIndexEntry { key: Box::from(&b"charlie"[..]), table_key: 30 })
         );
         assert!(cursor.next_owned_entry().unwrap().is_none());
 
         assert!(cursor.seek_to_key(b"b").unwrap());
         assert_eq!(
             cursor.current_owned_entry().unwrap(),
-            Some(OwnedIndexEntry { key: Box::from(&b"bravo"[..]), row_id: 20 })
+            Some(OwnedIndexEntry { key: Box::from(&b"bravo"[..]), table_key: 20 })
         );
         assert_eq!(
             cursor.prev_owned_entry().unwrap(),
-            Some(OwnedIndexEntry { key: Box::from(&b"alpha"[..]), row_id: 10 })
+            Some(OwnedIndexEntry { key: Box::from(&b"alpha"[..]), table_key: 10 })
         );
     }
 
@@ -670,7 +686,7 @@ mod tests {
         table.insert(500, &large_record).unwrap();
         assert_eq!(
             table.get(500).unwrap(),
-            Some(OwnedTableRecord { row_id: 500, record: large_record.into_boxed_slice() })
+            Some(OwnedTableRecord { table_key: 500, record: large_record.into_boxed_slice() })
         );
 
         let mut index = temp_index_cursor(16);
@@ -678,7 +694,7 @@ mod tests {
         index.insert(&large_key, 900).unwrap();
         assert_eq!(
             index.get(&large_key).unwrap(),
-            Some(OwnedIndexEntry { key: large_key.into_boxed_slice(), row_id: 900 })
+            Some(OwnedIndexEntry { key: large_key.into_boxed_slice(), table_key: 900 })
         );
     }
 
@@ -688,14 +704,14 @@ mod tests {
         let large_record = vec![0xaa; PAGE_SIZE * 2];
         table.insert(500, &large_record).unwrap();
         let record = table.get_record(500).unwrap().expect("large table record should exist");
-        assert_eq!(record.row_id(), 500);
+        assert_eq!(record.table_key(), 500);
         assert_eq!(record.with_record(|bytes| bytes.to_vec()).unwrap(), large_record);
 
         let mut index = temp_index_cursor(16);
         let large_key = vec![0xbb; PAGE_SIZE * 2];
         index.insert(&large_key, 900).unwrap();
         let entry = index.get_entry(&large_key).unwrap().expect("large index entry should exist");
-        assert_eq!(entry.row_id(), 900);
+        assert_eq!(entry.table_key(), 900);
         assert_eq!(entry.with_key(|key| key.to_vec()).unwrap(), large_key);
     }
 }

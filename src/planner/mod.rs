@@ -392,6 +392,9 @@ pub enum PlannerError {
     /// A `CREATE INDEX` column list named the same column more than once.
     #[error("duplicate index column: {column}")]
     DuplicateIndexColumn { column: String },
+    /// An `UPDATE` attempted to modify a primary-key column.
+    #[error("cannot update primary key column: {column}")]
+    PrimaryKeyUpdate { column: String },
     /// A values row does not provide exactly one value for each target column.
     #[error("insert row has {values} values for {columns} columns")]
     InsertColumnValueCount { columns: usize, values: usize },
@@ -544,8 +547,12 @@ impl<'db> Planner<'db> {
                     column: assignment.column.to_owned(),
                 });
             }
+            let column = bind_column(&table, assignment.column)?;
+            if table.row.columns[column.ordinal].primary_key {
+                return Err(PlannerError::PrimaryKeyUpdate { column: column.name });
+            }
             assignments.push(UpdateAssignment {
-                column: bind_column(&table, assignment.column)?,
+                column,
                 expression: self.bind_expression(&assignment.expression, Some(&table))?,
             });
         }

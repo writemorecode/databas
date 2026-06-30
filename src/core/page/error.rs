@@ -89,10 +89,10 @@ pub(crate) enum CellCorruption {
     /// The encoded cell length runs past the usable page region.
     #[error("cell length runs past the usable page bounds")]
     LengthOutOfBounds,
-    /// A table row-id key had the wrong encoded length.
-    #[error("table row-id key has invalid length {actual}")]
-    InvalidTableRowIdKeyLength { actual: usize },
-    /// An index row-id value had the wrong encoded length.
-    #[error("index row-id value has invalid length {actual}")]
-    InvalidIndexRowIdValueLength { actual: usize },
+    /// A table key had the wrong encoded length.
+    #[error("table key has invalid length {actual}")]
+    InvalidTableKeyLength { actual: usize },
+    /// An index table key value had the wrong encoded length.
+    #[error("index table-key value has invalid length {actual}")]
+    InvalidIndexTableKeyValueLength { actual: usize },
 }

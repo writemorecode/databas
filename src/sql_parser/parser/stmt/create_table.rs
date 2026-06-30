@@ -90,6 +90,7 @@ impl<'a> Parser<'a> {
         self.lexer.expect_token(TokenKind::LeftParen)?;
 
         let columns = self.parse_comma_separated_list(|p| p.parse_column_definition())?;
+        validate_primary_key(&columns, self.lexer.position)?;
 
         self.lexer.expect_token(TokenKind::RightParen)?;
         self.lexer.expect_token(TokenKind::Semicolon)?;
@@ -133,6 +134,47 @@ impl<'a> Parser<'a> {
     }
 }
 
+fn validate_primary_key<'a>(columns: &[Column<'a>], pos: usize) -> Result<(), SQLError<'a>> {
+    let primary_keys: Vec<_> = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.constraints.contains(&ColumnConstraint::PrimaryKey))
+        .collect();
+
+    if primary_keys.len() != 1 {
+        return Err(SQLError::new(
+            SQLErrorKind::InvalidPrimaryKey {
+                reason: "tables must declare exactly one primary key",
+            },
+            pos,
+        ));
+    }
+
+    let (ordinal, column) = primary_keys[0];
+    if ordinal != 0 {
+        return Err(SQLError::new(
+            SQLErrorKind::InvalidPrimaryKey { reason: "primary key must be the first column" },
+            pos,
+        ));
+    }
+
+    if column.column_type != ColumnType::Int {
+        return Err(SQLError::new(
+            SQLErrorKind::InvalidPrimaryKey { reason: "primary key must use INT type" },
+            pos,
+        ));
+    }
+
+    if column.constraints.contains(&ColumnConstraint::Nullable) {
+        return Err(SQLError::new(
+            SQLErrorKind::InvalidPrimaryKey { reason: "primary key cannot be nullable" },
+            pos,
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,13 +186,17 @@ mod tests {
 
     #[test]
     fn test_parse_simple_create_table() {
-        let s = "CREATE TABLE users (id INT, name TEXT, age INT);";
+        let s = "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);";
         let mut parser = Parser::new(s);
 
         let expected_query = CreateTableQuery {
             table_name: "users",
             columns: vec![
-                Column { name: "id", column_type: ColumnType::Int, constraints: Vec::new() },
+                Column {
+                    name: "id",
+                    column_type: ColumnType::Int,
+                    constraints: Vec::from([ColumnConstraint::PrimaryKey]),
+                },
                 Column { name: "name", column_type: ColumnType::Text, constraints: Vec::new() },
                 Column { name: "age", column_type: ColumnType::Int, constraints: Vec::new() },
             ],
@@ -162,13 +208,17 @@ mod tests {
 
     #[test]
     fn test_parse_create_table_with_all_types() {
-        let s = "CREATE TABLE products (id INT, name TEXT, price FLOAT);";
+        let s = "CREATE TABLE products (id INT PRIMARY KEY, name TEXT, price FLOAT);";
         let mut parser = Parser::new(s);
 
         let expected_query = CreateTableQuery {
             table_name: "products",
             columns: vec![
-                Column { name: "id", column_type: ColumnType::Int, constraints: Vec::new() },
+                Column {
+                    name: "id",
+                    column_type: ColumnType::Int,
+                    constraints: Vec::from([ColumnConstraint::PrimaryKey]),
+                },
                 Column { name: "name", column_type: ColumnType::Text, constraints: Vec::new() },
                 Column { name: "price", column_type: ColumnType::Float, constraints: Vec::new() },
             ],
@@ -180,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_parse_create_table_with_single_column() {
-        let s = "CREATE TABLE single_column (id INT);";
+        let s = "CREATE TABLE single_column (id INT PRIMARY KEY);";
         let mut parser = Parser::new(s);
 
         let expected_query = CreateTableQuery {
@@ -188,7 +238,7 @@ mod tests {
             columns: vec![Column {
                 name: "id",
                 column_type: ColumnType::Int,
-                constraints: Vec::new(),
+                constraints: Vec::from([ColumnConstraint::PrimaryKey]),
             }],
         };
 
@@ -211,7 +261,7 @@ mod tests {
 
     #[test]
     fn test_create_table_with_missing_table_name() {
-        let s = "CREATE TABLE (id INT);";
+        let s = "CREATE TABLE (id INT PRIMARY KEY);";
         let mut parser = Parser::new(s);
 
         let err = SQLError {
@@ -245,13 +295,17 @@ mod tests {
 
     #[test]
     fn test_create_table_with_nullable_constraint() {
-        let s = "CREATE TABLE users (id INT, name TEXT NULLABLE);";
+        let s = "CREATE TABLE users (id INT PRIMARY KEY, name TEXT NULLABLE);";
         let mut parser = Parser::new(s);
 
         let expected_query = CreateTableQuery {
             table_name: "users",
             columns: vec![
-                Column { name: "id", column_type: ColumnType::Int, constraints: Vec::new() },
+                Column {
+                    name: "id",
+                    column_type: ColumnType::Int,
+                    constraints: Vec::from([ColumnConstraint::PrimaryKey]),
+                },
                 Column {
                     name: "name",
                     column_type: ColumnType::Text,
@@ -266,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_columns_not_nullable_by_default() {
-        let s = "CREATE TABLE test (a INT);";
+        let s = "CREATE TABLE test (a INT PRIMARY KEY);";
         let mut parser = Parser::new(s);
 
         let expected_query = CreateTableQuery {
@@ -274,11 +328,62 @@ mod tests {
             columns: vec![Column {
                 name: "a",
                 column_type: ColumnType::Int,
-                constraints: Vec::new(),
+                constraints: Vec::from([ColumnConstraint::PrimaryKey]),
             }],
         };
 
         let expected = CreateTable(expected_query);
         assert_eq!(Ok(expected), parser.stmt());
+    }
+
+    #[test]
+    fn create_table_requires_exactly_one_primary_key() {
+        let mut parser = Parser::new("CREATE TABLE users (id INT, name TEXT);");
+
+        assert!(matches!(
+            parser.stmt(),
+            Err(SQLError { kind: SQLErrorKind::InvalidPrimaryKey { .. }, .. })
+        ));
+    }
+
+    #[test]
+    fn create_table_rejects_multiple_primary_keys() {
+        let mut parser =
+            Parser::new("CREATE TABLE users (id INT PRIMARY KEY, other INT PRIMARY KEY);");
+
+        assert!(matches!(
+            parser.stmt(),
+            Err(SQLError { kind: SQLErrorKind::InvalidPrimaryKey { .. }, .. })
+        ));
+    }
+
+    #[test]
+    fn create_table_requires_primary_key_first() {
+        let mut parser = Parser::new("CREATE TABLE users (name TEXT, id INT PRIMARY KEY);");
+
+        assert!(matches!(
+            parser.stmt(),
+            Err(SQLError { kind: SQLErrorKind::InvalidPrimaryKey { .. }, .. })
+        ));
+    }
+
+    #[test]
+    fn create_table_requires_integer_primary_key() {
+        let mut parser = Parser::new("CREATE TABLE users (id TEXT PRIMARY KEY);");
+
+        assert!(matches!(
+            parser.stmt(),
+            Err(SQLError { kind: SQLErrorKind::InvalidPrimaryKey { .. }, .. })
+        ));
+    }
+
+    #[test]
+    fn create_table_rejects_nullable_primary_key() {
+        let mut parser = Parser::new("CREATE TABLE users (id INT PRIMARY KEY NULLABLE);");
+
+        assert!(matches!(
+            parser.stmt(),
+            Err(SQLError { kind: SQLErrorKind::InvalidPrimaryKey { .. }, .. })
+        ));
     }
 }
