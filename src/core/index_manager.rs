@@ -1,5 +1,5 @@
 use crate::core::{
-    IndexSchema, OwnedTableRecord, RowId, TableSchema, Tuple, TupleView, Value,
+    IndexSchema, OwnedTableRecord, TableKey, TableSchema, Tuple, TupleView, Value,
     catalog_manager::CatalogManager,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
 };
@@ -35,7 +35,7 @@ impl IndexManager {
         for index in self.catalog.index_schemas_for_table(table)? {
             let key = index_key_from_record(table, &index, record)?;
             let mut index_cursor = self.catalog.index_cursor_by_name(&index.name)?;
-            index_cursor.insert(&key, record.row_id)?;
+            index_cursor.insert(&key, record.table_key)?;
         }
 
         Ok(())
@@ -61,7 +61,7 @@ impl IndexManager {
 
         while let Some(record) = table_cursor.next_owned_record()? {
             let key = index_key_from_record(table, index, &record)?;
-            index_cursor.insert(&key, record.row_id)?;
+            index_cursor.insert(&key, record.table_key)?;
         }
 
         Ok(())
@@ -74,7 +74,7 @@ fn index_key_from_record(
     record: &OwnedTableRecord,
 ) -> StorageResult<Vec<u8>> {
     let tuple = TupleView::parse(&record.record).map_err(|error| {
-        invalid_table_record(table, record.row_id, format!("invalid tuple bytes: {error}"))
+        invalid_table_record(table, record.table_key, format!("invalid tuple bytes: {error}"))
     })?;
     let mut values = Vec::with_capacity(index.columns.len());
 
@@ -83,7 +83,7 @@ fn index_key_from_record(
         let value = tuple.values().nth(ordinal).ok_or_else(|| {
             invalid_table_record(
                 table,
-                record.row_id,
+                record.table_key,
                 format!(
                     "index {} references source column ordinal {ordinal}, but row has {} values",
                     index.name,
@@ -97,11 +97,11 @@ fn index_key_from_record(
     Tuple::new(values).to_bytes().map_err(StorageError::from)
 }
 
-fn invalid_table_record(table: &TableSchema, row_id: RowId, reason: String) -> StorageError {
+fn invalid_table_record(table: &TableSchema, table_key: TableKey, reason: String) -> StorageError {
     StorageError::Corruption(CorruptionError {
         component: CorruptionComponent::Catalog,
         page_id: None,
-        kind: CorruptionKind::InvalidTableRecord { table: table.name.clone(), row_id, reason },
+        kind: CorruptionKind::InvalidTableRecord { table: table.name.clone(), table_key, reason },
     })
 }
 
@@ -172,7 +172,7 @@ mod tests {
         indexes.create_index("idx_users_name", "users", &["name"]).unwrap();
 
         let mut index = catalog.index_cursor_by_name("idx_users_name").unwrap();
-        assert_eq!(index.get(&name_key("Ada")).unwrap().unwrap().row_id, 1);
-        assert_eq!(index.get(&name_key("Grace")).unwrap().unwrap().row_id, 2);
+        assert_eq!(index.get(&name_key("Ada")).unwrap().unwrap().table_key, 1);
+        assert_eq!(index.get(&name_key("Grace")).unwrap().unwrap().table_key, 2);
     }
 }

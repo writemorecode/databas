@@ -38,5 +38,6 @@ pub use tuple::{EncodedTupleView, Tuple, TupleRef, TupleView, Value, ValueRef};
 pub(crate) const PAGE_SIZE: usize = 4096;
 
 pub type PageId = u64;
-pub type RowId = u64;
+pub type CatalogId = i32;
+pub type TableKey = i32;
 pub(crate) type SlotId = u16;

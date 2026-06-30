@@ -5,7 +5,7 @@ use tempfile::tempdir;
 use super::*;
 use crate::{
     core::{
-        ColumnSchema, DataType, PAGE_SIZE, Tuple, TupleSchema,
+        ColumnSchema, DataType, PAGE_SIZE, TableKey, Tuple, TupleSchema,
         error::{ConstraintError, InternalError, InvariantViolation, StorageError},
     },
     error::DatabaseError,
@@ -14,8 +14,8 @@ use crate::{
     sql_parser::parser::Parser,
 };
 
-fn record(row_id: u64, values: Vec<Value>) -> TableRecord {
-    record_from_values(row_id, values).unwrap()
+fn record(table_key: TableKey, values: Vec<Value>) -> TableRecord {
+    record_from_values(table_key, values).unwrap()
 }
 
 fn values(record: &TableRecord) -> Vec<Value> {
@@ -146,29 +146,29 @@ fn insert_many_users_sql(count: u64) -> String {
     sql
 }
 
-fn assert_user_row(database: &Database, row_id: u64, expected_name: &str) {
+fn assert_user_row(database: &Database, table_key: TableKey, expected_name: &str) {
     let mut users = database.table_cursor_by_name("users").unwrap();
-    let row = users.get(row_id).unwrap().expect("user row should exist");
+    let row = users.get(table_key).unwrap().expect("user row should exist");
     assert_eq!(
         values(&row),
         vec![
-            Value::Integer(row_id as i32),
+            Value::Integer(table_key),
             Value::String(expected_name.to_owned()),
             Value::Boolean(true),
         ]
     );
 }
 
-fn assert_name_index_entry(database: &Database, name: &str, row_id: u64) {
+fn assert_name_index_entry(database: &Database, name: &str, table_key: TableKey) {
     let mut index = database.index_cursor_by_name("idx_users_name").unwrap();
     let key = Tuple::new(vec![Value::String(name.to_owned())]).to_bytes().unwrap();
     let entry = index.get(&key).unwrap().expect("index entry should exist");
-    assert_eq!(entry.row_id, row_id);
+    assert_eq!(entry.table_key, table_key);
 }
 
-fn assert_user_row_absent(database: &Database, row_id: u64) {
+fn assert_user_row_absent(database: &Database, table_key: TableKey) {
     let mut users = database.table_cursor_by_name("users").unwrap();
-    assert!(users.get(row_id).unwrap().is_none());
+    assert!(users.get(table_key).unwrap().is_none());
 }
 
 fn assert_name_index_absent(database: &Database, name: &str) {
@@ -184,7 +184,7 @@ fn single_literal_expression_produces_one_column_record() {
         evaluate_expression(&PlannedExpression::Literal(Value::String("Ada".to_owned())), &input)
             .unwrap();
 
-    assert_eq!(output.row_id, 7);
+    assert_eq!(output.table_key, 7);
     assert_eq!(values(&output), vec![Value::String("Ada".to_owned())]);
 }
 
@@ -196,7 +196,7 @@ fn single_column_expression_reads_bound_ordinal() {
         evaluate_expression(&PlannedExpression::Column(bound("name", 1, DataType::Text)), &input)
             .unwrap();
 
-    assert_eq!(output.row_id, 8);
+    assert_eq!(output.table_key, 8);
     assert_eq!(values(&output), vec![Value::String("Grace".to_owned())]);
 }
 
@@ -225,7 +225,7 @@ fn project_evaluates_multiple_expressions_in_order() {
     let rows = collect_rows(executor.execute(plan).unwrap()).unwrap();
 
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].row_id, 0);
+    assert_eq!(rows[0].table_key, 0);
     assert_eq!(values(&rows[0]), vec![Value::Integer(5), Value::Integer(9)]);
 }
 
@@ -592,12 +592,12 @@ fn select_with_projection_and_filter_executes_end_to_end() {
     let rows = collect_rows(executor.execute(plan.physical).unwrap()).unwrap();
 
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].row_id, 1);
+    assert_eq!(rows[0].table_key, 1);
     assert_eq!(values(&rows[0]), vec![Value::String("Ada".to_owned())]);
 }
 
 #[test]
-fn insert_values_allocates_row_ids_and_persists_rows() {
+fn insert_values_uses_primary_keys_and_persists_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
     database.create_table("users", users_schema()).unwrap();
@@ -613,7 +613,6 @@ fn insert_values_allocates_row_ids_and_persists_rows() {
     let output = executor.execute(plan.physical).unwrap();
 
     assert!(matches!(output, ExecutionOutput::RowsAffected(2)));
-    assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 2);
 
     let mut users = database.table_cursor_by_name("users").unwrap();
     let first = users.get(1).unwrap().expect("first inserted row should exist");
@@ -642,7 +641,6 @@ fn insert_values_rejects_omitted_non_nullable_columns() {
     let mut executor = Executor::new(&database);
 
     assert!(executor.execute(plan).is_err_and(|error| is_null_value_error(error, "active")));
-    assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 0);
 }
 
 #[test]
@@ -664,7 +662,6 @@ fn insert_values_rejects_values_with_wrong_type() {
         DataType::Integer,
         "text"
     )));
-    assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 0);
 }
 
 #[test]
@@ -685,11 +682,10 @@ fn insert_values_rejects_null_for_non_nullable_columns() {
     let mut executor = Executor::new(&database);
 
     assert!(executor.execute(plan).is_err_and(|error| is_null_value_error(error, "name")));
-    assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 0);
 }
 
 #[test]
-fn failed_insert_does_not_advance_last_row_id() {
+fn failed_insert_does_not_write_partial_row() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
     database.create_table("users", users_schema()).unwrap();
@@ -705,7 +701,6 @@ fn failed_insert_does_not_advance_last_row_id() {
         vec![vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(true)]],
     );
     executor.execute(valid).unwrap();
-    assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 1);
 
     let invalid = insert_values_plan(
         &database,
@@ -724,7 +719,6 @@ fn failed_insert_does_not_advance_last_row_id() {
     assert!(executor.execute(invalid).is_err_and(|error| {
         is_type_mismatch_error(error, "active", DataType::Boolean, "text")
     }));
-    assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 1);
 
     let mut users = database.table_cursor_by_name("users").unwrap();
     assert!(users.get(2).unwrap().is_none());
@@ -745,7 +739,6 @@ fn failed_multi_row_insert_rolls_back_rows_already_inserted_in_statement() {
         is_database_type_mismatch_error(error, "active", DataType::Boolean, "text")
     }));
 
-    assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 0);
     let mut users = database.table_cursor_by_name("users").unwrap();
     assert!(users.get(1).unwrap().is_none());
     assert!(users.get(2).unwrap().is_none());
@@ -784,16 +777,15 @@ fn failed_multi_row_insert_in_explicit_transaction_rolls_back_statement_before_c
     let mut index = reopened.index_cursor_by_name("idx_users_name").unwrap();
     let ada = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
     let linus = Tuple::new(vec![Value::String("Linus".to_owned())]).to_bytes().unwrap();
-    let row = users.get(1).unwrap().expect("successful statement should commit");
+    let row = users.get(2).unwrap().expect("successful statement should commit");
 
-    assert_eq!(reopened.table_schema_by_name("users").unwrap().last_row_id, 1);
     assert_eq!(
         values(&row),
         vec![Value::Integer(2), Value::String("Linus".to_owned()), Value::Boolean(true)]
     );
-    assert!(users.get(2).unwrap().is_none());
+    assert!(users.get(1).unwrap().is_none());
     assert!(index.get(&ada).unwrap().is_none());
-    assert_eq!(index.get(&linus).unwrap().unwrap().row_id, 1);
+    assert_eq!(index.get(&linus).unwrap().unwrap().table_key, 2);
 }
 
 #[test]
@@ -862,7 +854,7 @@ fn create_index_backfills_existing_table_rows() {
     let key = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
     let entry = index.get(&key).unwrap().expect("index entry should be backfilled");
 
-    assert_eq!(entry.row_id, 1);
+    assert_eq!(entry.table_key, 1);
 }
 
 #[test]
@@ -885,7 +877,7 @@ fn insert_values_updates_existing_secondary_indexes() {
     let key = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
     let entry = index.get(&key).unwrap().expect("index entry should track inserted row");
 
-    assert_eq!(entry.row_id, 1);
+    assert_eq!(entry.table_key, 1);
 }
 
 #[test]
@@ -1043,16 +1035,30 @@ fn update_assignment_expression_reads_original_row_values() {
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
 
-    execute_sql(&database, "UPDATE users SET id = id + 1, active = NOT active WHERE id == 1;")
-        .unwrap();
+    execute_sql(&database, "UPDATE users SET active = NOT active WHERE id == 1;").unwrap();
 
     let mut users = database.table_cursor_by_name("users").unwrap();
-    let row = users.get(1).unwrap().expect("row id should be preserved");
+    let row = users.get(1).unwrap().expect("table key should be preserved");
     assert_eq!(
         values(&row),
-        vec![Value::Integer(2), Value::String("Ada".to_owned()), Value::Boolean(false)]
+        vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(false)]
     );
-    assert!(users.get(2).unwrap().is_none());
+}
+
+#[test]
+fn update_rejects_primary_key_assignment() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+        .unwrap();
+
+    assert!(matches!(
+        execute_sql(&database, "UPDATE users SET id = id + 1 WHERE id == 1;"),
+        Err(DatabaseError::Planner(crate::planner::PlannerError::PrimaryKeyUpdate { column }))
+            if column == "id"
+    ));
+    assert_user_row(&database, 1, "Ada");
 }
 
 #[test]
@@ -1182,7 +1188,6 @@ COMMIT;
 
     assert_eq!(schema.name, "users");
     assert_eq!(schema.row.columns.len(), 3);
-    assert_eq!(schema.last_row_id, 2);
     assert_name_index_entry(&reopened, "Ada", 1);
     assert_name_index_entry(&reopened, "Grace", 2);
 }
@@ -1208,7 +1213,6 @@ ROLLBACK;
     );
 
     let mut users = database.table_cursor_by_name("users").unwrap();
-    assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 1);
     assert!(users.get(1).unwrap().is_some());
     assert!(users.get(2).unwrap().is_none());
     assert!(database.table_schema_by_name("rolled_back").is_err());
@@ -1382,14 +1386,13 @@ fn dropping_session_with_active_transaction_rolls_back_and_releases_database_han
         .unwrap();
 
     let mut users = database.table_cursor_by_name("users").unwrap();
-    let row = users.get(1).unwrap().expect("new statement should commit after session drop");
+    let row = users.get(2).unwrap().expect("new statement should commit after session drop");
 
-    assert_eq!(database.table_schema_by_name("users").unwrap().last_row_id, 1);
     assert_eq!(
         values(&row),
         vec![Value::Integer(2), Value::String("Linus".to_owned()), Value::Boolean(true)]
     );
-    assert!(users.get(2).unwrap().is_none());
+    assert!(users.get(1).unwrap().is_none());
 }
 
 #[test]
@@ -1448,7 +1451,6 @@ fn committed_large_insert_with_btree_splits_recovers_from_wal_after_crash() {
 
     let reopened = Database::open(&path).unwrap();
 
-    assert_eq!(reopened.table_schema_by_name("users").unwrap().last_row_id, 500);
     assert_user_row(&reopened, 1, "user1");
     assert_user_row(&reopened, 250, "user250");
     assert_user_row(&reopened, 500, "user500");
@@ -1501,7 +1503,6 @@ fn failed_indexed_multi_row_insert_rolls_back_after_reopen() {
     let mut index = reopened.index_cursor_by_name("idx_users_name").unwrap();
     let ada = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
 
-    assert_eq!(reopened.table_schema_by_name("users").unwrap().last_row_id, 0);
     assert!(users.get(1).unwrap().is_none());
     assert!(index.get(&ada).unwrap().is_none());
 }
@@ -1541,7 +1542,6 @@ fn uncommitted_flushed_insert_is_undone_during_recovery() {
     let mut index = reopened.index_cursor_by_name("idx_users_name").unwrap();
     let ada = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
 
-    assert_eq!(reopened.table_schema_by_name("users").unwrap().last_row_id, 0);
     assert!(users.get(1).unwrap().is_none());
     assert!(index.get(&ada).unwrap().is_none());
 }
@@ -1691,6 +1691,6 @@ fn select_without_from_executes_through_one_row_and_project() {
     let rows = collect_rows(executor.execute(plan.physical).unwrap()).unwrap();
 
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].row_id, 0);
+    assert_eq!(rows[0].table_key, 0);
     assert_eq!(values(&rows[0]), vec![Value::Integer(3)]);
 }

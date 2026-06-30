@@ -35,6 +35,7 @@ pub enum SQLErrorKind<'a> {
     UnterminatedStatement,
     UnterminatedString,
     DuplicateConstraint { column: &'a str, constraint: ColumnConstraint },
+    InvalidPrimaryKey { reason: &'static str },
 }
 
 impl Display for SQLErrorKind<'_> {
@@ -93,6 +94,9 @@ impl Display for SQLErrorKind<'_> {
             }
             SQLErrorKind::DuplicateConstraint { column, constraint } => {
                 write!(f, "Duplicate constraint for column '{column}': {constraint}")
+            }
+            SQLErrorKind::InvalidPrimaryKey { reason } => {
+                write!(f, "Invalid primary key: {reason}")
             }
         }
     }

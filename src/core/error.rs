@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::core::{
     log_manager::{LogManagerError, LogManagerFlushError, Lsn, TxnId},
     page::{CellCorruption, PageCorruption, PageError},
-    {PAGE_SIZE, PageId, RowId},
+    {PAGE_SIZE, PageId, TableKey},
 };
 
 #[derive(Debug, Error)]
@@ -92,10 +92,10 @@ pub enum CorruptionKind {
     CellLengthTooSmall,
     #[error("cell length runs past the usable page bounds")]
     CellLengthOutOfBounds,
-    #[error("table row-id key has invalid length {actual}")]
-    InvalidTableRowIdKeyLength { actual: usize },
-    #[error("index row-id value has invalid length {actual}")]
-    InvalidIndexRowIdValueLength { actual: usize },
+    #[error("table key has invalid length {actual}")]
+    InvalidTableKeyLength { actual: usize },
+    #[error("index table-key value has invalid length {actual}")]
+    InvalidIndexTableKeyValueLength { actual: usize },
     #[error("overflow chain ended before {expected} bytes could be read")]
     OverflowChainTooShort { expected: usize, actual: usize },
     #[error("overflow chain has extra pages after {expected} bytes were read")]
@@ -106,8 +106,8 @@ pub enum CorruptionKind {
     UnexpectedSystemCatalogRoot { expected: PageId, actual: PageId },
     #[error("invalid catalog row in {table}: {reason}")]
     InvalidCatalogRow { table: &'static str, reason: String },
-    #[error("invalid table record in {table} row {row_id}: {reason}")]
-    InvalidTableRecord { table: String, row_id: RowId, reason: String },
+    #[error("invalid table record in {table} key {table_key}: {reason}")]
+    InvalidTableRecord { table: String, table_key: TableKey, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -140,6 +140,10 @@ pub enum InvalidArgumentError {
     EmptyIndexColumns,
     #[error("table {table} row has {values} values for {columns} columns")]
     TableRowValueCount { table: String, columns: usize, values: usize },
+    #[error("invalid primary key for table {table}: {reason}")]
+    InvalidPrimaryKey { table: String, reason: String },
+    #[error("cannot update primary key column {column} on table {table}")]
+    PrimaryKeyUpdate { table: String, column: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -150,8 +154,6 @@ pub enum LimitExceededError {
     CellTooLarge { len: usize, max: usize },
     #[error("cache capacity exhausted")]
     CacheCapacityExhausted,
-    #[error("row id space exhausted for table {table}")]
-    RowIdExhausted { table: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -416,11 +418,11 @@ fn map_cell_corruption(kind: CellCorruption) -> CorruptionKind {
     match kind {
         CellCorruption::LengthTooSmall => CorruptionKind::CellLengthTooSmall,
         CellCorruption::LengthOutOfBounds => CorruptionKind::CellLengthOutOfBounds,
-        CellCorruption::InvalidTableRowIdKeyLength { actual } => {
-            CorruptionKind::InvalidTableRowIdKeyLength { actual }
+        CellCorruption::InvalidTableKeyLength { actual } => {
+            CorruptionKind::InvalidTableKeyLength { actual }
         }
-        CellCorruption::InvalidIndexRowIdValueLength { actual } => {
-            CorruptionKind::InvalidIndexRowIdValueLength { actual }
+        CellCorruption::InvalidIndexTableKeyValueLength { actual } => {
+            CorruptionKind::InvalidIndexTableKeyValueLength { actual }
         }
     }
 }

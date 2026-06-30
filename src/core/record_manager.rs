@@ -1,5 +1,5 @@
 use crate::core::{
-    DataType, OwnedTableRecord, TableSchema, Tuple, Value,
+    DataType, OwnedTableRecord, TableKey, TableSchema, Tuple, Value,
     catalog_manager::CatalogManager,
     cursor::TableCursor,
     error::{ConstraintError, InvalidArgumentError, StorageError, StorageResult},
@@ -35,12 +35,12 @@ impl RecordManager {
     ) -> StorageResult<OwnedTableRecord> {
         validate_table_row(table, &values)?;
 
+        let table_key = table_key_from_values(table, &values)?;
         let record = Tuple::new(values).to_bytes()?;
-        let row_id = self.catalog.allocate_table_row_id(table)?;
         let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
-        table_cursor.insert(row_id, &record)?;
+        table_cursor.insert(table_key, &record)?;
 
-        let record = OwnedTableRecord { row_id, record: record.into_boxed_slice() };
+        let record = OwnedTableRecord { table_key, record: record.into_boxed_slice() };
         self.indexes.insert_index_entries(table, &record)?;
         Ok(record)
     }
@@ -52,7 +52,7 @@ impl RecordManager {
     ) -> StorageResult<()> {
         self.indexes.delete_index_entries(table, record)?;
         let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
-        table_cursor.delete(record.row_id)
+        table_cursor.delete(record.table_key)
     }
 
     pub(crate) fn update_table_row(
@@ -62,14 +62,21 @@ impl RecordManager {
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord> {
         validate_table_row(table, &values)?;
+        let updated_table_key = table_key_from_values(table, &values)?;
+        if updated_table_key != record.table_key {
+            return Err(StorageError::InvalidArgument(InvalidArgumentError::PrimaryKeyUpdate {
+                table: table.name.clone(),
+                column: table.row.columns[0].name.clone(),
+            }));
+        }
 
         let updated = Tuple::new(values).to_bytes()?;
         let updated =
-            OwnedTableRecord { row_id: record.row_id, record: updated.into_boxed_slice() };
+            OwnedTableRecord { table_key: record.table_key, record: updated.into_boxed_slice() };
 
         self.indexes.delete_index_entries(table, record)?;
         let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
-        table_cursor.update(record.row_id, &updated.record)?;
+        table_cursor.update(record.table_key, &updated.record)?;
         self.indexes.insert_index_entries(table, &updated)?;
 
         Ok(updated)
@@ -127,6 +134,25 @@ fn validate_table_row(table: &TableSchema, values: &[Value]) -> StorageResult<()
     }
 
     Ok(())
+}
+
+fn table_key_from_values(table: &TableSchema, values: &[Value]) -> StorageResult<TableKey> {
+    match values.first() {
+        Some(Value::Integer(value)) => Ok(*value),
+        Some(Value::Null) => Err(StorageError::Constraint(ConstraintError::NullValue {
+            column: table.row.columns[0].name.clone(),
+        })),
+        Some(value) => Err(StorageError::Constraint(ConstraintError::ColumnTypeMismatch {
+            column: table.row.columns[0].name.clone(),
+            expected: DataType::Integer,
+            actual: value_type_name(value),
+        })),
+        None => Err(StorageError::InvalidArgument(InvalidArgumentError::TableRowValueCount {
+            table: table.name.clone(),
+            columns: table.row.columns.len(),
+            values: 0,
+        })),
+    }
 }
 
 fn value_matches_data_type(value: &Value, data_type: DataType) -> bool {
@@ -221,16 +247,102 @@ mod tests {
         let mut index: IndexCursor = catalog.index_cursor_by_name("idx_users_name").unwrap();
         let entry = index.get(&name_key("Ada")).unwrap().expect("index should track inserted row");
 
-        assert_eq!(inserted.row_id, 1);
+        assert_eq!(inserted.table_key, 1);
         assert_eq!(
             values(&stored),
             vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(true)]
         );
-        assert_eq!(entry.row_id, 1);
+        assert_eq!(entry.table_key, 1);
     }
 
     #[test]
-    fn insert_table_row_rejects_null_before_allocating_row_id() {
+    fn insert_table_row_uses_explicit_primary_key_for_table_and_index_pointers() {
+        let file = NamedTempFile::new().unwrap();
+        let (catalog, records) = open(file.path()).unwrap();
+        let indexes = IndexManager::new(catalog.clone());
+        let table = catalog.create_table("users", users_schema()).unwrap();
+        indexes.create_index("idx_users_name", "users", &["name"]).unwrap();
+
+        records
+            .insert_table_row(
+                &table,
+                vec![Value::Integer(20), Value::String("Grace".to_owned()), Value::Boolean(true)],
+            )
+            .unwrap();
+        records
+            .insert_table_row(
+                &table,
+                vec![Value::Integer(-5), Value::String("Ada".to_owned()), Value::Boolean(false)],
+            )
+            .unwrap();
+
+        let mut users = catalog.table_cursor_by_name("users").unwrap();
+        assert!(users.get(20).unwrap().is_some());
+        assert!(users.get(-5).unwrap().is_some());
+        assert!(users.seek_to_first().unwrap());
+        assert_eq!(users.current_owned_record().unwrap().unwrap().table_key, -5);
+
+        let mut index: IndexCursor = catalog.index_cursor_by_name("idx_users_name").unwrap();
+        assert_eq!(index.get(&name_key("Ada")).unwrap().unwrap().table_key, -5);
+        assert_eq!(index.get(&name_key("Grace")).unwrap().unwrap().table_key, 20);
+    }
+
+    #[test]
+    fn insert_table_row_rejects_duplicate_primary_key() {
+        let file = NamedTempFile::new().unwrap();
+        let (catalog, records) = open(file.path()).unwrap();
+        let table = catalog.create_table("users", users_schema()).unwrap();
+
+        records
+            .insert_table_row(
+                &table,
+                vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(true)],
+            )
+            .unwrap();
+        let error = records
+            .insert_table_row(
+                &table,
+                vec![Value::Integer(1), Value::String("Grace".to_owned()), Value::Boolean(false)],
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, StorageError::Constraint(ConstraintError::DuplicateKey)));
+    }
+
+    #[test]
+    fn update_table_row_rejects_primary_key_change() {
+        let file = NamedTempFile::new().unwrap();
+        let (catalog, records) = open(file.path()).unwrap();
+        let table = catalog.create_table("users", users_schema()).unwrap();
+        let inserted = records
+            .insert_table_row(
+                &table,
+                vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(true)],
+            )
+            .unwrap();
+
+        let error = records
+            .update_table_row(
+                &table,
+                &inserted,
+                vec![Value::Integer(2), Value::String("Ada".to_owned()), Value::Boolean(false)],
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            StorageError::InvalidArgument(InvalidArgumentError::PrimaryKeyUpdate {
+                table,
+                column,
+            }) if table == "users" && column == "id"
+        ));
+        let mut users = catalog.table_cursor_by_name("users").unwrap();
+        assert!(users.get(1).unwrap().is_some());
+        assert!(users.get(2).unwrap().is_none());
+    }
+
+    #[test]
+    fn insert_table_row_rejects_null_before_writing_row() {
         let file = NamedTempFile::new().unwrap();
         let (catalog, records) = open(file.path()).unwrap();
         let table = catalog.create_table("users", users_schema()).unwrap();
@@ -246,13 +358,12 @@ mod tests {
             error,
             StorageError::Constraint(ConstraintError::NullValue { column }) if column == "active"
         ));
-        assert_eq!(catalog.table_schema_by_name("users").unwrap().last_row_id, 0);
         let mut users = catalog.table_cursor_by_name("users").unwrap();
         assert!(users.get(1).unwrap().is_none());
     }
 
     #[test]
-    fn insert_table_row_rejects_wrong_type_before_allocating_row_id() {
+    fn insert_table_row_rejects_wrong_type_before_writing_row() {
         let file = NamedTempFile::new().unwrap();
         let (catalog, records) = open(file.path()).unwrap();
         let table = catalog.create_table("users", users_schema()).unwrap();
@@ -276,7 +387,6 @@ mod tests {
                 actual: "text",
             }) if column == "active"
         ));
-        assert_eq!(catalog.table_schema_by_name("users").unwrap().last_row_id, 0);
         let mut users = catalog.table_cursor_by_name("users").unwrap();
         assert!(users.get(1).unwrap().is_none());
     }
