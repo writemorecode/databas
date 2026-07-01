@@ -265,6 +265,13 @@ impl<'db> Executor<'db> {
                     self.database.scan_table(&table)?.map(|record| record.map_err(Into::into));
                 Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
             }
+            PhysicalPlan::PrimaryKeyRangeScan { table, range } => {
+                let rows = self
+                    .database
+                    .scan_table_range(&table, range)?
+                    .map(|record| record.map_err(Into::into));
+                Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
+            }
             PhysicalPlan::Filter { input, predicate } => {
                 let output_inner = self.execute(*input)?;
                 let rows = output_inner.into_rows("FILTER")?.filter_map(move |row| match row {

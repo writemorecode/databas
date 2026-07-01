@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::core::{
-    IndexSchema, OwnedTableRecord, TableSchema, TupleSchema, Value,
+    IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
     access::{DdlAccess, RecordAccess, SchemaAccess},
     catalog_manager::CatalogManager,
     cursor::{IndexCursor, TableCursor},
@@ -132,6 +132,14 @@ impl Database {
         self.records.scan_table(table)
     }
 
+    pub(crate) fn scan_table_range(
+        &self,
+        table: &TableSchema,
+        range: TableKeyRange,
+    ) -> StorageResult<TableScan> {
+        self.records.scan_table_range(table, range)
+    }
+
     pub(crate) fn insert_table_row(
         &self,
         table: &TableSchema,
@@ -186,6 +194,14 @@ impl DdlAccess for Database {
 impl RecordAccess for Database {
     fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
         Database::scan_table(self, table)
+    }
+
+    fn scan_table_range(
+        &self,
+        table: &TableSchema,
+        range: TableKeyRange,
+    ) -> StorageResult<TableScan> {
+        Database::scan_table_range(self, table, range)
     }
 
     fn insert_table_row(

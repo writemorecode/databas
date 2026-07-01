@@ -16,7 +16,8 @@ use thiserror::Error;
 
 use crate::{
     core::{
-        ColumnSchema, DataType, Database, TableSchema, TupleSchema, Value,
+        ColumnSchema, DataType, Database, TableKey, TableKeyBound, TableKeyRange, TableSchema,
+        TupleSchema, Value,
         access::SchemaAccess,
         error::{InvalidArgumentError, StorageError},
     },
@@ -158,6 +159,13 @@ pub enum PhysicalPlan {
         /// Table to scan.
         table: TableSchema,
     },
+    /// Scan rows from a table whose primary key falls in a bounded range.
+    PrimaryKeyRangeScan {
+        /// Table to scan.
+        table: TableSchema,
+        /// Primary-key range to scan.
+        range: TableKeyRange,
+    },
     /// Filter rows from an input physical operator.
     Filter {
         /// Input operator.
@@ -240,7 +248,8 @@ fn physical_plan_input(plan: &PhysicalPlan) -> Option<&PhysicalPlan> {
         | PhysicalPlan::Values { .. }
         | PhysicalPlan::InsertValues { .. }
         | PhysicalPlan::OneRow
-        | PhysicalPlan::FullTableScan { .. } => None,
+        | PhysicalPlan::FullTableScan { .. }
+        | PhysicalPlan::PrimaryKeyRangeScan { .. } => None,
     }
 }
 
@@ -266,6 +275,9 @@ fn physical_plan_label(plan: &PhysicalPlan) -> String {
         PhysicalPlan::Delete { table, .. } => format!("Delete table={}", table.name),
         PhysicalPlan::OneRow => "OneRow".to_owned(),
         PhysicalPlan::FullTableScan { table } => format!("FullTableScan table={}", table.name),
+        PhysicalPlan::PrimaryKeyRangeScan { table, range } => {
+            format!("PrimaryKeyRangeScan table={} range=[{}]", table.name, range)
+        }
         PhysicalPlan::Filter { predicate, .. } => format!("Filter predicate={predicate}"),
         PhysicalPlan::Sort { terms, .. } => format!("Sort terms=[{}]", display_list(terms)),
         PhysicalPlan::Project { expressions, .. } => {
@@ -648,10 +660,33 @@ impl<'db> Planner<'db> {
             LogicalPlan::TableScan { table } => {
                 Ok(PhysicalPlan::FullTableScan { table: table.clone() })
             }
-            LogicalPlan::Filter { input, predicate } => Ok(PhysicalPlan::Filter {
-                input: Box::new(self.physical_plan(input)?),
-                predicate: predicate.clone(),
-            }),
+            LogicalPlan::Filter { input, predicate } => match input.as_ref() {
+                LogicalPlan::TableScan { table } => {
+                    match primary_key_range_predicate(table, predicate) {
+                        Some(range_predicate) => {
+                            let scan = PhysicalPlan::PrimaryKeyRangeScan {
+                                table: table.clone(),
+                                range: range_predicate.range,
+                            };
+                            match range_predicate.residual {
+                                Some(residual) => Ok(PhysicalPlan::Filter {
+                                    input: Box::new(scan),
+                                    predicate: residual,
+                                }),
+                                None => Ok(scan),
+                            }
+                        }
+                        None => Ok(PhysicalPlan::Filter {
+                            input: Box::new(self.physical_plan(input)?),
+                            predicate: predicate.clone(),
+                        }),
+                    }
+                }
+                _ => Ok(PhysicalPlan::Filter {
+                    input: Box::new(self.physical_plan(input)?),
+                    predicate: predicate.clone(),
+                }),
+            },
             LogicalPlan::Sort { input, terms } => Ok(PhysicalPlan::Sort {
                 input: Box::new(self.physical_plan(input)?),
                 terms: terms.clone(),
@@ -753,6 +788,178 @@ fn literal_expression(expression: &Expression<'_>) -> Option<PlannedExpression> 
         Expression::Literal(literal) => Some(PlannedExpression::Literal(Value::from(literal))),
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RangePredicate {
+    range: TableKeyRange,
+    residual: Option<PlannedExpression>,
+}
+
+fn primary_key_range_predicate(
+    table: &TableSchema,
+    predicate: &PlannedExpression,
+) -> Option<RangePredicate> {
+    let primary_key = table.row.columns.first()?;
+    if !primary_key.primary_key || primary_key.data_type != DataType::Integer {
+        return None;
+    }
+
+    range_predicate_from_expression(table, predicate)
+}
+
+fn range_predicate_from_expression(
+    table: &TableSchema,
+    expression: &PlannedExpression,
+) -> Option<RangePredicate> {
+    match expression {
+        PlannedExpression::Binary { left, op: Op::And, right } => {
+            let left = range_predicate_from_expression(table, left)?;
+            if let Some(left_residual) = left.residual {
+                return Some(RangePredicate {
+                    range: left.range,
+                    residual: Some(and_expression(left_residual, (**right).clone())),
+                });
+            }
+
+            match range_predicate_from_expression(table, right) {
+                Some(right) => Some(RangePredicate {
+                    range: combine_ranges(left.range, right.range),
+                    residual: right.residual,
+                }),
+                None => {
+                    Some(RangePredicate { range: left.range, residual: Some((**right).clone()) })
+                }
+            }
+        }
+        PlannedExpression::Binary { left, op, right } => {
+            range_from_comparison(table, left, *op, right)
+                .map(|range| RangePredicate { range, residual: None })
+        }
+        PlannedExpression::Literal(_)
+        | PlannedExpression::Column(_)
+        | PlannedExpression::Unary { .. } => None,
+    }
+}
+
+fn and_expression(left: PlannedExpression, right: PlannedExpression) -> PlannedExpression {
+    PlannedExpression::Binary { left: Box::new(left), op: Op::And, right: Box::new(right) }
+}
+
+fn range_from_comparison(
+    table: &TableSchema,
+    left: &PlannedExpression,
+    op: Op,
+    right: &PlannedExpression,
+) -> Option<TableKeyRange> {
+    match (left, right) {
+        (PlannedExpression::Column(column), PlannedExpression::Literal(Value::Integer(value)))
+            if is_table_primary_key(table, column) =>
+        {
+            range_from_column_comparison(op, *value)
+        }
+        (PlannedExpression::Literal(Value::Integer(value)), PlannedExpression::Column(column))
+            if is_table_primary_key(table, column) =>
+        {
+            range_from_literal_comparison(op, *value)
+        }
+        _ => None,
+    }
+}
+
+fn is_table_primary_key(table: &TableSchema, column: &BoundColumn) -> bool {
+    column.table == table.name && column.ordinal == 0 && table.row.columns[0].primary_key
+}
+
+fn range_from_column_comparison(op: Op, value: TableKey) -> Option<TableKeyRange> {
+    match op {
+        Op::EqualsEquals => Some(TableKeyRange {
+            lower: Some(TableKeyBound::Inclusive(value)),
+            upper: Some(TableKeyBound::Inclusive(value)),
+        }),
+        Op::GreaterThan => {
+            Some(TableKeyRange { lower: Some(TableKeyBound::Exclusive(value)), upper: None })
+        }
+        Op::GreaterThanOrEqual => {
+            Some(TableKeyRange { lower: Some(TableKeyBound::Inclusive(value)), upper: None })
+        }
+        Op::LessThan => {
+            Some(TableKeyRange { lower: None, upper: Some(TableKeyBound::Exclusive(value)) })
+        }
+        Op::LessThanOrEqual => {
+            Some(TableKeyRange { lower: None, upper: Some(TableKeyBound::Inclusive(value)) })
+        }
+        Op::And | Op::Or | Op::NotEquals | Op::Not | Op::Add | Op::Sub | Op::Mul | Op::Div => None,
+    }
+}
+
+fn range_from_literal_comparison(op: Op, value: TableKey) -> Option<TableKeyRange> {
+    match op {
+        Op::EqualsEquals => Some(TableKeyRange {
+            lower: Some(TableKeyBound::Inclusive(value)),
+            upper: Some(TableKeyBound::Inclusive(value)),
+        }),
+        Op::LessThan => {
+            Some(TableKeyRange { lower: Some(TableKeyBound::Exclusive(value)), upper: None })
+        }
+        Op::LessThanOrEqual => {
+            Some(TableKeyRange { lower: Some(TableKeyBound::Inclusive(value)), upper: None })
+        }
+        Op::GreaterThan => {
+            Some(TableKeyRange { lower: None, upper: Some(TableKeyBound::Exclusive(value)) })
+        }
+        Op::GreaterThanOrEqual => {
+            Some(TableKeyRange { lower: None, upper: Some(TableKeyBound::Inclusive(value)) })
+        }
+        Op::And | Op::Or | Op::NotEquals | Op::Not | Op::Add | Op::Sub | Op::Mul | Op::Div => None,
+    }
+}
+
+fn combine_ranges(left: TableKeyRange, right: TableKeyRange) -> TableKeyRange {
+    TableKeyRange {
+        lower: tightest_lower(left.lower, right.lower),
+        upper: tightest_upper(left.upper, right.upper),
+    }
+}
+
+fn tightest_lower(
+    left: Option<TableKeyBound>,
+    right: Option<TableKeyBound>,
+) -> Option<TableKeyBound> {
+    match (left, right) {
+        (None, bound) | (bound, None) => bound,
+        (Some(left), Some(right)) => {
+            if left.value() > right.value() {
+                Some(left)
+            } else if right.value() > left.value() || bound_is_exclusive(right) {
+                Some(right)
+            } else {
+                Some(left)
+            }
+        }
+    }
+}
+
+fn tightest_upper(
+    left: Option<TableKeyBound>,
+    right: Option<TableKeyBound>,
+) -> Option<TableKeyBound> {
+    match (left, right) {
+        (None, bound) | (bound, None) => bound,
+        (Some(left), Some(right)) => {
+            if left.value() < right.value() {
+                Some(left)
+            } else if right.value() < left.value() || bound_is_exclusive(right) {
+                Some(right)
+            } else {
+                Some(left)
+            }
+        }
+    }
+}
+
+fn bound_is_exclusive(bound: TableKeyBound) -> bool {
+    matches!(bound, TableKeyBound::Exclusive(_))
 }
 
 impl From<&Literal<'_>> for Value {
@@ -1000,7 +1207,16 @@ mod tests {
         let PhysicalPlan::Update { input, .. } = &plan.physical else {
             panic!("expected physical update plan: {plan:?}");
         };
-        assert!(matches!(input.as_ref(), PhysicalPlan::Filter { .. }));
+        assert!(matches!(
+            input.as_ref(),
+            PhysicalPlan::PrimaryKeyRangeScan {
+                range: TableKeyRange {
+                    lower: Some(TableKeyBound::Inclusive(1)),
+                    upper: Some(TableKeyBound::Inclusive(1)),
+                },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1074,7 +1290,16 @@ mod tests {
         let PhysicalPlan::Delete { input, .. } = &plan.physical else {
             panic!("expected physical delete plan: {plan:?}");
         };
-        assert!(matches!(input.as_ref(), PhysicalPlan::Filter { .. }));
+        assert!(matches!(
+            input.as_ref(),
+            PhysicalPlan::PrimaryKeyRangeScan {
+                range: TableKeyRange {
+                    lower: Some(TableKeyBound::Inclusive(1)),
+                    upper: Some(TableKeyBound::Inclusive(1)),
+                },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1141,6 +1366,167 @@ mod tests {
     }
 
     #[test]
+    fn select_primary_key_range_uses_range_scan() {
+        let (_dir, database) = database_with_users();
+        let planner = Planner::new(&database);
+        let statement = parse("SELECT name FROM users WHERE 10 <= id AND id < 20;");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let PhysicalPlan::Project { input, .. } = &plan.physical else {
+            panic!("expected project root: {plan:?}");
+        };
+        let PhysicalPlan::PrimaryKeyRangeScan { table, range } = input.as_ref() else {
+            panic!("expected primary key range scan under project: {plan:?}");
+        };
+        assert_eq!(table.name, "users");
+        assert_eq!(
+            *range,
+            TableKeyRange {
+                lower: Some(TableKeyBound::Inclusive(10)),
+                upper: Some(TableKeyBound::Exclusive(20)),
+            }
+        );
+    }
+
+    #[test]
+    fn select_primary_key_equality_uses_single_key_range_scan() {
+        let (_dir, database) = database_with_users();
+        let planner = Planner::new(&database);
+        let statement = parse("SELECT name FROM users WHERE id == 10;");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let PhysicalPlan::Project { input, .. } = &plan.physical else {
+            panic!("expected project root: {plan:?}");
+        };
+        let PhysicalPlan::PrimaryKeyRangeScan { range, .. } = input.as_ref() else {
+            panic!("expected primary key range scan under project: {plan:?}");
+        };
+        assert_eq!(
+            *range,
+            TableKeyRange {
+                lower: Some(TableKeyBound::Inclusive(10)),
+                upper: Some(TableKeyBound::Inclusive(10)),
+            }
+        );
+    }
+
+    #[test]
+    fn select_primary_key_range_with_residual_filter_uses_range_scan() {
+        let (_dir, database) = database_with_users();
+        let planner = Planner::new(&database);
+        let statement = parse("SELECT name FROM users WHERE id < 10 AND age == 7;");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let PhysicalPlan::Project { input, .. } = &plan.physical else {
+            panic!("expected project root: {plan:?}");
+        };
+        let PhysicalPlan::Filter { input, predicate } = input.as_ref() else {
+            panic!("expected residual filter under project: {plan:?}");
+        };
+        assert_eq!(
+            predicate,
+            &PlannedExpression::Binary {
+                left: Box::new(PlannedExpression::Column(bound(
+                    "users",
+                    "age",
+                    2,
+                    DataType::Integer
+                ))),
+                op: Op::EqualsEquals,
+                right: Box::new(PlannedExpression::Literal(Value::Integer(7))),
+            }
+        );
+        let PhysicalPlan::PrimaryKeyRangeScan { range, .. } = input.as_ref() else {
+            panic!("expected primary key range scan under residual filter: {plan:?}");
+        };
+        assert_eq!(
+            *range,
+            TableKeyRange { lower: None, upper: Some(TableKeyBound::Exclusive(10)) }
+        );
+    }
+
+    #[test]
+    fn select_multiple_primary_key_bounds_with_residual_filter_uses_combined_range_scan() {
+        let (_dir, database) = database_with_users();
+        let planner = Planner::new(&database);
+        let statement = parse("SELECT name FROM users WHERE 1 <= id AND id <= 10 AND age == 7;");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let PhysicalPlan::Project { input, .. } = &plan.physical else {
+            panic!("expected project root: {plan:?}");
+        };
+        let PhysicalPlan::Filter { input, predicate } = input.as_ref() else {
+            panic!("expected residual filter under project: {plan:?}");
+        };
+        assert_eq!(
+            predicate,
+            &PlannedExpression::Binary {
+                left: Box::new(PlannedExpression::Column(bound(
+                    "users",
+                    "age",
+                    2,
+                    DataType::Integer
+                ))),
+                op: Op::EqualsEquals,
+                right: Box::new(PlannedExpression::Literal(Value::Integer(7))),
+            }
+        );
+        let PhysicalPlan::PrimaryKeyRangeScan { range, .. } = input.as_ref() else {
+            panic!("expected primary key range scan under residual filter: {plan:?}");
+        };
+        assert_eq!(
+            *range,
+            TableKeyRange {
+                lower: Some(TableKeyBound::Inclusive(1)),
+                upper: Some(TableKeyBound::Inclusive(10)),
+            }
+        );
+    }
+
+    #[test]
+    fn select_non_leading_primary_key_range_stays_full_table_scan() {
+        let (_dir, database) = database_with_users();
+        let planner = Planner::new(&database);
+        let statement = parse("SELECT name FROM users WHERE age == 7 AND id < 10;");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let PhysicalPlan::Project { input, .. } = &plan.physical else {
+            panic!("expected project root: {plan:?}");
+        };
+        let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+            panic!("expected filter under project: {plan:?}");
+        };
+        assert!(
+            matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        );
+    }
+
+    #[test]
+    fn select_secondary_index_column_range_stays_full_table_scan() {
+        let (_dir, database) = database_with_users();
+        database.create_index("idx_users_name", "users", &["name"]).unwrap();
+        let planner = Planner::new(&database);
+        let statement = parse("SELECT name FROM users WHERE 'Ada' <= name AND name < 'Linus';");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let PhysicalPlan::Project { input, .. } = &plan.physical else {
+            panic!("expected project root: {plan:?}");
+        };
+        let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+            panic!("expected filter under project: {plan:?}");
+        };
+        assert!(
+            matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        );
+    }
+
+    #[test]
     fn explain_select_wraps_planned_select() {
         let (_dir, database) = database_with_users();
         let planner = Planner::new(&database);
@@ -1163,7 +1549,16 @@ mod tests {
             expressions,
             &[PlannedExpression::Column(bound("users", "name", 1, DataType::Text))]
         );
-        assert!(matches!(input.as_ref(), PhysicalPlan::Filter { .. }));
+        assert!(matches!(
+            input.as_ref(),
+            PhysicalPlan::PrimaryKeyRangeScan {
+                range: TableKeyRange {
+                    lower: Some(TableKeyBound::Inclusive(1)),
+                    upper: Some(TableKeyBound::Inclusive(1)),
+                },
+                ..
+            }
+        ));
     }
 
     #[test]

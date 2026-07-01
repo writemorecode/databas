@@ -1,3 +1,5 @@
+use std::fmt;
+
 pub(crate) mod access;
 pub(crate) mod btree;
 pub(crate) mod catalog;
@@ -41,3 +43,79 @@ pub type PageId = u64;
 pub type CatalogId = i32;
 pub type TableKey = i32;
 pub(crate) type SlotId = u16;
+
+/// Inclusive or exclusive bound over table primary keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableKeyBound {
+    /// The bound includes the stored key value.
+    Inclusive(TableKey),
+    /// The bound excludes the stored key value.
+    Exclusive(TableKey),
+}
+
+impl TableKeyBound {
+    /// Returns the raw key value stored in this bound.
+    pub fn value(self) -> TableKey {
+        match self {
+            Self::Inclusive(value) | Self::Exclusive(value) => value,
+        }
+    }
+
+    /// Returns whether `key` satisfies this lower bound.
+    pub fn contains_lower(self, key: TableKey) -> bool {
+        match self {
+            Self::Inclusive(value) => key >= value,
+            Self::Exclusive(value) => key > value,
+        }
+    }
+
+    /// Returns whether `key` satisfies this upper bound.
+    pub fn contains_upper(self, key: TableKey) -> bool {
+        match self {
+            Self::Inclusive(value) => key <= value,
+            Self::Exclusive(value) => key < value,
+        }
+    }
+}
+
+impl fmt::Display for TableKeyBound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inclusive(value) => write!(f, "{value} inclusive"),
+            Self::Exclusive(value) => write!(f, "{value} exclusive"),
+        }
+    }
+}
+
+/// Ordered primary-key range for scanning a table B+-tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TableKeyRange {
+    /// Optional lower bound.
+    pub lower: Option<TableKeyBound>,
+    /// Optional upper bound.
+    pub upper: Option<TableKeyBound>,
+}
+
+impl TableKeyRange {
+    /// Returns a range with no lower or upper bound.
+    pub fn unbounded() -> Self {
+        Self::default()
+    }
+
+    /// Returns whether `key` is inside the range.
+    pub fn contains(self, key: TableKey) -> bool {
+        self.lower.is_none_or(|bound| bound.contains_lower(key))
+            && self.upper.is_none_or(|bound| bound.contains_upper(key))
+    }
+}
+
+impl fmt::Display for TableKeyRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.lower, self.upper) {
+            (None, None) => write!(f, "unbounded"),
+            (Some(lower), None) => write!(f, "lower={lower}"),
+            (None, Some(upper)) => write!(f, "upper={upper}"),
+            (Some(lower), Some(upper)) => write!(f, "lower={lower} upper={upper}"),
+        }
+    }
+}

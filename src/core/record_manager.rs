@@ -1,5 +1,5 @@
 use crate::core::{
-    DataType, OwnedTableRecord, TableKey, TableSchema, Tuple, Value,
+    DataType, OwnedTableRecord, TableKey, TableKeyBound, TableKeyRange, TableSchema, Tuple, Value,
     catalog_manager::CatalogManager,
     cursor::TableCursor,
     error::{ConstraintError, InvalidArgumentError, StorageError, StorageResult},
@@ -16,6 +16,8 @@ pub(crate) struct RecordManager {
 /// Iterator over owned records in one table.
 pub(crate) struct TableScan {
     cursor: TableCursor,
+    range: TableKeyRange,
+    initialized: bool,
     done: bool,
 }
 
@@ -25,7 +27,20 @@ impl RecordManager {
     }
 
     pub(crate) fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
-        Ok(TableScan { cursor: self.catalog.table_cursor_by_name(&table.name)?, done: false })
+        self.scan_table_range(table, TableKeyRange::unbounded())
+    }
+
+    pub(crate) fn scan_table_range(
+        &self,
+        table: &TableSchema,
+        range: TableKeyRange,
+    ) -> StorageResult<TableScan> {
+        Ok(TableScan {
+            cursor: self.catalog.table_cursor_by_name(&table.name)?,
+            range,
+            initialized: false,
+            done: false,
+        })
     }
 
     pub(crate) fn insert_table_row(
@@ -91,8 +106,19 @@ impl Iterator for TableScan {
             return None;
         }
 
-        match self.cursor.next_owned_record() {
-            Ok(Some(record)) => Some(Ok(record)),
+        let record = if self.initialized {
+            self.cursor.next_owned_record()
+        } else {
+            self.initialized = true;
+            self.first_record()
+        };
+
+        match record {
+            Ok(Some(record)) if self.range.contains(record.table_key) => Some(Ok(record)),
+            Ok(Some(_)) => {
+                self.done = true;
+                None
+            }
             Ok(None) => {
                 self.done = true;
                 None
@@ -102,6 +128,38 @@ impl Iterator for TableScan {
                 Some(Err(error))
             }
         }
+    }
+}
+
+impl TableScan {
+    fn first_record(&mut self) -> StorageResult<Option<OwnedTableRecord>> {
+        match range_start(self.range.lower) {
+            RangeStart::At(start_key) => {
+                if self.cursor.seek_to_table_key(start_key)? {
+                    self.cursor.current_owned_record()
+                } else {
+                    Ok(None)
+                }
+            }
+            RangeStart::Unbounded => self.cursor.next_owned_record(),
+            RangeStart::Empty => Ok(None),
+        }
+    }
+}
+
+enum RangeStart {
+    At(TableKey),
+    Unbounded,
+    Empty,
+}
+
+fn range_start(lower: Option<TableKeyBound>) -> RangeStart {
+    match lower {
+        Some(TableKeyBound::Inclusive(value)) => RangeStart::At(value),
+        Some(TableKeyBound::Exclusive(value)) => {
+            value.checked_add(1).map_or(RangeStart::Empty, RangeStart::At)
+        }
+        None => RangeStart::Unbounded,
     }
 }
 
@@ -183,8 +241,8 @@ mod tests {
 
     use super::*;
     use crate::core::{
-        ColumnSchema, TupleSchema, catalog_manager::CatalogManager, cursor::IndexCursor,
-        index_manager::IndexManager, pager::Pager,
+        ColumnSchema, TableKeyBound, TableKeyRange, TupleSchema, catalog_manager::CatalogManager,
+        cursor::IndexCursor, index_manager::IndexManager, pager::Pager,
     };
 
     fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, RecordManager)> {
@@ -285,6 +343,65 @@ mod tests {
         let mut index: IndexCursor = catalog.index_cursor_by_name("idx_users_name").unwrap();
         assert_eq!(index.get(&name_key("Ada")).unwrap().unwrap().table_key, -5);
         assert_eq!(index.get(&name_key("Grace")).unwrap().unwrap().table_key, 20);
+    }
+
+    #[test]
+    fn scan_table_range_seeks_to_lower_bound_and_stops_at_upper_bound() {
+        let file = NamedTempFile::new().unwrap();
+        let (_catalog, records) = open(file.path()).unwrap();
+        let table = records.catalog.create_table("users", users_schema()).unwrap();
+
+        for id in [-5, 1, 3, 5, 7] {
+            records
+                .insert_table_row(
+                    &table,
+                    vec![
+                        Value::Integer(id),
+                        Value::String(format!("user{id}")),
+                        Value::Boolean(true),
+                    ],
+                )
+                .unwrap();
+        }
+
+        let range = TableKeyRange {
+            lower: Some(TableKeyBound::Exclusive(1)),
+            upper: Some(TableKeyBound::Exclusive(7)),
+        };
+        let keys = records
+            .scan_table_range(&table, range)
+            .unwrap()
+            .map(|record| record.unwrap().table_key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(keys, vec![3, 5]);
+    }
+
+    #[test]
+    fn scan_table_range_with_exclusive_max_lower_is_empty() {
+        let file = NamedTempFile::new().unwrap();
+        let (_catalog, records) = open(file.path()).unwrap();
+        let table = records.catalog.create_table("users", users_schema()).unwrap();
+        records
+            .insert_table_row(
+                &table,
+                vec![
+                    Value::Integer(TableKey::MAX),
+                    Value::String("max".to_owned()),
+                    Value::Boolean(true),
+                ],
+            )
+            .unwrap();
+
+        let range =
+            TableKeyRange { lower: Some(TableKeyBound::Exclusive(TableKey::MAX)), upper: None };
+        let rows = records
+            .scan_table_range(&table, range)
+            .unwrap()
+            .collect::<StorageResult<Vec<_>>>()
+            .unwrap();
+
+        assert!(rows.is_empty());
     }
 
     #[test]
