@@ -204,34 +204,19 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_function_struct_usage() {
-        // Test direct field access
-        let sum_func = AggregateFunction {
-            kind: AggregateFunctionKind::Sum,
-            expr: Box::new(Expression::Identifier("salary")),
-        };
-
-        assert_eq!(sum_func.kind, AggregateFunctionKind::Sum);
-        assert_eq!(*sum_func.expr, Expression::Identifier("salary"));
-        assert_eq!(format!("{}", sum_func), "SUM(salary)");
-
-        // Test different aggregate kinds
-        let kinds = vec![
-            AggregateFunctionKind::Count,
-            AggregateFunctionKind::Avg,
-            AggregateFunctionKind::Max,
-            AggregateFunctionKind::Min,
-            AggregateFunctionKind::StdDev,
+    fn aggregate_functions_display_with_their_argument() {
+        let cases = [
+            (AggregateFunctionKind::Count, Expression::Wildcard, "COUNT(*)"),
+            (AggregateFunctionKind::Avg, Expression::Identifier("salary"), "AVG(salary)"),
+            (AggregateFunctionKind::Max, Expression::Identifier("salary"), "MAX(salary)"),
+            (AggregateFunctionKind::Min, Expression::Identifier("salary"), "MIN(salary)"),
+            (AggregateFunctionKind::StdDev, Expression::Identifier("salary"), "STDDEV(salary)"),
         ];
 
-        for kind in kinds {
-            let agg = AggregateFunction { kind, expr: Box::new(Expression::Wildcard) };
+        for (kind, expr, expected) in cases {
+            let aggregate = AggregateFunction { kind, expr: Box::new(expr) };
 
-            // Test that kind field is accessible
-            assert_eq!(agg.kind, kind);
-
-            // Test that expression field is accessible
-            assert_eq!(*agg.expr, Expression::Wildcard);
+            assert_eq!(aggregate.to_string(), expected);
         }
     }
 }

@@ -349,15 +349,17 @@ fn parenthesized_expression_display_loses_grouping() {
     let displayed = parsed.to_string();
     let reparsed = parse_statement(&displayed);
 
+    assert_eq!(displayed, "SELECT (alpha + beta) * gamma;");
     assert_eq!(parsed, reparsed, "displayed SQL: {displayed}");
 }
 
 #[test]
-fn float_literals_with_zero_fraction_display_as_integers() {
+fn float_literals_with_zero_fraction_keep_fractional_display() {
     let sql = "SELECT 0.0;";
     let parsed = parse_statement(sql);
     let displayed = parsed.to_string();
     let reparsed = parse_statement(&displayed);
 
+    assert_eq!(displayed, "SELECT 0.0;");
     assert_eq!(parsed, reparsed, "displayed SQL: {displayed}");
 }

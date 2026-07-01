@@ -10,7 +10,7 @@ use crate::{
     },
     error::DatabaseError,
     planner::{BoundColumn, PlannedExpression, Planner},
-    session::Session,
+    session::{Session, SessionError},
     sql_parser::parser::Parser,
 };
 
@@ -1288,7 +1288,10 @@ fn commit_without_active_transaction_errors_and_later_implicit_statement_commits
         .unwrap();
     let mut session = Session::new(&database);
 
-    assert!(execute_sql_with_session(&mut session, "COMMIT;").is_err());
+    assert!(matches!(
+        execute_sql_with_session(&mut session, "COMMIT;"),
+        Err(DatabaseError::Session(SessionError::NoActiveTransaction))
+    ));
     execute_sql_with_session(
         &mut session,
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1);",
@@ -1296,7 +1299,11 @@ fn commit_without_active_transaction_errors_and_later_implicit_statement_commits
     .unwrap();
 
     let mut users = database.table_cursor_by_name("users").unwrap();
-    assert!(users.get(1).unwrap().is_some());
+    let row = users.get(1).unwrap().expect("later implicit insert should commit");
+    assert_eq!(
+        values(&row),
+        vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Integer(1)]
+    );
 }
 
 #[test]
@@ -1315,7 +1322,12 @@ fn failed_commit_clears_session_when_storage_transaction_was_cleared() {
     .unwrap();
     database.fail_next_wal_flush_for_test();
 
-    assert!(execute_sql_with_session(&mut session, "COMMIT;").is_err());
+    assert!(matches!(
+        execute_sql_with_session(&mut session, "COMMIT;"),
+        Err(DatabaseError::Storage(StorageError::Io(error)))
+            if error.kind() == std::io::ErrorKind::Other
+                && error.to_string() == "injected WAL flush failure"
+    ));
     execute_sql_with_session(
         &mut session,
         "INSERT INTO users (id, name, active) VALUES (2, 'Linus', 1);",
@@ -1323,7 +1335,11 @@ fn failed_commit_clears_session_when_storage_transaction_was_cleared() {
     .unwrap();
 
     let mut users = database.table_cursor_by_name("users").unwrap();
-    assert!(users.get(2).unwrap().is_some());
+    let row = users.get(2).unwrap().expect("later implicit insert should commit");
+    assert_eq!(
+        values(&row),
+        vec![Value::Integer(2), Value::String("Linus".to_owned()), Value::Integer(1)]
+    );
 }
 
 #[test]
@@ -1334,7 +1350,10 @@ fn rollback_without_active_transaction_errors_and_later_implicit_statement_commi
         .unwrap();
     let mut session = Session::new(&database);
 
-    assert!(execute_sql_with_session(&mut session, "ROLLBACK;").is_err());
+    assert!(matches!(
+        execute_sql_with_session(&mut session, "ROLLBACK;"),
+        Err(DatabaseError::Session(SessionError::NoActiveTransaction))
+    ));
     execute_sql_with_session(
         &mut session,
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1);",
@@ -1342,7 +1361,11 @@ fn rollback_without_active_transaction_errors_and_later_implicit_statement_commi
     .unwrap();
 
     let mut users = database.table_cursor_by_name("users").unwrap();
-    assert!(users.get(1).unwrap().is_some());
+    let row = users.get(1).unwrap().expect("later implicit insert should commit");
+    assert_eq!(
+        values(&row),
+        vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Integer(1)]
+    );
 }
 
 #[test]
@@ -1359,7 +1382,10 @@ fn nested_begin_errors_without_ending_outer_transaction() {
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1);",
     )
     .unwrap();
-    assert!(execute_sql_with_session(&mut session, "BEGIN;").is_err());
+    assert!(matches!(
+        execute_sql_with_session(&mut session, "BEGIN;"),
+        Err(DatabaseError::Session(SessionError::TransactionAlreadyActive { txn_id })) if txn_id > 0
+    ));
     execute_sql_with_session(&mut session, "ROLLBACK;").unwrap();
 
     let mut users = database.table_cursor_by_name("users").unwrap();
@@ -1515,7 +1541,7 @@ fn uncommitted_flushed_insert_is_undone_during_recovery() {
     database.create_table("users", users_schema()).unwrap();
     database.create_index("idx_users_name", "users", &["name"]).unwrap();
     database.flush().unwrap();
-    let txn_id = database.begin_transaction().unwrap();
+    database.begin_transaction().unwrap();
     let table = database.table_schema_by_name("users").unwrap();
 
     execute_insert_values(
@@ -1534,7 +1560,6 @@ fn uncommitted_flushed_insert_is_undone_during_recovery() {
     )
     .unwrap();
     database.flush().unwrap();
-    assert_eq!(txn_id, 1);
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();

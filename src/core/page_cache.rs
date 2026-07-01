@@ -794,25 +794,16 @@ mod tests {
         let (_file, disk_manager) = create_disk_with_pages(&pages);
         let cache = PageCache::new(disk_manager, 2).unwrap();
 
-        cache.inner.frames[0].page_id.set(Some(0));
-        *cache.inner.frames[0].data.borrow_mut() = pages[0];
-        cache.inner.frames[0].dirty.set(false);
-        cache.inner.frames[0].pin_count.set(1);
-
-        cache.inner.frames[1].page_id.set(Some(1));
-        *cache.inner.frames[1].data.borrow_mut() = pages[1];
-        cache.inner.frames[1].dirty.set(false);
-        cache.inner.frames[1].pin_count.set(0);
-
-        let mut meta = cache.inner.meta.borrow_mut();
-        meta.page_table.insert(0, 0);
-        meta.page_table.insert(1, 1);
-        drop(meta);
+        let pinned = cache.fetch_page(0).unwrap();
+        {
+            let _unpinned = cache.fetch_page(1).unwrap();
+        }
 
         {
             let _guard = cache.fetch_page(2).unwrap();
         }
 
+        assert_eq!(pinned.page_id(), 0);
         assert_eq!(cache.inner.frames[0].page_id.get(), Some(0));
         let page_table = &cache.inner.meta.borrow().page_table;
         assert!(page_table.contains_key(&0));
@@ -826,20 +817,8 @@ mod tests {
         let (_file, disk_manager) = create_disk_with_pages(&pages);
         let cache = PageCache::new(disk_manager, 2).unwrap();
 
-        cache.inner.frames[0].page_id.set(Some(0));
-        *cache.inner.frames[0].data.borrow_mut() = pages[0];
-        cache.inner.frames[0].dirty.set(false);
-        cache.inner.frames[0].pin_count.set(1);
-
-        cache.inner.frames[1].page_id.set(Some(1));
-        *cache.inner.frames[1].data.borrow_mut() = pages[1];
-        cache.inner.frames[1].dirty.set(false);
-        cache.inner.frames[1].pin_count.set(1);
-
-        let mut meta = cache.inner.meta.borrow_mut();
-        meta.page_table.insert(0, 0);
-        meta.page_table.insert(1, 1);
-        drop(meta);
+        let _first = cache.fetch_page(0).unwrap();
+        let _second = cache.fetch_page(1).unwrap();
 
         let result = cache.fetch_page(2);
         assert!(matches!(result, Err(PageCacheError::NoEvictableFrame)));
@@ -1148,16 +1127,12 @@ mod tests {
 
     #[test]
     fn flush_page_returns_error_if_page_is_pinned() {
-        let page = page_with_pattern(8);
-        let pages = [page];
+        let pages = [page_with_pattern(8)];
         let (_file, disk_manager) = create_disk_with_pages(&pages);
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
-        cache.inner.frames[0].page_id.set(Some(0));
-        *cache.inner.frames[0].data.borrow_mut() = page;
-        cache.inner.frames[0].dirty.set(true);
-        cache.inner.frames[0].pin_count.set(1);
-        cache.inner.meta.borrow_mut().page_table.insert(0, 0);
+        let guard = cache.fetch_page(0).unwrap();
+        guard.write().unwrap().page_mut()[0] = 99;
 
         let result = cache.flush_page(0);
         assert!(matches!(result, Err(PageCacheError::PinnedPage { page_id: 0 })));
@@ -1205,16 +1180,12 @@ mod tests {
 
     #[test]
     fn flush_all_returns_error_if_dirty_page_is_pinned() {
-        let page = page_with_pattern(19);
-        let pages = [page];
+        let pages = [page_with_pattern(19)];
         let (_file, disk_manager) = create_disk_with_pages(&pages);
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
-        cache.inner.frames[0].page_id.set(Some(0));
-        *cache.inner.frames[0].data.borrow_mut() = page;
-        cache.inner.frames[0].dirty.set(true);
-        cache.inner.frames[0].pin_count.set(1);
-        cache.inner.meta.borrow_mut().page_table.insert(0, 0);
+        let guard = cache.fetch_page(0).unwrap();
+        guard.write().unwrap().page_mut()[0] = 99;
 
         let result = cache.flush_all();
         assert!(matches!(result, Err(PageCacheError::PinnedPage { page_id: 0 })));

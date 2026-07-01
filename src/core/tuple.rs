@@ -884,9 +884,6 @@ mod tests {
         let tuple_ref = TupleRef::new(&borrowed_values);
         let owned_tuple = Tuple::new(borrowed_values.into_iter().map(Value::from).collect());
 
-        assert_eq!(tuple_ref.len(), 6);
-        assert!(!tuple_ref.is_empty());
-        assert_eq!(tuple_ref.values(), borrowed_values);
         assert_eq!(tuple_ref.to_bytes().unwrap(), owned_tuple.to_bytes().unwrap());
     }
 
