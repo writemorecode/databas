@@ -1,6 +1,6 @@
 use crate::core::{
-    IndexSchema, OwnedTableRecord, TableSchema, TupleSchema, Value, error::StorageResult,
-    record_manager::TableScan,
+    IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
+    error::StorageResult, record_manager::TableScan,
 };
 
 pub(crate) trait SchemaAccess {
@@ -20,6 +20,12 @@ pub(crate) trait DdlAccess {
 
 pub(crate) trait RecordAccess {
     fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan>;
+
+    fn scan_table_range(
+        &self,
+        table: &TableSchema,
+        range: TableKeyRange,
+    ) -> StorageResult<TableScan>;
 
     fn insert_table_row(
         &self,

@@ -597,6 +597,27 @@ fn select_with_projection_and_filter_executes_end_to_end() {
 }
 
 #[test]
+fn select_with_primary_key_range_returns_only_matching_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, &insert_many_users_sql(25)).unwrap();
+
+    let output =
+        execute_sql(&database, "SELECT id FROM users WHERE 10 <= id AND id < 20;").unwrap();
+
+    let rows = collect_rows(output).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.table_key).collect::<Vec<_>>(),
+        (10..20).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        rows.iter().map(values).collect::<Vec<_>>(),
+        (10..20).map(|id| vec![Value::Integer(id)]).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn insert_values_uses_primary_keys_and_persists_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
@@ -917,6 +938,22 @@ fn delete_where_removes_only_matching_rows() {
 }
 
 #[test]
+fn delete_where_primary_key_range_removes_only_matching_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, &insert_many_users_sql(25)).unwrap();
+
+    let output = execute_sql(&database, "DELETE FROM users WHERE 10 <= id AND id < 20;").unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(10)));
+    assert_user_row(&database, 9, "user9");
+    assert_user_row_absent(&database, 10);
+    assert_user_row_absent(&database, 19);
+    assert_user_row(&database, 20, "user20");
+}
+
+#[test]
 fn delete_without_matches_returns_zero_rows_affected() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
@@ -1011,6 +1048,24 @@ fn update_where_replaces_only_matching_rows() {
         values(&row),
         vec![Value::Integer(2), Value::String("Linus".to_owned()), Value::Boolean(false)]
     );
+}
+
+#[test]
+fn update_where_primary_key_range_replaces_only_matching_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, &insert_many_users_sql(25)).unwrap();
+
+    let output =
+        execute_sql(&database, "UPDATE users SET name = 'updated' WHERE 10 <= id AND id < 20;")
+            .unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(10)));
+    assert_user_row(&database, 9, "user9");
+    assert_user_row(&database, 10, "updated");
+    assert_user_row(&database, 19, "updated");
+    assert_user_row(&database, 20, "user20");
 }
 
 #[test]
