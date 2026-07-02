@@ -9,7 +9,7 @@ use crate::core::{
     index_manager::IndexManager,
     log_manager::TxnId,
     pager::Pager,
-    record_manager::{RecordManager, TableScan},
+    record_manager::{IndexScan, RecordManager, TableScan},
     transaction_manager::TransactionSavepoint,
     transaction_runtime::TransactionRuntime,
 };
@@ -174,6 +174,10 @@ impl SchemaAccess for Database {
     fn table_schema_by_name(&self, name: &str) -> StorageResult<TableSchema> {
         Database::table_schema_by_name(self, name)
     }
+
+    fn index_schemas_for_table(&self, table: &TableSchema) -> StorageResult<Vec<IndexSchema>> {
+        Database::index_schemas_for_table(self, table)
+    }
 }
 
 impl DdlAccess for Database {
@@ -202,6 +206,15 @@ impl RecordAccess for Database {
         range: TableKeyRange,
     ) -> StorageResult<TableScan> {
         Database::scan_table_range(self, table, range)
+    }
+
+    fn scan_index(
+        &self,
+        table: &TableSchema,
+        index: &IndexSchema,
+        key_prefix: Vec<u8>,
+    ) -> StorageResult<IndexScan> {
+        self.records.scan_index(table, index, key_prefix)
     }
 
     fn insert_table_row(

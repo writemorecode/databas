@@ -1,7 +1,8 @@
 use crate::core::{
-    DataType, OwnedTableRecord, TableKey, TableKeyBound, TableKeyRange, TableSchema, Tuple, Value,
+    CorruptionComponent, CorruptionError, CorruptionKind, DataType, IndexSchema, OwnedTableRecord,
+    TableKey, TableKeyBound, TableKeyRange, TableSchema, Tuple, Value,
     catalog_manager::CatalogManager,
-    cursor::TableCursor,
+    cursor::{IndexCursor, TableCursor},
     error::{ConstraintError, InvalidArgumentError, StorageError, StorageResult},
     index_manager::IndexManager,
 };
@@ -17,6 +18,16 @@ pub(crate) struct RecordManager {
 pub(crate) struct TableScan {
     cursor: TableCursor,
     range: TableKeyRange,
+    initialized: bool,
+    done: bool,
+}
+
+/// Iterator over table rows referenced by matching secondary-index entries.
+pub(crate) struct IndexScan {
+    table: TableSchema,
+    table_cursor: TableCursor,
+    index_cursor: IndexCursor,
+    key_prefix: Vec<u8>,
     initialized: bool,
     done: bool,
 }
@@ -38,6 +49,22 @@ impl RecordManager {
         Ok(TableScan {
             cursor: self.catalog.table_cursor_by_name(&table.name)?,
             range,
+            initialized: false,
+            done: false,
+        })
+    }
+
+    pub(crate) fn scan_index(
+        &self,
+        table: &TableSchema,
+        index: &IndexSchema,
+        key_prefix: Vec<u8>,
+    ) -> StorageResult<IndexScan> {
+        Ok(IndexScan {
+            table: table.clone(),
+            table_cursor: self.catalog.table_cursor_by_name(&table.name)?,
+            index_cursor: self.catalog.index_cursor_by_name(&index.name)?,
+            key_prefix,
             initialized: false,
             done: false,
         })
@@ -95,6 +122,61 @@ impl RecordManager {
         self.indexes.insert_index_entries(table, &updated)?;
 
         Ok(updated)
+    }
+}
+
+impl Iterator for IndexScan {
+    type Item = StorageResult<OwnedTableRecord>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        let entry = if self.initialized {
+            self.index_cursor.next_owned_entry()
+        } else {
+            self.initialized = true;
+            self.first_entry()
+        };
+
+        match entry {
+            Ok(Some(entry)) if entry.key.starts_with(&self.key_prefix) => {
+                match self.table_cursor.get_owned_record(entry.table_key) {
+                    Ok(Some(record)) => Some(Ok(record)),
+                    Ok(None) => {
+                        self.done = true;
+                        Some(Err(invalid_index_entry(
+                            &self.table,
+                            entry.table_key,
+                            "index entry references missing table row",
+                        )))
+                    }
+                    Err(error) => {
+                        self.done = true;
+                        Some(Err(error))
+                    }
+                }
+            }
+            Ok(Some(_)) | Ok(None) => {
+                self.done = true;
+                None
+            }
+            Err(error) => {
+                self.done = true;
+                Some(Err(error))
+            }
+        }
+    }
+}
+
+impl IndexScan {
+    fn first_entry(&mut self) -> StorageResult<Option<crate::core::OwnedIndexEntry>> {
+        if self.index_cursor.seek_to_key(&self.key_prefix)? {
+            self.index_cursor.current_owned_entry()
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -233,6 +315,18 @@ fn value_type_name(value: &Value) -> &'static str {
         Value::Float(_) => "float",
         Value::UnsignedInteger(_) => "unsigned integer",
     }
+}
+
+fn invalid_index_entry(table: &TableSchema, table_key: TableKey, reason: &str) -> StorageError {
+    StorageError::Corruption(CorruptionError {
+        component: CorruptionComponent::Catalog,
+        page_id: None,
+        kind: CorruptionKind::InvalidTableRecord {
+            table: table.name.clone(),
+            table_key,
+            reason: reason.to_owned(),
+        },
+    })
 }
 
 #[cfg(test)]

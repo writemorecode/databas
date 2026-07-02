@@ -272,6 +272,13 @@ impl<'db> Executor<'db> {
                     .map(|record| record.map_err(Into::into));
                 Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
             }
+            PhysicalPlan::SecondaryIndexScan { table, index, key, .. } => {
+                let rows = self
+                    .database
+                    .scan_index(&table, &index, key)?
+                    .map(|record| record.map_err(Into::into));
+                Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
+            }
             PhysicalPlan::Filter { input, predicate } => {
                 let output_inner = self.execute(*input)?;
                 let rows = output_inner.into_rows("FILTER")?.filter_map(move |row| match row {
