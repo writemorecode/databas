@@ -241,8 +241,11 @@ mod tests {
 
     use super::*;
     use crate::core::{
-        ColumnSchema, TableKeyBound, TableKeyRange, TupleSchema, catalog_manager::CatalogManager,
-        cursor::IndexCursor, index_manager::IndexManager, pager::Pager,
+        ColumnSchema, TableKeyBound, TableKeyRange, TupleSchema,
+        catalog_manager::CatalogManager,
+        cursor::{IndexCursor, encode_index_entry_key},
+        index_manager::IndexManager,
+        pager::Pager,
     };
 
     fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, RecordManager)> {
@@ -285,6 +288,10 @@ mod tests {
         Tuple::new(vec![Value::String(name.to_owned())]).to_bytes().unwrap()
     }
 
+    fn name_entry_key(name: &str, table_key: TableKey) -> Vec<u8> {
+        encode_index_entry_key(&name_key(name), table_key)
+    }
+
     #[test]
     fn insert_table_row_persists_row_and_updates_secondary_indexes() {
         let file = NamedTempFile::new().unwrap();
@@ -303,7 +310,8 @@ mod tests {
         let mut users = catalog.table_cursor_by_name("users").unwrap();
         let stored = users.get(1).unwrap().expect("inserted row should be stored");
         let mut index: IndexCursor = catalog.index_cursor_by_name("idx_users_name").unwrap();
-        let entry = index.get(&name_key("Ada")).unwrap().expect("index should track inserted row");
+        let entry =
+            index.get(&name_entry_key("Ada", 1)).unwrap().expect("index should track inserted row");
 
         assert_eq!(inserted.table_key, 1);
         assert_eq!(
@@ -341,8 +349,121 @@ mod tests {
         assert_eq!(users.current_owned_record().unwrap().unwrap().table_key, -5);
 
         let mut index: IndexCursor = catalog.index_cursor_by_name("idx_users_name").unwrap();
-        assert_eq!(index.get(&name_key("Ada")).unwrap().unwrap().table_key, -5);
-        assert_eq!(index.get(&name_key("Grace")).unwrap().unwrap().table_key, 20);
+        assert_eq!(index.get(&name_entry_key("Ada", -5)).unwrap().unwrap().table_key, -5);
+        assert_eq!(index.get(&name_entry_key("Grace", 20)).unwrap().unwrap().table_key, 20);
+    }
+
+    #[test]
+    fn insert_table_row_allows_duplicate_secondary_index_values() {
+        let file = NamedTempFile::new().unwrap();
+        let (catalog, records) = open(file.path()).unwrap();
+        let indexes = IndexManager::new(catalog.clone());
+        let table = catalog.create_table("users", users_schema()).unwrap();
+        indexes.create_index("idx_users_name", "users", &["name"]).unwrap();
+
+        records
+            .insert_table_row(
+                &table,
+                vec![
+                    Value::Integer(1),
+                    Value::String("Engineering".to_owned()),
+                    Value::Boolean(true),
+                ],
+            )
+            .unwrap();
+        records
+            .insert_table_row(
+                &table,
+                vec![
+                    Value::Integer(2),
+                    Value::String("Engineering".to_owned()),
+                    Value::Boolean(false),
+                ],
+            )
+            .unwrap();
+
+        let mut index = catalog.index_cursor_by_name("idx_users_name").unwrap();
+        assert_eq!(index.get(&name_entry_key("Engineering", 1)).unwrap().unwrap().table_key, 1);
+        assert_eq!(index.get(&name_entry_key("Engineering", 2)).unwrap().unwrap().table_key, 2);
+    }
+
+    #[test]
+    fn delete_table_row_removes_only_one_duplicate_secondary_index_entry() {
+        let file = NamedTempFile::new().unwrap();
+        let (catalog, records) = open(file.path()).unwrap();
+        let indexes = IndexManager::new(catalog.clone());
+        let table = catalog.create_table("users", users_schema()).unwrap();
+        indexes.create_index("idx_users_name", "users", &["name"]).unwrap();
+
+        let first = records
+            .insert_table_row(
+                &table,
+                vec![
+                    Value::Integer(1),
+                    Value::String("Engineering".to_owned()),
+                    Value::Boolean(true),
+                ],
+            )
+            .unwrap();
+        records
+            .insert_table_row(
+                &table,
+                vec![
+                    Value::Integer(2),
+                    Value::String("Engineering".to_owned()),
+                    Value::Boolean(false),
+                ],
+            )
+            .unwrap();
+
+        records.delete_table_row(&table, &first).unwrap();
+
+        let mut index = catalog.index_cursor_by_name("idx_users_name").unwrap();
+        assert!(index.get(&name_entry_key("Engineering", 1)).unwrap().is_none());
+        assert_eq!(index.get(&name_entry_key("Engineering", 2)).unwrap().unwrap().table_key, 2);
+    }
+
+    #[test]
+    fn update_table_row_refreshes_only_one_duplicate_secondary_index_entry() {
+        let file = NamedTempFile::new().unwrap();
+        let (catalog, records) = open(file.path()).unwrap();
+        let indexes = IndexManager::new(catalog.clone());
+        let table = catalog.create_table("users", users_schema()).unwrap();
+        indexes.create_index("idx_users_name", "users", &["name"]).unwrap();
+
+        let first = records
+            .insert_table_row(
+                &table,
+                vec![
+                    Value::Integer(1),
+                    Value::String("Engineering".to_owned()),
+                    Value::Boolean(true),
+                ],
+            )
+            .unwrap();
+        records
+            .insert_table_row(
+                &table,
+                vec![
+                    Value::Integer(2),
+                    Value::String("Engineering".to_owned()),
+                    Value::Boolean(false),
+                ],
+            )
+            .unwrap();
+
+        records
+            .update_table_row(
+                &table,
+                &first,
+                vec![Value::Integer(1), Value::String("Sales".to_owned()), Value::Boolean(true)],
+            )
+            .unwrap();
+
+        let mut index = catalog.index_cursor_by_name("idx_users_name").unwrap();
+        assert!(index.get(&name_entry_key("Engineering", 1)).unwrap().is_none());
+        assert_eq!(index.get(&name_entry_key("Engineering", 2)).unwrap().unwrap().table_key, 2);
+        assert_eq!(index.get(&name_entry_key("Sales", 1)).unwrap().unwrap().table_key, 1);
     }
 
     #[test]

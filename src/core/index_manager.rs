@@ -1,6 +1,7 @@
 use crate::core::{
     IndexSchema, OwnedTableRecord, TableKey, TableSchema, Tuple, TupleView, Value,
     catalog_manager::CatalogManager,
+    cursor::encode_index_entry_key,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
 };
 
@@ -34,6 +35,7 @@ impl IndexManager {
     ) -> StorageResult<()> {
         for index in self.catalog.index_schemas_for_table(table)? {
             let key = index_key_from_record(table, &index, record)?;
+            let key = encode_index_entry_key(&key, record.table_key);
             let mut index_cursor = self.catalog.index_cursor_by_name(&index.name)?;
             index_cursor.insert(&key, record.table_key)?;
         }
@@ -48,6 +50,7 @@ impl IndexManager {
     ) -> StorageResult<()> {
         for index in self.catalog.index_schemas_for_table(table)? {
             let key = index_key_from_record(table, &index, record)?;
+            let key = encode_index_entry_key(&key, record.table_key);
             let mut index_cursor = self.catalog.index_cursor_by_name(&index.name)?;
             index_cursor.delete(&key)?;
         }
@@ -61,6 +64,7 @@ impl IndexManager {
 
         while let Some(record) = table_cursor.next_owned_record()? {
             let key = index_key_from_record(table, index, &record)?;
+            let key = encode_index_entry_key(&key, record.table_key);
             index_cursor.insert(&key, record.table_key)?;
         }
 
@@ -150,6 +154,10 @@ mod tests {
         Tuple::new(vec![Value::String(name.to_owned())]).to_bytes().unwrap()
     }
 
+    fn name_entry_key(name: &str, table_key: TableKey) -> Vec<u8> {
+        encode_index_entry_key(&name_key(name), table_key)
+    }
+
     #[test]
     fn create_index_backfills_existing_table_rows() {
         let file = NamedTempFile::new().unwrap();
@@ -172,7 +180,41 @@ mod tests {
         indexes.create_index("idx_users_name", "users", &["name"]).unwrap();
 
         let mut index = catalog.index_cursor_by_name("idx_users_name").unwrap();
-        assert_eq!(index.get(&name_key("Ada")).unwrap().unwrap().table_key, 1);
-        assert_eq!(index.get(&name_key("Grace")).unwrap().unwrap().table_key, 2);
+        assert_eq!(index.get(&name_entry_key("Ada", 1)).unwrap().unwrap().table_key, 1);
+        assert_eq!(index.get(&name_entry_key("Grace", 2)).unwrap().unwrap().table_key, 2);
+    }
+
+    #[test]
+    fn create_index_backfills_duplicate_index_values() {
+        let file = NamedTempFile::new().unwrap();
+        let (catalog, indexes) = open(file.path()).unwrap();
+        let records = RecordManager::new(catalog.clone(), indexes.clone());
+        let table = catalog.create_table("users", users_schema()).unwrap();
+        records
+            .insert_table_row(
+                &table,
+                vec![
+                    Value::Integer(1),
+                    Value::String("Engineering".to_owned()),
+                    Value::Boolean(true),
+                ],
+            )
+            .unwrap();
+        records
+            .insert_table_row(
+                &table,
+                vec![
+                    Value::Integer(2),
+                    Value::String("Engineering".to_owned()),
+                    Value::Boolean(false),
+                ],
+            )
+            .unwrap();
+
+        indexes.create_index("idx_users_name", "users", &["name"]).unwrap();
+
+        let mut index = catalog.index_cursor_by_name("idx_users_name").unwrap();
+        assert_eq!(index.get(&name_entry_key("Engineering", 1)).unwrap().unwrap().table_key, 1);
+        assert_eq!(index.get(&name_entry_key("Engineering", 2)).unwrap().unwrap().table_key, 2);
     }
 }
