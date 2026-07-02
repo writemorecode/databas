@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::core::{
-    IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
+    IndexKeyRange, IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
     access::{DdlAccess, RecordAccess, SchemaAccess},
     catalog_manager::CatalogManager,
     cursor::{IndexCursor, TableCursor},
@@ -212,9 +212,9 @@ impl RecordAccess for Database {
         &self,
         table: &TableSchema,
         index: &IndexSchema,
-        key_prefix: Vec<u8>,
+        key_range: IndexKeyRange,
     ) -> StorageResult<IndexScan> {
-        self.records.scan_index(table, index, key_prefix)
+        self.records.scan_index(table, index, key_range)
     }
 
     fn insert_table_row(

@@ -16,9 +16,10 @@ use thiserror::Error;
 
 use crate::{
     core::{
-        ColumnSchema, DataType, Database, IndexSchema, TableKey, TableKeyBound, TableKeyRange,
-        TableSchema, Tuple, TupleSchema, Value,
+        ColumnSchema, DataType, Database, IndexKeyBound, IndexKeyRange, IndexSchema, TableKey,
+        TableKeyBound, TableKeyRange, TableSchema, Tuple, TupleSchema, Value,
         access::SchemaAccess,
+        cursor::encode_index_entry_key,
         error::{InvalidArgumentError, StorageError},
     },
     sql_parser::{
@@ -166,18 +167,10 @@ pub enum PhysicalPlan {
         /// Primary-key range to scan.
         range: TableKeyRange,
     },
-    /// Scan rows from a table through an exact secondary-index key lookup.
+    /// Scan rows from a table through a secondary-index key range.
     SecondaryIndexScan {
-        /// Table to fetch rows from.
-        table: TableSchema,
-        /// Secondary index to scan.
-        index: IndexSchema,
-        /// Bound table column matched by the index lookup.
-        column: BoundColumn,
-        /// Literal value encoded into `key`.
-        value: Value,
-        /// Encoded index-key prefix to seek.
-        key: Vec<u8>,
+        /// Scan metadata and key bounds.
+        scan: Box<SecondaryIndexScanPlan>,
     },
     /// Filter rows from an input physical operator.
     Filter {
@@ -214,6 +207,21 @@ pub enum PhysicalPlan {
         /// Maximum number of rows to emit.
         limit: u32,
     },
+}
+
+/// Metadata needed to scan a table through a secondary index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SecondaryIndexScanPlan {
+    /// Table to fetch rows from.
+    pub table: TableSchema,
+    /// Secondary index to scan.
+    pub index: IndexSchema,
+    /// Bound table column matched by the index lookup.
+    pub column: BoundColumn,
+    /// Human-readable indexed value range.
+    pub value_range: IndexValueRange,
+    /// Encoded index-key range to scan.
+    pub key_range: IndexKeyRange,
 }
 
 impl fmt::Display for PhysicalPlan {
@@ -292,9 +300,9 @@ fn physical_plan_label(plan: &PhysicalPlan) -> String {
         PhysicalPlan::PrimaryKeyRangeScan { table, range } => {
             format!("PrimaryKeyRangeScan table={} range=[{}]", table.name, range)
         }
-        PhysicalPlan::SecondaryIndexScan { table, index, column, value, .. } => format!(
-            "SecondaryIndexScan table={} index={} column={} value={}",
-            table.name, index.name, column, value
+        PhysicalPlan::SecondaryIndexScan { scan } => format!(
+            "SecondaryIndexScan table={} index={} column={} range=[{}]",
+            scan.table.name, scan.index.name, scan.column, scan.value_range
         ),
         PhysicalPlan::Filter { predicate, .. } => format!("Filter predicate={predicate}"),
         PhysicalPlan::Sort { terms, .. } => format!("Sort terms=[{}]", display_list(terms)),
@@ -350,6 +358,44 @@ pub struct BoundColumn {
     pub ordinal: usize,
     /// Storage type recorded for the column.
     pub data_type: DataType,
+}
+
+/// Inclusive or exclusive display bound for a secondary-index scan value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IndexValueBound {
+    /// The scan includes this value.
+    Inclusive(Value),
+    /// The scan excludes this value.
+    Exclusive(Value),
+}
+
+impl fmt::Display for IndexValueBound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inclusive(value) => write!(f, "{value} inclusive"),
+            Self::Exclusive(value) => write!(f, "{value} exclusive"),
+        }
+    }
+}
+
+/// Human-readable range over values in a single-column secondary index.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct IndexValueRange {
+    /// Optional lower value bound.
+    pub lower: Option<IndexValueBound>,
+    /// Optional upper value bound.
+    pub upper: Option<IndexValueBound>,
+}
+
+impl fmt::Display for IndexValueRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.lower, &self.upper) {
+            (None, None) => write!(f, "unbounded"),
+            (Some(lower), None) => write!(f, "lower={lower}"),
+            (None, Some(upper)) => write!(f, "upper={upper}"),
+            (Some(lower), Some(upper)) => write!(f, "lower={lower} upper={upper}"),
+        }
+    }
 }
 
 impl fmt::Display for BoundColumn {
@@ -697,11 +743,13 @@ impl<'db> Planner<'db> {
                         None => match self.secondary_index_predicate(table, predicate)? {
                             Some(index_predicate) => Ok(PhysicalPlan::Filter {
                                 input: Box::new(PhysicalPlan::SecondaryIndexScan {
-                                    table: table.clone(),
-                                    index: index_predicate.index,
-                                    column: index_predicate.column,
-                                    value: index_predicate.value,
-                                    key: index_predicate.key,
+                                    scan: Box::new(SecondaryIndexScanPlan {
+                                        table: table.clone(),
+                                        index: index_predicate.index,
+                                        column: index_predicate.column,
+                                        value_range: index_predicate.value_range,
+                                        key_range: index_predicate.key_range,
+                                    }),
                                 }),
                                 predicate: predicate.clone(),
                             }),
@@ -839,8 +887,8 @@ struct RangePredicate {
 struct IndexPredicate {
     index: IndexSchema,
     column: BoundColumn,
-    value: Value,
-    key: Vec<u8>,
+    value_range: IndexValueRange,
+    key_range: IndexKeyRange,
 }
 
 fn primary_key_range_predicate(
@@ -860,28 +908,115 @@ fn secondary_index_predicate(
     predicate: &PlannedExpression,
     indexes: &[IndexSchema],
 ) -> Option<IndexPredicate> {
-    match predicate {
+    let mut conjuncts = Vec::new();
+    flatten_conjuncts(predicate, &mut conjuncts);
+
+    for conjunct in &conjuncts {
+        let Some(candidate) = secondary_index_comparison(table, conjunct, indexes) else {
+            continue;
+        };
+        let mut value_range = IndexValueRange::default();
+        let mut key_range = IndexKeyRange::default();
+
+        for conjunct in &conjuncts {
+            if let Some(comparison) =
+                index_comparison_for_column(table, conjunct, &candidate.column)
+            {
+                combine_index_ranges(
+                    &mut value_range,
+                    &mut key_range,
+                    comparison.value,
+                    comparison.kind,
+                )?;
+            }
+        }
+
+        return Some(IndexPredicate {
+            index: candidate.index,
+            column: candidate.column,
+            value_range,
+            key_range,
+        });
+    }
+
+    None
+}
+
+fn flatten_conjuncts<'a>(
+    expression: &'a PlannedExpression,
+    conjuncts: &mut Vec<&'a PlannedExpression>,
+) {
+    match expression {
         PlannedExpression::Binary { left, op: Op::And, right } => {
-            secondary_index_predicate(table, left, indexes)
-                .or_else(|| secondary_index_predicate(table, right, indexes))
+            flatten_conjuncts(left, conjuncts);
+            flatten_conjuncts(right, conjuncts);
         }
-        PlannedExpression::Binary { left, op: Op::EqualsEquals, right } => {
-            secondary_index_from_comparison(table, left, right, indexes)
-                .or_else(|| secondary_index_from_comparison(table, right, left, indexes))
-        }
-        PlannedExpression::Binary { .. }
-        | PlannedExpression::Literal(_)
-        | PlannedExpression::Column(_)
-        | PlannedExpression::Unary { .. } => None,
+        _ => conjuncts.push(expression),
     }
 }
 
-fn secondary_index_from_comparison(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexComparisonKind {
+    Equals,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
+}
+
+struct IndexComparison<'a> {
+    column: BoundColumn,
+    value: &'a Value,
+    kind: IndexComparisonKind,
+}
+
+struct SecondaryIndexCandidate<'a> {
+    index: IndexSchema,
+    column: BoundColumn,
+    _marker: std::marker::PhantomData<&'a ()>,
+}
+
+fn secondary_index_comparison<'a>(
+    table: &TableSchema,
+    comparison: &'a PlannedExpression,
+    indexes: &[IndexSchema],
+) -> Option<SecondaryIndexCandidate<'a>> {
+    let comparison = index_comparison(table, comparison)?;
+    let index =
+        indexes.iter().find(|index| exact_single_column_index(index, table, &comparison.column))?;
+    Some(SecondaryIndexCandidate {
+        index: index.clone(),
+        column: comparison.column,
+        _marker: std::marker::PhantomData,
+    })
+}
+
+fn index_comparison_for_column<'a>(
+    table: &TableSchema,
+    comparison: &'a PlannedExpression,
+    column: &BoundColumn,
+) -> Option<IndexComparison<'a>> {
+    let comparison = index_comparison(table, comparison)?;
+    (comparison.column == *column).then_some(comparison)
+}
+
+fn index_comparison<'a>(
+    table: &TableSchema,
+    comparison: &'a PlannedExpression,
+) -> Option<IndexComparison<'a>> {
+    let PlannedExpression::Binary { left, op, right } = comparison else {
+        return None;
+    };
+    index_comparison_from_operands(table, left, *op, right)
+        .or_else(|| index_comparison_from_reversed_operands(table, left, *op, right))
+}
+
+fn index_comparison_from_operands<'a>(
     table: &TableSchema,
     column: &PlannedExpression,
-    value: &PlannedExpression,
-    indexes: &[IndexSchema],
-) -> Option<IndexPredicate> {
+    op: Op,
+    value: &'a PlannedExpression,
+) -> Option<IndexComparison<'a>> {
     let PlannedExpression::Column(column) = column else {
         return None;
     };
@@ -892,9 +1027,155 @@ fn secondary_index_from_comparison(
         return None;
     }
 
-    let index = indexes.iter().find(|index| exact_single_column_index(index, table, column))?;
-    let key = Tuple::new(vec![value.clone()]).to_bytes().ok()?;
-    Some(IndexPredicate { index: index.clone(), column: column.clone(), value: value.clone(), key })
+    let kind = match op {
+        Op::EqualsEquals => IndexComparisonKind::Equals,
+        Op::GreaterThan => IndexComparisonKind::GreaterThan,
+        Op::GreaterThanOrEqual => IndexComparisonKind::GreaterThanOrEqual,
+        Op::LessThan => IndexComparisonKind::LessThan,
+        Op::LessThanOrEqual => IndexComparisonKind::LessThanOrEqual,
+        Op::And | Op::Or | Op::NotEquals | Op::Not | Op::Add | Op::Sub | Op::Mul | Op::Div => {
+            return None;
+        }
+    };
+
+    if !secondary_index_comparison_is_order_compatible(column.data_type, kind) {
+        return None;
+    }
+
+    Some(IndexComparison { column: column.clone(), value, kind })
+}
+
+fn index_comparison_from_reversed_operands<'a>(
+    table: &TableSchema,
+    value: &'a PlannedExpression,
+    op: Op,
+    column: &PlannedExpression,
+) -> Option<IndexComparison<'a>> {
+    let reversed = reverse_comparison_op(op)?;
+    index_comparison_from_operands(table, column, reversed, value)
+}
+
+fn reverse_comparison_op(op: Op) -> Option<Op> {
+    match op {
+        Op::EqualsEquals => Some(Op::EqualsEquals),
+        Op::GreaterThan => Some(Op::LessThan),
+        Op::GreaterThanOrEqual => Some(Op::LessThanOrEqual),
+        Op::LessThan => Some(Op::GreaterThan),
+        Op::LessThanOrEqual => Some(Op::GreaterThanOrEqual),
+        Op::And | Op::Or | Op::NotEquals | Op::Not | Op::Add | Op::Sub | Op::Mul | Op::Div => None,
+    }
+}
+
+fn secondary_index_comparison_is_order_compatible(
+    data_type: DataType,
+    kind: IndexComparisonKind,
+) -> bool {
+    kind == IndexComparisonKind::Equals || data_type != DataType::Text
+}
+
+fn combine_index_ranges(
+    value_range: &mut IndexValueRange,
+    key_range: &mut IndexKeyRange,
+    value: &Value,
+    kind: IndexComparisonKind,
+) -> Option<()> {
+    match kind {
+        IndexComparisonKind::Equals => {
+            combine_index_lower_bound(value_range, key_range, value.clone(), true)?;
+            combine_index_upper_bound(value_range, key_range, value.clone(), true)?;
+        }
+        IndexComparisonKind::GreaterThan => {
+            combine_index_lower_bound(value_range, key_range, value.clone(), false)?;
+        }
+        IndexComparisonKind::GreaterThanOrEqual => {
+            combine_index_lower_bound(value_range, key_range, value.clone(), true)?;
+        }
+        IndexComparisonKind::LessThan => {
+            combine_index_upper_bound(value_range, key_range, value.clone(), false)?;
+        }
+        IndexComparisonKind::LessThanOrEqual => {
+            combine_index_upper_bound(value_range, key_range, value.clone(), true)?;
+        }
+    }
+    Some(())
+}
+
+fn combine_index_lower_bound(
+    value_range: &mut IndexValueRange,
+    key_range: &mut IndexKeyRange,
+    value: Value,
+    inclusive: bool,
+) -> Option<()> {
+    let key = index_lower_key(&value, inclusive)?;
+    let value_bound = if inclusive {
+        IndexValueBound::Inclusive(value)
+    } else {
+        IndexValueBound::Exclusive(value)
+    };
+    let key_bound =
+        if inclusive { IndexKeyBound::Inclusive(key) } else { IndexKeyBound::Exclusive(key) };
+
+    if index_lower_is_tighter(key_range.lower.as_ref(), &key_bound) {
+        value_range.lower = Some(value_bound);
+        key_range.lower = Some(key_bound);
+    }
+    Some(())
+}
+
+fn combine_index_upper_bound(
+    value_range: &mut IndexValueRange,
+    key_range: &mut IndexKeyRange,
+    value: Value,
+    inclusive: bool,
+) -> Option<()> {
+    let key = index_upper_key(&value, inclusive)?;
+    let value_bound = if inclusive {
+        IndexValueBound::Inclusive(value)
+    } else {
+        IndexValueBound::Exclusive(value)
+    };
+    let key_bound =
+        if inclusive { IndexKeyBound::Inclusive(key) } else { IndexKeyBound::Exclusive(key) };
+
+    if index_upper_is_tighter(key_range.upper.as_ref(), &key_bound) {
+        value_range.upper = Some(value_bound);
+        key_range.upper = Some(key_bound);
+    }
+    Some(())
+}
+
+fn index_lower_key(value: &Value, inclusive: bool) -> Option<Vec<u8>> {
+    let prefix = Tuple::new(vec![value.clone()]).to_bytes().ok()?;
+    let table_key = if inclusive { TableKey::MIN } else { TableKey::MAX };
+    Some(encode_index_entry_key(&prefix, table_key))
+}
+
+fn index_upper_key(value: &Value, inclusive: bool) -> Option<Vec<u8>> {
+    let prefix = Tuple::new(vec![value.clone()]).to_bytes().ok()?;
+    let table_key = if inclusive { TableKey::MAX } else { TableKey::MIN };
+    Some(encode_index_entry_key(&prefix, table_key))
+}
+
+fn index_lower_is_tighter(current: Option<&IndexKeyBound>, candidate: &IndexKeyBound) -> bool {
+    match current {
+        None => true,
+        Some(current) => {
+            candidate.key() > current.key()
+                || (candidate.key() == current.key()
+                    && matches!(candidate, IndexKeyBound::Exclusive(_)))
+        }
+    }
+}
+
+fn index_upper_is_tighter(current: Option<&IndexKeyBound>, candidate: &IndexKeyBound) -> bool {
+    match current {
+        None => true,
+        Some(current) => {
+            candidate.key() < current.key()
+                || (candidate.key() == current.key()
+                    && matches!(candidate, IndexKeyBound::Exclusive(_)))
+        }
+    }
 }
 
 fn exact_single_column_index(
@@ -1617,11 +1898,11 @@ mod tests {
     }
 
     #[test]
-    fn select_secondary_index_column_range_stays_full_table_scan() {
+    fn select_secondary_index_integer_column_range_uses_index_scan() {
         let (_dir, database) = database_with_users();
-        database.create_index("idx_users_name", "users", &["name"]).unwrap();
+        database.create_index("idx_users_age", "users", &["age"]).unwrap();
         let planner = Planner::new(&database);
-        let statement = parse("SELECT name FROM users WHERE 'Ada' <= name AND name < 'Linus';");
+        let statement = parse("SELECT name FROM users WHERE 18 <= age AND age < 65;");
 
         let plan = planner.plan_statement(&statement).unwrap();
 
@@ -1631,8 +1912,16 @@ mod tests {
         let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
             panic!("expected filter under project: {plan:?}");
         };
-        assert!(
-            matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        let PhysicalPlan::SecondaryIndexScan { scan } = input.as_ref() else {
+            panic!("expected secondary index scan under residual filter: {plan:?}");
+        };
+        assert_eq!(scan.index.name, "idx_users_age");
+        assert_eq!(
+            &scan.value_range,
+            &IndexValueRange {
+                lower: Some(IndexValueBound::Inclusive(Value::Integer(18))),
+                upper: Some(IndexValueBound::Exclusive(Value::Integer(65))),
+            }
         );
     }
 
@@ -1664,14 +1953,19 @@ mod tests {
                 right: Box::new(PlannedExpression::Literal(Value::String("Ada".to_owned()))),
             }
         );
-        let PhysicalPlan::SecondaryIndexScan { table, index, column, value, .. } = input.as_ref()
-        else {
+        let PhysicalPlan::SecondaryIndexScan { scan } = input.as_ref() else {
             panic!("expected secondary index scan under residual filter: {plan:?}");
         };
-        assert_eq!(table.name, "users");
-        assert_eq!(index.name, "idx_users_name");
-        assert_eq!(column.name, "name");
-        assert_eq!(value, &Value::String("Ada".to_owned()));
+        assert_eq!(scan.table.name, "users");
+        assert_eq!(scan.index.name, "idx_users_name");
+        assert_eq!(scan.column.name, "name");
+        assert_eq!(
+            &scan.value_range,
+            &IndexValueRange {
+                lower: Some(IndexValueBound::Inclusive(Value::String("Ada".to_owned()))),
+                upper: Some(IndexValueBound::Inclusive(Value::String("Ada".to_owned()))),
+            }
+        );
     }
 
     #[test]
@@ -1702,6 +1996,67 @@ mod tests {
     }
 
     #[test]
+    fn select_text_secondary_index_range_stays_full_table_scan() {
+        let (_dir, database) = database_with_users();
+        database.create_index("idx_users_name", "users", &["name"]).unwrap();
+        let planner = Planner::new(&database);
+        let statement =
+            parse("SELECT name FROM users WHERE name >= 'Amy' AND name <= 'Charlotte';");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let PhysicalPlan::Project { input, .. } = &plan.physical else {
+            panic!("expected project root: {plan:?}");
+        };
+        let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+            panic!("expected residual filter under project: {plan:?}");
+        };
+        assert!(
+            matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        );
+    }
+
+    #[test]
+    fn select_reversed_text_secondary_index_range_stays_full_table_scan() {
+        let (_dir, database) = database_with_users();
+        database.create_index("idx_users_name", "users", &["name"]).unwrap();
+        let planner = Planner::new(&database);
+        let statement = parse("SELECT name FROM users WHERE 'Amy' < name AND 'Charlotte' >= name;");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let PhysicalPlan::Project { input, .. } = &plan.physical else {
+            panic!("expected project root: {plan:?}");
+        };
+        let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+            panic!("expected residual filter under project: {plan:?}");
+        };
+        assert!(
+            matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        );
+    }
+
+    #[test]
+    fn secondary_index_selection_skips_text_range_conjuncts() {
+        let (_dir, database) = database_with_users();
+        database.create_index("idx_users_name", "users", &["name"]).unwrap();
+        let planner = Planner::new(&database);
+        let statement = parse("SELECT name FROM users WHERE age == 7 AND name >= 'Amy';");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let PhysicalPlan::Project { input, .. } = &plan.physical else {
+            panic!("expected project root: {plan:?}");
+        };
+        let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+            panic!("expected residual filter under project: {plan:?}");
+        };
+        assert!(
+            matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        );
+    }
+
+    #[test]
     fn leftmost_usable_secondary_index_predicate_wins() {
         let (_dir, database) = database_with_users();
         database.create_index("idx_users_name", "users", &["name"]).unwrap();
@@ -1717,12 +2072,18 @@ mod tests {
         let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
             panic!("expected residual filter under project: {plan:?}");
         };
-        let PhysicalPlan::SecondaryIndexScan { index, column, value, .. } = input.as_ref() else {
+        let PhysicalPlan::SecondaryIndexScan { scan } = input.as_ref() else {
             panic!("expected secondary index scan under residual filter: {plan:?}");
         };
-        assert_eq!(index.name, "idx_users_age");
-        assert_eq!(column.name, "age");
-        assert_eq!(value, &Value::Integer(7));
+        assert_eq!(scan.index.name, "idx_users_age");
+        assert_eq!(scan.column.name, "age");
+        assert_eq!(
+            &scan.value_range,
+            &IndexValueRange {
+                lower: Some(IndexValueBound::Inclusive(Value::Integer(7))),
+                upper: Some(IndexValueBound::Inclusive(Value::Integer(7))),
+            }
+        );
     }
 
     #[test]
@@ -1741,10 +2102,10 @@ mod tests {
         let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
             panic!("expected residual filter under project: {plan:?}");
         };
-        let PhysicalPlan::SecondaryIndexScan { index, .. } = input.as_ref() else {
+        let PhysicalPlan::SecondaryIndexScan { scan } = input.as_ref() else {
             panic!("expected secondary index scan under residual filter: {plan:?}");
         };
-        assert_eq!(index.name, "idx_users_name_first");
+        assert_eq!(scan.index.name, "idx_users_name_first");
     }
 
     #[test]

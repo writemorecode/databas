@@ -679,6 +679,80 @@ fn select_with_secondary_index_equality_applies_residual_filter() {
 }
 
 #[test]
+fn select_with_text_index_range_returns_matching_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES \
+         (1, 'Zoe', TRUE), \
+         (2, 'Amy', TRUE), \
+         (3, 'Ada', TRUE), \
+         (4, 'Charlotte', TRUE), \
+         (5, 'Bob', TRUE);",
+    )
+    .unwrap();
+
+    let output =
+        execute_sql(&database, "SELECT id FROM users WHERE name >= 'Amy' AND name <= 'Charlotte';")
+            .unwrap();
+
+    let rows = collect_rows(output).unwrap();
+    assert_eq!(rows.iter().map(|row| row.table_key).collect::<Vec<_>>(), vec![2, 4, 5]);
+    assert_eq!(
+        rows.iter().map(values).collect::<Vec<_>>(),
+        vec![vec![Value::Integer(2)], vec![Value::Integer(4)], vec![Value::Integer(5)]]
+    );
+}
+
+#[test]
+fn select_with_text_index_exclusive_range_excludes_boundary_values() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES \
+         (1, 'Amy', TRUE), (2, 'Bob', TRUE), (3, 'Charlotte', TRUE);",
+    )
+    .unwrap();
+
+    let output =
+        execute_sql(&database, "SELECT id FROM users WHERE name > 'Amy' AND name < 'Charlotte';")
+            .unwrap();
+
+    let rows = collect_rows(output).unwrap();
+    assert_eq!(rows.iter().map(|row| row.table_key).collect::<Vec<_>>(), vec![2]);
+    assert_eq!(rows.iter().map(values).collect::<Vec<_>>(), vec![vec![Value::Integer(2)]]);
+}
+
+#[test]
+fn select_with_text_index_range_does_not_skip_short_matching_values() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES \
+         (1, 'Bob', TRUE), (2, 'Zo', TRUE), (3, 'Charlie', TRUE);",
+    )
+    .unwrap();
+
+    let output = execute_sql(&database, "SELECT id FROM users WHERE name > 'Bob';").unwrap();
+
+    let rows = collect_rows(output).unwrap();
+    assert_eq!(rows.iter().map(|row| row.table_key).collect::<Vec<_>>(), vec![2, 3]);
+    assert_eq!(
+        rows.iter().map(values).collect::<Vec<_>>(),
+        vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]
+    );
+}
+
+#[test]
 fn explain_select_reports_secondary_index_scan_choice() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
@@ -692,7 +766,7 @@ fn explain_select_reports_secondary_index_scan_choice() {
         panic!("expected explain output");
     };
     assert!(plan.contains(
-        "SecondaryIndexScan table=users index=idx_users_name column=users.name value=Ada"
+        "SecondaryIndexScan table=users index=idx_users_name column=users.name range=[lower=Ada inclusive upper=Ada inclusive]"
     ));
 }
 

@@ -44,6 +44,62 @@ pub type CatalogId = i32;
 pub type TableKey = i32;
 pub(crate) type SlotId = u16;
 
+/// Inclusive or exclusive bound over encoded secondary-index B+-tree keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexKeyBound {
+    /// The bound includes the stored key bytes.
+    Inclusive(Vec<u8>),
+    /// The bound excludes the stored key bytes.
+    Exclusive(Vec<u8>),
+}
+
+impl IndexKeyBound {
+    /// Returns the encoded key bytes stored in this bound.
+    pub(crate) fn key(&self) -> &[u8] {
+        match self {
+            Self::Inclusive(key) | Self::Exclusive(key) => key,
+        }
+    }
+
+    /// Returns whether `key` satisfies this lower bound.
+    pub(crate) fn contains_lower(&self, key: &[u8]) -> bool {
+        match self {
+            Self::Inclusive(value) => key >= value,
+            Self::Exclusive(value) => key > value,
+        }
+    }
+
+    /// Returns whether `key` satisfies this upper bound.
+    pub(crate) fn contains_upper(&self, key: &[u8]) -> bool {
+        match self {
+            Self::Inclusive(value) => key <= value,
+            Self::Exclusive(value) => key < value,
+        }
+    }
+}
+
+/// Ordered key-byte range for scanning a secondary-index B+-tree.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IndexKeyRange {
+    /// Optional lower bound.
+    pub lower: Option<IndexKeyBound>,
+    /// Optional upper bound.
+    pub upper: Option<IndexKeyBound>,
+}
+
+impl IndexKeyRange {
+    /// Returns whether `key` is inside the range.
+    pub(crate) fn contains(&self, key: &[u8]) -> bool {
+        self.lower.as_ref().is_none_or(|bound| bound.contains_lower(key))
+            && self.upper.as_ref().is_none_or(|bound| bound.contains_upper(key))
+    }
+
+    /// Returns whether `key` has moved beyond this range's upper bound.
+    pub(crate) fn is_past_upper(&self, key: &[u8]) -> bool {
+        self.upper.as_ref().is_some_and(|bound| !bound.contains_upper(key))
+    }
+}
+
 /// Inclusive or exclusive bound over table primary keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableKeyBound {

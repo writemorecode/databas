@@ -1,5 +1,5 @@
 use crate::core::{
-    IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
+    IndexKeyRange, IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
     error::StorageResult,
     record_manager::{IndexScan, TableScan},
 };
@@ -34,7 +34,7 @@ pub(crate) trait RecordAccess {
         &self,
         table: &TableSchema,
         index: &IndexSchema,
-        key_prefix: Vec<u8>,
+        key_range: IndexKeyRange,
     ) -> StorageResult<IndexScan>;
 
     fn insert_table_row(
