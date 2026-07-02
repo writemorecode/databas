@@ -272,10 +272,10 @@ impl<'db> Executor<'db> {
                     .map(|record| record.map_err(Into::into));
                 Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
             }
-            PhysicalPlan::SecondaryIndexScan { table, index, key, .. } => {
+            PhysicalPlan::SecondaryIndexScan { scan } => {
                 let rows = self
                     .database
-                    .scan_index(&table, &index, key)?
+                    .scan_index(&scan.table, &scan.index, scan.key_range)?
                     .map(|record| record.map_err(Into::into));
                 Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
             }

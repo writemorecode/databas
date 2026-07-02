@@ -1,6 +1,6 @@
 use crate::core::{
-    CorruptionComponent, CorruptionError, CorruptionKind, DataType, IndexSchema, OwnedTableRecord,
-    TableKey, TableKeyBound, TableKeyRange, TableSchema, Tuple, Value,
+    CorruptionComponent, CorruptionError, CorruptionKind, DataType, IndexKeyRange, IndexSchema,
+    OwnedTableRecord, TableKey, TableKeyBound, TableKeyRange, TableSchema, Tuple, Value,
     catalog_manager::CatalogManager,
     cursor::{IndexCursor, TableCursor},
     error::{ConstraintError, InvalidArgumentError, StorageError, StorageResult},
@@ -27,7 +27,7 @@ pub(crate) struct IndexScan {
     table: TableSchema,
     table_cursor: TableCursor,
     index_cursor: IndexCursor,
-    key_prefix: Vec<u8>,
+    key_range: IndexKeyRange,
     initialized: bool,
     done: bool,
 }
@@ -58,13 +58,13 @@ impl RecordManager {
         &self,
         table: &TableSchema,
         index: &IndexSchema,
-        key_prefix: Vec<u8>,
+        key_range: IndexKeyRange,
     ) -> StorageResult<IndexScan> {
         Ok(IndexScan {
             table: table.clone(),
             table_cursor: self.catalog.table_cursor_by_name(&table.name)?,
             index_cursor: self.catalog.index_cursor_by_name(&index.name)?,
-            key_prefix,
+            key_range,
             initialized: false,
             done: false,
         })
@@ -133,38 +133,43 @@ impl Iterator for IndexScan {
             return None;
         }
 
-        let entry = if self.initialized {
-            self.index_cursor.next_owned_entry()
-        } else {
-            self.initialized = true;
-            self.first_entry()
-        };
+        loop {
+            let entry = if self.initialized {
+                self.index_cursor.next_owned_entry()
+            } else {
+                self.initialized = true;
+                self.first_entry()
+            };
 
-        match entry {
-            Ok(Some(entry)) if entry.key.starts_with(&self.key_prefix) => {
-                match self.table_cursor.get_owned_record(entry.table_key) {
-                    Ok(Some(record)) => Some(Ok(record)),
+            match entry {
+                Ok(Some(entry)) if self.key_range.is_past_upper(&entry.key) => {
+                    self.done = true;
+                    return None;
+                }
+                Ok(Some(entry)) if !self.key_range.contains(&entry.key) => continue,
+                Ok(Some(entry)) => match self.table_cursor.get_owned_record(entry.table_key) {
+                    Ok(Some(record)) => return Some(Ok(record)),
                     Ok(None) => {
                         self.done = true;
-                        Some(Err(invalid_index_entry(
+                        return Some(Err(invalid_index_entry(
                             &self.table,
                             entry.table_key,
                             "index entry references missing table row",
-                        )))
+                        )));
                     }
                     Err(error) => {
                         self.done = true;
-                        Some(Err(error))
+                        return Some(Err(error));
                     }
+                },
+                Ok(None) => {
+                    self.done = true;
+                    return None;
                 }
-            }
-            Ok(Some(_)) | Ok(None) => {
-                self.done = true;
-                None
-            }
-            Err(error) => {
-                self.done = true;
-                Some(Err(error))
+                Err(error) => {
+                    self.done = true;
+                    return Some(Err(error));
+                }
             }
         }
     }
@@ -172,10 +177,21 @@ impl Iterator for IndexScan {
 
 impl IndexScan {
     fn first_entry(&mut self) -> StorageResult<Option<crate::core::OwnedIndexEntry>> {
-        if self.index_cursor.seek_to_key(&self.key_prefix)? {
-            self.index_cursor.current_owned_entry()
-        } else {
-            Ok(None)
+        match self.key_range.lower.as_ref() {
+            Some(lower) => {
+                if self.index_cursor.seek_to_key(lower.key())? {
+                    self.index_cursor.current_owned_entry()
+                } else {
+                    Ok(None)
+                }
+            }
+            None => {
+                if self.index_cursor.seek_to_first()? {
+                    self.index_cursor.current_owned_entry()
+                } else {
+                    Ok(None)
+                }
+            }
         }
     }
 }
