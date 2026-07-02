@@ -6,6 +6,7 @@ use super::*;
 use crate::{
     core::{
         ColumnSchema, DataType, PAGE_SIZE, TableKey, Tuple, TupleSchema,
+        cursor::encode_index_entry_key,
         error::{ConstraintError, InternalError, InvariantViolation, StorageError},
     },
     error::DatabaseError,
@@ -161,7 +162,7 @@ fn assert_user_row(database: &Database, table_key: TableKey, expected_name: &str
 
 fn assert_name_index_entry(database: &Database, name: &str, table_key: TableKey) {
     let mut index = database.index_cursor_by_name("idx_users_name").unwrap();
-    let key = Tuple::new(vec![Value::String(name.to_owned())]).to_bytes().unwrap();
+    let key = name_index_entry_key(name, table_key);
     let entry = index.get(&key).unwrap().expect("index entry should exist");
     assert_eq!(entry.table_key, table_key);
 }
@@ -174,7 +175,19 @@ fn assert_user_row_absent(database: &Database, table_key: TableKey) {
 fn assert_name_index_absent(database: &Database, name: &str) {
     let mut index = database.index_cursor_by_name("idx_users_name").unwrap();
     let key = Tuple::new(vec![Value::String(name.to_owned())]).to_bytes().unwrap();
-    assert!(index.get(&key).unwrap().is_none());
+    assert_index_prefix_absent(&mut index, &key);
+}
+
+fn assert_index_prefix_absent(index: &mut crate::core::cursor::IndexCursor, key: &[u8]) {
+    assert!(
+        !index.seek_to_key(key).unwrap()
+            || !index.current_owned_entry().unwrap().unwrap().key.starts_with(key)
+    );
+}
+
+fn name_index_entry_key(name: &str, table_key: TableKey) -> Vec<u8> {
+    let key = Tuple::new(vec![Value::String(name.to_owned())]).to_bytes().unwrap();
+    encode_index_entry_key(&key, table_key)
 }
 
 #[test]
@@ -797,7 +810,7 @@ fn failed_multi_row_insert_in_explicit_transaction_rolls_back_statement_before_c
     let mut users = reopened.table_cursor_by_name("users").unwrap();
     let mut index = reopened.index_cursor_by_name("idx_users_name").unwrap();
     let ada = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
-    let linus = Tuple::new(vec![Value::String("Linus".to_owned())]).to_bytes().unwrap();
+    let linus = name_index_entry_key("Linus", 2);
     let row = users.get(2).unwrap().expect("successful statement should commit");
 
     assert_eq!(
@@ -805,7 +818,7 @@ fn failed_multi_row_insert_in_explicit_transaction_rolls_back_statement_before_c
         vec![Value::Integer(2), Value::String("Linus".to_owned()), Value::Boolean(true)]
     );
     assert!(users.get(1).unwrap().is_none());
-    assert!(index.get(&ada).unwrap().is_none());
+    assert_index_prefix_absent(&mut index, &ada);
     assert_eq!(index.get(&linus).unwrap().unwrap().table_key, 2);
 }
 
@@ -872,7 +885,7 @@ fn create_index_backfills_existing_table_rows() {
     executor.execute(create_index_plan.physical).unwrap();
 
     let mut index = database.index_cursor_by_name("idx_users_name").unwrap();
-    let key = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
+    let key = name_index_entry_key("Ada", 1);
     let entry = index.get(&key).unwrap().expect("index entry should be backfilled");
 
     assert_eq!(entry.table_key, 1);
@@ -895,10 +908,32 @@ fn insert_values_updates_existing_secondary_indexes() {
     executor.execute(insert_plan.physical).unwrap();
 
     let mut index = database.index_cursor_by_name("idx_users_name").unwrap();
-    let key = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
+    let key = name_index_entry_key("Ada", 1);
     let entry = index.get(&key).unwrap().expect("index entry should track inserted row");
 
     assert_eq!(entry.table_key, 1);
+}
+
+#[test]
+fn secondary_indexes_allow_duplicate_values_and_persist_entries() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    let database = Database::create(&path).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES \
+         (1, 'Engineering', TRUE), (2, 'Engineering', FALSE);",
+    )
+    .unwrap();
+    database.flush().unwrap();
+    drop(database);
+
+    let reopened = Database::open(&path).unwrap();
+    assert_name_index_entry(&reopened, "Engineering", 1);
+    assert_name_index_entry(&reopened, "Engineering", 2);
 }
 
 #[test]
@@ -1585,7 +1620,7 @@ fn failed_indexed_multi_row_insert_rolls_back_after_reopen() {
     let ada = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
 
     assert!(users.get(1).unwrap().is_none());
-    assert!(index.get(&ada).unwrap().is_none());
+    assert_index_prefix_absent(&mut index, &ada);
 }
 
 #[test]
@@ -1623,7 +1658,7 @@ fn uncommitted_flushed_insert_is_undone_during_recovery() {
     let ada = Tuple::new(vec![Value::String("Ada".to_owned())]).to_bytes().unwrap();
 
     assert!(users.get(1).unwrap().is_none());
-    assert!(index.get(&ada).unwrap().is_none());
+    assert_index_prefix_absent(&mut index, &ada);
 }
 
 #[test]
