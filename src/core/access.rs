@@ -1,10 +1,13 @@
 use crate::core::{
     IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
-    error::StorageResult, record_manager::TableScan,
+    error::StorageResult,
+    record_manager::{IndexScan, TableScan},
 };
 
 pub(crate) trait SchemaAccess {
     fn table_schema_by_name(&self, name: &str) -> StorageResult<TableSchema>;
+
+    fn index_schemas_for_table(&self, table: &TableSchema) -> StorageResult<Vec<IndexSchema>>;
 }
 
 pub(crate) trait DdlAccess {
@@ -26,6 +29,13 @@ pub(crate) trait RecordAccess {
         table: &TableSchema,
         range: TableKeyRange,
     ) -> StorageResult<TableScan>;
+
+    fn scan_index(
+        &self,
+        table: &TableSchema,
+        index: &IndexSchema,
+        key_prefix: Vec<u8>,
+    ) -> StorageResult<IndexScan>;
 
     fn insert_table_row(
         &self,

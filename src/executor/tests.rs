@@ -631,6 +631,72 @@ fn select_with_primary_key_range_returns_only_matching_rows() {
 }
 
 #[test]
+fn select_with_secondary_index_equality_returns_matching_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES \
+         (1, 'Engineering', TRUE), (2, 'Engineering', FALSE), (3, 'Sales', TRUE);",
+    )
+    .unwrap();
+
+    let output =
+        execute_sql(&database, "SELECT id FROM users WHERE name == 'Engineering';").unwrap();
+
+    let rows = collect_rows(output).unwrap();
+    assert_eq!(rows.iter().map(|row| row.table_key).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(
+        rows.iter().map(values).collect::<Vec<_>>(),
+        vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]
+    );
+}
+
+#[test]
+fn select_with_secondary_index_equality_applies_residual_filter() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES \
+         (1, 'Engineering', TRUE), (2, 'Engineering', FALSE), (3, 'Sales', FALSE);",
+    )
+    .unwrap();
+
+    let output = execute_sql(
+        &database,
+        "SELECT id FROM users WHERE name == 'Engineering' AND active == FALSE;",
+    )
+    .unwrap();
+
+    let rows = collect_rows(output).unwrap();
+    assert_eq!(rows.iter().map(|row| row.table_key).collect::<Vec<_>>(), vec![2]);
+    assert_eq!(rows.iter().map(values).collect::<Vec<_>>(), vec![vec![Value::Integer(2)]]);
+}
+
+#[test]
+fn explain_select_reports_secondary_index_scan_choice() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+
+    let output =
+        execute_sql(&database, "EXPLAIN SELECT id FROM users WHERE name == 'Ada';").unwrap();
+
+    let ExecutionOutput::Explain(plan) = output else {
+        panic!("expected explain output");
+    };
+    assert!(plan.contains(
+        "SecondaryIndexScan table=users index=idx_users_name column=users.name value=Ada"
+    ));
+}
+
+#[test]
 fn insert_values_uses_primary_keys_and_persists_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
@@ -1024,6 +1090,29 @@ fn delete_removes_secondary_index_entries() {
 }
 
 #[test]
+fn delete_where_can_use_secondary_index_scan() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES \
+         (1, 'Engineering', TRUE), (2, 'Engineering', TRUE), (3, 'Sales', TRUE);",
+    )
+    .unwrap();
+
+    let output = execute_sql(&database, "DELETE FROM users WHERE name == 'Engineering';").unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(2)));
+    assert_user_row_absent(&database, 1);
+    assert_user_row_absent(&database, 2);
+    assert_user_row(&database, 3, "Sales");
+    assert_name_index_absent(&database, "Engineering");
+    assert_name_index_entry(&database, "Sales", 3);
+}
+
+#[test]
 fn delete_with_non_boolean_where_does_not_delete_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
@@ -1205,6 +1294,45 @@ fn update_refreshes_secondary_index_entries() {
     assert_name_index_absent(&database, "Ada");
     assert_name_index_entry(&database, "Linus", 1);
     assert_name_index_entry(&database, "Grace", 2);
+}
+
+#[test]
+fn update_where_can_use_secondary_index_scan() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES \
+         (1, 'Engineering', TRUE), (2, 'Engineering', FALSE), (3, 'Sales', TRUE);",
+    )
+    .unwrap();
+
+    let output =
+        execute_sql(&database, "UPDATE users SET active = FALSE WHERE name == 'Engineering';")
+            .unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(2)));
+    let mut users = database.table_cursor_by_name("users").unwrap();
+    let first = users.get(1).unwrap().expect("updated row should exist");
+    let second = users.get(2).unwrap().expect("updated row should exist");
+    let third = users.get(3).unwrap().expect("untouched row should exist");
+    assert_eq!(
+        values(&first),
+        vec![Value::Integer(1), Value::String("Engineering".to_owned()), Value::Boolean(false)]
+    );
+    assert_eq!(
+        values(&second),
+        vec![Value::Integer(2), Value::String("Engineering".to_owned()), Value::Boolean(false)]
+    );
+    assert_eq!(
+        values(&third),
+        vec![Value::Integer(3), Value::String("Sales".to_owned()), Value::Boolean(true)]
+    );
+    assert_name_index_entry(&database, "Engineering", 1);
+    assert_name_index_entry(&database, "Engineering", 2);
+    assert_name_index_entry(&database, "Sales", 3);
 }
 
 #[test]
