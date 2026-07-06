@@ -166,11 +166,6 @@ impl TableCursor {
         self.inner.state()
     }
 
-    /// Resets the cursor back to the table root page.
-    pub fn seek_to_root(&mut self) {
-        self.inner.seek_to_root();
-    }
-
     /// Positions the cursor on the first table record.
     pub fn seek_to_first(&mut self) -> StorageResult<bool> {
         self.inner.seek_to_first()
@@ -192,17 +187,13 @@ impl TableCursor {
         self.inner.next_record()?.map(|record| self.table_record_from_raw(record)).transpose()
     }
 
-    /// Moves to the previous table record in table key order.
-    pub fn prev_record(&mut self) -> StorageResult<Option<TableRecord>> {
-        self.inner.prev_record()?.map(|record| self.table_record_from_raw(record)).transpose()
-    }
-
     /// Inserts a table record keyed by `table_key`.
     pub fn insert(&mut self, table_key: TableKey, record: &[u8]) -> StorageResult<()> {
         self.inner.insert(&encode_table_key(table_key), record)
     }
 
     /// Looks up a table record by table key.
+    #[cfg(test)]
     pub fn get(&mut self, table_key: TableKey) -> StorageResult<Option<OwnedTableRecord>> {
         self.inner
             .get(&encode_table_key(table_key))?
@@ -252,11 +243,6 @@ impl IndexCursor {
         self.inner.state()
     }
 
-    /// Resets the cursor back to the index root page.
-    pub fn seek_to_root(&mut self) {
-        self.inner.seek_to_root();
-    }
-
     /// Positions the cursor on the first index entry.
     pub fn seek_to_first(&mut self) -> StorageResult<bool> {
         self.inner.seek_to_first()
@@ -278,17 +264,13 @@ impl IndexCursor {
         self.inner.next_record()?.map(IndexEntry::try_from).transpose()
     }
 
-    /// Moves to the previous index entry in key order.
-    pub fn prev_entry(&mut self) -> StorageResult<Option<IndexEntry>> {
-        self.inner.prev_record()?.map(IndexEntry::try_from).transpose()
-    }
-
     /// Inserts an index entry from `key` to `table_key`.
     pub fn insert(&mut self, key: &[u8], table_key: TableKey) -> StorageResult<()> {
         self.inner.insert(key, &encode_index_table_key(table_key))
     }
 
     /// Looks up an index entry by key.
+    #[cfg(test)]
     pub fn get(&mut self, key: &[u8]) -> StorageResult<Option<OwnedIndexEntry>> {
         self.inner
             .get(key)?
@@ -297,11 +279,13 @@ impl IndexCursor {
     }
 
     /// Looks up an index entry by key without eagerly copying page-resident bytes.
+    #[cfg(test)]
     pub fn get_entry(&mut self, key: &[u8]) -> StorageResult<Option<IndexEntry>> {
         self.inner.get(key)?.map(IndexEntry::try_from).transpose()
     }
 
     /// Replaces the table key stored for an existing index `key`.
+    #[cfg(test)]
     pub fn update(&mut self, key: &[u8], table_key: TableKey) -> StorageResult<()> {
         self.inner.update(key, &encode_index_table_key(table_key))
     }
@@ -505,10 +489,6 @@ mod tests {
             cursor.current_record().unwrap().map(|record| record.to_owned_record().unwrap()),
             Some(OwnedTableRecord { table_key: 20, record: Box::from(&b"twenty"[..]) })
         );
-        assert_eq!(
-            cursor.prev_record().unwrap().map(|record| record.to_owned_record().unwrap()),
-            Some(OwnedTableRecord { table_key: 10, record: Box::from(&b"ten"[..]) })
-        );
     }
 
     #[test]
@@ -578,10 +558,6 @@ mod tests {
         assert_eq!(
             cursor.current_entry().unwrap().map(|entry| entry.to_owned_entry().unwrap()),
             Some(OwnedIndexEntry { key: Box::from(&b"bravo"[..]), table_key: 20 })
-        );
-        assert_eq!(
-            cursor.prev_entry().unwrap().map(|entry| entry.to_owned_entry().unwrap()),
-            Some(OwnedIndexEntry { key: Box::from(&b"alpha"[..]), table_key: 10 })
         );
     }
 

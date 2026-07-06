@@ -13,79 +13,6 @@ enum LeafSeek {
     Exhausted,
 }
 
-/// Direction selector for shared cursor scans over linked leaf pages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScanDirection {
-    /// Move toward larger keys.
-    Forward,
-    /// Move toward smaller keys.
-    Backward,
-}
-
-impl ScanDirection {
-    /// Descends from `start_page_id` to the leaf at the edge implied by `self`.
-    fn descend_to_edge_leaf(
-        self,
-        cursor: &TreeCursor,
-        start_page_id: PageId,
-    ) -> StorageResult<PageId> {
-        match self {
-            Self::Forward => cursor.descend_to_first_leaf_from(start_page_id),
-            Self::Backward => cursor.descend_to_last_leaf_from(start_page_id),
-        }
-    }
-
-    /// Chooses the first or last slot in `leaf`, or advances to the next leaf
-    /// in the scan direction when the page is empty.
-    fn edge_seek(self, leaf: &RawLeaf<Read<'_>>) -> LeafSeek {
-        match self {
-            Self::Forward => {
-                if leaf.slot_count() > 0 {
-                    LeafSeek::Positioned(0)
-                } else if let Some(next_page_id) = leaf.next_page_id() {
-                    LeafSeek::Advance(next_page_id)
-                } else {
-                    LeafSeek::Exhausted
-                }
-            }
-            Self::Backward => {
-                if leaf.slot_count() > 0 {
-                    LeafSeek::Positioned(leaf.slot_count() - 1)
-                } else if let Some(prev_page_id) = leaf.prev_page_id() {
-                    LeafSeek::Advance(prev_page_id)
-                } else {
-                    LeafSeek::Exhausted
-                }
-            }
-        }
-    }
-
-    /// Chooses the adjacent slot relative to `slot_index`, or advances to the
-    /// neighboring leaf when the cursor is already at the page boundary.
-    fn adjacent_seek(self, leaf: &RawLeaf<Read<'_>>, slot_index: u16) -> LeafSeek {
-        match self {
-            Self::Forward => {
-                if slot_index + 1 < leaf.slot_count() {
-                    LeafSeek::Positioned(slot_index + 1)
-                } else if let Some(next_page_id) = leaf.next_page_id() {
-                    LeafSeek::Advance(next_page_id)
-                } else {
-                    LeafSeek::Exhausted
-                }
-            }
-            Self::Backward => {
-                if slot_index > 0 {
-                    LeafSeek::Positioned(slot_index - 1)
-                } else if let Some(prev_page_id) = leaf.prev_page_id() {
-                    LeafSeek::Advance(prev_page_id)
-                } else {
-                    LeafSeek::Exhausted
-                }
-            }
-        }
-    }
-}
-
 impl TreeCursor {
     /// Creates a cursor anchored at `root_page_id` in page-level state.
     pub(crate) fn new(page_cache: PageCache, root_page_id: PageId) -> Self {
@@ -104,11 +31,6 @@ impl TreeCursor {
     /// Returns the cursor's current logical state.
     pub fn state(&self) -> CursorState {
         self.state
-    }
-
-    /// Resets the cursor back to the tree root page.
-    pub fn seek_to_root(&mut self) {
-        self.state = CursorState::Page { page_id: self.root_page_id() };
     }
 
     /// Switches the cursor to a page-anchored but not slot-anchored state.
@@ -342,29 +264,6 @@ impl TreeCursor {
         }
     }
 
-    /// Follows rightmost children from `start_page_id` until reaching a leaf.
-    pub(super) fn descend_to_last_leaf_from(&self, start_page_id: PageId) -> StorageResult<PageId> {
-        let mut page_id = start_page_id;
-
-        loop {
-            let pin = self.page_cache.fetch_page(page_id)?;
-            let next = {
-                let page = pin.read()?;
-                match read_page_kind(page.page(), page_id)? {
-                    PageKind::RawLeaf => {
-                        let _ = page.open::<Leaf>()?;
-                        return Ok(page_id);
-                    }
-                    PageKind::RawInterior => {
-                        let interior = page.open::<Interior>()?;
-                        interior.rightmost_child()
-                    }
-                }
-            };
-            page_id = next;
-        }
-    }
-
     /// Descends to the leaf page that contains or would contain `key`.
     pub(super) fn leaf_page_for_key(&self, key: &[u8]) -> StorageResult<PageId> {
         let mut page_id = self.root_page_id();
@@ -466,13 +365,9 @@ impl TreeCursor {
         }
     }
 
-    /// Reads the first reachable record from `start_page_id` in `direction`,
+    /// Reads the first reachable record from `start_page_id`,
     /// skipping over empty leaf pages until a slot is found or the scan ends.
-    fn edge_record_from_leaf(
-        &mut self,
-        start_page_id: PageId,
-        direction: ScanDirection,
-    ) -> StorageResult<Option<Record>> {
+    fn edge_record_from_leaf(&mut self, start_page_id: PageId) -> StorageResult<Option<Record>> {
         let mut page_id = start_page_id;
 
         loop {
@@ -481,7 +376,13 @@ impl TreeCursor {
                 let page = pin.read()?;
                 expect_page_kind(page.page(), page_id, PageKind::RawLeaf, "raw leaf")?;
                 let leaf = page.open::<Leaf>()?;
-                direction.edge_seek(&leaf)
+                if leaf.slot_count() > 0 {
+                    LeafSeek::Positioned(0)
+                } else if let Some(next_page_id) = leaf.next_page_id() {
+                    LeafSeek::Advance(next_page_id)
+                } else {
+                    LeafSeek::Exhausted
+                }
             };
 
             match seek {
@@ -498,13 +399,13 @@ impl TreeCursor {
         }
     }
 
-    /// Advances or rewinds the cursor by one logical record.
-    fn step_record(&mut self, direction: ScanDirection) -> StorageResult<Option<Record>> {
+    /// Advances the cursor by one logical record.
+    fn step_record(&mut self) -> StorageResult<Option<Record>> {
         match self.state {
             CursorState::Exhausted => Ok(None),
             CursorState::Page { page_id } => {
-                let leaf_page_id = direction.descend_to_edge_leaf(self, page_id)?;
-                self.edge_record_from_leaf(leaf_page_id, direction)
+                let leaf_page_id = self.descend_to_first_leaf_from(page_id)?;
+                self.edge_record_from_leaf(leaf_page_id)
             }
             CursorState::Positioned { page_id, slot_index } => {
                 let pin = self.page_cache.fetch_page(page_id)?;
@@ -512,7 +413,13 @@ impl TreeCursor {
                     let page = pin.read()?;
                     expect_page_kind(page.page(), page_id, PageKind::RawLeaf, "raw leaf")?;
                     let leaf = page.open::<Leaf>()?;
-                    direction.adjacent_seek(&leaf, slot_index)
+                    if slot_index + 1 < leaf.slot_count() {
+                        LeafSeek::Positioned(slot_index + 1)
+                    } else if let Some(next_page_id) = leaf.next_page_id() {
+                        LeafSeek::Advance(next_page_id)
+                    } else {
+                        LeafSeek::Exhausted
+                    }
                 };
 
                 match seek {
@@ -520,9 +427,7 @@ impl TreeCursor {
                         self.set_positioned_state(page_id, next_slot);
                         self.record_at(page_id, next_slot).map(Some)
                     }
-                    LeafSeek::Advance(next_page_id) => {
-                        self.edge_record_from_leaf(next_page_id, direction)
-                    }
+                    LeafSeek::Advance(next_page_id) => self.edge_record_from_leaf(next_page_id),
                     LeafSeek::Exhausted => {
                         self.set_exhausted_state();
                         Ok(None)
@@ -578,9 +483,9 @@ impl TreeCursor {
                 self.set_positioned_state(page_id, slot_index);
                 Ok(true)
             }
-            LeafSeek::Advance(next_page_id) => self
-                .edge_record_from_leaf(next_page_id, ScanDirection::Forward)
-                .map(|record| record.is_some()),
+            LeafSeek::Advance(next_page_id) => {
+                self.edge_record_from_leaf(next_page_id).map(|record| record.is_some())
+            }
             LeafSeek::Exhausted => {
                 self.set_exhausted_state();
                 Ok(false)
@@ -591,8 +496,7 @@ impl TreeCursor {
     /// Positions the cursor on the smallest key in the tree.
     pub fn seek_to_first(&mut self) -> StorageResult<bool> {
         let leaf_page_id = self.descend_to_first_leaf_from(self.root_page_id())?;
-        self.edge_record_from_leaf(leaf_page_id, ScanDirection::Forward)
-            .map(|record| record.is_some())
+        self.edge_record_from_leaf(leaf_page_id).map(|record| record.is_some())
     }
 
     /// Reads the currently selected record, if any.
@@ -607,11 +511,6 @@ impl TreeCursor {
 
     /// Advances to the next record in sorted key order.
     pub fn next_record(&mut self) -> StorageResult<Option<Record>> {
-        self.step_record(ScanDirection::Forward)
-    }
-
-    /// Moves to the previous record in sorted key order.
-    pub fn prev_record(&mut self) -> StorageResult<Option<Record>> {
-        self.step_record(ScanDirection::Backward)
+        self.step_record()
     }
 }

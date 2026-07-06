@@ -194,7 +194,6 @@ fn random_insert_get_simulation_with_oversized_values_reaches_four_levels() {
     }
 
     assert_forward_scan_matches(&mut cursor, &expected);
-    assert_reverse_scan_matches(&mut cursor, &expected);
     assert_eq!(expected.len(), cells.len());
 }
 
@@ -293,7 +292,6 @@ fn random_insert_update_simulation_replaces_values_for_all_keys() {
     }
 
     assert_forward_scan_matches(&mut cursor, &updated);
-    assert_reverse_scan_matches(&mut cursor, &updated);
 }
 
 #[ignore = "slow because of fsync"]
@@ -653,24 +651,5 @@ fn assert_forward_scan_matches(cursor: &mut TreeCursor, expected: &BTreeMap<Vec<
     }
 
     assert!(cursor.next_record().unwrap().is_none());
-    assert_eq!(scanned, expected.len());
-}
-
-fn assert_reverse_scan_matches(cursor: &mut TreeCursor, expected: &BTreeMap<Vec<u8>, Vec<u8>>) {
-    let (last_key, _) = expected.iter().next_back().unwrap();
-    let last_record = cursor.get(last_key).unwrap().expect("last key should be present");
-
-    let mut expected_entries = expected.iter().rev();
-    let (key, value) = expected_entries.next().unwrap();
-    assert_record_matches(&last_record, key, value);
-
-    let mut scanned = 1;
-    for (key, value) in expected_entries {
-        let record = cursor.prev_record().unwrap().expect("reverse scan ended early");
-        assert_record_matches(&record, key, value);
-        scanned += 1;
-    }
-
-    assert!(cursor.prev_record().unwrap().is_none());
     assert_eq!(scanned, expected.len());
 }

@@ -1,10 +1,11 @@
 use std::path::Path;
 
+#[cfg(test)]
+use crate::core::cursor::{IndexCursor, TableCursor};
 use crate::core::{
     IndexKeyRange, IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
     access::{DdlAccess, RecordAccess, SchemaAccess},
     catalog_manager::CatalogManager,
-    cursor::{IndexCursor, TableCursor},
     error::StorageResult,
     index_manager::IndexManager,
     log_manager::TxnId,
@@ -124,6 +125,7 @@ impl Database {
         self.catalog.index_schemas_for_table(table)
     }
 
+    #[cfg(test)]
     pub(crate) fn table_cursor_by_name(&self, name: &str) -> StorageResult<TableCursor> {
         self.catalog.table_cursor_by_name(name)
     }
@@ -165,6 +167,7 @@ impl Database {
         self.records.update_table_row(table, record, values)
     }
 
+    #[cfg(test)]
     pub(crate) fn index_cursor_by_name(&self, name: &str) -> StorageResult<IndexCursor> {
         self.catalog.index_cursor_by_name(name)
     }
