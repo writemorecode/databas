@@ -1,14 +1,30 @@
 //! SQL query planning.
 //!
-//! The planner lowers parsed SQL statements into a [`Plan`] that contains both
-//! a catalog-bound [`LogicalPlan`] and the executable [`PhysicalPlan`]. Planning
-//! resolves table and column names against the database catalog, expands
-//! wildcard projections, validates statement shapes, and records enough schema
-//! metadata for execution to read or write typed tuples.
+//! The planner is the boundary between parsed SQL syntax and executable
+//! database work. It lowers one parsed [`Statement`] into a [`Plan`] containing:
 //!
-//! This planner is intentionally conservative. It preserves the parsed query
-//! shape for most relational operators and currently chooses only simple
-//! physical operators such as full table scans and values-backed inserts.
+//! - a catalog-bound [`LogicalPlan`] that describes the statement's meaning; and
+//! - a [`PhysicalPlan`] that selects the executor operators used to run it.
+//!
+//! During logical planning, table and column names are resolved against the
+//! catalog, wildcard projections are expanded, duplicate target columns are
+//! rejected, and scalar expressions are converted into [`PlannedExpression`]
+//! trees. The resulting plan carries [`TableSchema`] and [`BoundColumn`] values
+//! so later stages can work with ordinals and storage types instead of repeating
+//! name lookup.
+//!
+//! Physical planning is intentionally small and predictable. Most relational
+//! operators are translated directly, while table access can be narrowed from a
+//! full scan to [`PhysicalPlan::PrimaryKeyRangeScan`] for integer primary-key
+//! predicates, or to [`PhysicalPlan::SecondaryIndexScan`] for compatible
+//! single-column secondary-index predicates. Predicates that cannot be fully
+//! represented by an access path are retained as residual
+//! [`PhysicalPlan::Filter`] operators.
+//!
+//! The planner validates statement shape, but it does not execute side effects
+//! or enforce every runtime constraint. Storage, type, arithmetic, and mutation
+//! errors that depend on actual row values are still reported by the executor
+//! and storage layers.
 
 use std::{collections::HashSet, fmt};
 
@@ -45,8 +61,10 @@ pub type PlannerResult<T> = Result<T, PlannerError>;
 
 /// Complete planning result for one SQL statement.
 ///
-/// The logical plan is useful for validation, tests, and future optimization
-/// passes. The physical plan is the tree consumed by the executor.
+/// A plan keeps both representations because they answer different questions:
+/// the logical plan is the catalog-bound statement shape, while the physical
+/// plan is the exact operator tree consumed by the executor. Tests often assert
+/// both to verify that binding and access-path selection agree.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     /// Catalog-bound statement representation before physical operator
@@ -58,9 +76,14 @@ pub struct Plan {
 
 /// Catalog-bound relational representation of a parsed SQL statement.
 ///
-/// Logical plans describe what the statement means after name binding and basic
-/// validation, but before choosing concrete access methods. Children are stored
-/// in `Box`es so the plan can form recursive operator trees.
+/// Logical plans are still independent of any concrete scan strategy. A
+/// [`LogicalPlan::TableScan`] means "rows from this table"; deciding whether
+/// those rows come from a full scan, primary-key range, or secondary index is a
+/// physical-planning concern.
+///
+/// Every table or column reference in this enum is already bound to catalog
+/// metadata. Children are boxed so select, update, and delete statements can be
+/// represented as recursive operator trees.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogicalPlan {
     /// Return the physical plan for an input statement without executing it.
@@ -70,10 +93,20 @@ pub enum LogicalPlan {
     /// Create a secondary index over bound columns from an existing table.
     CreateIndex { name: String, table: TableSchema, columns: Vec<BoundColumn> },
     /// Literal rows, usually produced by an `INSERT ... VALUES` statement.
+    ///
+    /// The current planner accepts only literal expressions in insert values, so
+    /// this node is side-effect free and independent of table input.
     Values { rows: Vec<Vec<PlannedExpression>> },
     /// Insert rows from an input plan into bound table columns.
+    ///
+    /// The input is currently expected to be [`LogicalPlan::Values`] during
+    /// physical planning.
     Insert { table: TableSchema, columns: Vec<BoundColumn>, input: Box<LogicalPlan> },
     /// Update rows in a table selected by an input plan.
+    ///
+    /// Assignment targets are bound and checked for duplicate names before this
+    /// node is built. Primary-key columns are rejected here because changing
+    /// them would require moving table records.
     Update { table: TableSchema, assignments: Vec<UpdateAssignment>, input: Box<LogicalPlan> },
     /// Delete rows from a table selected by an input plan.
     Delete { table: TableSchema, input: Box<LogicalPlan> },
@@ -83,6 +116,9 @@ pub enum LogicalPlan {
     /// Read every row from a catalog table.
     TableScan { table: TableSchema },
     /// Keep only rows for which the predicate evaluates truthfully.
+    ///
+    /// Physical planning may use part of this predicate to choose a narrower
+    /// table access path. Any remaining predicate is preserved as a filter.
     Filter { input: Box<LogicalPlan>, predicate: PlannedExpression },
     /// Order input rows by one or more columns.
     Sort { input: Box<LogicalPlan>, terms: Vec<SortTerm> },
@@ -96,10 +132,17 @@ pub enum LogicalPlan {
 
 /// Executable operator tree selected by the planner.
 ///
-/// Physical plans mirror the current executor's available operators. Today this
-/// mostly maps logical operators directly, with a few concrete choices such as
-/// [`PhysicalPlan::FullTableScan`] for table access and
-/// [`PhysicalPlan::InsertValues`] for `INSERT ... VALUES`.
+/// Physical plans mirror the executor's available operators. They are still
+/// declarative data, but table access and mutation shapes have been made
+/// concrete enough for execution:
+///
+/// - table scans become full scans, primary-key range scans, or secondary-index
+///   scans;
+/// - `INSERT ... VALUES` becomes [`PhysicalPlan::InsertValues`]; and
+/// - row-shaping operators such as filters, projections, limits, offsets, and
+///   sorts keep their input subtrees.
+///
+/// [`fmt::Display`] renders this tree in the same shape returned by `EXPLAIN`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalPlan {
     /// Return the formatted input plan without executing it.
@@ -154,6 +197,8 @@ pub enum PhysicalPlan {
         input: Box<PhysicalPlan>,
     },
     /// Produce exactly one empty row.
+    ///
+    /// This is the row source for `SELECT` statements without a `FROM` clause.
     OneRow,
     /// Scan all rows from a table.
     FullTableScan {
@@ -161,6 +206,11 @@ pub enum PhysicalPlan {
         table: TableSchema,
     },
     /// Scan rows from a table whose primary key falls in a bounded range.
+    ///
+    /// The planner emits this for compatible comparisons against the first
+    /// integer primary-key column. If only part of the `WHERE` predicate can be
+    /// expressed as a key range, the range scan is wrapped in a
+    /// [`PhysicalPlan::Filter`] for the residual expression.
     PrimaryKeyRangeScan {
         /// Table to scan.
         table: TableSchema,
@@ -168,6 +218,11 @@ pub enum PhysicalPlan {
         range: TableKeyRange,
     },
     /// Scan rows from a table through a secondary-index key range.
+    ///
+    /// This is selected for predicates on a compatible single-column secondary
+    /// index. The scan produces candidate table rows; the original predicate is
+    /// still applied by a surrounding [`PhysicalPlan::Filter`] so the executor
+    /// preserves SQL semantics when the access range is only an approximation.
     SecondaryIndexScan {
         /// Scan metadata and key bounds.
         scan: Box<SecondaryIndexScanPlan>,
@@ -210,6 +265,11 @@ pub enum PhysicalPlan {
 }
 
 /// Metadata needed to scan a table through a secondary index.
+///
+/// Secondary indexes store encoded index keys, while diagnostics and `EXPLAIN`
+/// output should stay close to SQL values. This struct therefore keeps both the
+/// human-readable [`IndexValueRange`] and the encoded [`IndexKeyRange`] that the
+/// storage layer scans.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SecondaryIndexScanPlan {
     /// Table to fetch rows from.
@@ -320,8 +380,14 @@ fn display_list<T: fmt::Display>(values: &[T]) -> String {
 
 /// Expression after literal conversion and column binding.
 ///
-/// Bound column expressions carry catalog metadata and row ordinals, so the
-/// executor can evaluate them without doing name resolution again.
+/// Planned expressions are the scalar language shared by filters, projections,
+/// update assignments, and insert values. Identifiers have already been
+/// resolved into [`BoundColumn`] values, and parser literals have already been
+/// converted into storage [`Value`]s.
+///
+/// The planner does not type-check every operator combination. It records the
+/// bound expression tree and leaves value-dependent type errors, such as adding
+/// incompatible values or evaluating a non-boolean predicate, to execution.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlannedExpression {
     /// Constant storage value.
@@ -347,7 +413,10 @@ impl fmt::Display for PlannedExpression {
 
 /// Catalog column reference resolved during planning.
 ///
-/// `ordinal` is the zero-based position of the column in the table row schema.
+/// A bound column is deliberately redundant: it stores display names for
+/// diagnostics and plan formatting, plus the row ordinal and data type needed by
+/// the executor. `ordinal` is the zero-based position of the column in the table
+/// row schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundColumn {
     /// Name of the table that owns this column.
@@ -361,6 +430,9 @@ pub struct BoundColumn {
 }
 
 /// Inclusive or exclusive display bound for a secondary-index scan value.
+///
+/// These bounds are used for formatted plans and tests. The storage-facing byte
+/// bounds live in [`IndexKeyBound`] values inside [`SecondaryIndexScanPlan`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum IndexValueBound {
     /// The scan includes this value.
@@ -379,6 +451,9 @@ impl fmt::Display for IndexValueBound {
 }
 
 /// Human-readable range over values in a single-column secondary index.
+///
+/// This mirrors the encoded [`IndexKeyRange`] selected for storage, but keeps
+/// the original SQL value type visible for debugging and `EXPLAIN` output.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct IndexValueRange {
     /// Optional lower value bound.
@@ -405,6 +480,10 @@ impl fmt::Display for BoundColumn {
 }
 
 /// One bound column assignment from an `UPDATE ... SET` clause.
+///
+/// The target column has already been checked for existence, duplicate
+/// assignment, and primary-key immutability. The expression is evaluated against
+/// the original row when the update executes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateAssignment {
     /// Target column to overwrite.
@@ -420,6 +499,10 @@ impl fmt::Display for UpdateAssignment {
 }
 
 /// One bound column and optional direction from an `ORDER BY` clause.
+///
+/// Only simple column sort keys are represented today. A missing direction
+/// means SQL omitted `ASC` or `DESC`; consumers should treat that as their
+/// default ascending order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SortTerm {
     /// Column used as the sort key.
@@ -451,6 +534,10 @@ pub enum SortDirection {
 }
 
 /// Errors that can occur while converting parsed SQL into a plan.
+///
+/// Planner errors are limited to catalog binding, statement-shape validation,
+/// unsupported syntax, and catalog access failures. Runtime errors that depend
+/// on row contents are reported by the executor or storage layer instead.
 #[derive(Debug, Error)]
 pub enum PlannerError {
     /// A statement referenced a table that does not exist in the catalog.
@@ -499,15 +586,19 @@ pub enum PlannerError {
 
 /// Planner bound to a database catalog.
 ///
-/// A planner borrows a [`Database`] so it can resolve table schemas and bind
-/// column references. It does not mutate the catalog; DDL statements are only
-/// represented as plan nodes until executed.
+/// A planner borrows catalog access from a [`Database`] so it can resolve table
+/// schemas, discover indexes, and bind column references. It does not mutate the
+/// catalog or perform writes. Even DDL and DML statements are represented only
+/// as plan nodes until an executor runs the physical plan.
 pub struct Planner<'db> {
     schema: &'db dyn SchemaAccess,
 }
 
 impl<'db> Planner<'db> {
     /// Creates a planner that resolves names through `database`.
+    ///
+    /// The database is borrowed for catalog reads only. The returned planner can
+    /// be reused for multiple statements as long as the borrowed database lives.
     pub fn new(database: &'db Database) -> Self {
         Self { schema: database }
     }
@@ -516,6 +607,8 @@ impl<'db> Planner<'db> {
     ///
     /// This first builds a [`LogicalPlan`] with catalog-bound names, then
     /// converts it into a [`PhysicalPlan`] that can be passed to the executor.
+    /// The method performs catalog lookups and access-path selection, but does
+    /// not execute the statement or mutate database state.
     pub fn plan_statement(&self, statement: &Statement<'_>) -> PlannerResult<Plan> {
         let logical = self.logical_plan_statement(statement)?;
         let physical = self.physical_plan(&logical)?;
