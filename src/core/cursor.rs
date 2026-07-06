@@ -4,7 +4,7 @@ use std::fmt::{self, Display};
 
 use crate::core::{
     TableKey, Tuple,
-    btree::{CursorState, OwnedRecord, Record, TreeCursor},
+    btree::{CursorState, Record, TreeCursor},
     error::StorageResult,
     page::{CellCorruption, PageError},
 };
@@ -187,38 +187,14 @@ impl TableCursor {
         self.inner.current()?.map(|record| self.table_record_from_raw(record)).transpose()
     }
 
-    /// Reads the currently selected table record as a stable owned snapshot, if any.
-    pub fn current_owned_record(&self) -> StorageResult<Option<OwnedTableRecord>> {
-        self.inner
-            .current_owned()?
-            .map(|record| self.owned_table_record_from_raw(record))
-            .transpose()
-    }
-
     /// Advances to the next table record in table key order.
     pub fn next_record(&mut self) -> StorageResult<Option<TableRecord>> {
         self.inner.next_record()?.map(|record| self.table_record_from_raw(record)).transpose()
     }
 
-    /// Advances to the next table record and returns a stable owned snapshot.
-    pub fn next_owned_record(&mut self) -> StorageResult<Option<OwnedTableRecord>> {
-        self.inner
-            .next_owned_record()?
-            .map(|record| self.owned_table_record_from_raw(record))
-            .transpose()
-    }
-
     /// Moves to the previous table record in table key order.
     pub fn prev_record(&mut self) -> StorageResult<Option<TableRecord>> {
         self.inner.prev_record()?.map(|record| self.table_record_from_raw(record)).transpose()
-    }
-
-    /// Moves to the previous table record and returns a stable owned snapshot.
-    pub fn prev_owned_record(&mut self) -> StorageResult<Option<OwnedTableRecord>> {
-        self.inner
-            .prev_owned_record()?
-            .map(|record| self.owned_table_record_from_raw(record))
-            .transpose()
     }
 
     /// Inserts a table record keyed by `table_key`.
@@ -229,17 +205,11 @@ impl TableCursor {
     /// Looks up a table record by table key.
     pub fn get(&mut self, table_key: TableKey) -> StorageResult<Option<OwnedTableRecord>> {
         self.inner
-            .get_owned(&encode_table_key(table_key))?
-            .map(|record| self.owned_table_record_from_raw(record))
+            .get(&encode_table_key(table_key))?
+            .map(|record| {
+                self.table_record_from_raw(record).and_then(|record| record.to_owned_record())
+            })
             .transpose()
-    }
-
-    /// Looks up a table record by table key and returns a stable owned snapshot.
-    pub fn get_owned_record(
-        &mut self,
-        table_key: TableKey,
-    ) -> StorageResult<Option<OwnedTableRecord>> {
-        self.get(table_key)
     }
 
     /// Looks up a table record by table key without eagerly copying page-resident bytes.
@@ -258,12 +228,6 @@ impl TableCursor {
     /// Deletes the table record identified by `table_key`.
     pub fn delete(&mut self, table_key: TableKey) -> StorageResult<()> {
         self.inner.delete(&encode_table_key(table_key))
-    }
-
-    fn owned_table_record_from_raw(&self, raw: OwnedRecord) -> StorageResult<OwnedTableRecord> {
-        raw.with_key_value(|key, value| {
-            Ok(OwnedTableRecord { table_key: decode_table_key(key)?, record: value.into() })
-        })
     }
 
     fn table_record_from_raw(&self, raw: Record) -> StorageResult<TableRecord> {
@@ -309,29 +273,14 @@ impl IndexCursor {
         self.inner.current()?.map(IndexEntry::try_from).transpose()
     }
 
-    /// Reads the currently selected index entry as a stable owned snapshot, if any.
-    pub fn current_owned_entry(&self) -> StorageResult<Option<OwnedIndexEntry>> {
-        self.inner.current_owned()?.map(OwnedIndexEntry::try_from).transpose()
-    }
-
     /// Advances to the next index entry in key order.
     pub fn next_entry(&mut self) -> StorageResult<Option<IndexEntry>> {
         self.inner.next_record()?.map(IndexEntry::try_from).transpose()
     }
 
-    /// Advances to the next index entry and returns a stable owned snapshot.
-    pub fn next_owned_entry(&mut self) -> StorageResult<Option<OwnedIndexEntry>> {
-        self.inner.next_owned_record()?.map(OwnedIndexEntry::try_from).transpose()
-    }
-
     /// Moves to the previous index entry in key order.
     pub fn prev_entry(&mut self) -> StorageResult<Option<IndexEntry>> {
         self.inner.prev_record()?.map(IndexEntry::try_from).transpose()
-    }
-
-    /// Moves to the previous index entry and returns a stable owned snapshot.
-    pub fn prev_owned_entry(&mut self) -> StorageResult<Option<OwnedIndexEntry>> {
-        self.inner.prev_owned_record()?.map(OwnedIndexEntry::try_from).transpose()
     }
 
     /// Inserts an index entry from `key` to `table_key`.
@@ -341,12 +290,10 @@ impl IndexCursor {
 
     /// Looks up an index entry by key.
     pub fn get(&mut self, key: &[u8]) -> StorageResult<Option<OwnedIndexEntry>> {
-        self.inner.get_owned(key)?.map(OwnedIndexEntry::try_from).transpose()
-    }
-
-    /// Looks up an index entry by key and returns a stable owned snapshot.
-    pub fn get_owned_entry(&mut self, key: &[u8]) -> StorageResult<Option<OwnedIndexEntry>> {
-        self.get(key)
+        self.inner
+            .get(key)?
+            .map(|record| IndexEntry::try_from(record).and_then(|entry| entry.to_owned_entry()))
+            .transpose()
     }
 
     /// Looks up an index entry by key without eagerly copying page-resident bytes.
@@ -408,7 +355,9 @@ impl IndexEntry {
 
     /// Returns a stable, owned snapshot of this index entry.
     pub fn to_owned_entry(&self) -> StorageResult<OwnedIndexEntry> {
-        self.raw.to_owned_record()?.try_into()
+        self.raw.with_key_value(|key, value| {
+            Ok(OwnedIndexEntry { key: key.into(), table_key: decode_index_table_key(value)? })
+        })?
     }
 }
 
@@ -454,16 +403,6 @@ impl TryFrom<Record> for IndexEntry {
     fn try_from(raw: Record) -> Result<Self, Self::Error> {
         let table_key = raw.with_value(decode_index_table_key)??;
         Ok(Self { table_key, raw })
-    }
-}
-
-impl TryFrom<OwnedRecord> for OwnedIndexEntry {
-    type Error = crate::core::error::StorageError;
-
-    fn try_from(raw: OwnedRecord) -> Result<Self, Self::Error> {
-        raw.with_key_value(|key, value| {
-            Ok(Self { key: key.into(), table_key: decode_index_table_key(value)? })
-        })
     }
 }
 
@@ -552,22 +491,22 @@ mod tests {
         assert_eq!(first.with_record(|bytes| bytes.to_vec()).unwrap(), b"ten");
 
         assert_eq!(
-            cursor.next_owned_record().unwrap(),
+            cursor.next_record().unwrap().map(|record| record.to_owned_record().unwrap()),
             Some(OwnedTableRecord { table_key: 20, record: Box::from(&b"twenty"[..]) })
         );
         assert_eq!(
-            cursor.next_owned_record().unwrap(),
+            cursor.next_record().unwrap().map(|record| record.to_owned_record().unwrap()),
             Some(OwnedTableRecord { table_key: 30, record: Box::from(&b"thirty"[..]) })
         );
-        assert!(cursor.next_owned_record().unwrap().is_none());
+        assert!(cursor.next_record().unwrap().is_none());
 
         assert!(cursor.seek_to_table_key(20).unwrap());
         assert_eq!(
-            cursor.current_owned_record().unwrap(),
+            cursor.current_record().unwrap().map(|record| record.to_owned_record().unwrap()),
             Some(OwnedTableRecord { table_key: 20, record: Box::from(&b"twenty"[..]) })
         );
         assert_eq!(
-            cursor.prev_owned_record().unwrap(),
+            cursor.prev_record().unwrap().map(|record| record.to_owned_record().unwrap()),
             Some(OwnedTableRecord { table_key: 10, record: Box::from(&b"ten"[..]) })
         );
     }
@@ -626,22 +565,22 @@ mod tests {
         );
 
         assert_eq!(
-            cursor.next_owned_entry().unwrap(),
+            cursor.next_entry().unwrap().map(|entry| entry.to_owned_entry().unwrap()),
             Some(OwnedIndexEntry { key: Box::from(&b"bravo"[..]), table_key: 20 })
         );
         assert_eq!(
-            cursor.next_owned_entry().unwrap(),
+            cursor.next_entry().unwrap().map(|entry| entry.to_owned_entry().unwrap()),
             Some(OwnedIndexEntry { key: Box::from(&b"charlie"[..]), table_key: 30 })
         );
-        assert!(cursor.next_owned_entry().unwrap().is_none());
+        assert!(cursor.next_entry().unwrap().is_none());
 
         assert!(cursor.seek_to_key(b"b").unwrap());
         assert_eq!(
-            cursor.current_owned_entry().unwrap(),
+            cursor.current_entry().unwrap().map(|entry| entry.to_owned_entry().unwrap()),
             Some(OwnedIndexEntry { key: Box::from(&b"bravo"[..]), table_key: 20 })
         );
         assert_eq!(
-            cursor.prev_owned_entry().unwrap(),
+            cursor.prev_entry().unwrap().map(|entry| entry.to_owned_entry().unwrap()),
             Some(OwnedIndexEntry { key: Box::from(&b"alpha"[..]), table_key: 10 })
         );
     }

@@ -1,6 +1,7 @@
 use crate::core::{
-    CorruptionComponent, CorruptionError, CorruptionKind, DataType, IndexKeyRange, IndexSchema,
-    OwnedTableRecord, TableKey, TableKeyBound, TableKeyRange, TableSchema, Tuple, Value,
+    CorruptionComponent, CorruptionError, CorruptionKind, DataType, IndexEntry, IndexKeyRange,
+    IndexSchema, OwnedTableRecord, TableKey, TableKeyBound, TableKeyRange, TableRecord,
+    TableSchema, Tuple, Value,
     catalog_manager::CatalogManager,
     cursor::{IndexCursor, TableCursor},
     error::{ConstraintError, InvalidArgumentError, StorageError, StorageResult},
@@ -14,7 +15,7 @@ pub(crate) struct RecordManager {
     indexes: IndexManager,
 }
 
-/// Iterator over owned records in one table.
+/// Iterator over records in one table.
 pub(crate) struct TableScan {
     cursor: TableCursor,
     range: TableKeyRange,
@@ -126,7 +127,7 @@ impl RecordManager {
 }
 
 impl Iterator for IndexScan {
-    type Item = StorageResult<OwnedTableRecord>;
+    type Item = StorageResult<TableRecord>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -135,33 +136,53 @@ impl Iterator for IndexScan {
 
         loop {
             let entry = if self.initialized {
-                self.index_cursor.next_owned_entry()
+                self.index_cursor.next_entry()
             } else {
                 self.initialized = true;
                 self.first_entry()
             };
 
             match entry {
-                Ok(Some(entry)) if self.key_range.is_past_upper(&entry.key) => {
-                    self.done = true;
-                    return None;
+                Ok(Some(entry)) => {
+                    let table_key = entry.table_key();
+                    let entry_state = entry.with_key(|key| {
+                        if self.key_range.is_past_upper(key) {
+                            IndexEntryState::PastUpper
+                        } else if self.key_range.contains(key) {
+                            IndexEntryState::InRange
+                        } else {
+                            IndexEntryState::Skip
+                        }
+                    });
+                    match entry_state {
+                        Ok(IndexEntryState::PastUpper) => {
+                            self.done = true;
+                            return None;
+                        }
+                        Ok(IndexEntryState::Skip) => continue,
+                        Ok(IndexEntryState::InRange) => {}
+                        Err(error) => {
+                            self.done = true;
+                            return Some(Err(error));
+                        }
+                    }
+
+                    match self.table_cursor.get_record(table_key) {
+                        Ok(Some(record)) => return Some(Ok(record)),
+                        Ok(None) => {
+                            self.done = true;
+                            return Some(Err(invalid_index_entry(
+                                &self.table,
+                                table_key,
+                                "index entry references missing table row",
+                            )));
+                        }
+                        Err(error) => {
+                            self.done = true;
+                            return Some(Err(error));
+                        }
+                    }
                 }
-                Ok(Some(entry)) if !self.key_range.contains(&entry.key) => continue,
-                Ok(Some(entry)) => match self.table_cursor.get_owned_record(entry.table_key) {
-                    Ok(Some(record)) => return Some(Ok(record)),
-                    Ok(None) => {
-                        self.done = true;
-                        return Some(Err(invalid_index_entry(
-                            &self.table,
-                            entry.table_key,
-                            "index entry references missing table row",
-                        )));
-                    }
-                    Err(error) => {
-                        self.done = true;
-                        return Some(Err(error));
-                    }
-                },
                 Ok(None) => {
                     self.done = true;
                     return None;
@@ -176,18 +197,18 @@ impl Iterator for IndexScan {
 }
 
 impl IndexScan {
-    fn first_entry(&mut self) -> StorageResult<Option<crate::core::OwnedIndexEntry>> {
+    fn first_entry(&mut self) -> StorageResult<Option<IndexEntry>> {
         match self.key_range.lower.as_ref() {
             Some(lower) => {
                 if self.index_cursor.seek_to_key(lower.key())? {
-                    self.index_cursor.current_owned_entry()
+                    self.index_cursor.current_entry()
                 } else {
                     Ok(None)
                 }
             }
             None => {
                 if self.index_cursor.seek_to_first()? {
-                    self.index_cursor.current_owned_entry()
+                    self.index_cursor.current_entry()
                 } else {
                     Ok(None)
                 }
@@ -197,7 +218,7 @@ impl IndexScan {
 }
 
 impl Iterator for TableScan {
-    type Item = StorageResult<OwnedTableRecord>;
+    type Item = StorageResult<TableRecord>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -205,14 +226,14 @@ impl Iterator for TableScan {
         }
 
         let record = if self.initialized {
-            self.cursor.next_owned_record()
+            self.cursor.next_record()
         } else {
             self.initialized = true;
             self.first_record()
         };
 
         match record {
-            Ok(Some(record)) if self.range.contains(record.table_key) => Some(Ok(record)),
+            Ok(Some(record)) if self.range.contains(record.table_key()) => Some(Ok(record)),
             Ok(Some(_)) => {
                 self.done = true;
                 None
@@ -230,19 +251,25 @@ impl Iterator for TableScan {
 }
 
 impl TableScan {
-    fn first_record(&mut self) -> StorageResult<Option<OwnedTableRecord>> {
+    fn first_record(&mut self) -> StorageResult<Option<TableRecord>> {
         match range_start(self.range.lower) {
             RangeStart::At(start_key) => {
                 if self.cursor.seek_to_table_key(start_key)? {
-                    self.cursor.current_owned_record()
+                    self.cursor.current_record()
                 } else {
                     Ok(None)
                 }
             }
-            RangeStart::Unbounded => self.cursor.next_owned_record(),
+            RangeStart::Unbounded => self.cursor.next_record(),
             RangeStart::Empty => Ok(None),
         }
     }
+}
+
+enum IndexEntryState {
+    PastUpper,
+    InRange,
+    Skip,
 }
 
 enum RangeStart {
@@ -456,7 +483,7 @@ mod tests {
         assert!(users.get(20).unwrap().is_some());
         assert!(users.get(-5).unwrap().is_some());
         assert!(users.seek_to_first().unwrap());
-        assert_eq!(users.current_owned_record().unwrap().unwrap().table_key, -5);
+        assert_eq!(users.current_record().unwrap().unwrap().table_key(), -5);
 
         let mut index: IndexCursor = catalog.index_cursor_by_name("idx_users_name").unwrap();
         assert_eq!(index.get(&name_entry_key("Ada", -5)).unwrap().unwrap().table_key, -5);
@@ -602,7 +629,7 @@ mod tests {
         let keys = records
             .scan_table_range(&table, range)
             .unwrap()
-            .map(|record| record.unwrap().table_key)
+            .map(|record| record.unwrap().table_key())
             .collect::<Vec<_>>();
 
         assert_eq!(keys, vec![3, 5]);

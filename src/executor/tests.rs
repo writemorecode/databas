@@ -5,7 +5,7 @@ use tempfile::tempdir;
 use super::*;
 use crate::{
     core::{
-        ColumnSchema, DataType, PAGE_SIZE, TableKey, Tuple, TupleSchema,
+        ColumnSchema, DataType, OwnedTableRecord, PAGE_SIZE, TableKey, Tuple, TupleSchema,
         cursor::encode_index_entry_key,
         error::{ConstraintError, InternalError, InvariantViolation, StorageError},
     },
@@ -15,15 +15,43 @@ use crate::{
     sql_parser::parser::Parser,
 };
 
-fn record(table_key: TableKey, values: Vec<Value>) -> TableRecord {
+fn record(table_key: TableKey, values: Vec<Value>) -> ExecutorRow {
     record_from_values(table_key, values).unwrap()
 }
 
-fn values(record: &TableRecord) -> Vec<Value> {
-    Tuple::from_bytes(&record.record).unwrap().into_values()
+trait TestRecordValues {
+    fn values(&self) -> Vec<Value>;
 }
 
-fn collect_rows(output: ExecutionOutput) -> ExecutorResult<Vec<TableRecord>> {
+impl TestRecordValues for ExecutorRow {
+    fn values(&self) -> Vec<Value> {
+        self.with_record(|bytes| Tuple::from_bytes(bytes).unwrap().into_values()).unwrap()
+    }
+}
+
+impl TestRecordValues for OwnedTableRecord {
+    fn values(&self) -> Vec<Value> {
+        Tuple::from_bytes(&self.record).unwrap().into_values()
+    }
+}
+
+fn values(record: &impl TestRecordValues) -> Vec<Value> {
+    record.values()
+}
+
+fn owned_record(record: &ExecutorRow) -> OwnedTableRecord {
+    record.to_owned_record().unwrap()
+}
+
+fn table_keys(rows: &[ExecutorRow]) -> Vec<TableKey> {
+    rows.iter().map(ExecutorRow::table_key).collect()
+}
+
+fn record_bytes(record: &ExecutorRow) -> Vec<u8> {
+    record.with_record(|bytes| bytes.to_vec()).unwrap()
+}
+
+fn collect_rows(output: ExecutionOutput) -> ExecutorResult<Vec<ExecutorRow>> {
     output.into_rows("TEST")?.collect()
 }
 
@@ -181,7 +209,12 @@ fn assert_name_index_absent(database: &Database, name: &str) {
 fn assert_index_prefix_absent(index: &mut crate::core::cursor::IndexCursor, key: &[u8]) {
     assert!(
         !index.seek_to_key(key).unwrap()
-            || !index.current_owned_entry().unwrap().unwrap().key.starts_with(key)
+            || !index
+                .current_entry()
+                .unwrap()
+                .unwrap()
+                .with_key(|entry_key| entry_key.starts_with(key))
+                .unwrap()
     );
 }
 
@@ -197,7 +230,7 @@ fn single_literal_expression_produces_one_column_record() {
         evaluate_expression(&PlannedExpression::Literal(Value::String("Ada".to_owned())), &input)
             .unwrap();
 
-    assert_eq!(output.table_key, 7);
+    assert_eq!(output.table_key(), 7);
     assert_eq!(values(&output), vec![Value::String("Ada".to_owned())]);
 }
 
@@ -209,7 +242,7 @@ fn single_column_expression_reads_bound_ordinal() {
         evaluate_expression(&PlannedExpression::Column(bound("name", 1, DataType::Text)), &input)
             .unwrap();
 
-    assert_eq!(output.table_key, 8);
+    assert_eq!(output.table_key(), 8);
     assert_eq!(values(&output), vec![Value::String("Grace".to_owned())]);
 }
 
@@ -238,7 +271,7 @@ fn project_evaluates_multiple_expressions_in_order() {
     let rows = collect_rows(executor.execute(plan).unwrap()).unwrap();
 
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].table_key, 0);
+    assert_eq!(rows[0].table_key(), 0);
     assert_eq!(values(&rows[0]), vec![Value::Integer(5), Value::Integer(9)]);
 }
 
@@ -267,6 +300,77 @@ fn filter_keeps_only_rows_with_true_predicate() {
 
     assert_eq!(rows.len(), 1);
     assert_eq!(values(&rows[0]), vec![Value::Integer(1), Value::Boolean(true)]);
+}
+
+#[test]
+fn full_table_scan_yields_borrowed_rows_that_can_be_materialized() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
+    )
+    .unwrap();
+    let table = database.table_schema_by_name("users").unwrap();
+    let mut executor = Executor::new(&database);
+
+    let rows =
+        collect_rows(executor.execute(PhysicalPlan::FullTableScan { table }).unwrap()).unwrap();
+
+    assert!(matches!(rows[0], ExecutorRow::Borrowed(_)));
+    assert_eq!(
+        values(&rows[0]),
+        vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(true)]
+    );
+    let owned = owned_record(&rows[0]);
+    assert_eq!(owned.table_key, 1);
+    assert_eq!(record_bytes(&rows[0]), owned.record.to_vec());
+}
+
+#[test]
+fn filter_over_table_scan_preserves_borrowed_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
+    )
+    .unwrap();
+    let table = database.table_schema_by_name("users").unwrap();
+    let mut executor = Executor::new(&database);
+    let plan = PhysicalPlan::Filter {
+        input: Box::new(PhysicalPlan::FullTableScan { table }),
+        predicate: PlannedExpression::Column(bound("active", 2, DataType::Boolean)),
+    };
+
+    let rows = collect_rows(executor.execute(plan).unwrap()).unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0], ExecutorRow::Borrowed(_)));
+    assert_eq!(rows[0].table_key(), 1);
+}
+
+#[test]
+fn project_over_table_scan_returns_owned_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
+        .unwrap();
+    let table = database.table_schema_by_name("users").unwrap();
+    let mut executor = Executor::new(&database);
+    let plan = PhysicalPlan::Project {
+        input: Box::new(PhysicalPlan::FullTableScan { table }),
+        expressions: vec![PlannedExpression::Column(bound("name", 1, DataType::Text))],
+    };
+
+    let rows = collect_rows(executor.execute(plan).unwrap()).unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0], ExecutorRow::Owned(_)));
+    assert_eq!(values(&rows[0]), vec![Value::String("Ada".to_owned())]);
 }
 
 #[test]
@@ -605,7 +709,7 @@ fn select_with_projection_and_filter_executes_end_to_end() {
     let rows = collect_rows(executor.execute(plan.physical).unwrap()).unwrap();
 
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].table_key, 1);
+    assert_eq!(rows[0].table_key(), 1);
     assert_eq!(values(&rows[0]), vec![Value::String("Ada".to_owned())]);
 }
 
@@ -620,10 +724,7 @@ fn select_with_primary_key_range_returns_only_matching_rows() {
         execute_sql(&database, "SELECT id FROM users WHERE 10 <= id AND id < 20;").unwrap();
 
     let rows = collect_rows(output).unwrap();
-    assert_eq!(
-        rows.iter().map(|row| row.table_key).collect::<Vec<_>>(),
-        (10..20).collect::<Vec<_>>()
-    );
+    assert_eq!(table_keys(&rows), (10..20).collect::<Vec<_>>());
     assert_eq!(
         rows.iter().map(values).collect::<Vec<_>>(),
         (10..20).map(|id| vec![Value::Integer(id)]).collect::<Vec<_>>()
@@ -647,7 +748,7 @@ fn select_with_secondary_index_equality_returns_matching_rows() {
         execute_sql(&database, "SELECT id FROM users WHERE name == 'Engineering';").unwrap();
 
     let rows = collect_rows(output).unwrap();
-    assert_eq!(rows.iter().map(|row| row.table_key).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(table_keys(&rows), vec![1, 2]);
     assert_eq!(
         rows.iter().map(values).collect::<Vec<_>>(),
         vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]
@@ -674,7 +775,7 @@ fn select_with_secondary_index_equality_applies_residual_filter() {
     .unwrap();
 
     let rows = collect_rows(output).unwrap();
-    assert_eq!(rows.iter().map(|row| row.table_key).collect::<Vec<_>>(), vec![2]);
+    assert_eq!(table_keys(&rows), vec![2]);
     assert_eq!(rows.iter().map(values).collect::<Vec<_>>(), vec![vec![Value::Integer(2)]]);
 }
 
@@ -700,7 +801,7 @@ fn select_with_text_index_range_returns_matching_rows() {
             .unwrap();
 
     let rows = collect_rows(output).unwrap();
-    assert_eq!(rows.iter().map(|row| row.table_key).collect::<Vec<_>>(), vec![2, 4, 5]);
+    assert_eq!(table_keys(&rows), vec![2, 4, 5]);
     assert_eq!(
         rows.iter().map(values).collect::<Vec<_>>(),
         vec![vec![Value::Integer(2)], vec![Value::Integer(4)], vec![Value::Integer(5)]]
@@ -725,7 +826,7 @@ fn select_with_text_index_exclusive_range_excludes_boundary_values() {
             .unwrap();
 
     let rows = collect_rows(output).unwrap();
-    assert_eq!(rows.iter().map(|row| row.table_key).collect::<Vec<_>>(), vec![2]);
+    assert_eq!(table_keys(&rows), vec![2]);
     assert_eq!(rows.iter().map(values).collect::<Vec<_>>(), vec![vec![Value::Integer(2)]]);
 }
 
@@ -745,7 +846,7 @@ fn select_with_text_index_range_does_not_skip_short_matching_values() {
     let output = execute_sql(&database, "SELECT id FROM users WHERE name > 'Bob';").unwrap();
 
     let rows = collect_rows(output).unwrap();
-    assert_eq!(rows.iter().map(|row| row.table_key).collect::<Vec<_>>(), vec![2, 3]);
+    assert_eq!(table_keys(&rows), vec![2, 3]);
     assert_eq!(
         rows.iter().map(values).collect::<Vec<_>>(),
         vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]
@@ -2008,6 +2109,6 @@ fn select_without_from_executes_through_one_row_and_project() {
     let rows = collect_rows(executor.execute(plan.physical).unwrap()).unwrap();
 
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].table_key, 0);
+    assert_eq!(rows[0].table_key(), 0);
     assert_eq!(values(&rows[0]), vec![Value::Integer(3)]);
 }

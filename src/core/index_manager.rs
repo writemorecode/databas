@@ -1,5 +1,5 @@
 use crate::core::{
-    IndexSchema, OwnedTableRecord, TableKey, TableSchema, Tuple, TupleView, Value,
+    IndexSchema, OwnedTableRecord, TableKey, TableRecord, TableSchema, Tuple, TupleView, Value,
     catalog_manager::CatalogManager,
     cursor::encode_index_entry_key,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
@@ -62,10 +62,11 @@ impl IndexManager {
         let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
         let mut index_cursor = self.catalog.index_cursor_by_name(&index.name)?;
 
-        while let Some(record) = table_cursor.next_owned_record()? {
-            let key = index_key_from_record(table, index, &record)?;
-            let key = encode_index_entry_key(&key, record.table_key);
-            index_cursor.insert(&key, record.table_key)?;
+        while let Some(record) = table_cursor.next_record()? {
+            let key = index_key_from_table_record(table, index, &record)?;
+            let table_key = record.table_key();
+            let key = encode_index_entry_key(&key, table_key);
+            index_cursor.insert(&key, table_key)?;
         }
 
         Ok(())
@@ -77,8 +78,26 @@ fn index_key_from_record(
     index: &IndexSchema,
     record: &OwnedTableRecord,
 ) -> StorageResult<Vec<u8>> {
-    let tuple = TupleView::parse(&record.record).map_err(|error| {
-        invalid_table_record(table, record.table_key, format!("invalid tuple bytes: {error}"))
+    index_key_from_record_bytes(table, index, record.table_key, &record.record)
+}
+
+fn index_key_from_table_record(
+    table: &TableSchema,
+    index: &IndexSchema,
+    record: &TableRecord,
+) -> StorageResult<Vec<u8>> {
+    record
+        .with_record(|bytes| index_key_from_record_bytes(table, index, record.table_key(), bytes))?
+}
+
+fn index_key_from_record_bytes(
+    table: &TableSchema,
+    index: &IndexSchema,
+    table_key: TableKey,
+    record: &[u8],
+) -> StorageResult<Vec<u8>> {
+    let tuple = TupleView::parse(record).map_err(|error| {
+        invalid_table_record(table, table_key, format!("invalid tuple bytes: {error}"))
     })?;
     let mut values = Vec::with_capacity(index.columns.len());
 
@@ -87,7 +106,7 @@ fn index_key_from_record(
         let value = tuple.values().nth(ordinal).ok_or_else(|| {
             invalid_table_record(
                 table,
-                record.table_key,
+                table_key,
                 format!(
                     "index {} references source column ordinal {ordinal}, but row has {} values",
                     index.name,

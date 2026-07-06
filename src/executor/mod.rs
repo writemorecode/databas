@@ -13,8 +13,9 @@
 
 use crate::{
     core::{
-        Database, OwnedTableRecord as TableRecord, Value, access::ExecutionAccess,
-        error::StorageError,
+        Database, OwnedTableRecord, TableKey, TableRecord as BorrowedTableRecord, Tuple, Value,
+        access::ExecutionAccess,
+        error::{StorageError, StorageResult},
     },
     planner::PhysicalPlan,
     sql_parser::parser::op::Op,
@@ -135,12 +136,67 @@ pub enum ExecutorError {
 /// Result type returned by executor operations.
 pub type ExecutorResult<T> = Result<T, ExecutorError>;
 
+/// Row produced by the query executor.
+///
+/// Scan rows can borrow storage pages through cursor-backed records, while
+/// synthetic and projected rows own their encoded tuple bytes.
+#[derive(Debug)]
+pub enum ExecutorRow {
+    /// Stable row snapshot with owned encoded tuple bytes.
+    Owned(OwnedTableRecord),
+    /// Cursor-backed row that may keep a storage page pinned.
+    Borrowed(BorrowedTableRecord),
+}
+
+impl ExecutorRow {
+    /// Returns this row's table key.
+    pub fn table_key(&self) -> TableKey {
+        match self {
+            Self::Owned(record) => record.table_key,
+            Self::Borrowed(record) => record.table_key(),
+        }
+    }
+
+    /// Executes `f` with the encoded tuple bytes for this row.
+    pub fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
+        match self {
+            Self::Owned(record) => Ok(f(&record.record)),
+            Self::Borrowed(record) => record.with_record(f),
+        }
+    }
+
+    /// Returns this row as a stable owned snapshot.
+    pub fn to_owned_record(&self) -> StorageResult<OwnedTableRecord> {
+        match self {
+            Self::Owned(record) => Ok(record.clone()),
+            Self::Borrowed(record) => record.to_owned_record(),
+        }
+    }
+}
+
+impl std::fmt::Display for ExecutorRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.with_record(|record| match Tuple::from_bytes(record) {
+            Ok(tuple) => {
+                for value in &tuple {
+                    write!(f, "{value}\t")?;
+                }
+                Ok(())
+            }
+            Err(_) => write!(f, "<invalid tuple>"),
+        }) {
+            Ok(result) => result,
+            Err(error) => write!(f, "<unavailable row: {error}>"),
+        }
+    }
+}
+
 /// Lazy stream of records produced by a row-returning plan.
 ///
 /// Individual rows can fail while the stream is being consumed, for example if
 /// a later scanned page cannot be read or a downstream expression fails for a
 /// specific record.
-pub type RowStream = Box<dyn Iterator<Item = ExecutorResult<TableRecord>>>;
+pub type RowStream = Box<dyn Iterator<Item = ExecutorResult<ExecutorRow>>>;
 
 /// Result of executing one physical plan.
 pub enum ExecutionOutput {
@@ -241,14 +297,18 @@ impl<'db> Executor<'db> {
             }
             PhysicalPlan::Update { table, assignments, input } => {
                 let output_inner = self.execute(*input)?;
-                let records =
-                    output_inner.into_rows("UPDATE")?.collect::<ExecutorResult<Vec<_>>>()?;
+                let records = output_inner
+                    .into_rows("UPDATE")?
+                    .map(|row| row.and_then(|row| row.to_owned_record().map_err(Into::into)))
+                    .collect::<ExecutorResult<Vec<_>>>()?;
                 execute_update(self.database, table, assignments, records)
             }
             PhysicalPlan::Delete { table, input } => {
                 let output_inner = self.execute(*input)?;
-                let records =
-                    output_inner.into_rows("DELETE")?.collect::<ExecutorResult<Vec<_>>>()?;
+                let records = output_inner
+                    .into_rows("DELETE")?
+                    .map(|row| row.and_then(|row| row.to_owned_record().map_err(Into::into)))
+                    .collect::<ExecutorResult<Vec<_>>>()?;
                 let affected = records.len() as u64;
 
                 for record in records {
@@ -261,30 +321,33 @@ impl<'db> Executor<'db> {
                 rows: Box::new(std::iter::once_with(|| empty_record(0))),
             }),
             PhysicalPlan::FullTableScan { table } => {
-                let rows =
-                    self.database.scan_table(&table)?.map(|record| record.map_err(Into::into));
+                let rows = self
+                    .database
+                    .scan_table(&table)?
+                    .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
                 Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
             }
             PhysicalPlan::PrimaryKeyRangeScan { table, range } => {
                 let rows = self
                     .database
                     .scan_table_range(&table, range)?
-                    .map(|record| record.map_err(Into::into));
+                    .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
                 Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
             }
             PhysicalPlan::SecondaryIndexScan { scan } => {
                 let rows = self
                     .database
                     .scan_index(&scan.table, &scan.index, scan.key_range)?
-                    .map(|record| record.map_err(Into::into));
+                    .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
                 Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
             }
             PhysicalPlan::Filter { input, predicate } => {
                 let output_inner = self.execute(*input)?;
                 let rows = output_inner.into_rows("FILTER")?.filter_map(move |row| match row {
                     Ok(row) => {
-                        let result = EvaluationContext::from_record(&row)
-                            .and_then(|context| evaluate_value(&predicate, &context));
+                        let result = EvaluationContext::with_record(&row, |context| {
+                            evaluate_value(&predicate, context)
+                        });
                         match result {
                             Ok(Value::Boolean(true)) => Some(Ok(row)),
                             Ok(Value::Boolean(false)) => None,

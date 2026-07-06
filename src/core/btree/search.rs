@@ -555,11 +555,6 @@ impl TreeCursor {
         }
     }
 
-    /// Searches the raw tree for `key` and returns a stable owned record snapshot.
-    pub fn get_owned(&mut self, key: &[u8]) -> StorageResult<Option<OwnedRecord>> {
-        self.get(key)?.map(|record| record.to_owned_record()).transpose()
-    }
-
     /// Positions the cursor on the first record whose key is greater than or
     /// equal to `key`.
     pub fn seek_to_key(&mut self, key: &[u8]) -> StorageResult<bool> {
@@ -610,28 +605,13 @@ impl TreeCursor {
         }
     }
 
-    /// Reads the currently selected record as a stable owned snapshot, if any.
-    pub fn current_owned(&self) -> StorageResult<Option<OwnedRecord>> {
-        self.current()?.map(|record| record.to_owned_record()).transpose()
-    }
-
     /// Advances to the next record in sorted key order.
     pub fn next_record(&mut self) -> StorageResult<Option<Record>> {
         self.step_record(ScanDirection::Forward)
     }
 
-    /// Advances to the next record and returns a stable owned snapshot.
-    pub fn next_owned_record(&mut self) -> StorageResult<Option<OwnedRecord>> {
-        self.next_record()?.map(|record| record.to_owned_record()).transpose()
-    }
-
     /// Moves to the previous record in sorted key order.
     pub fn prev_record(&mut self) -> StorageResult<Option<Record>> {
         self.step_record(ScanDirection::Backward)
-    }
-
-    /// Moves to the previous record and returns a stable owned snapshot.
-    pub fn prev_owned_record(&mut self) -> StorageResult<Option<OwnedRecord>> {
-        self.prev_record()?.map(|record| record.to_owned_record()).transpose()
     }
 }

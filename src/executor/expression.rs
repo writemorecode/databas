@@ -1,23 +1,22 @@
 use crate::{
     core::{
-        OwnedTableRecord as TableRecord, TableKey, TableSchema, Tuple, TupleView, Value,
-        access::RecordAccess,
+        OwnedTableRecord, TableKey, TableSchema, Tuple, TupleView, Value, access::RecordAccess,
     },
     planner::{BoundColumn, PlannedExpression, UpdateAssignment},
     sql_parser::parser::op::Op,
 };
 
-use super::{ExecutionOutput, ExecutorError, ExecutorResult, RowStream};
+use super::{ExecutionOutput, ExecutorError, ExecutorResult, ExecutorRow, RowStream};
 
 /// Evaluates one planned scalar expression against a record.
 ///
-/// The result is represented as a single-column [`TableRecord`] that preserves
+/// The result is represented as a single-column [`ExecutorRow`] that preserves
 /// the input record's table key. This is primarily useful for tests and callers
 /// that need expression evaluation without building a full projection plan.
 pub fn evaluate_expression(
     expression: &PlannedExpression,
-    record: &TableRecord,
-) -> ExecutorResult<TableRecord> {
+    record: &ExecutorRow,
+) -> ExecutorResult<ExecutorRow> {
     evaluate_expressions(std::slice::from_ref(expression), record)
 }
 
@@ -75,20 +74,22 @@ pub(super) fn execute_insert_values<R: RecordAccess + ?Sized>(
         }
 
         let input = empty_record(0)?;
-        let input_context = EvaluationContext::from_record(&input)?;
-        let mut row_values = vec![Value::Null; table.row.columns.len()];
-        for (column, expression) in columns.iter().zip(expressions.iter()) {
-            let len = row_values.len();
-            let value = evaluate_value(expression, &input_context)?;
-            let slot = row_values.get_mut(column.ordinal).ok_or_else(|| {
-                ExecutorError::ColumnOrdinalOutOfBounds {
-                    column: column.name.clone(),
-                    ordinal: column.ordinal,
-                    len,
-                }
-            })?;
-            *slot = value;
-        }
+        let row_values = EvaluationContext::with_record(&input, |input_context| {
+            let mut row_values = vec![Value::Null; table.row.columns.len()];
+            for (column, expression) in columns.iter().zip(expressions.iter()) {
+                let len = row_values.len();
+                let value = evaluate_value(expression, input_context)?;
+                let slot = row_values.get_mut(column.ordinal).ok_or_else(|| {
+                    ExecutorError::ColumnOrdinalOutOfBounds {
+                        column: column.name.clone(),
+                        ordinal: column.ordinal,
+                        len,
+                    }
+                })?;
+                *slot = value;
+            }
+            Ok(row_values)
+        })?;
         records.insert_table_row(&table, row_values)?;
         affected += 1;
     }
@@ -101,12 +102,12 @@ pub(super) fn execute_update<R: RecordAccess + ?Sized>(
     records: &R,
     table: TableSchema,
     assignments: Vec<UpdateAssignment>,
-    target_rows: Vec<TableRecord>,
+    target_rows: Vec<OwnedTableRecord>,
 ) -> ExecutorResult<ExecutionOutput> {
     let affected = target_rows.len() as u64;
 
     for row in target_rows {
-        let context = EvaluationContext::from_record(&row)?;
+        let context = EvaluationContext::from_owned_record(&row)?;
         let mut values = context.tuple.to_owned_tuple().into_values();
 
         for assignment in &assignments {
@@ -131,17 +132,18 @@ pub(super) fn execute_update<R: RecordAccess + ?Sized>(
 /// Evaluates a projection list against one input record.
 pub(super) fn evaluate_expressions(
     expressions: &[PlannedExpression],
-    record: &TableRecord,
-) -> ExecutorResult<TableRecord> {
-    let context = EvaluationContext::from_record(record)?;
-    evaluate_expressions_in_context(expressions, &context)
+    record: &ExecutorRow,
+) -> ExecutorResult<ExecutorRow> {
+    EvaluationContext::with_record(record, |context| {
+        evaluate_expressions_in_context(expressions, context)
+    })
 }
 
 /// Evaluates expressions using an already-parsed tuple context.
 fn evaluate_expressions_in_context(
     expressions: &[PlannedExpression],
     context: &EvaluationContext<'_>,
-) -> ExecutorResult<TableRecord> {
+) -> ExecutorResult<ExecutorRow> {
     let values = expressions
         .iter()
         .map(|expression| evaluate_value(expression, context))
@@ -186,11 +188,31 @@ pub(super) struct EvaluationContext<'a> {
     tuple: TupleView<'a>,
 }
 
+impl EvaluationContext<'_> {
+    /// Parses the encoded tuple bytes from `record` and evaluates `f` while
+    /// the record bytes are still borrowed.
+    pub(super) fn with_record<R>(
+        record: &ExecutorRow,
+        f: impl FnOnce(&EvaluationContext<'_>) -> ExecutorResult<R>,
+    ) -> ExecutorResult<R> {
+        let table_key = record.table_key();
+        record.with_record(|bytes| {
+            let tuple = TupleView::parse(bytes).map_err(ExecutorError::InvalidTuple)?;
+            let context = EvaluationContext { table_key, tuple };
+            f(&context)
+        })?
+    }
+}
+
 impl<'a> EvaluationContext<'a> {
-    /// Parses the encoded tuple bytes from `record`.
-    pub(super) fn from_record(record: &'a TableRecord) -> ExecutorResult<Self> {
-        let tuple = TupleView::parse(&record.record).map_err(ExecutorError::InvalidTuple)?;
-        Ok(Self { table_key: record.table_key, tuple })
+    /// Parses the encoded tuple bytes from an owned table record.
+    pub(super) fn from_owned_record(record: &'a OwnedTableRecord) -> ExecutorResult<Self> {
+        Self::from_bytes(record.table_key, &record.record)
+    }
+
+    fn from_bytes(table_key: TableKey, record: &'a [u8]) -> ExecutorResult<Self> {
+        let tuple = TupleView::parse(record).map_err(ExecutorError::InvalidTuple)?;
+        Ok(Self { table_key, tuple })
     }
 
     /// Reads the value for a planner-bound column reference.
@@ -354,7 +376,7 @@ fn compare_ordered<T: PartialOrd>(left: &T, op: Op, right: &T) -> bool {
 }
 
 /// Builds an encoded empty record with the provided table key.
-pub(super) fn empty_record(table_key: TableKey) -> ExecutorResult<TableRecord> {
+pub(super) fn empty_record(table_key: TableKey) -> ExecutorResult<ExecutorRow> {
     record_from_values(table_key, Vec::new())
 }
 
@@ -362,9 +384,16 @@ pub(super) fn empty_record(table_key: TableKey) -> ExecutorResult<TableRecord> {
 pub(super) fn record_from_values(
     table_key: TableKey,
     values: Vec<Value>,
-) -> ExecutorResult<TableRecord> {
+) -> ExecutorResult<ExecutorRow> {
+    owned_record_from_values(table_key, values).map(ExecutorRow::Owned)
+}
+
+pub(super) fn owned_record_from_values(
+    table_key: TableKey,
+    values: Vec<Value>,
+) -> ExecutorResult<OwnedTableRecord> {
     let record = record_bytes_from_values(values)?;
-    Ok(TableRecord { table_key, record: record.into_boxed_slice() })
+    Ok(OwnedTableRecord { table_key, record: record.into_boxed_slice() })
 }
 
 /// Serializes typed values using the tuple storage format.
