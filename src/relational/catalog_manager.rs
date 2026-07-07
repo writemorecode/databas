@@ -54,7 +54,7 @@ impl CatalogManager {
         }
 
         let table_id = self.next_object_id()?;
-        let root_page_id = self.pager.create_table_tree()?.root_page_id();
+        let root_page_id = self.pager.create_tree()?.root_page_id();
         let schema = TableSchema { table_id, name: name.to_owned(), root_page_id, row };
 
         self.insert_table_catalog_row(&schema.catalog_row())?;
@@ -133,7 +133,7 @@ impl CatalogManager {
             });
         }
 
-        let root_page_id = self.pager.create_index_tree()?.root_page_id();
+        let root_page_id = self.pager.create_tree()?.root_page_id();
         let schema = IndexSchema {
             index_id,
             name: name.to_owned(),
@@ -152,13 +152,13 @@ impl CatalogManager {
     /// Returns a typed cursor for the cataloged table named `name`.
     pub fn table_cursor_by_name(&self, name: &str) -> StorageResult<TableCursor> {
         let schema = self.table_schema_by_name(name)?;
-        self.pager.table_cursor(schema.root_page_id)
+        Ok(self.table_cursor(schema.root_page_id))
     }
 
     /// Returns a typed cursor for the cataloged index named `name`.
     pub fn index_cursor_by_name(&self, name: &str) -> StorageResult<IndexCursor> {
         let schema = self.index_schema_by_name(name)?;
-        self.pager.index_cursor(schema.root_page_id)
+        Ok(self.index_cursor(schema.root_page_id))
     }
 
     fn initialize_or_validate_system_catalog(&self) -> StorageResult<()> {
@@ -171,7 +171,7 @@ impl CatalogManager {
     }
 
     fn initialize_system_root(&self, expected_page_id: PageId) -> StorageResult<()> {
-        let actual_page_id = self.pager.create_table_tree()?.root_page_id();
+        let actual_page_id = self.pager.create_tree()?.root_page_id();
         if actual_page_id == expected_page_id {
             Ok(())
         } else {
@@ -187,8 +187,8 @@ impl CatalogManager {
     }
 
     fn seed_system_catalog(&self) -> StorageResult<()> {
-        let mut tables = self.pager.table_cursor(SYS_TABLES_ROOT_PAGE_ID)?;
-        let mut columns = self.pager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID)?;
+        let mut tables = self.table_cursor(SYS_TABLES_ROOT_PAGE_ID);
+        let mut columns = self.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID);
 
         for schema in system_table_schemas() {
             let bytes = schema.catalog_row().to_bytes()?;
@@ -201,6 +201,14 @@ impl CatalogManager {
         }
 
         Ok(())
+    }
+
+    fn table_cursor(&self, root_page_id: PageId) -> TableCursor {
+        TableCursor::new(self.pager.tree_cursor(root_page_id))
+    }
+
+    fn index_cursor(&self, root_page_id: PageId) -> IndexCursor {
+        IndexCursor::new(self.pager.tree_cursor(root_page_id))
     }
 
     fn validate_page_formats(&self) -> StorageResult<()> {
@@ -329,7 +337,7 @@ impl CatalogManager {
         catalog_table_name: &'static str,
         decode: impl Fn(&Tuple) -> Result<T, CatalogError>,
     ) -> StorageResult<Vec<T>> {
-        let mut cursor = self.pager.table_cursor(root_page_id)?;
+        let mut cursor = self.table_cursor(root_page_id);
         let mut rows = Vec::new();
         if !cursor.seek_to_first()? {
             return Ok(rows);
@@ -366,7 +374,7 @@ impl CatalogManager {
         table_key: CatalogId,
         tuple: &Tuple,
     ) -> StorageResult<()> {
-        let mut cursor = self.pager.table_cursor(root_page_id)?;
+        let mut cursor = self.table_cursor(root_page_id);
         let bytes = tuple.to_bytes()?;
         cursor.insert(table_key, &bytes)
     }
@@ -493,9 +501,9 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let manager = open(file.path()).unwrap();
 
-        assert_eq!(manager.pager.create_table_tree().unwrap().root_page_id(), 4);
+        assert_eq!(manager.pager.create_tree().unwrap().root_page_id(), 4);
 
-        let mut tables = manager.pager.table_cursor(SYS_TABLES_ROOT_PAGE_ID).unwrap();
+        let mut tables = manager.table_cursor(SYS_TABLES_ROOT_PAGE_ID);
         assert_table_catalog_row(
             &mut tables,
             SYS_TABLES_TABLE_ID,
@@ -515,7 +523,7 @@ mod tests {
             SYS_COLUMNS_ROOT_PAGE_ID,
         );
 
-        let mut columns = manager.pager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID).unwrap();
+        let mut columns = manager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID);
         for row in system_column_rows() {
             let record =
                 columns.get(row.column_id).unwrap().expect("system column row should exist");
@@ -543,7 +551,7 @@ mod tests {
         }
 
         let manager = open(file.path()).unwrap();
-        let mut tables = manager.pager.table_cursor(SYS_TABLES_ROOT_PAGE_ID).unwrap();
+        let mut tables = manager.table_cursor(SYS_TABLES_ROOT_PAGE_ID);
         assert_table_catalog_row(
             &mut tables,
             SYS_TABLES_TABLE_ID,
@@ -593,11 +601,11 @@ mod tests {
             table.root_page_id
         );
 
-        let mut tables = manager.pager.table_cursor(SYS_TABLES_ROOT_PAGE_ID).unwrap();
+        let mut tables = manager.table_cursor(SYS_TABLES_ROOT_PAGE_ID);
         assert_table_catalog_row(&mut tables, table.table_id, "users", table.root_page_id);
 
         let first_user_column_id = system_column_rows().len() as CatalogId + 1;
-        let mut columns = manager.pager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID).unwrap();
+        let mut columns = manager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID);
         assert_column_catalog_row(
             &mut columns,
             ColumnCatalogRow {
@@ -682,7 +690,7 @@ mod tests {
             index.root_page_id
         );
 
-        let mut indexes = manager.pager.table_cursor(SYS_INDEXES_ROOT_PAGE_ID).unwrap();
+        let mut indexes = manager.table_cursor(SYS_INDEXES_ROOT_PAGE_ID);
         assert_index_catalog_row(
             &mut indexes,
             IndexCatalogRow {
@@ -696,7 +704,7 @@ mod tests {
 
         let index_column_id =
             system_column_rows().len() as CatalogId + table.row.columns.len() as CatalogId + 1;
-        let mut columns = manager.pager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID).unwrap();
+        let mut columns = manager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID);
         assert_column_catalog_row(
             &mut columns,
             ColumnCatalogRow {

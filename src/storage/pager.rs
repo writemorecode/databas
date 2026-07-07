@@ -1,7 +1,6 @@
 use std::{path::Path, rc::Rc};
 
 use crate::core::{PageId, error::StorageResult};
-use crate::relational::cursor::{IndexCursor, TableCursor};
 use crate::storage::{
     btree::{TreeCursor, initialize_empty_root, validate_tree_page_formats},
     database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header},
@@ -29,7 +28,7 @@ impl Default for PagerOptions {
 /// Storage-engine handle for one database file.
 ///
 /// `Pager` owns the disk manager and page cache indirectly, and is responsible
-/// only for producing typed B+-tree cursors rooted at specific page ids.
+/// only for producing raw B+-tree cursors rooted at specific page ids.
 #[derive(Clone)]
 pub(crate) struct Pager {
     runtime: Rc<StorageRuntime>,
@@ -122,26 +121,15 @@ impl Pager {
         TransactionRuntime::new(Rc::clone(&self.runtime), self.page_cache.clone())
     }
 
-    /// Creates a new empty table tree and returns a cursor rooted at it.
-    pub(crate) fn create_table_tree(&self) -> StorageResult<TableCursor> {
+    /// Creates a new empty raw tree and returns a cursor rooted at it.
+    pub(crate) fn create_tree(&self) -> StorageResult<TreeCursor> {
         let root_page_id = initialize_empty_root(&self.page_cache)?;
-        Ok(TableCursor::new(TreeCursor::new(self.page_cache.clone(), root_page_id)))
+        Ok(TreeCursor::new(self.page_cache.clone(), root_page_id))
     }
 
-    /// Creates a new empty secondary-index tree and returns a cursor rooted at it.
-    pub(crate) fn create_index_tree(&self) -> StorageResult<IndexCursor> {
-        let root_page_id = initialize_empty_root(&self.page_cache)?;
-        Ok(IndexCursor::new(TreeCursor::new(self.page_cache.clone(), root_page_id)))
-    }
-
-    /// Returns a typed cursor rooted at an existing table tree.
-    pub(crate) fn table_cursor(&self, root_page_id: PageId) -> StorageResult<TableCursor> {
-        Ok(TableCursor::new(TreeCursor::new(self.page_cache.clone(), root_page_id)))
-    }
-
-    /// Returns a typed cursor rooted at an existing secondary-index tree.
-    pub(crate) fn index_cursor(&self, root_page_id: PageId) -> StorageResult<IndexCursor> {
-        Ok(IndexCursor::new(TreeCursor::new(self.page_cache.clone(), root_page_id)))
+    /// Returns a raw cursor rooted at an existing tree.
+    pub(crate) fn tree_cursor(&self, root_page_id: PageId) -> TreeCursor {
+        TreeCursor::new(self.page_cache.clone(), root_page_id)
     }
 
     /// Validates every B+-tree page reachable from `root_page_id`.
@@ -175,18 +163,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opens_database_and_manages_table_and_index_trees() {
+    fn opens_database_and_manages_raw_trees() {
         let file = NamedTempFile::new().unwrap();
         let pager = Pager::open_or_create(file.path()).unwrap();
 
         assert_eq!(pager.opened_page_count(), 1);
-        assert_eq!(pager.create_table_tree().unwrap().root_page_id(), 1);
-        assert_eq!(pager.create_index_tree().unwrap().root_page_id(), 2);
+        assert_eq!(pager.create_tree().unwrap().root_page_id(), 1);
+        assert_eq!(pager.create_tree().unwrap().root_page_id(), 2);
         pager.flush().unwrap();
 
         let pager = Pager::open(file.path()).unwrap();
         assert_eq!(pager.opened_page_count(), 3);
-        assert_eq!(pager.table_cursor(1).unwrap().root_page_id(), 1);
-        assert_eq!(pager.index_cursor(2).unwrap().root_page_id(), 2);
+        assert_eq!(pager.tree_cursor(1).root_page_id(), 1);
+        assert_eq!(pager.tree_cursor(2).root_page_id(), 2);
     }
 }
