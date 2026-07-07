@@ -1,27 +1,21 @@
 use std::fmt;
 
 pub(crate) mod access;
-pub(crate) mod catalog;
-mod catalog_manager;
-pub(crate) mod cursor;
 pub(crate) mod database;
 pub mod error;
-pub(crate) mod index_manager;
-pub(crate) mod record_manager;
-pub(crate) mod tuple;
 
-pub use catalog::{
+pub use crate::relational::catalog::{
     ColumnSchema, DataType, IndexColumnSchema, IndexSchema, TableSchema, TupleSchema,
 };
-pub use cursor::{
+pub use crate::relational::cursor::{
     IndexEntry, IndexEntryView, OwnedIndexEntry, OwnedTableRecord, TableRecord, TableRecordView,
 };
+pub use crate::relational::tuple::{EncodedTupleView, Tuple, TupleRef, TupleView, Value, ValueRef};
 pub use database::Database;
 pub use error::{
     ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InternalError,
     InvalidArgumentError, LimitExceededError, StorageError, StorageResult,
 };
-pub use tuple::{EncodedTupleView, Tuple, TupleRef, TupleView, Value, ValueRef};
 
 pub(crate) const PAGE_SIZE: usize = 4096;
 

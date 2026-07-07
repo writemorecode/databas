@@ -6,11 +6,11 @@ use super::*;
 use crate::{
     core::{
         ColumnSchema, DataType, OwnedTableRecord, PAGE_SIZE, TableKey, Tuple, TupleSchema,
-        cursor::encode_index_entry_key,
         error::{ConstraintError, InternalError, InvariantViolation, StorageError},
     },
     error::DatabaseError,
     planner::{BoundColumn, PlannedExpression, Planner},
+    relational::cursor::encode_index_entry_key,
     session::{Session, SessionError},
     sql_parser::parser::Parser,
 };
@@ -206,7 +206,7 @@ fn assert_name_index_absent(database: &Database, name: &str) {
     assert_index_prefix_absent(&mut index, &key);
 }
 
-fn assert_index_prefix_absent(index: &mut crate::core::cursor::IndexCursor, key: &[u8]) {
+fn assert_index_prefix_absent(index: &mut crate::relational::cursor::IndexCursor, key: &[u8]) {
     assert!(
         !index.seek_to_key(key).unwrap()
             || !index

@@ -2,16 +2,18 @@ use std::path::Path;
 
 use crate::core::{
     CatalogId, IndexSchema, PageId, TableRecord, TableSchema, Tuple, TupleSchema,
+    error::{
+        ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind,
+        InvalidArgumentError, StorageError, StorageResult,
+    },
+};
+use crate::relational::{
     catalog::{
         CatalogError, CatalogObjectKind, ColumnCatalogRow, ColumnSchema, IndexCatalogRow,
         IndexColumnSchema, SYS_COLUMNS_ROOT_PAGE_ID, SYS_INDEXES_ROOT_PAGE_ID,
         SYS_TABLES_ROOT_PAGE_ID, TableCatalogRow, system_column_rows, system_table_schemas,
     },
     cursor::{IndexCursor, TableCursor},
-    error::{
-        ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind,
-        InvalidArgumentError, StorageError, StorageResult,
-    },
 };
 use crate::storage::pager::Pager;
 
@@ -475,12 +477,10 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::{
-        CatalogId, Tuple, TupleSchema,
-        catalog::{
-            ColumnCatalogRow, ColumnSchema, DataType, IndexCatalogRow, SYS_COLUMNS_TABLE_ID,
-            SYS_INDEXES_TABLE_ID, SYS_TABLES_TABLE_ID, TableCatalogRow, system_column_rows,
-        },
+    use crate::core::{CatalogId, Tuple, TupleSchema};
+    use crate::relational::catalog::{
+        ColumnCatalogRow, ColumnSchema, DataType, IndexCatalogRow, SYS_COLUMNS_TABLE_ID,
+        SYS_INDEXES_TABLE_ID, SYS_TABLES_TABLE_ID, TableCatalogRow, system_column_rows,
     };
     use crate::storage::{database_header::DatabaseHeader, disk_manager::DiskManager};
 
@@ -520,7 +520,7 @@ mod tests {
             let record =
                 columns.get(row.column_id).unwrap().expect("system column row should exist");
             let tuple = Tuple::from_bytes(&record.record).unwrap();
-            let actual = crate::core::catalog::ColumnCatalogRow::decode(&tuple).unwrap();
+            let actual = crate::relational::catalog::ColumnCatalogRow::decode(&tuple).unwrap();
             assert_eq!(actual.column_id, row.column_id);
             assert_eq!(actual.object_kind, row.object_kind);
             assert_eq!(actual.object_id, row.object_id);

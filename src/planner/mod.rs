@@ -35,9 +35,9 @@ use crate::{
         ColumnSchema, DataType, Database, IndexKeyBound, IndexKeyRange, IndexSchema, TableKey,
         TableKeyBound, TableKeyRange, TableSchema, Tuple, TupleSchema, Value,
         access::SchemaAccess,
-        cursor::encode_index_entry_key,
         error::{InvalidArgumentError, StorageError},
     },
+    relational::cursor::encode_index_entry_key,
     sql_parser::{
         NumberKind,
         parser::{

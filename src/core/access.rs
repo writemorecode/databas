@@ -1,8 +1,8 @@
 use crate::core::{
     IndexKeyRange, IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
     error::StorageResult,
-    record_manager::{IndexScan, TableScan},
 };
+use crate::relational::record_manager::{IndexScan, TableScan};
 
 pub(crate) trait SchemaAccess {
     fn table_schema_by_name(&self, name: &str) -> StorageResult<TableSchema>;
