@@ -1,8 +1,7 @@
 //! Overflow-page chain helpers for large B+-tree cell payloads.
 
-use crate::core::{
-    PAGE_SIZE, PageId,
-    error::StorageResult,
+use crate::core::{PAGE_SIZE, PageId, error::StorageResult};
+use crate::storage::{
     page::format::{self, OVERFLOW_NEXT_PAGE_ID_SIZE},
     page_cache::PageCache,
 };

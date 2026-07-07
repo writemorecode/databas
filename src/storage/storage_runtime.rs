@@ -2,8 +2,10 @@ use std::{cell::RefCell, path::PathBuf};
 
 use crate::core::{
     PAGE_SIZE, PageId,
-    disk_manager::DiskManager,
     error::{DiskManagerError, StorageResult},
+};
+use crate::storage::{
+    disk_manager::DiskManager,
     log_manager::{LogManager, Lsn, TxnId},
     recovery::recover_from_wal,
     transaction_manager::{

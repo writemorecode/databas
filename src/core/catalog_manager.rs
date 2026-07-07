@@ -12,8 +12,8 @@ use crate::core::{
         ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind,
         InvalidArgumentError, StorageError, StorageResult,
     },
-    pager::Pager,
 };
+use crate::storage::pager::Pager;
 
 /// Internal catalog manager for one database file.
 ///
@@ -161,7 +161,7 @@ impl CatalogManager {
 
     fn initialize_or_validate_system_catalog(&self) -> StorageResult<()> {
         match self.pager.opened_page_count() {
-            0 => Err(crate::core::database_header::missing_header()),
+            0 => Err(crate::storage::database_header::missing_header()),
             1 => self.initialize_system_catalog(),
             2..=3 => Err(missing_system_catalog_root(self.pager.opened_page_count())),
             _ => Ok(()),
@@ -481,9 +481,8 @@ mod tests {
             ColumnCatalogRow, ColumnSchema, DataType, IndexCatalogRow, SYS_COLUMNS_TABLE_ID,
             SYS_INDEXES_TABLE_ID, SYS_TABLES_TABLE_ID, TableCatalogRow, system_column_rows,
         },
-        database_header::DatabaseHeader,
-        disk_manager::DiskManager,
     };
+    use crate::storage::{database_header::DatabaseHeader, disk_manager::DiskManager};
 
     fn open(path: impl AsRef<Path>) -> StorageResult<CatalogManager> {
         CatalogManager::from_pager(Pager::open_or_create(path)?)

@@ -1,10 +1,10 @@
 use std::{collections::TryReserveError, fmt};
 use thiserror::Error;
 
-use crate::core::{
+use crate::core::{PAGE_SIZE, PageId, TableKey};
+use crate::storage::{
     log_manager::{LogManagerError, LogManagerFlushError, Lsn, TxnId},
     page::{CellCorruption, PageCorruption, PageError},
-    {PAGE_SIZE, PageId, TableKey},
 };
 
 #[derive(Debug, Error)]
@@ -343,8 +343,8 @@ impl From<PageError> for StorageError {
             }),
             PageError::InvalidPageKind { expected, actual } => Self::Corruption(CorruptionError {
                 component: match expected.node_kind() {
-                    crate::core::page::format::NodeKind::Leaf => CorruptionComponent::LeafPage,
-                    crate::core::page::format::NodeKind::Interior => {
+                    crate::storage::page::format::NodeKind::Leaf => CorruptionComponent::LeafPage,
+                    crate::storage::page::format::NodeKind::Interior => {
                         CorruptionComponent::InteriorPage
                     }
                 },
@@ -388,10 +388,10 @@ impl From<PageError> for StorageError {
     }
 }
 
-fn page_kind_name(kind: crate::core::page::format::PageKind) -> &'static str {
+fn page_kind_name(kind: crate::storage::page::format::PageKind) -> &'static str {
     match kind {
-        crate::core::page::format::PageKind::RawLeaf => "raw leaf",
-        crate::core::page::format::PageKind::RawInterior => "raw interior",
+        crate::storage::page::format::PageKind::RawLeaf => "raw leaf",
+        crate::storage::page::format::PageKind::RawInterior => "raw interior",
     }
 }
 

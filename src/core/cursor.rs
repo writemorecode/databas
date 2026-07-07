@@ -2,10 +2,9 @@
 
 use std::fmt::{self, Display};
 
-use crate::core::{
-    TableKey, Tuple,
+use crate::core::{TableKey, Tuple, error::StorageResult};
+use crate::storage::{
     btree::{CursorState, Record, TreeCursor},
-    error::StorageResult,
     page::{CellCorruption, PageError},
 };
 
@@ -399,10 +398,10 @@ mod tests {
     use super::*;
     use crate::core::{
         PAGE_SIZE,
-        btree::initialize_empty_root,
-        disk_manager::DiskManager,
         error::{ConstraintError, InvalidArgumentError, StorageError},
-        page_cache::PageCache,
+    };
+    use crate::storage::{
+        btree::initialize_empty_root, disk_manager::DiskManager, page_cache::PageCache,
         storage_runtime::StorageRuntime,
     };
 

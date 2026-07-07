@@ -8,10 +8,10 @@ use crate::core::{
     catalog_manager::CatalogManager,
     error::StorageResult,
     index_manager::IndexManager,
-    log_manager::TxnId,
-    pager::Pager,
     record_manager::{IndexScan, RecordManager, TableScan},
-    transaction_manager::TransactionSavepoint,
+};
+use crate::storage::{
+    log_manager::TxnId, pager::Pager, transaction_manager::TransactionSavepoint,
     transaction_runtime::TransactionRuntime,
 };
 

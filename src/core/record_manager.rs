@@ -382,8 +382,8 @@ mod tests {
         catalog_manager::CatalogManager,
         cursor::{IndexCursor, encode_index_entry_key},
         index_manager::IndexManager,
-        pager::Pager,
     };
+    use crate::storage::pager::Pager;
 
     fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, RecordManager)> {
         let catalog = CatalogManager::from_pager(Pager::open_or_create(path)?)?;

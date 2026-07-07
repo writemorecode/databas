@@ -1,8 +1,8 @@
 use core::marker::PhantomData;
 use std::cmp::Ordering;
 
-use crate::core::log_manager::ZERO_LSN;
 use crate::core::{PAGE_SIZE, PageId, SlotId};
+use crate::storage::log_manager::ZERO_LSN;
 
 use super::{
     error::{PageCorruption, PageError, PageResult},

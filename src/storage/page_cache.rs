@@ -24,12 +24,14 @@ use std::{
 
 use crate::core::{
     error::{PageCacheError, PageCacheResult},
+    {PAGE_SIZE, PageId},
+};
+use crate::storage::{
     log_manager::{Lsn, ZERO_LSN},
     page::{NodeMarker, Page, PageResult, Read, Write},
     page_replacement::ClockPolicy,
     storage_runtime::StorageRuntime,
     transaction_manager::PageRestore,
-    {PAGE_SIZE, PageId},
 };
 
 pub(crate) type FrameId = usize;
@@ -457,13 +459,13 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::disk_manager::DiskManager;
-    use crate::core::log_manager::{OwnedLogRecordKind, read_log_record_kinds_for_test};
-    use crate::core::page;
-    use crate::core::page::format::PageKind;
-    use crate::core::page::{Leaf, Page, Write};
-    use crate::core::storage_runtime::StorageRuntime;
-    use crate::core::transaction_runtime::TransactionRuntime;
+    use crate::storage::disk_manager::DiskManager;
+    use crate::storage::log_manager::{OwnedLogRecordKind, read_log_record_kinds_for_test};
+    use crate::storage::page;
+    use crate::storage::page::format::PageKind;
+    use crate::storage::page::{Leaf, Page, Write};
+    use crate::storage::storage_runtime::StorageRuntime;
+    use crate::storage::transaction_runtime::TransactionRuntime;
 
     /// Generates a deterministic page payload from a seed byte.
     fn page_with_pattern(seed: u8) -> [u8; PAGE_SIZE] {

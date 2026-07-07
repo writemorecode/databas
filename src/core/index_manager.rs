@@ -134,9 +134,10 @@ mod tests {
 
     use super::*;
     use crate::core::{
-        ColumnSchema, DataType, TupleSchema, Value, catalog_manager::CatalogManager, pager::Pager,
+        ColumnSchema, DataType, TupleSchema, Value, catalog_manager::CatalogManager,
         record_manager::RecordManager,
     };
+    use crate::storage::pager::Pager;
 
     fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, IndexManager)> {
         let catalog = CatalogManager::from_pager(Pager::open_or_create(path)?)?;

@@ -4,7 +4,7 @@ use std::ops::Range;
 use super::payload::{cell_corruption, materialize_leaf_cell};
 use super::*;
 
-pub(in crate::core::btree) enum RecordStorage {
+pub(in crate::storage::btree) enum RecordStorage {
     PageResident { pin: PinGuard, key_range: Range<usize>, value_range: Range<usize> },
     Materialized { key: Box<[u8]>, value: Box<[u8]> },
 }
@@ -19,7 +19,7 @@ pub(in crate::core::btree) enum RecordStorage {
 pub struct Record {
     page_id: PageId,
     slot_index: u16,
-    pub(in crate::core::btree) storage: RecordStorage,
+    pub(in crate::storage::btree) storage: RecordStorage,
 }
 
 /// Stable, owned raw record snapshot.
