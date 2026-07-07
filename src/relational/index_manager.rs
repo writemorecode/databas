@@ -1,9 +1,8 @@
 use crate::core::{
     IndexSchema, OwnedTableRecord, TableKey, TableRecord, TableSchema, Tuple, TupleView, Value,
-    catalog_manager::CatalogManager,
-    cursor::encode_index_entry_key,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
 };
+use crate::relational::{catalog_manager::CatalogManager, cursor::encode_index_entry_key};
 
 /// Internal manager for secondary-index data maintenance.
 #[derive(Clone)]
@@ -133,10 +132,8 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::{
-        ColumnSchema, DataType, TupleSchema, Value, catalog_manager::CatalogManager,
-        record_manager::RecordManager,
-    };
+    use crate::core::{ColumnSchema, DataType, TupleSchema, Value};
+    use crate::relational::{catalog_manager::CatalogManager, record_manager::RecordManager};
     use crate::storage::pager::Pager;
 
     fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, IndexManager)> {

@@ -1,12 +1,14 @@
 use std::path::Path;
 
-#[cfg(test)]
-use crate::core::cursor::{IndexCursor, TableCursor};
 use crate::core::{
     IndexKeyRange, IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
     access::{DdlAccess, RecordAccess, SchemaAccess},
-    catalog_manager::CatalogManager,
     error::StorageResult,
+};
+#[cfg(test)]
+use crate::relational::cursor::{IndexCursor, TableCursor};
+use crate::relational::{
+    catalog_manager::CatalogManager,
     index_manager::IndexManager,
     record_manager::{IndexScan, RecordManager, TableScan},
 };

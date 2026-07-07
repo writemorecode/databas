@@ -1,10 +1,7 @@
 use std::{path::Path, rc::Rc};
 
-use crate::core::{
-    PageId,
-    cursor::{IndexCursor, TableCursor},
-    error::StorageResult,
-};
+use crate::core::{PageId, error::StorageResult};
+use crate::relational::cursor::{IndexCursor, TableCursor};
 use crate::storage::{
     btree::{TreeCursor, initialize_empty_root, validate_tree_page_formats},
     database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header},

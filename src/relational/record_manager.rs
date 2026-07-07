@@ -2,9 +2,11 @@ use crate::core::{
     CorruptionComponent, CorruptionError, CorruptionKind, DataType, IndexEntry, IndexKeyRange,
     IndexSchema, OwnedTableRecord, TableKey, TableKeyBound, TableKeyRange, TableRecord,
     TableSchema, Tuple, Value,
+    error::{ConstraintError, InvalidArgumentError, StorageError, StorageResult},
+};
+use crate::relational::{
     catalog_manager::CatalogManager,
     cursor::{IndexCursor, TableCursor},
-    error::{ConstraintError, InvalidArgumentError, StorageError, StorageResult},
     index_manager::IndexManager,
 };
 
@@ -377,8 +379,8 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::{
-        ColumnSchema, TableKeyBound, TableKeyRange, TupleSchema,
+    use crate::core::{ColumnSchema, TableKeyBound, TableKeyRange, TupleSchema};
+    use crate::relational::{
         catalog_manager::CatalogManager,
         cursor::{IndexCursor, encode_index_entry_key},
         index_manager::IndexManager,
