@@ -4,7 +4,8 @@
 //! upward from the header, a packed cell-content region that grows downward
 //! from the end of usable space, and a zeroed reserved footer.
 
-use crate::core::{PAGE_SIZE, PageId, SlotId, log_manager::Lsn};
+use crate::core::{PAGE_SIZE, PageId, SlotId};
+use crate::storage::log_manager::Lsn;
 
 /// Current on-disk page format version.
 pub(crate) const FORMAT_VERSION: u8 = 5;

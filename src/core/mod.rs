@@ -1,28 +1,14 @@
 use std::fmt;
 
 pub(crate) mod access;
-pub(crate) mod btree;
 pub(crate) mod catalog;
 mod catalog_manager;
 pub(crate) mod cursor;
 pub(crate) mod database;
-pub(crate) mod database_header;
-pub(crate) mod disk_manager;
 pub mod error;
 pub(crate) mod index_manager;
-pub(crate) mod overflow;
-pub(crate) mod page;
-pub(crate) mod page_cache;
-pub(crate) mod page_replacement;
-pub(crate) mod pager;
 pub(crate) mod record_manager;
-pub(crate) mod recovery;
-pub(crate) mod storage_runtime;
-pub(crate) mod transaction_manager;
-pub(crate) mod transaction_runtime;
 pub(crate) mod tuple;
-
-pub(crate) mod log_manager;
 
 pub use catalog::{
     ColumnSchema, DataType, IndexColumnSchema, IndexSchema, TableSchema, TupleSchema,

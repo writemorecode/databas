@@ -6,11 +6,11 @@
 
 use thiserror::Error;
 
+use crate::storage::transaction_manager::TransactionSavepoint;
 use crate::{
     core::{
         Database,
         error::{InternalError, InvariantViolation, StorageError},
-        transaction_manager::TransactionSavepoint,
     },
     error::DatabaseError,
     executor::{ExecutionOutput, Executor},

@@ -1,9 +1,8 @@
 use std::{collections::HashMap, path::Path};
 
-use crate::core::{
-    PAGE_SIZE, PageId,
+use crate::core::{PAGE_SIZE, PageId, error::StorageResult};
+use crate::storage::{
     disk_manager::DiskManager,
-    error::StorageResult,
     log_manager::{Lsn, RecoveryLogRecordKind, TxnId, ZERO_LSN, read_recovery_log, truncate_wal},
     transaction_manager::page_lsn,
 };
@@ -146,7 +145,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::{
+    use crate::storage::{
         log_manager::{LogManager, LogRecord, LogRecordKind},
         page,
         page::format::PageKind,

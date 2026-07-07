@@ -2,11 +2,13 @@ use std::{path::Path, rc::Rc};
 
 use crate::core::{
     PageId,
-    btree::{TreeCursor, initialize_empty_root, validate_tree_page_formats},
     cursor::{IndexCursor, TableCursor},
+    error::StorageResult,
+};
+use crate::storage::{
+    btree::{TreeCursor, initialize_empty_root, validate_tree_page_formats},
     database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header},
     disk_manager::DiskManager,
-    error::StorageResult,
     page_cache::PageCache,
     storage_runtime::StorageRuntime,
     transaction_runtime::TransactionRuntime,

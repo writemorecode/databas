@@ -1,8 +1,9 @@
 use std::rc::Rc;
 
-use crate::core::{
-    error::StorageResult, log_manager::TxnId, page_cache::PageCache,
-    storage_runtime::StorageRuntime, transaction_manager::TransactionSavepoint,
+use crate::core::error::StorageResult;
+use crate::storage::{
+    log_manager::TxnId, page_cache::PageCache, storage_runtime::StorageRuntime,
+    transaction_manager::TransactionSavepoint,
 };
 
 /// Transaction-facing runtime for a database file.

@@ -1,4 +1,4 @@
-use crate::core::page_cache::FrameId;
+use crate::storage::page_cache::FrameId;
 
 const BITS_PER_WORD: usize = u64::BITS as usize;
 

@@ -4,9 +4,9 @@ use fastrand::Rng;
 use tempfile::NamedTempFile;
 
 use super::*;
-use crate::core::disk_manager::DiskManager;
 use crate::core::error::LimitExceededError;
-use crate::core::storage_runtime::StorageRuntime;
+use crate::storage::disk_manager::DiskManager;
+use crate::storage::storage_runtime::StorageRuntime;
 
 const KEY_LEN_RANGE: std::ops::RangeInclusive<usize> = 8..=192;
 const VALUE_LEN_RANGE: std::ops::RangeInclusive<usize> = 8..=PAGE_SIZE * 3;

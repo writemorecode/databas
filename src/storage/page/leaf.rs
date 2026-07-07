@@ -269,7 +269,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::core::page::Write;
+    use crate::storage::page::Write;
 
     use super::*;
 

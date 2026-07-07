@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use crate::core::{
     PAGE_SIZE, PageId,
     error::{InternalError, InvariantViolation, StorageError, StorageResult},
+};
+use crate::storage::{
     log_manager::{LogManager, LogManagerError, LogRecord, LogRecordKind, Lsn, TxnId, ZERO_LSN},
     page,
 };
@@ -594,12 +596,10 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::{
-        error::{InternalError, InvariantViolation},
-        log_manager::{
-            LogManager, OwnedLogRecordKind, RecoveryLogRecordKind, read_log_record_kinds_for_test,
-            read_recovery_log,
-        },
+    use crate::core::error::{InternalError, InvariantViolation};
+    use crate::storage::log_manager::{
+        LogManager, OwnedLogRecordKind, RecoveryLogRecordKind, read_log_record_kinds_for_test,
+        read_recovery_log,
     };
 
     #[test]
