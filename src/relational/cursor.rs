@@ -119,7 +119,7 @@ impl<'a> IndexEntryView<'a> {
     }
 }
 
-/// Table record returned by [`TableCursor`] lookups and cursor iteration.
+/// Table record returned by table cursor lookups and cursor iteration.
 ///
 /// Inline records keep the backing page pinned internally and expose bytes only
 /// through callbacks. Overflow records may still be materialized by the raw tree.
@@ -128,7 +128,7 @@ pub struct TableRecord {
     raw: Record,
 }
 
-/// Secondary-index entry returned by [`IndexCursor`] lookups and cursor iteration.
+/// Secondary-index entry returned by index cursor lookups and cursor iteration.
 ///
 /// Inline entries keep the backing page pinned internally and expose key bytes
 /// only through callbacks. Overflow keys may still be materialized by the raw tree.
