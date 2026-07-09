@@ -214,8 +214,8 @@ impl<'a> Iterator for Lexer<'a> {
 mod tests {
     use super::*;
     use crate::sql_parser::error::SQLErrorKind;
-    use token_kind::Keyword;
     use token_kind::NumberKind::{Float, Integer};
+    use token_kind::{Aggregate, Keyword};
 
     trait LexerExt {
         fn expect(&mut self, kind: TokenKind, offset: usize);
@@ -322,6 +322,16 @@ mod tests {
         lexer.expect(TokenKind::Keyword(Keyword::Into), 7);
         lexer.expect(TokenKind::Identifier("some_table"), 12);
         lexer.expect(TokenKind::Keyword(Keyword::Values), 23);
+
+        let s = "bEgIn; cOmMiT; rOlLbAcK; sTdDeV(x);";
+        let mut lexer = Lexer::new(s);
+        lexer.expect(TokenKind::Keyword(Keyword::Begin), 0);
+        lexer.expect(TokenKind::Semicolon, 5);
+        lexer.expect(TokenKind::Keyword(Keyword::Commit), 7);
+        lexer.expect(TokenKind::Semicolon, 13);
+        lexer.expect(TokenKind::Keyword(Keyword::Rollback), 15);
+        lexer.expect(TokenKind::Semicolon, 23);
+        lexer.expect(TokenKind::Keyword(Keyword::Aggregate(Aggregate::StdDev)), 25);
     }
 
     #[test]
