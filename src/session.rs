@@ -79,16 +79,16 @@ impl<'db> Session<'db> {
         statement: Statement<'sql>,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
         let mutating = statement_is_mutating(&statement);
-        let plan = Planner::new(self.database).plan_statement(&statement)?;
+        let plan = Planner::new(self.database).plan_physical_statement(&statement)?;
 
         if !mutating {
-            return self.execute_plan(plan.physical);
+            return self.execute_plan(plan);
         }
 
         if let Some(txn_id) = self.active_txn {
-            self.execute_explicit_transaction_statement(txn_id, plan.physical)
+            self.execute_explicit_transaction_statement(txn_id, plan)
         } else {
-            self.execute_implicit_transaction(plan.physical)
+            self.execute_implicit_transaction(plan)
         }
     }
 

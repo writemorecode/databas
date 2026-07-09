@@ -615,6 +615,19 @@ impl<'db> Planner<'db> {
         Ok(Plan { logical, physical })
     }
 
+    /// Plans one parsed SQL statement directly into an executable physical plan.
+    ///
+    /// This is the production execution path: the intermediate logical plan is
+    /// consumed during physical planning instead of being retained for
+    /// inspection.
+    pub fn plan_physical_statement(
+        &self,
+        statement: &Statement<'_>,
+    ) -> PlannerResult<PhysicalPlan> {
+        let logical = self.logical_plan_statement(statement)?;
+        self.physical_plan(logical)
+    }
+
     fn logical_plan_statement(&self, statement: &Statement<'_>) -> PlannerResult<LogicalPlan> {
         match statement {
             Statement::Explain(statement) => self.plan_explain(statement),
