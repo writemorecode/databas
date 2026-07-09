@@ -611,7 +611,7 @@ impl<'db> Planner<'db> {
     /// not execute the statement or mutate database state.
     pub fn plan_statement(&self, statement: &Statement<'_>) -> PlannerResult<Plan> {
         let logical = self.logical_plan_statement(statement)?;
-        let physical = self.physical_plan(&logical)?;
+        let physical = self.physical_plan(logical.clone())?;
         Ok(Plan { logical, physical })
     }
 
@@ -782,47 +782,40 @@ impl<'db> Planner<'db> {
         Ok(plan)
     }
 
-    fn physical_plan(&self, logical: &LogicalPlan) -> PlannerResult<PhysicalPlan> {
+    fn physical_plan(&self, logical: LogicalPlan) -> PlannerResult<PhysicalPlan> {
         match logical {
             LogicalPlan::Explain { input } => {
-                Ok(PhysicalPlan::Explain { input: Box::new(self.physical_plan(input)?) })
+                Ok(PhysicalPlan::Explain { input: Box::new(self.physical_plan(*input)?) })
             }
             LogicalPlan::CreateTable { name, schema } => {
-                Ok(PhysicalPlan::CreateTable { name: name.clone(), schema: schema.clone() })
+                Ok(PhysicalPlan::CreateTable { name, schema })
             }
-            LogicalPlan::CreateIndex { name, table, columns } => Ok(PhysicalPlan::CreateIndex {
-                name: name.clone(),
-                table: table.clone(),
-                columns: columns.clone(),
-            }),
-            LogicalPlan::Values { rows } => Ok(PhysicalPlan::Values { rows: rows.clone() }),
-            LogicalPlan::Insert { table, columns, input } => match input.as_ref() {
-                LogicalPlan::Values { rows } => Ok(PhysicalPlan::InsertValues {
-                    table: table.clone(),
-                    columns: columns.clone(),
-                    values: rows.clone(),
-                }),
+            LogicalPlan::CreateIndex { name, table, columns } => {
+                Ok(PhysicalPlan::CreateIndex { name, table, columns })
+            }
+            LogicalPlan::Values { rows } => Ok(PhysicalPlan::Values { rows }),
+            LogicalPlan::Insert { table, columns, input } => match *input {
+                LogicalPlan::Values { rows } => {
+                    Ok(PhysicalPlan::InsertValues { table, columns, values: rows })
+                }
                 _ => Err(PlannerError::InvalidInsertInput),
             },
             LogicalPlan::Update { table, assignments, input } => Ok(PhysicalPlan::Update {
-                table: table.clone(),
-                assignments: assignments.clone(),
-                input: Box::new(self.physical_plan(input)?),
+                table,
+                assignments,
+                input: Box::new(self.physical_plan(*input)?),
             }),
-            LogicalPlan::Delete { table, input } => Ok(PhysicalPlan::Delete {
-                table: table.clone(),
-                input: Box::new(self.physical_plan(input)?),
-            }),
-            LogicalPlan::OneRow => Ok(PhysicalPlan::OneRow),
-            LogicalPlan::TableScan { table } => {
-                Ok(PhysicalPlan::FullTableScan { table: table.clone() })
+            LogicalPlan::Delete { table, input } => {
+                Ok(PhysicalPlan::Delete { table, input: Box::new(self.physical_plan(*input)?) })
             }
-            LogicalPlan::Filter { input, predicate } => match input.as_ref() {
+            LogicalPlan::OneRow => Ok(PhysicalPlan::OneRow),
+            LogicalPlan::TableScan { table } => Ok(PhysicalPlan::FullTableScan { table }),
+            LogicalPlan::Filter { input, predicate } => match *input {
                 LogicalPlan::TableScan { table } => {
-                    match primary_key_range_predicate(table, predicate) {
+                    match primary_key_range_predicate(&table, &predicate) {
                         Some(range_predicate) => {
                             let scan = PhysicalPlan::PrimaryKeyRangeScan {
-                                table: table.clone(),
+                                table,
                                 range: range_predicate.range,
                             };
                             match range_predicate.residual {
@@ -833,47 +826,44 @@ impl<'db> Planner<'db> {
                                 None => Ok(scan),
                             }
                         }
-                        None => match self.secondary_index_predicate(table, predicate)? {
+                        None => match self.secondary_index_predicate(&table, &predicate)? {
                             Some(index_predicate) => Ok(PhysicalPlan::Filter {
                                 input: Box::new(PhysicalPlan::SecondaryIndexScan {
                                     scan: Box::new(SecondaryIndexScanPlan {
-                                        table: table.clone(),
+                                        table,
                                         index: index_predicate.index,
                                         column: index_predicate.column,
                                         value_range: index_predicate.value_range,
                                         key_range: index_predicate.key_range,
                                     }),
                                 }),
-                                predicate: predicate.clone(),
+                                predicate,
                             }),
                             None => Ok(PhysicalPlan::Filter {
-                                input: Box::new(self.physical_plan(input)?),
-                                predicate: predicate.clone(),
+                                input: Box::new(PhysicalPlan::FullTableScan { table }),
+                                predicate,
                             }),
                         },
                     }
                 }
-                _ => Ok(PhysicalPlan::Filter {
+                input => Ok(PhysicalPlan::Filter {
                     input: Box::new(self.physical_plan(input)?),
-                    predicate: predicate.clone(),
+                    predicate,
                 }),
             },
-            LogicalPlan::Sort { input, terms } => Ok(PhysicalPlan::Sort {
-                input: Box::new(self.physical_plan(input)?),
-                terms: terms.clone(),
-            }),
+            LogicalPlan::Sort { input, terms } => {
+                Ok(PhysicalPlan::Sort { input: Box::new(self.physical_plan(*input)?), terms })
+            }
             LogicalPlan::Project { input, expressions } => Ok(PhysicalPlan::Project {
-                input: Box::new(self.physical_plan(input)?),
-                expressions: expressions.clone(),
+                input: Box::new(self.physical_plan(*input)?),
+                expressions,
             }),
-            LogicalPlan::Offset { input, offset } => Ok(PhysicalPlan::Offset {
-                input: Box::new(self.physical_plan(input)?),
-                offset: *offset,
-            }),
-            LogicalPlan::Limit { input, limit } => Ok(PhysicalPlan::Limit {
-                input: Box::new(self.physical_plan(input)?),
-                limit: *limit,
-            }),
+            LogicalPlan::Offset { input, offset } => {
+                Ok(PhysicalPlan::Offset { input: Box::new(self.physical_plan(*input)?), offset })
+            }
+            LogicalPlan::Limit { input, limit } => {
+                Ok(PhysicalPlan::Limit { input: Box::new(self.physical_plan(*input)?), limit })
+            }
         }
     }
 
