@@ -645,6 +645,12 @@ impl<'db> Planner<'db> {
             Statement::Select(query) => {
                 Ok(LogicalPlan::Explain { input: Box::new(self.plan_select(query)?) })
             }
+            Statement::Update(query) => {
+                Ok(LogicalPlan::Explain { input: Box::new(self.plan_update(query)?) })
+            }
+            Statement::Delete(query) => {
+                Ok(LogicalPlan::Explain { input: Box::new(self.plan_delete(query)?) })
+            }
             statement => {
                 Err(PlannerError::UnsupportedStatement { statement: statement.to_string() })
             }
@@ -2256,6 +2262,82 @@ mod tests {
                 },
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn explain_update_wraps_planned_update() {
+        let (_dir, database) = database_with_users();
+        let planner = Planner::new(&database);
+        let statement = parse("EXPLAIN UPDATE users SET name = 'Ada' WHERE id == 1;");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let LogicalPlan::Explain { input } = &plan.logical else {
+            panic!("expected logical explain plan: {plan:?}");
+        };
+        assert!(
+            matches!(input.as_ref(), LogicalPlan::Update { table, .. } if table.name == "users")
+        );
+
+        let PhysicalPlan::Explain { input } = &plan.physical else {
+            panic!("expected physical explain plan: {plan:?}");
+        };
+        let PhysicalPlan::Update { table, assignments, input } = input.as_ref() else {
+            panic!("expected explained update plan: {plan:?}");
+        };
+        assert_eq!(table.name, "users");
+        assert_eq!(
+            assignments,
+            &[UpdateAssignment {
+                column: bound("users", "name", 1, DataType::Text),
+                expression: PlannedExpression::Literal(Value::String("Ada".to_owned())),
+            }]
+        );
+        assert!(matches!(
+            input.as_ref(),
+            PhysicalPlan::PrimaryKeyRangeScan {
+                range: TableKeyRange {
+                    lower: Some(TableKeyBound::Inclusive(1)),
+                    upper: Some(TableKeyBound::Inclusive(1)),
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn explain_delete_wraps_planned_delete() {
+        let (_dir, database) = database_with_users();
+        database.create_index("idx_users_name", "users", &["name"]).unwrap();
+        let planner = Planner::new(&database);
+        let statement = parse("EXPLAIN DELETE FROM users WHERE name == 'Ada';");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let LogicalPlan::Explain { input } = &plan.logical else {
+            panic!("expected logical explain plan: {plan:?}");
+        };
+        assert!(
+            matches!(input.as_ref(), LogicalPlan::Delete { table, .. } if table.name == "users")
+        );
+
+        let PhysicalPlan::Explain { input } = &plan.physical else {
+            panic!("expected physical explain plan: {plan:?}");
+        };
+        let PhysicalPlan::Delete { table, input } = input.as_ref() else {
+            panic!("expected explained delete plan: {plan:?}");
+        };
+        assert_eq!(table.name, "users");
+        let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+            panic!("expected residual filter over secondary index scan: {plan:?}");
+        };
+        assert!(matches!(
+            input.as_ref(),
+            PhysicalPlan::SecondaryIndexScan { scan }
+                if scan.table.name == "users"
+                    && scan.index.name == "idx_users_name"
+                    && scan.column == bound("users", "name", 1, DataType::Text)
         ));
     }
 

@@ -217,6 +217,14 @@ fn draw_explain_select(tc: &TestCase) -> String {
     format!("EXPLAIN {}", draw_select(tc))
 }
 
+fn draw_explain_delete(tc: &TestCase) -> String {
+    format!("EXPLAIN {}", draw_delete(tc))
+}
+
+fn draw_explain_update(tc: &TestCase) -> String {
+    format!("EXPLAIN {}", draw_update(tc))
+}
+
 fn draw_create_table(tc: &TestCase) -> String {
     let table = draw_identifier(tc);
     let mut columns = vec![format!("{} INT PRIMARY KEY", draw_identifier(tc))];
@@ -275,6 +283,20 @@ fn explain_select_queries_round_trip_through_display(tc: TestCase) {
     assert_round_trips(&sql);
 }
 
+#[hegel::test(test_cases = 250)]
+fn explain_delete_queries_round_trip_through_display(tc: TestCase) {
+    let sql = draw_explain_delete(&tc);
+    tc.note(&sql);
+    assert_round_trips(&sql);
+}
+
+#[hegel::test(test_cases = 250)]
+fn explain_update_queries_round_trip_through_display(tc: TestCase) {
+    let sql = draw_explain_update(&tc);
+    tc.note(&sql);
+    assert_round_trips(&sql);
+}
+
 #[test]
 fn explain_select_parses_as_explain_statement() {
     let parsed = parse_statement("EXPLAIN SELECT alpha FROM beta;");
@@ -283,6 +305,26 @@ fn explain_select_parses_as_explain_statement() {
         panic!("expected EXPLAIN statement");
     };
     assert!(matches!(statement.as_ref(), Statement::Select(_)));
+}
+
+#[test]
+fn explain_delete_parses_as_explain_statement() {
+    let parsed = parse_statement("EXPLAIN DELETE FROM beta WHERE alpha == 1;");
+
+    let Statement::Explain(statement) = parsed else {
+        panic!("expected EXPLAIN statement");
+    };
+    assert!(matches!(statement.as_ref(), Statement::Delete(_)));
+}
+
+#[test]
+fn explain_update_parses_as_explain_statement() {
+    let parsed = parse_statement("EXPLAIN UPDATE beta SET alpha = 1 WHERE gamma == 2;");
+
+    let Statement::Explain(statement) = parsed else {
+        panic!("expected EXPLAIN statement");
+    };
+    assert!(matches!(statement.as_ref(), Statement::Update(_)));
 }
 
 #[hegel::test(test_cases = 250)]
