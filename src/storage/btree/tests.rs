@@ -92,6 +92,64 @@ fn tree_height(cursor: &TreeCursor) -> StorageResult<usize> {
 }
 
 #[test]
+fn rejected_mutations_do_not_advance_tree_epoch() {
+    let mut cursor = temp_tree_cursor(32);
+    cursor.insert(b"present", b"value").unwrap();
+    let mutation_epoch = cursor.mutation_epoch();
+    let oversized_value = vec![0; u16::MAX as usize];
+
+    assert!(cursor.insert(b"present", b"duplicate").is_err());
+    assert_eq!(cursor.mutation_epoch(), mutation_epoch);
+
+    assert!(cursor.update(b"missing", b"value").is_err());
+    assert_eq!(cursor.mutation_epoch(), mutation_epoch);
+
+    assert!(cursor.delete(b"missing").is_err());
+    assert_eq!(cursor.mutation_epoch(), mutation_epoch);
+
+    assert!(cursor.insert(b"oversized", &oversized_value).is_err());
+    assert_eq!(cursor.mutation_epoch(), mutation_epoch);
+
+    assert!(cursor.update(b"present", &oversized_value).is_err());
+    assert_eq!(cursor.mutation_epoch(), mutation_epoch);
+}
+
+#[test]
+fn successful_mutations_advance_shared_tree_epoch_once() {
+    let mut cursor = temp_tree_cursor(32);
+    let observer = TreeCursor::new(cursor.page_cache.clone(), cursor.root_page_id());
+
+    let before_insert = observer.mutation_epoch();
+    cursor.insert(b"key", b"value").unwrap();
+    assert_eq!(observer.mutation_epoch(), before_insert.wrapping_add(1));
+
+    let before_update = observer.mutation_epoch();
+    cursor.update(b"key", b"updated").unwrap();
+    assert_eq!(observer.mutation_epoch(), before_update.wrapping_add(1));
+
+    let before_delete = observer.mutation_epoch();
+    cursor.delete(b"key").unwrap();
+    assert_eq!(observer.mutation_epoch(), before_delete.wrapping_add(1));
+}
+
+#[test]
+fn leaf_split_advances_tree_epoch_once() {
+    let mut cursor = temp_tree_cursor(256);
+
+    for index in 0..256_u16 {
+        let before_insert = cursor.mutation_epoch();
+        cursor.insert(&oversized_key(index), b"value").unwrap();
+        assert_eq!(cursor.mutation_epoch(), before_insert.wrapping_add(1));
+
+        if tree_height(&cursor).unwrap() >= 2 {
+            return;
+        }
+    }
+
+    panic!("test setup should split the root leaf");
+}
+
+#[test]
 fn root_page_id_stays_stable_after_root_splits() {
     let mut cursor = temp_tree_cursor(256);
     let root_page_id = cursor.root_page_id();
@@ -599,6 +657,23 @@ fn binary_search_supports_oversized_interior_separator_keys() {
         let record = cursor.current().unwrap().expect("seek_to_key should position cursor");
         assert_record_matches(&record, key, value);
     }
+}
+
+#[test]
+fn seek_after_key_uses_a_strict_exclusive_bound() {
+    let mut cursor = temp_tree_cursor(8);
+    cursor.insert(b"alpha", b"one").unwrap();
+    cursor.insert(b"bravo", b"two").unwrap();
+    cursor.insert(b"charlie", b"three").unwrap();
+
+    assert!(cursor.seek_after_key(b"alpha").unwrap());
+    assert_record_matches(&cursor.current().unwrap().unwrap(), b"bravo", b"two");
+
+    assert!(cursor.seek_after_key(b"between").unwrap());
+    assert_record_matches(&cursor.current().unwrap().unwrap(), b"bravo", b"two");
+
+    assert!(!cursor.seek_after_key(b"charlie").unwrap());
+    assert!(cursor.current().unwrap().is_none());
 }
 
 fn assert_record_matches(record: &Record, expected_key: &[u8], expected_value: &[u8]) {
