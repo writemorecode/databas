@@ -289,6 +289,7 @@ impl TreeCursor {
             *leaf_guard.page_mut() = left_page_image;
             *right_guard.page_mut() = right_page_image;
         }
+        self.mark_tree_mutated();
 
         if let Some(next_page_id) = next_page_id {
             let next_page_guard = self.page_cache.fetch_page(next_page_id)?;

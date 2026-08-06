@@ -149,7 +149,6 @@ impl TreeCursor {
 
     /// Inserts a new raw key/value record into the tree.
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
-        self.mark_tree_mutated();
         let (leaf_page_id, leaf_pin_guard, tree_path) = self.leaf_page_pin_path_for_key(key)?;
         let (slot_index, has_capacity, old_slot_count) = {
             let leaf_read_guard = leaf_pin_guard.read()?;
@@ -166,13 +165,13 @@ impl TreeCursor {
             let needed = self.leaf_cell_local_size(key, value)? + page::format::SLOT_ENTRY_SIZE;
             (slot_index, page.total_reclaimable_space()? >= needed, page.slot_count())
         };
-
         if has_capacity {
             let inserted_new_leaf_max;
             {
                 let mut leaf_guard = leaf_pin_guard.write()?;
                 let mut page = leaf_guard.open_mut::<Leaf>()?;
                 let slot_index = self.insert_leaf_payload_at(&mut page, slot_index, key, value)?;
+                self.mark_tree_mutated();
                 self.set_positioned_state(leaf_page_id, slot_index);
                 inserted_new_leaf_max = slot_index == old_slot_count;
             }
@@ -192,7 +191,6 @@ impl TreeCursor {
 
     /// Replaces the value stored for an existing `key`.
     pub fn update(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
-        self.mark_tree_mutated();
         let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
         let slot_index = match self.search_leaf_slot(leaf_page_id, key)? {
             SearchResult::Found(slot_index) => slot_index,
@@ -212,6 +210,7 @@ impl TreeCursor {
                 let mut leaf_guard = leaf_pin_guard.write()?;
                 let mut page = leaf_guard.open_mut::<Leaf>()?;
                 let slot_index = self.update_leaf_payload_at(&mut page, slot_index, key, value)?;
+                self.mark_tree_mutated();
                 self.set_positioned_state(leaf_page_id, slot_index);
             }
             drop(leaf_pin_guard);
@@ -228,13 +227,13 @@ impl TreeCursor {
 
     /// Deletes the record identified by `key`.
     pub fn delete(&mut self, key: &[u8]) -> StorageResult<()> {
-        self.mark_tree_mutated();
         let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
         {
             let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
             let mut leaf_guard = leaf_pin_guard.write()?;
             let mut page = leaf_guard.open_mut::<Leaf>()?;
             page.delete(key)?;
+            self.mark_tree_mutated();
         }
 
         self.set_page_state(leaf_page_id);
