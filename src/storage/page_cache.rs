@@ -61,6 +61,7 @@ impl Frame {
 struct CacheMeta {
     page_table: HashMap<PageId, FrameId>,
     replacement: ClockPolicy,
+    tree_mutation_epochs: HashMap<PageId, Rc<Cell<u64>>>,
 }
 
 struct PageCacheInner {
@@ -107,10 +108,19 @@ impl PageCache {
                 meta: RefCell::new(CacheMeta {
                     page_table: HashMap::new(),
                     replacement: ClockPolicy::new(frame_count),
+                    tree_mutation_epochs: HashMap::new(),
                 }),
                 frames,
             }),
         })
+    }
+
+    /// Returns the mutation epoch shared by cursors over one B+-tree root.
+    pub(crate) fn tree_mutation_epoch(&self, root_page_id: PageId) -> Rc<Cell<u64>> {
+        let mut meta = self.inner.meta.borrow_mut();
+        Rc::clone(
+            meta.tree_mutation_epochs.entry(root_page_id).or_insert_with(|| Rc::new(Cell::new(0))),
+        )
     }
 
     /// Fetches an existing page into the cache and returns a pin guard.

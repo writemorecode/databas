@@ -68,6 +68,7 @@ pub enum CursorState {
 pub struct TreeCursor {
     page_cache: PageCache,
     root_page_id: Rc<Cell<PageId>>,
+    mutation_epoch: Rc<Cell<u64>>,
     state: CursorState,
 }
 

@@ -21,6 +21,8 @@ pub(crate) struct RecordManager {
 pub(crate) struct TableScan {
     cursor: TableCursor,
     range: TableKeyRange,
+    last_table_key: Option<TableKey>,
+    observed_mutation_epoch: u64,
     initialized: bool,
     done: bool,
 }
@@ -49,9 +51,13 @@ impl RecordManager {
         table: &TableSchema,
         range: TableKeyRange,
     ) -> StorageResult<TableScan> {
+        let cursor = self.catalog.table_cursor_by_name(&table.name)?;
+        let observed_mutation_epoch = cursor.mutation_epoch();
         Ok(TableScan {
-            cursor: self.catalog.table_cursor_by_name(&table.name)?,
+            cursor,
             range,
+            last_table_key: None,
+            observed_mutation_epoch,
             initialized: false,
             done: false,
         })
@@ -227,15 +233,24 @@ impl Iterator for TableScan {
             return None;
         }
 
+        let mutation_epoch = self.cursor.mutation_epoch();
         let record = if self.initialized {
-            self.cursor.next_record()
+            if mutation_epoch == self.observed_mutation_epoch {
+                self.cursor.next_record()
+            } else {
+                self.observed_mutation_epoch = mutation_epoch;
+                self.resume_after_mutation()
+            }
         } else {
             self.initialized = true;
             self.first_record()
         };
 
         match record {
-            Ok(Some(record)) if self.range.contains(record.table_key()) => Some(Ok(record)),
+            Ok(Some(record)) if self.range.contains(record.table_key()) => {
+                self.last_table_key = Some(record.table_key());
+                Some(Ok(record))
+            }
             Ok(Some(_)) => {
                 self.done = true;
                 None
@@ -253,6 +268,17 @@ impl Iterator for TableScan {
 }
 
 impl TableScan {
+    fn resume_after_mutation(&mut self) -> StorageResult<Option<TableRecord>> {
+        let Some(last_table_key) = self.last_table_key else {
+            return self.first_record();
+        };
+        if self.cursor.seek_after_table_key(last_table_key)? {
+            self.cursor.current_record()
+        } else {
+            Ok(None)
+        }
+    }
+
     fn first_record(&mut self) -> StorageResult<Option<TableRecord>> {
         match range_start(self.range.lower) {
             RangeStart::At(start_key) => {
@@ -662,6 +688,92 @@ mod tests {
             .unwrap();
 
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn table_scan_resumes_logically_while_current_rows_are_deleted() {
+        let file = NamedTempFile::new().unwrap();
+        let (_catalog, records) = open(file.path()).unwrap();
+        let table = records.catalog.create_table("users", users_schema()).unwrap();
+
+        for id in 0..32 {
+            records
+                .insert_table_row(
+                    &table,
+                    vec![
+                        Value::Integer(id),
+                        Value::String(format!("user-{id}-{}", "x".repeat(350))),
+                        Value::Boolean(true),
+                    ],
+                )
+                .unwrap();
+        }
+
+        let mut deleted_keys = Vec::new();
+        for record in records.scan_table(&table).unwrap() {
+            let record = record.unwrap();
+            let owned = record.to_owned_record().unwrap();
+            deleted_keys.push(owned.table_key);
+            drop(record);
+            records.delete_table_row(&table, &owned).unwrap();
+        }
+
+        assert_eq!(deleted_keys, (0..32).collect::<Vec<_>>());
+        assert!(records.scan_table(&table).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn table_scan_resumes_logically_while_current_rows_grow_and_split_leaves() {
+        let file = NamedTempFile::new().unwrap();
+        let (_catalog, records) = open(file.path()).unwrap();
+        let table = records.catalog.create_table("users", users_schema()).unwrap();
+
+        for id in 0..32 {
+            records
+                .insert_table_row(
+                    &table,
+                    vec![
+                        Value::Integer(id),
+                        Value::String(format!("user-{id}")),
+                        Value::Boolean(true),
+                    ],
+                )
+                .unwrap();
+        }
+
+        let mut updated_keys = Vec::new();
+        for record in records.scan_table(&table).unwrap() {
+            let record = record.unwrap();
+            let owned = record.to_owned_record().unwrap();
+            updated_keys.push(owned.table_key);
+            drop(record);
+            records
+                .update_table_row(
+                    &table,
+                    &owned,
+                    vec![
+                        Value::Integer(owned.table_key),
+                        Value::String(format!("updated-{}-{}", owned.table_key, "x".repeat(400))),
+                        Value::Boolean(false),
+                    ],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(updated_keys, (0..32).collect::<Vec<_>>());
+        let rows = records
+            .scan_table(&table)
+            .unwrap()
+            .map(|record| record.unwrap().to_owned_record().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 32);
+        assert!(rows.iter().all(|record| {
+            matches!(
+                values(record).as_slice(),
+                [Value::Integer(_), Value::String(name), Value::Boolean(false)]
+                    if name.starts_with("updated-")
+            )
+        }));
     }
 
     #[test]

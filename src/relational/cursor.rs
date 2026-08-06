@@ -165,6 +165,11 @@ impl TableCursor {
         self.inner.state()
     }
 
+    /// Returns the mutation epoch shared by cursors over this table tree.
+    pub(crate) fn mutation_epoch(&self) -> u64 {
+        self.inner.mutation_epoch()
+    }
+
     /// Positions the cursor on the first table record.
     pub fn seek_to_first(&mut self) -> StorageResult<bool> {
         self.inner.seek_to_first()
@@ -174,6 +179,12 @@ impl TableCursor {
     /// or equal to `table_key`.
     pub fn seek_to_table_key(&mut self, table_key: TableKey) -> StorageResult<bool> {
         self.inner.seek_to_key(&encode_table_key(table_key))
+    }
+
+    /// Positions the cursor on the first table record whose key is strictly
+    /// greater than `table_key`.
+    pub fn seek_after_table_key(&mut self, table_key: TableKey) -> StorageResult<bool> {
+        self.inner.seek_after_key(&encode_table_key(table_key))
     }
 
     /// Reads the currently selected table record, if any.
