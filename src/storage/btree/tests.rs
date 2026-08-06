@@ -601,6 +601,23 @@ fn binary_search_supports_oversized_interior_separator_keys() {
     }
 }
 
+#[test]
+fn seek_after_key_uses_a_strict_exclusive_bound() {
+    let mut cursor = temp_tree_cursor(8);
+    cursor.insert(b"alpha", b"one").unwrap();
+    cursor.insert(b"bravo", b"two").unwrap();
+    cursor.insert(b"charlie", b"three").unwrap();
+
+    assert!(cursor.seek_after_key(b"alpha").unwrap());
+    assert_record_matches(&cursor.current().unwrap().unwrap(), b"bravo", b"two");
+
+    assert!(cursor.seek_after_key(b"between").unwrap());
+    assert_record_matches(&cursor.current().unwrap().unwrap(), b"bravo", b"two");
+
+    assert!(!cursor.seek_after_key(b"charlie").unwrap());
+    assert!(cursor.current().unwrap().is_none());
+}
+
 fn assert_record_matches(record: &Record, expected_key: &[u8], expected_value: &[u8]) {
     record
         .with_key_value(|actual_key, actual_value| {

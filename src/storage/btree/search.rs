@@ -16,9 +16,11 @@ enum LeafSeek {
 impl TreeCursor {
     /// Creates a cursor anchored at `root_page_id` in page-level state.
     pub(crate) fn new(page_cache: PageCache, root_page_id: PageId) -> Self {
+        let mutation_epoch = page_cache.tree_mutation_epoch(root_page_id);
         Self {
             page_cache,
             root_page_id: Rc::new(Cell::new(root_page_id)),
+            mutation_epoch,
             state: CursorState::Page { page_id: root_page_id },
         }
     }
@@ -26,6 +28,16 @@ impl TreeCursor {
     /// Returns the root page id that anchors this tree.
     pub fn root_page_id(&self) -> PageId {
         self.root_page_id.get()
+    }
+
+    /// Returns the current mutation epoch shared by cursors over this tree.
+    pub(crate) fn mutation_epoch(&self) -> u64 {
+        self.mutation_epoch.get()
+    }
+
+    /// Invalidates physical positions held by other cursors over this tree.
+    pub(super) fn mark_tree_mutated(&self) {
+        self.mutation_epoch.set(self.mutation_epoch.get().wrapping_add(1));
     }
 
     /// Returns the cursor's current logical state.
@@ -186,6 +198,28 @@ impl TreeCursor {
                 low = mid + 1;
             } else {
                 high = mid;
+            }
+        }
+
+        if low == slot_count { Ok(BoundResult::PastEnd) } else { Ok(BoundResult::At(low)) }
+    }
+
+    fn upper_bound_leaf_slot_in_page(
+        &self,
+        page_id: PageId,
+        page_bytes: &[u8; PAGE_SIZE],
+        leaf: &RawLeaf<Read<'_>>,
+        key: &[u8],
+    ) -> StorageResult<BoundResult> {
+        let mut low: u16 = 0;
+        let slot_count = leaf.slot_count();
+        let mut high = slot_count;
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+            match self.compare_leaf_key_in_page(page_id, page_bytes, leaf, mid, key)? {
+                Ordering::Less | Ordering::Equal => low = mid + 1,
+                Ordering::Greater => high = mid,
             }
         }
 
@@ -470,6 +504,38 @@ impl TreeCursor {
             let leaf = page.open::<Leaf>()?;
             let bound = self.lower_bound_leaf_slot(page_id, key)?;
             match bound {
+                BoundResult::At(slot_index) => LeafSeek::Positioned(slot_index),
+                BoundResult::PastEnd => match leaf.next_page_id() {
+                    Some(next_page_id) => LeafSeek::Advance(next_page_id),
+                    None => LeafSeek::Exhausted,
+                },
+            }
+        };
+
+        match seek {
+            LeafSeek::Positioned(slot_index) => {
+                self.set_positioned_state(page_id, slot_index);
+                Ok(true)
+            }
+            LeafSeek::Advance(next_page_id) => {
+                self.edge_record_from_leaf(next_page_id).map(|record| record.is_some())
+            }
+            LeafSeek::Exhausted => {
+                self.set_exhausted_state();
+                Ok(false)
+            }
+        }
+    }
+
+    /// Positions the cursor on the first record whose key is strictly greater
+    /// than `key`.
+    pub fn seek_after_key(&mut self, key: &[u8]) -> StorageResult<bool> {
+        let page_id = self.leaf_page_for_key(key)?;
+        let pin = self.page_cache.fetch_page(page_id)?;
+        let seek = {
+            let page = pin.read()?;
+            let leaf = page.open::<Leaf>()?;
+            match self.upper_bound_leaf_slot_in_page(page_id, page.page(), &leaf, key)? {
                 BoundResult::At(slot_index) => LeafSeek::Positioned(slot_index),
                 BoundResult::PastEnd => match leaf.next_page_id() {
                     Some(next_page_id) => LeafSeek::Advance(next_page_id),
