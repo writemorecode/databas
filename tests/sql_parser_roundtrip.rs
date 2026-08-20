@@ -1,79 +1,166 @@
 use databas::sql_parser::parser::{Parser, SqlItem, stmt::Statement};
-use hegel::TestCase;
-use hegel::generators as gs;
+use proptest::prelude::*;
 
 const IDENTIFIERS: &[&str] =
     &["alpha", "beta", "gamma", "delta", "epsilon", "customer_id", "order_total", "created_at"];
-
 const STRING_LITERALS: &[&str] = &["cake", "waffles", "coffee", "tea", "pending", "done"];
 
-fn draw_bool(tc: &TestCase) -> bool {
-    tc.draw(gs::booleans())
+fn identifier() -> BoxedStrategy<&'static str> {
+    prop::sample::select(IDENTIFIERS).boxed()
 }
 
-fn draw_index(tc: &TestCase, len: usize) -> usize {
-    tc.draw(gs::integers::<usize>().min_value(0).max_value(len - 1))
+fn atom(allow_wildcard: bool) -> BoxedStrategy<String> {
+    let atoms = prop_oneof![
+        identifier().prop_map(str::to_owned),
+        (-1000i32..=1000i32).prop_map(|n| n.to_string()),
+        (0u32..=1000, 0u32..=99).prop_map(|(whole, fraction)| format!("{whole}.{fraction}")),
+        prop::sample::select(STRING_LITERALS).prop_map(|literal| format!("'{literal}'")),
+    ];
+
+    if allow_wildcard { prop_oneof![atoms, Just("*".to_owned())].boxed() } else { atoms.boxed() }
 }
 
-fn draw_identifier(tc: &TestCase) -> &'static str {
-    IDENTIFIERS[draw_index(tc, IDENTIFIERS.len())]
+fn expression(allow_wildcard: bool) -> BoxedStrategy<String> {
+    prop_oneof![
+        atom(allow_wildcard),
+        (
+            atom(false),
+            atom(false),
+            prop::sample::select(&["+", "-", "*", "/", "==", "!=", "<", "<=", "AND"]),
+        )
+            .prop_map(|(left, right, operator)| format!("{left} {operator} {right}")),
+    ]
+    .boxed()
 }
 
-fn draw_non_empty_len(tc: &TestCase, max: usize) -> usize {
-    tc.draw(gs::integers::<usize>().min_value(1).max_value(max))
+fn insert_query() -> BoxedStrategy<String> {
+    (identifier(), prop::collection::vec(identifier(), 1..=4), 1usize..=4)
+        .prop_flat_map(|(table, columns, row_count)| {
+            prop::collection::vec(
+                prop::collection::vec(expression(false), columns.len()),
+                row_count,
+            )
+            .prop_map(move |rows| {
+                let rows = rows
+                    .into_iter()
+                    .map(|values| format!("({})", values.join(", ")))
+                    .collect::<Vec<_>>();
+                format!("INSERT INTO {table} ({}) VALUES {};", columns.join(", "), rows.join(", "))
+            })
+        })
+        .boxed()
 }
 
-fn draw_u32(tc: &TestCase) -> u32 {
-    tc.draw(gs::integers::<u32>().min_value(0).max_value(1000))
+fn select_query() -> BoxedStrategy<String> {
+    (
+        prop::collection::vec(expression(true), 1..=4),
+        prop::option::of(identifier()),
+        prop::option::of(expression(false)),
+        prop::option::of(prop::collection::vec(
+            (identifier(), prop::sample::select(&["", " ASC", " DESC"]))
+                .prop_map(|(column, direction)| format!("{column}{direction}")),
+            1..=3,
+        )),
+        prop::option::of(0u32..=1000),
+        prop::option::of(0u32..=1000),
+    )
+        .prop_map(|(columns, table, predicate, order_by, limit, offset)| {
+            let mut sql = format!("SELECT {}", columns.join(", "));
+            if let Some(table) = table {
+                sql.push_str(&format!(" FROM {table}"));
+            }
+            if let Some(predicate) = predicate {
+                sql.push_str(&format!(" WHERE {predicate}"));
+            }
+            if let Some(order_by) = order_by {
+                sql.push_str(&format!(" ORDER BY {}", order_by.join(", ")));
+            }
+            if let Some(limit) = limit {
+                sql.push_str(&format!(" LIMIT {limit}"));
+            }
+            if let Some(offset) = offset {
+                sql.push_str(&format!(" OFFSET {offset}"));
+            }
+            sql.push(';');
+            sql
+        })
+        .boxed()
 }
 
-fn draw_i32(tc: &TestCase) -> i32 {
-    tc.draw(gs::integers::<i32>().min_value(-1000).max_value(1000))
+fn delete_query() -> BoxedStrategy<String> {
+    (identifier(), prop::option::of(expression(false)))
+        .prop_map(|(table, predicate)| match predicate {
+            Some(predicate) => format!("DELETE FROM {table} WHERE {predicate};"),
+            None => format!("DELETE FROM {table};"),
+        })
+        .boxed()
 }
 
-fn draw_atom(tc: &TestCase, allow_wildcard: bool) -> String {
-    let variant_count = if allow_wildcard { 5 } else { 4 };
-    match draw_index(tc, variant_count) {
-        0 => draw_identifier(tc).to_string(),
-        1 => draw_i32(tc).to_string(),
-        2 => format!(
-            "{}.{}",
-            draw_u32(tc),
-            tc.draw(gs::integers::<u32>().min_value(0).max_value(99))
+fn update_query() -> BoxedStrategy<String> {
+    (
+        identifier(),
+        prop::collection::vec((identifier(), expression(false)), 1..=4),
+        prop::option::of(expression(false)),
+    )
+        .prop_map(|(table, assignments, predicate)| {
+            let assignments = assignments
+                .into_iter()
+                .map(|(column, value)| format!("{column} = {value}"))
+                .collect::<Vec<_>>();
+            let mut sql = format!("UPDATE {table} SET {}", assignments.join(", "));
+            if let Some(predicate) = predicate {
+                sql.push_str(&format!(" WHERE {predicate}"));
+            }
+            sql.push(';');
+            sql
+        })
+        .boxed()
+}
+
+fn create_table_query() -> BoxedStrategy<String> {
+    (
+        identifier(),
+        identifier(),
+        prop::collection::vec(
+            (identifier(), prop::sample::select(&["INT", "FLOAT", "TEXT"]), any::<bool>()),
+            0..=4,
         ),
-        3 => {
-            let lit = STRING_LITERALS[draw_index(tc, STRING_LITERALS.len())];
-            format!("'{lit}'")
-        }
-        4 => "*".to_string(),
-        _ => unreachable!(),
-    }
+    )
+        .prop_map(|(table, primary_key, extra_columns)| {
+            let mut columns = vec![format!("{primary_key} INT PRIMARY KEY")];
+            columns.extend(extra_columns.into_iter().map(|(name, column_type, nullable)| {
+                let nullable = if nullable { " NULLABLE" } else { "" };
+                format!("{name} {column_type}{nullable}")
+            }));
+            format!("CREATE TABLE {table} ({});", columns.join(", "))
+        })
+        .boxed()
 }
 
-fn draw_expression(tc: &TestCase, allow_wildcard: bool) -> String {
-    if draw_bool(tc) {
-        return draw_atom(tc, allow_wildcard);
-    }
-
-    let left = draw_atom(tc, false);
-    let right = draw_atom(tc, false);
-    let op = match draw_index(tc, 9) {
-        0 => "+",
-        1 => "-",
-        2 => "*",
-        3 => "/",
-        4 => "==",
-        5 => "!=",
-        6 => "<",
-        7 => "<=",
-        8 => "AND",
-        _ => unreachable!(),
-    };
-    format!("{left} {op} {right}")
+fn create_index_query() -> BoxedStrategy<String> {
+    (identifier(), identifier(), prop::collection::vec(identifier(), 1..=5))
+        .prop_map(|(index, table, columns)| {
+            format!("CREATE INDEX {index} ON {table} ({});", columns.join(", "))
+        })
+        .boxed()
 }
 
-fn draw_expression_list(tc: &TestCase, max_len: usize, allow_wildcard: bool) -> Vec<String> {
-    (0..draw_non_empty_len(tc, max_len)).map(|_| draw_expression(tc, allow_wildcard)).collect()
+fn transaction_control() -> BoxedStrategy<String> {
+    prop::sample::select(&["BEGIN;", "COMMIT;", "ROLLBACK;"]).prop_map(str::to_owned).boxed()
+}
+
+fn statement() -> BoxedStrategy<String> {
+    prop_oneof![
+        insert_query(),
+        select_query(),
+        create_table_query(),
+        create_index_query(),
+        select_query().prop_map(|sql| format!("EXPLAIN {sql}")),
+        transaction_control(),
+        delete_query(),
+        update_query(),
+    ]
+    .boxed()
 }
 
 fn parse_statement(sql: &str) -> Statement<'_> {
@@ -114,187 +201,58 @@ fn assert_items_round_trip(sql: &str) {
     assert_eq!(parsed, reparsed, "SQL did not round-trip: {sql}\ndisplayed as: {displayed}");
 }
 
-fn draw_statement(tc: &TestCase) -> String {
-    match draw_index(tc, 8) {
-        0 => draw_insert(tc),
-        1 => draw_select(tc),
-        2 => draw_create_table(tc),
-        3 => draw_create_index(tc),
-        4 => draw_explain_select(tc),
-        5 => draw_transaction_control(tc),
-        6 => draw_delete(tc),
-        7 => draw_update(tc),
-        _ => unreachable!(),
-    }
-}
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(250))]
 
-fn draw_insert(tc: &TestCase) -> String {
-    let table = draw_identifier(tc);
-    let column_count = draw_non_empty_len(tc, 4);
-    let columns = (0..column_count).map(|_| draw_identifier(tc)).collect::<Vec<_>>();
-    let row_count = draw_non_empty_len(tc, 4);
-    let rows = (0..row_count)
-        .map(|_| {
-            let values = (0..column_count).map(|_| draw_expression(tc, false)).collect::<Vec<_>>();
-            format!("({})", values.join(", "))
-        })
-        .collect::<Vec<_>>();
-
-    format!("INSERT INTO {table} ({}) VALUES {};", columns.join(", "), rows.join(", "))
-}
-
-fn draw_select(tc: &TestCase) -> String {
-    let columns = draw_expression_list(tc, 4, true).join(", ");
-    let mut sql = format!("SELECT {columns}");
-
-    if draw_bool(tc) {
-        sql.push_str(" FROM ");
-        sql.push_str(draw_identifier(tc));
-    }
-    if draw_bool(tc) {
-        sql.push_str(" WHERE ");
-        sql.push_str(&draw_expression(tc, false));
-    }
-    if draw_bool(tc) {
-        sql.push_str(" ORDER BY ");
-        let terms = (0..draw_non_empty_len(tc, 3))
-            .map(|_| {
-                let mut term = draw_identifier(tc).to_string();
-                match draw_index(tc, 3) {
-                    0 => {}
-                    1 => term.push_str(" ASC"),
-                    2 => term.push_str(" DESC"),
-                    _ => unreachable!(),
-                }
-                term
-            })
-            .collect::<Vec<_>>();
-        sql.push_str(&terms.join(", "));
-    }
-    if draw_bool(tc) {
-        sql.push_str(" LIMIT ");
-        sql.push_str(&draw_u32(tc).to_string());
-    }
-    if draw_bool(tc) {
-        sql.push_str(" OFFSET ");
-        sql.push_str(&draw_u32(tc).to_string());
+    #[test]
+    fn insert_queries_round_trip_through_display(sql in insert_query()) {
+        assert_round_trips(&sql);
     }
 
-    sql.push(';');
-    sql
-}
-
-fn draw_delete(tc: &TestCase) -> String {
-    let table = draw_identifier(tc);
-    let mut sql = format!("DELETE FROM {table}");
-
-    if draw_bool(tc) {
-        sql.push_str(" WHERE ");
-        sql.push_str(&draw_expression(tc, false));
+    #[test]
+    fn select_queries_round_trip_through_display(sql in select_query()) {
+        assert_round_trips(&sql);
     }
 
-    sql.push(';');
-    sql
-}
-
-fn draw_update(tc: &TestCase) -> String {
-    let table = draw_identifier(tc);
-    let assignments = (0..draw_non_empty_len(tc, 4))
-        .map(|_| format!("{} = {}", draw_identifier(tc), draw_expression(tc, false)))
-        .collect::<Vec<_>>();
-    let mut sql = format!("UPDATE {table} SET {}", assignments.join(", "));
-
-    if draw_bool(tc) {
-        sql.push_str(" WHERE ");
-        sql.push_str(&draw_expression(tc, false));
+    #[test]
+    fn explain_select_queries_round_trip_through_display(sql in select_query().prop_map(|sql| format!("EXPLAIN {sql}"))) {
+        assert_round_trips(&sql);
     }
 
-    sql.push(';');
-    sql
-}
-
-fn draw_explain_select(tc: &TestCase) -> String {
-    format!("EXPLAIN {}", draw_select(tc))
-}
-
-fn draw_explain_delete(tc: &TestCase) -> String {
-    format!("EXPLAIN {}", draw_delete(tc))
-}
-
-fn draw_explain_update(tc: &TestCase) -> String {
-    format!("EXPLAIN {}", draw_update(tc))
-}
-
-fn draw_create_table(tc: &TestCase) -> String {
-    let table = draw_identifier(tc);
-    let mut columns = vec![format!("{} INT PRIMARY KEY", draw_identifier(tc))];
-    columns.extend((0..draw_index(tc, 5)).map(|_| {
-        let column_type = match draw_index(tc, 3) {
-            0 => "INT",
-            1 => "FLOAT",
-            2 => "TEXT",
-            _ => unreachable!(),
-        };
-        let mut column = format!("{} {column_type}", draw_identifier(tc));
-        if draw_bool(tc) {
-            column.push_str(" NULLABLE");
-        }
-        column
-    }));
-
-    format!("CREATE TABLE {table} ({});", columns.join(", "))
-}
-
-fn draw_create_index(tc: &TestCase) -> String {
-    let index = draw_identifier(tc);
-    let table = draw_identifier(tc);
-    let columns = (0..draw_non_empty_len(tc, 5)).map(|_| draw_identifier(tc)).collect::<Vec<_>>();
-
-    format!("CREATE INDEX {index} ON {table} ({});", columns.join(", "))
-}
-
-fn draw_transaction_control(tc: &TestCase) -> String {
-    match draw_index(tc, 3) {
-        0 => "BEGIN;".to_owned(),
-        1 => "COMMIT;".to_owned(),
-        2 => "ROLLBACK;".to_owned(),
-        _ => unreachable!(),
+    #[test]
+    fn explain_delete_queries_round_trip_through_display(sql in delete_query().prop_map(|sql| format!("EXPLAIN {sql}"))) {
+        assert_round_trips(&sql);
     }
-}
 
-#[hegel::test(test_cases = 250)]
-fn insert_queries_round_trip_through_display(tc: TestCase) {
-    let sql = draw_insert(&tc);
-    tc.note(&sql);
-    assert_round_trips(&sql);
-}
+    #[test]
+    fn explain_update_queries_round_trip_through_display(sql in update_query().prop_map(|sql| format!("EXPLAIN {sql}"))) {
+        assert_round_trips(&sql);
+    }
 
-#[hegel::test(test_cases = 250)]
-fn select_queries_round_trip_through_display(tc: TestCase) {
-    let sql = draw_select(&tc);
-    tc.note(&sql);
-    assert_round_trips(&sql);
-}
+    #[test]
+    fn delete_queries_round_trip_through_display(sql in delete_query()) {
+        assert_round_trips(&sql);
+    }
 
-#[hegel::test(test_cases = 250)]
-fn explain_select_queries_round_trip_through_display(tc: TestCase) {
-    let sql = draw_explain_select(&tc);
-    tc.note(&sql);
-    assert_round_trips(&sql);
-}
+    #[test]
+    fn update_queries_round_trip_through_display(sql in update_query()) {
+        assert_round_trips(&sql);
+    }
 
-#[hegel::test(test_cases = 250)]
-fn explain_delete_queries_round_trip_through_display(tc: TestCase) {
-    let sql = draw_explain_delete(&tc);
-    tc.note(&sql);
-    assert_round_trips(&sql);
-}
+    #[test]
+    fn create_table_queries_round_trip_through_display(sql in create_table_query()) {
+        assert_round_trips(&sql);
+    }
 
-#[hegel::test(test_cases = 250)]
-fn explain_update_queries_round_trip_through_display(tc: TestCase) {
-    let sql = draw_explain_update(&tc);
-    tc.note(&sql);
-    assert_round_trips(&sql);
+    #[test]
+    fn create_index_queries_round_trip_through_display(sql in create_index_query()) {
+        assert_round_trips(&sql);
+    }
+
+    #[test]
+    fn multiple_queries_round_trip_through_display(sql in prop::collection::vec(statement(), 1..=8).prop_map(|statements| statements.join("\n"))) {
+        assert_items_round_trip(&sql);
+    }
 }
 
 #[test]
@@ -327,34 +285,6 @@ fn explain_update_parses_as_explain_statement() {
     assert!(matches!(statement.as_ref(), Statement::Update(_)));
 }
 
-#[hegel::test(test_cases = 250)]
-fn delete_queries_round_trip_through_display(tc: TestCase) {
-    let sql = draw_delete(&tc);
-    tc.note(&sql);
-    assert_round_trips(&sql);
-}
-
-#[hegel::test(test_cases = 250)]
-fn update_queries_round_trip_through_display(tc: TestCase) {
-    let sql = draw_update(&tc);
-    tc.note(&sql);
-    assert_round_trips(&sql);
-}
-
-#[hegel::test(test_cases = 250)]
-fn create_table_queries_round_trip_through_display(tc: TestCase) {
-    let sql = draw_create_table(&tc);
-    tc.note(&sql);
-    assert_round_trips(&sql);
-}
-
-#[hegel::test(test_cases = 250)]
-fn create_index_queries_round_trip_through_display(tc: TestCase) {
-    let sql = draw_create_index(&tc);
-    tc.note(&sql);
-    assert_round_trips(&sql);
-}
-
 #[test]
 fn transaction_control_queries_round_trip_through_display() {
     assert_item_round_trips("BEGIN;");
@@ -374,14 +304,6 @@ BEGIN;
 ROLLBACK;
 ",
     );
-}
-
-#[hegel::test(test_cases = 250)]
-fn multiple_queries_round_trip_through_display(tc: TestCase) {
-    let sql =
-        (0..draw_non_empty_len(&tc, 8)).map(|_| draw_statement(&tc)).collect::<Vec<_>>().join("\n");
-    tc.note(&sql);
-    assert_items_round_trip(&sql);
 }
 
 #[test]
