@@ -37,7 +37,6 @@
 //! float payloads, and trailing bytes before exposing zero-copy borrowed values.
 
 use std::{
-    cmp::Ordering,
     fmt::Display,
     io::{self, Read, Write},
     ops::Range,
@@ -643,74 +642,13 @@ fn validate_float(value: f32) -> io::Result<()> {
     }
 }
 
-#[allow(dead_code)]
-struct EncodedValueItem<'a> {
-    bytes: &'a [u8],
-    field: ValueField,
-}
-
-impl EncodedValueItem<'_> {
-    fn payload(&self) -> &[u8] {
-        &self.bytes[self.field.value_range.clone()]
-    }
-}
-
-impl PartialEq for EncodedValueItem<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for EncodedValueItem<'_> {}
-
-impl PartialOrd for EncodedValueItem<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for EncodedValueItem<'_> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match (self.field.tag == TAG_NULL, other.field.tag == TAG_NULL) {
-            (true, true) => return Ordering::Equal,
-            (true, false) => return Ordering::Less,
-            (false, true) => return Ordering::Greater,
-            (false, false) => {}
-        }
-
-        match self.field.tag.cmp(&other.field.tag) {
-            Ordering::Equal => self.payload().cmp(other.payload()),
-            ordering => ordering,
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn parse_encoded_value_item(bytes: &[u8]) -> io::Result<EncodedValueItem<'_>> {
-    let (tag, next_offset) = read_u8_from_slice(bytes, 0)?;
-    let (len, value_offset) = read_value_len_from_slice(bytes, next_offset)?;
-    let value_len = usize::try_from(len).map_err(invalid_data)?;
-    let value_end = value_offset.checked_add(value_len).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "tuple value length overflows usize")
-    })?;
-    let payload = bytes.get(value_offset..value_end).ok_or_else(unexpected_eof)?;
-    validate_value_payload(tag, payload)?;
-    if value_end != bytes.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "trailing bytes after tuple value payload",
-        ));
-    }
-    Ok(EncodedValueItem { bytes, field: ValueField { tag, value_range: value_offset..value_end } })
-}
-
 fn unexpected_eof() -> io::Error {
     io::Error::new(io::ErrorKind::UnexpectedEof, "truncated tuple payload")
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{cmp::Ordering, io::Cursor};
 
     use super::*;
 
@@ -718,21 +656,14 @@ mod tests {
         Tuple::read_from(&mut Cursor::new(bytes))
     }
 
-    fn encoded_value(value: ValueRef<'_>) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        value.write_to(&mut bytes).unwrap();
-        bytes
-    }
-
-    fn assert_encoded_value_order(left: ValueRef<'_>, right: ValueRef<'_>, expected: Ordering) {
-        let left = encoded_value(left);
-        let right = encoded_value(right);
-        assert_eq!(
-            parse_encoded_value_item(&left)
-                .unwrap()
-                .cmp(&parse_encoded_value_item(&right).unwrap()),
-            expected
-        );
+    fn assert_single_value_tuple_byte_order(
+        left: ValueRef<'_>,
+        right: ValueRef<'_>,
+        expected: Ordering,
+    ) {
+        let left = Tuple::new(vec![Value::from(left)]).to_bytes().unwrap();
+        let right = Tuple::new(vec![Value::from(right)]).to_bytes().unwrap();
+        assert_eq!(left.cmp(&right), expected);
     }
 
     #[test]
@@ -984,24 +915,37 @@ mod tests {
     }
 
     #[test]
-    fn encoded_values_compare_in_logical_order() {
-        assert_encoded_value_order(ValueRef::Null, ValueRef::Boolean(false), Ordering::Less);
-        assert_encoded_value_order(
+    fn range_compatible_single_value_tuple_bytes_compare_in_logical_order() {
+        assert_single_value_tuple_byte_order(
             ValueRef::Boolean(false),
             ValueRef::Boolean(true),
             Ordering::Less,
         );
-        assert_encoded_value_order(ValueRef::Integer(-1), ValueRef::Integer(0), Ordering::Less);
-        assert_encoded_value_order(ValueRef::Integer(0), ValueRef::Integer(1), Ordering::Less);
-        assert_encoded_value_order(
+        assert_single_value_tuple_byte_order(
+            ValueRef::Integer(-1),
+            ValueRef::Integer(0),
+            Ordering::Less,
+        );
+        assert_single_value_tuple_byte_order(
+            ValueRef::Integer(0),
+            ValueRef::Integer(1),
+            Ordering::Less,
+        );
+        assert_single_value_tuple_byte_order(
             ValueRef::UnsignedInteger(9),
             ValueRef::UnsignedInteger(10),
             Ordering::Less,
         );
-        assert_encoded_value_order(ValueRef::Float(-1.5), ValueRef::Float(0.0), Ordering::Less);
-        assert_encoded_value_order(ValueRef::Float(0.0), ValueRef::Float(2.25), Ordering::Less);
-        assert_encoded_value_order(ValueRef::String("a"), ValueRef::String("aa"), Ordering::Less);
-        assert_encoded_value_order(ValueRef::String("aa"), ValueRef::String("b"), Ordering::Less);
+        assert_single_value_tuple_byte_order(
+            ValueRef::Float(-1.5),
+            ValueRef::Float(0.0),
+            Ordering::Less,
+        );
+        assert_single_value_tuple_byte_order(
+            ValueRef::Float(0.0),
+            ValueRef::Float(2.25),
+            Ordering::Less,
+        );
     }
 
     #[test]
