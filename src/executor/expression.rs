@@ -97,17 +97,19 @@ pub(super) fn execute_insert_values<R: RecordAccess + ?Sized>(
     Ok(ExecutionOutput::RowsAffected(affected))
 }
 
-/// Executes an `UPDATE` plan against a materialized target row set.
+/// Executes an `UPDATE` plan by consuming and mutating one target row at a time.
 pub(super) fn execute_update<R: RecordAccess + ?Sized>(
     records: &R,
     table: TableSchema,
     assignments: Vec<UpdateAssignment>,
-    target_rows: Vec<OwnedTableRecord>,
+    target_rows: RowStream,
 ) -> ExecutorResult<ExecutionOutput> {
-    let affected = target_rows.len() as u64;
+    let mut affected = 0;
 
     for row in target_rows {
-        let context = EvaluationContext::from_owned_record(&row)?;
+        let owned_row = row?.into_owned_record()?;
+
+        let context = EvaluationContext::from_owned_record(&owned_row)?;
         let mut values = context.tuple.to_owned_tuple().into_values();
 
         for assignment in &assignments {
@@ -123,7 +125,26 @@ pub(super) fn execute_update<R: RecordAccess + ?Sized>(
             *slot = value;
         }
 
-        records.update_table_row(&table, &row, values)?;
+        records.update_table_row(&table, &owned_row, values)?;
+        affected += 1;
+    }
+
+    Ok(ExecutionOutput::RowsAffected(affected))
+}
+
+/// Executes a `DELETE` plan by consuming and deleting one target row at a time.
+pub(super) fn execute_delete<R: RecordAccess + ?Sized>(
+    records: &R,
+    table: TableSchema,
+    target_rows: RowStream,
+) -> ExecutorResult<ExecutionOutput> {
+    let mut affected = 0;
+
+    for row in target_rows {
+        let owned_row = row?.into_owned_record()?;
+
+        records.delete_table_row(&table, &owned_row)?;
+        affected += 1;
     }
 
     Ok(ExecutionOutput::RowsAffected(affected))

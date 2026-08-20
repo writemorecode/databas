@@ -175,6 +175,19 @@ fn insert_many_users_sql(count: u64) -> String {
     sql
 }
 
+fn insert_many_large_users_sql(count: u64, name_len: usize) -> String {
+    let mut sql = String::from("INSERT INTO users (id, name, active) VALUES ");
+    let suffix = "x".repeat(name_len);
+    for id in 1..=count {
+        if id > 1 {
+            sql.push_str(", ");
+        }
+        write!(&mut sql, "({id}, 'user{id}_{suffix}', TRUE)").unwrap();
+    }
+    sql.push(';');
+    sql
+}
+
 fn assert_user_row(database: &Database, table_key: TableKey, expected_name: &str) {
     let mut users = database.table_cursor_by_name("users").unwrap();
     let row = users.get(table_key).unwrap().expect("user row should exist");
@@ -1191,6 +1204,22 @@ fn delete_all_rows_returns_count_and_empties_table() {
 }
 
 #[test]
+fn delete_streams_across_leaf_merges_without_skipping_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, &insert_many_large_users_sql(40, 300)).unwrap();
+
+    let output = execute_sql(&database, "DELETE FROM users;").unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(40)));
+    let mut users = database.table_cursor_by_name("users").unwrap();
+    for table_key in 1..=40 {
+        assert!(users.get(table_key).unwrap().is_none());
+    }
+}
+
+#[test]
 fn delete_where_removes_only_matching_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
@@ -1260,7 +1289,7 @@ fn delete_removes_secondary_index_entries() {
 }
 
 #[test]
-fn delete_where_can_use_secondary_index_scan() {
+fn delete_where_indexed_predicate_removes_all_matching_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
     database.create_table("users", users_schema()).unwrap();
@@ -1318,6 +1347,23 @@ fn update_all_rows_returns_count_and_replaces_values() {
     assert!(matches!(output, ExecutionOutput::RowsAffected(2)));
     assert_user_row(&database, 1, "Updated");
     assert_user_row(&database, 2, "Updated");
+}
+
+#[test]
+fn update_streams_across_leaf_splits_without_revisiting_rows() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database.create_table("users", users_schema()).unwrap();
+    execute_sql(&database, &insert_many_large_users_sql(40, 40)).unwrap();
+    let updated_name = "y".repeat(500);
+
+    let output =
+        execute_sql(&database, &format!("UPDATE users SET name = '{updated_name}';")).unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(40)));
+    for table_key in 1..=40 {
+        assert_user_row(&database, table_key, &updated_name);
+    }
 }
 
 #[test]
@@ -1467,7 +1513,7 @@ fn update_refreshes_secondary_index_entries() {
 }
 
 #[test]
-fn update_where_can_use_secondary_index_scan() {
+fn update_where_indexed_predicate_updates_all_matching_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
     database.create_table("users", users_schema()).unwrap();
@@ -1503,6 +1549,60 @@ fn update_where_can_use_secondary_index_scan() {
     assert_name_index_entry(&database, "Engineering", 1);
     assert_name_index_entry(&database, "Engineering", 2);
     assert_name_index_entry(&database, "Sales", 3);
+}
+
+#[test]
+fn update_indexed_range_changes_each_matching_row_once() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    database
+        .create_table(
+            "scores",
+            TupleSchema {
+                columns: vec![
+                    ColumnSchema {
+                        name: "id".to_owned(),
+                        data_type: DataType::Integer,
+                        nullable: false,
+                        primary_key: true,
+                    },
+                    ColumnSchema {
+                        name: "score".to_owned(),
+                        data_type: DataType::Integer,
+                        nullable: false,
+                        primary_key: false,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+    execute_sql(&database, "CREATE INDEX idx_scores_score ON scores (score);").unwrap();
+    execute_sql(
+        &database,
+        "INSERT INTO scores (id, score) VALUES (1, 0), (2, 1), (3, 2), (4, 10);",
+    )
+    .unwrap();
+
+    let output =
+        execute_sql(&database, "UPDATE scores SET score = score + 1 WHERE score < 3;").unwrap();
+
+    assert!(matches!(output, ExecutionOutput::RowsAffected(3)));
+    let mut scores = database.table_cursor_by_name("scores").unwrap();
+    let actual = (1..=4)
+        .map(|table_key| {
+            let row = scores.get(table_key).unwrap().expect("score row should exist");
+            values(&row)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            vec![Value::Integer(1), Value::Integer(1)],
+            vec![Value::Integer(2), Value::Integer(2)],
+            vec![Value::Integer(3), Value::Integer(3)],
+            vec![Value::Integer(4), Value::Integer(10)],
+        ]
+    );
 }
 
 #[test]
