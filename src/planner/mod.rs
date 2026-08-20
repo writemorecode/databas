@@ -19,7 +19,8 @@
 //! predicates, or to [`PhysicalPlan::SecondaryIndexScan`] for compatible
 //! single-column secondary-index predicates. Predicates that cannot be fully
 //! represented by an access path are retained as residual
-//! [`PhysicalPlan::Filter`] operators.
+//! [`PhysicalPlan::Filter`] operators. Mutation inputs use primary-key range or
+//! full table scans so writes cannot invalidate the index that drives them.
 //!
 //! The planner validates statement shape, but it does not execute side effects
 //! or enforce every runtime constraint. Storage, type, arithmetic, and mutation
@@ -802,10 +803,20 @@ impl<'db> Planner<'db> {
     }
 
     fn physical_plan(&self, logical: LogicalPlan) -> PlannerResult<PhysicalPlan> {
+        self.physical_plan_with_secondary_indexes(logical, true)
+    }
+
+    fn physical_plan_with_secondary_indexes(
+        &self,
+        logical: LogicalPlan,
+        allow_secondary_index_scans: bool,
+    ) -> PlannerResult<PhysicalPlan> {
         match logical {
-            LogicalPlan::Explain { input } => {
-                Ok(PhysicalPlan::Explain { input: Box::new(self.physical_plan(*input)?) })
-            }
+            LogicalPlan::Explain { input } => Ok(PhysicalPlan::Explain {
+                input: Box::new(
+                    self.physical_plan_with_secondary_indexes(*input, allow_secondary_index_scans)?,
+                ),
+            }),
             LogicalPlan::CreateTable { name, schema } => {
                 Ok(PhysicalPlan::CreateTable { name, schema })
             }
@@ -822,11 +833,12 @@ impl<'db> Planner<'db> {
             LogicalPlan::Update { table, assignments, input } => Ok(PhysicalPlan::Update {
                 table,
                 assignments,
-                input: Box::new(self.physical_plan(*input)?),
+                input: Box::new(self.physical_plan_with_secondary_indexes(*input, false)?),
             }),
-            LogicalPlan::Delete { table, input } => {
-                Ok(PhysicalPlan::Delete { table, input: Box::new(self.physical_plan(*input)?) })
-            }
+            LogicalPlan::Delete { table, input } => Ok(PhysicalPlan::Delete {
+                table,
+                input: Box::new(self.physical_plan_with_secondary_indexes(*input, false)?),
+            }),
             LogicalPlan::OneRow => Ok(PhysicalPlan::OneRow),
             LogicalPlan::TableScan { table } => Ok(PhysicalPlan::FullTableScan { table }),
             LogicalPlan::Filter { input, predicate } => match *input {
@@ -845,44 +857,64 @@ impl<'db> Planner<'db> {
                                 None => Ok(scan),
                             }
                         }
-                        None => match self.secondary_index_predicate(&table, &predicate)? {
-                            Some(index_predicate) => Ok(PhysicalPlan::Filter {
-                                input: Box::new(PhysicalPlan::SecondaryIndexScan {
-                                    scan: Box::new(SecondaryIndexScanPlan {
-                                        table,
-                                        index: index_predicate.index,
-                                        column: index_predicate.column,
-                                        value_range: index_predicate.value_range,
-                                        key_range: index_predicate.key_range,
+                        None if allow_secondary_index_scans => {
+                            match self.secondary_index_predicate(&table, &predicate)? {
+                                Some(index_predicate) => Ok(PhysicalPlan::Filter {
+                                    input: Box::new(PhysicalPlan::SecondaryIndexScan {
+                                        scan: Box::new(SecondaryIndexScanPlan {
+                                            table,
+                                            index: index_predicate.index,
+                                            column: index_predicate.column,
+                                            value_range: index_predicate.value_range,
+                                            key_range: index_predicate.key_range,
+                                        }),
                                     }),
+                                    predicate,
                                 }),
-                                predicate,
-                            }),
-                            None => Ok(PhysicalPlan::Filter {
-                                input: Box::new(PhysicalPlan::FullTableScan { table }),
-                                predicate,
-                            }),
-                        },
+                                None => Ok(PhysicalPlan::Filter {
+                                    input: Box::new(PhysicalPlan::FullTableScan { table }),
+                                    predicate,
+                                }),
+                            }
+                        }
+                        None => Ok(PhysicalPlan::Filter {
+                            input: Box::new(PhysicalPlan::FullTableScan { table }),
+                            predicate,
+                        }),
                     }
                 }
                 input => Ok(PhysicalPlan::Filter {
-                    input: Box::new(self.physical_plan(input)?),
+                    input: Box::new(self.physical_plan_with_secondary_indexes(
+                        input,
+                        allow_secondary_index_scans,
+                    )?),
                     predicate,
                 }),
             },
-            LogicalPlan::Sort { input, terms } => {
-                Ok(PhysicalPlan::Sort { input: Box::new(self.physical_plan(*input)?), terms })
-            }
+            LogicalPlan::Sort { input, terms } => Ok(PhysicalPlan::Sort {
+                input: Box::new(
+                    self.physical_plan_with_secondary_indexes(*input, allow_secondary_index_scans)?,
+                ),
+                terms,
+            }),
             LogicalPlan::Project { input, expressions } => Ok(PhysicalPlan::Project {
-                input: Box::new(self.physical_plan(*input)?),
+                input: Box::new(
+                    self.physical_plan_with_secondary_indexes(*input, allow_secondary_index_scans)?,
+                ),
                 expressions,
             }),
-            LogicalPlan::Offset { input, offset } => {
-                Ok(PhysicalPlan::Offset { input: Box::new(self.physical_plan(*input)?), offset })
-            }
-            LogicalPlan::Limit { input, limit } => {
-                Ok(PhysicalPlan::Limit { input: Box::new(self.physical_plan(*input)?), limit })
-            }
+            LogicalPlan::Offset { input, offset } => Ok(PhysicalPlan::Offset {
+                input: Box::new(
+                    self.physical_plan_with_secondary_indexes(*input, allow_secondary_index_scans)?,
+                ),
+                offset,
+            }),
+            LogicalPlan::Limit { input, limit } => Ok(PhysicalPlan::Limit {
+                input: Box::new(
+                    self.physical_plan_with_secondary_indexes(*input, allow_secondary_index_scans)?,
+                ),
+                limit,
+            }),
         }
     }
 
@@ -1713,6 +1745,26 @@ mod tests {
     }
 
     #[test]
+    fn update_where_secondary_index_predicate_uses_full_table_scan() {
+        let (_dir, database) = database_with_users();
+        database.create_index("idx_users_age", "users", &["age"]).unwrap();
+        let planner = Planner::new(&database);
+        let statement = parse("UPDATE users SET age = age + 1 WHERE age < 3;");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let PhysicalPlan::Update { input, .. } = &plan.physical else {
+            panic!("expected physical update plan: {plan:?}");
+        };
+        let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+            panic!("expected filter below update: {plan:?}");
+        };
+        assert!(
+            matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        );
+    }
+
+    #[test]
     fn update_rejects_duplicate_assignment_columns() {
         let (_dir, database) = database_with_users();
         let planner = Planner::new(&database);
@@ -1793,6 +1845,26 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn delete_where_secondary_index_predicate_uses_full_table_scan() {
+        let (_dir, database) = database_with_users();
+        database.create_index("idx_users_name", "users", &["name"]).unwrap();
+        let planner = Planner::new(&database);
+        let statement = parse("DELETE FROM users WHERE name == 'Ada';");
+
+        let plan = planner.plan_statement(&statement).unwrap();
+
+        let PhysicalPlan::Delete { input, .. } = &plan.physical else {
+            panic!("expected physical delete plan: {plan:?}");
+        };
+        let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+            panic!("expected filter below delete: {plan:?}");
+        };
+        assert!(
+            matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        );
     }
 
     #[test]
@@ -2330,14 +2402,11 @@ mod tests {
         };
         assert_eq!(table.name, "users");
         let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
-            panic!("expected residual filter over secondary index scan: {plan:?}");
+            panic!("expected residual filter over full table scan: {plan:?}");
         };
         assert!(matches!(
             input.as_ref(),
-            PhysicalPlan::SecondaryIndexScan { scan }
-                if scan.table.name == "users"
-                    && scan.index.name == "idx_users_name"
-                    && scan.column == bound("users", "name", 1, DataType::Text)
+            PhysicalPlan::FullTableScan { table } if table.name == "users"
         ));
     }
 

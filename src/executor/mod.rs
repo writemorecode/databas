@@ -27,8 +27,8 @@ pub use expression::evaluate_expression;
 #[cfg(test)]
 use expression::record_from_values;
 use expression::{
-    EvaluationContext, empty_record, evaluate_expressions, evaluate_value, execute_insert_values,
-    execute_update, execute_values, offset_rows,
+    EvaluationContext, empty_record, evaluate_expressions, evaluate_value, execute_delete,
+    execute_insert_values, execute_update, execute_values, offset_rows,
 };
 
 /// Errors that can occur while executing a physical query plan.
@@ -172,6 +172,14 @@ impl ExecutorRow {
             Self::Borrowed(record) => record.to_owned_record(),
         }
     }
+
+    /// Converts this row into an owned snapshot without cloning an already-owned row.
+    pub fn into_owned_record(self) -> StorageResult<OwnedTableRecord> {
+        match self {
+            Self::Owned(record) => Ok(record),
+            Self::Borrowed(record) => record.to_owned_record(),
+        }
+    }
 }
 
 impl std::fmt::Display for ExecutorRow {
@@ -297,25 +305,11 @@ impl<'db> Executor<'db> {
             }
             PhysicalPlan::Update { table, assignments, input } => {
                 let output_inner = self.execute(*input)?;
-                let records = output_inner
-                    .into_rows("UPDATE")?
-                    .map(|row| row.and_then(|row| row.to_owned_record().map_err(Into::into)))
-                    .collect::<ExecutorResult<Vec<_>>>()?;
-                execute_update(self.database, table, assignments, records)
+                execute_update(self.database, table, assignments, output_inner.into_rows("UPDATE")?)
             }
             PhysicalPlan::Delete { table, input } => {
                 let output_inner = self.execute(*input)?;
-                let records = output_inner
-                    .into_rows("DELETE")?
-                    .map(|row| row.and_then(|row| row.to_owned_record().map_err(Into::into)))
-                    .collect::<ExecutorResult<Vec<_>>>()?;
-                let affected = records.len() as u64;
-
-                for record in records {
-                    self.database.delete_table_row(&table, &record)?;
-                }
-
-                Ok(ExecutionOutput::RowsAffected(affected))
+                execute_delete(self.database, table, output_inner.into_rows("DELETE")?)
             }
             PhysicalPlan::OneRow => Ok(ExecutionOutput::Rows {
                 rows: Box::new(std::iter::once_with(|| empty_record(0))),
