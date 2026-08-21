@@ -14,7 +14,7 @@ struct TransactionRecovery {
     completed: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct RecoveryPageUpdate {
     lsn: Lsn,
     page_id: PageId,
@@ -52,8 +52,6 @@ pub(crate) fn recover_from_wal(
             RecoveryLogRecordKind::Commit => {
                 transaction.committed = true;
                 transaction.completed = true;
-                committed_page_allocs.extend(transaction.page_allocs.iter().copied());
-                committed_updates.extend(transaction.updates.iter().cloned());
             }
             RecoveryLogRecordKind::Rollback => {
                 transaction.completed = true;
@@ -72,6 +70,16 @@ pub(crate) fn recover_from_wal(
         }
     }
 
+    let mut loser_updates = Vec::new();
+    for transaction in transactions.into_values() {
+        if transaction.committed {
+            committed_page_allocs.extend(transaction.page_allocs);
+            committed_updates.extend(transaction.updates);
+        } else if !transaction.completed {
+            loser_updates.extend(transaction.updates);
+        }
+    }
+
     committed_page_allocs.sort_unstable();
     committed_page_allocs.dedup();
     for page_id in committed_page_allocs {
@@ -84,14 +92,6 @@ pub(crate) fn recover_from_wal(
     }
     let latest_committed_lsn_by_page: HashMap<PageId, Lsn> =
         committed_updates.iter().map(|update| (update.page_id, update.lsn)).collect();
-
-    let mut loser_updates = Vec::new();
-    for transaction in transactions.values() {
-        if transaction.committed || transaction.completed {
-            continue;
-        }
-        loser_updates.extend(transaction.updates.iter().cloned());
-    }
 
     loser_updates.sort_by_key(|update| std::cmp::Reverse(update.lsn));
     for update in &loser_updates {
