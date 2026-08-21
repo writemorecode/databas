@@ -322,13 +322,17 @@ impl LogManager {
     pub(crate) fn new(db_file_path: impl AsRef<Path>) -> std::io::Result<Self> {
         let db_file_path = db_file_path.as_ref().to_path_buf();
         let wal_file_path = db_file_path.with_added_extension("wal");
+        let wal_was_created = !wal_file_path.try_exists()?;
         let mut wal_file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(wal_file_path)?;
+            .open(&wal_file_path)?;
         let wal_header = ensure_wal_file_header(&mut wal_file).map_err(wal_open_error)?;
+        if wal_was_created {
+            sync_parent_directory(&wal_file_path)?;
+        }
 
         let mut highest_appended_lsn = if wal_header.last_assigned_lsn == ZERO_LSN {
             None
@@ -533,13 +537,17 @@ pub(crate) fn read_recovery_log(
     db_file_path: impl AsRef<Path>,
 ) -> Result<RecoveryLogScan, LogManagerError> {
     let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
+    let wal_was_created = !wal_file_path.try_exists()?;
     let mut wal_file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(wal_file_path)?;
+        .open(&wal_file_path)?;
     let wal_header = ensure_wal_file_header(&mut wal_file)?;
+    if wal_was_created {
+        sync_parent_directory(&wal_file_path)?;
+    }
     let wal_len = wal_file.metadata()?.len();
     wal_file.seek(SeekFrom::Start(WAL_FILE_HEADER_LEN as u64))?;
 
@@ -619,7 +627,22 @@ pub(crate) fn truncate_wal(
     let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
     let checkpoint_file_path = wal_file_path.with_added_extension("checkpoint");
     write_wal_checkpoint_file(&checkpoint_file_path, last_assigned_lsn, max_txn_id)?;
-    std::fs::rename(checkpoint_file_path, wal_file_path)?;
+    std::fs::rename(checkpoint_file_path, &wal_file_path)?;
+    sync_parent_directory(&wal_file_path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
