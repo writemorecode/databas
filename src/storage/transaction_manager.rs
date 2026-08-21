@@ -550,8 +550,8 @@ fn pending_log_record(txn_id: TxnId, record: &PendingLogRecord) -> LogRecord<'_>
 
 /// Stamps the assigned page LSN into page formats that carry one.
 ///
-/// Overflow pages and unknown page formats are left unchanged. Their effective
-/// page LSN is treated as [`ZERO_LSN`] by [`page_lsn`].
+/// Overflow pages and unknown page formats are left unchanged; recovery uses
+/// their authoritative full-page WAL images without consulting an on-page LSN.
 fn stamp_page_lsn(page_bytes: &mut [u8; PAGE_SIZE], lsn: Lsn) {
     if page::is_overflow_page(page_bytes) {
         return;
@@ -572,23 +572,6 @@ fn transaction_mismatch(expected: TxnId, actual: TxnId) -> StorageError {
 
 fn invariant(kind: InvariantViolation) -> StorageError {
     StorageError::Internal(InternalError::InvariantViolation(kind))
-}
-
-/// Reads the recovery LSN stored in a page image.
-///
-/// Current B+-tree pages store an LSN in their page header. Overflow pages and
-/// unrecognized or zeroed pages return [`ZERO_LSN`], which makes recovery treat
-/// them as not yet reflecting any logged update.
-pub(crate) fn page_lsn(page_bytes: &[u8; PAGE_SIZE]) -> Lsn {
-    if page::is_overflow_page(page_bytes) {
-        return ZERO_LSN;
-    }
-
-    if page::is_current_btree_page(page_bytes) {
-        page::format::read_u64(page_bytes, page::format::LSN_OFFSET)
-    } else {
-        ZERO_LSN
-    }
 }
 
 #[cfg(test)]

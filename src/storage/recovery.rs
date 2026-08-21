@@ -3,8 +3,7 @@ use std::{collections::HashMap, path::Path};
 use crate::core::{PAGE_SIZE, PageId, error::StorageResult};
 use crate::storage::{
     disk_manager::DiskManager,
-    log_manager::{Lsn, RecoveryLogRecordKind, TxnId, ZERO_LSN, read_recovery_log, truncate_wal},
-    transaction_manager::page_lsn,
+    log_manager::{Lsn, RecoveryLogRecordKind, TxnId, read_recovery_log, truncate_wal},
 };
 
 #[derive(Debug, Default)]
@@ -83,6 +82,8 @@ pub(crate) fn recover_from_wal(
     for update in &committed_updates {
         redo_update(disk, update)?;
     }
+    let latest_committed_lsn_by_page: HashMap<PageId, Lsn> =
+        committed_updates.iter().map(|update| (update.page_id, update.lsn)).collect();
 
     let mut loser_updates = Vec::new();
     for transaction in transactions.values() {
@@ -94,7 +95,12 @@ pub(crate) fn recover_from_wal(
 
     loser_updates.sort_by_key(|update| std::cmp::Reverse(update.lsn));
     for update in &loser_updates {
-        undo_update(disk, update)?;
+        let has_later_committed_update = latest_committed_lsn_by_page
+            .get(&update.page_id)
+            .is_some_and(|committed_lsn| *committed_lsn > update.lsn);
+        if !has_later_committed_update {
+            undo_update(disk, update)?;
+        }
     }
 
     disk.sync()?;
@@ -104,11 +110,7 @@ pub(crate) fn recover_from_wal(
 
 fn redo_update(disk: &mut DiskManager, update: &RecoveryPageUpdate) -> StorageResult<()> {
     disk.ensure_page_exists(update.page_id)?;
-    let mut current = [0; PAGE_SIZE];
-    disk.read_page(update.page_id, &mut current)?;
-    if should_apply_redo(&current, update.lsn) {
-        disk.write_page(update.page_id, update.redo_data.as_ref())?;
-    }
+    disk.write_page(update.page_id, update.redo_data.as_ref())?;
     Ok(())
 }
 
@@ -117,22 +119,8 @@ fn undo_update(disk: &mut DiskManager, update: &RecoveryPageUpdate) -> StorageRe
         return Ok(());
     }
 
-    let mut current = [0; PAGE_SIZE];
-    disk.read_page(update.page_id, &mut current)?;
-    if should_apply_undo(&current, update.lsn) {
-        disk.write_page(update.page_id, update.undo_data.as_ref())?;
-    }
+    disk.write_page(update.page_id, update.undo_data.as_ref())?;
     Ok(())
-}
-
-fn should_apply_redo(page: &[u8; PAGE_SIZE], update_lsn: Lsn) -> bool {
-    let current_lsn = page_lsn(page);
-    current_lsn == ZERO_LSN || current_lsn < update_lsn
-}
-
-fn should_apply_undo(page: &[u8; PAGE_SIZE], update_lsn: Lsn) -> bool {
-    let current_lsn = page_lsn(page);
-    current_lsn == ZERO_LSN || current_lsn == update_lsn
 }
 
 #[cfg(test)]
@@ -146,7 +134,7 @@ mod tests {
 
     use super::*;
     use crate::storage::{
-        log_manager::{LogManager, LogRecord, LogRecordKind, WAL_FILE_HEADER_LEN},
+        log_manager::{LogManager, LogRecord, LogRecordKind, WAL_FILE_HEADER_LEN, ZERO_LSN},
         page,
         page::format::PageKind,
         storage_runtime::StorageRuntime,
@@ -216,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_skips_committed_update_when_page_lsn_is_current() {
+    fn recovery_replays_committed_update_when_page_lsn_is_current() {
         let file = NamedTempFile::new().unwrap();
         let before = formatted_page(1, ZERO_LSN);
         let current = formatted_page(2, 2);
@@ -246,7 +234,7 @@ mod tests {
         let mut disk = DiskManager::new(file.path()).unwrap();
         recover_from_wal(file.path(), &mut disk).unwrap();
 
-        assert_eq!(read_disk_page(file.path(), 0), current);
+        assert_eq!(read_disk_page(file.path(), 0), stale_redo);
     }
 
     #[test]
@@ -555,7 +543,6 @@ mod tests {
     // only the LSN near the start of the 4 KiB page, so it can skip redo when that LSN
     // persisted but later sectors still contain stale or corrupted bytes.
     #[test]
-    #[ignore = "known WAL bug: matching page LSN hides torn page body"]
     fn recovery_repairs_torn_page_with_current_lsn() {
         let file = NamedTempFile::new().unwrap();
         let before = formatted_page(1, ZERO_LSN);
@@ -589,6 +576,44 @@ mod tests {
         recover_from_wal(file.path(), &mut disk).unwrap();
 
         assert_eq!(read_disk_page(file.path(), 0)[PAGE_SIZE - 1], after[PAGE_SIZE - 1]);
+    }
+
+    // Issue: Torn database pages can masquerade as complete writes. An uncommitted
+    // torn write whose body persisted while its old header remained may not be undone
+    // when recovery trusts only the LSN near the start of the page.
+    #[test]
+    fn recovery_undoes_torn_uncommitted_page_with_stale_lsn() {
+        let file = NamedTempFile::new().unwrap();
+        let before = formatted_page(1, 1);
+        let after = formatted_page(2, 2);
+        let mut torn = after;
+        page::format::write_u64(&mut torn, page::format::LSN_OFFSET, 1);
+        {
+            let mut disk = DiskManager::new(file.path()).unwrap();
+            disk.ensure_page_exists(0).unwrap();
+            disk.write_page(0, &torn).unwrap();
+            disk.sync().unwrap();
+        }
+        append_transaction(
+            file.path(),
+            1,
+            &[
+                LogRecord { txn_id: 1, kind: LogRecordKind::Begin },
+                LogRecord {
+                    txn_id: 1,
+                    kind: LogRecordKind::PageUpdate {
+                        page_id: 0,
+                        redo_data: &after,
+                        undo_data: &before,
+                    },
+                },
+            ],
+        );
+
+        let mut disk = DiskManager::new(file.path()).unwrap();
+        recover_from_wal(file.path(), &mut disk).unwrap();
+
+        assert_eq!(read_disk_page(file.path(), 0), before);
     }
 
     // Issue: Transaction IDs are not actually monotonic across restarts. Recovery
