@@ -617,15 +617,26 @@ pub(crate) fn truncate_wal(
     max_txn_id: TxnId,
 ) -> Result<(), LogManagerError> {
     let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
-    let mut wal_file = OpenOptions::new()
+    let checkpoint_file_path = wal_file_path.with_added_extension("checkpoint");
+    write_wal_checkpoint_file(&checkpoint_file_path, last_assigned_lsn, max_txn_id)?;
+    std::fs::rename(checkpoint_file_path, wal_file_path)?;
+    Ok(())
+}
+
+fn write_wal_checkpoint_file(
+    checkpoint_file_path: &Path,
+    last_assigned_lsn: Lsn,
+    max_txn_id: TxnId,
+) -> Result<(), LogManagerError> {
+    let mut checkpoint_file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
-        .truncate(false)
-        .open(wal_file_path)?;
-    write_wal_file_header(&mut wal_file, last_assigned_lsn, max_txn_id)?;
-    wal_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
-    wal_file.sync_all()?;
+        .truncate(true)
+        .open(checkpoint_file_path)?;
+    write_wal_file_header(&mut checkpoint_file, last_assigned_lsn, max_txn_id)?;
+    checkpoint_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
+    checkpoint_file.sync_all()?;
     Ok(())
 }
 
@@ -1110,6 +1121,33 @@ mod tests {
 
         assert!(scan.records.is_empty());
         assert_eq!(std::fs::metadata(wal_file_path).unwrap().len(), WAL_FILE_HEADER_LEN as u64);
+    }
+
+    // Issue: WAL checkpoint/truncation is not crash-atomic. A crash can persist the
+    // truncation without the new LSN high-water mark. The next run can reuse old LSNs
+    // and skip committed redo when a page contains a numerically larger old LSN.
+    #[test]
+    fn staged_wal_checkpoint_does_not_modify_the_live_wal() {
+        let file = NamedTempFile::new().unwrap();
+        let records = [
+            LogRecord { txn_id: 41, kind: LogRecordKind::Begin },
+            LogRecord { txn_id: 41, kind: LogRecordKind::Commit },
+        ];
+        {
+            let mut manager = LogManager::new(file.path()).unwrap();
+            let lsn = manager.append_transaction(41, &records).unwrap();
+            manager.flush_through(lsn).unwrap();
+        }
+        let wal_file_path = file.path().with_added_extension("wal");
+        let checkpoint_file_path = wal_file_path.with_added_extension("checkpoint");
+        let original_wal = std::fs::read(&wal_file_path).unwrap();
+
+        write_wal_checkpoint_file(&checkpoint_file_path, 2, 41).unwrap();
+
+        assert_eq!(std::fs::read(wal_file_path).unwrap(), original_wal);
+        let scan = read_recovery_log(file.path()).unwrap();
+        assert_eq!(scan.records.len(), 2);
+        assert_eq!(scan.max_txn_id, 41);
     }
 
     #[test]
