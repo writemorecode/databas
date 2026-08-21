@@ -36,7 +36,7 @@ pub(crate) fn recover_from_wal(
     let max_txn_id = scan.max_txn_id;
     if scan.records.is_empty() {
         if max_txn_id > 0 || scan.truncated_tail {
-            truncate_wal(path, scan.last_assigned_lsn)?;
+            truncate_wal(path, scan.last_assigned_lsn, max_txn_id)?;
         }
         return Ok(RecoveryResult { max_txn_id });
     }
@@ -98,7 +98,7 @@ pub(crate) fn recover_from_wal(
     }
 
     disk.sync()?;
-    truncate_wal(path, last_assigned_lsn)?;
+    truncate_wal(path, last_assigned_lsn, max_txn_id)?;
     Ok(RecoveryResult { max_txn_id })
 }
 
@@ -566,7 +566,7 @@ mod tests {
             disk.write_page(0, &old_page).unwrap();
             disk.sync().unwrap();
         }
-        truncate_wal(file.path(), ZERO_LSN).unwrap();
+        truncate_wal(file.path(), ZERO_LSN, 0).unwrap();
         append_transaction(
             file.path(),
             1,
@@ -634,7 +634,6 @@ mod tests {
     // derives the maximum ID only from frames, while truncation preserves only the LSN,
     // so a second reopen with no intervening transaction forgets the previous maximum.
     #[test]
-    #[ignore = "known WAL bug: checkpoint forgets maximum transaction id"]
     fn recovery_preserves_max_transaction_id_across_multiple_reopens() {
         let file = NamedTempFile::new().unwrap();
         append_transaction(
