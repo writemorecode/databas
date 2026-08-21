@@ -489,8 +489,7 @@ mod tests {
                 OpenOptions::new().read(true).write(true).open(&wal_file_path).unwrap();
             let mut bytes = Vec::new();
             wal_file.read_to_end(&mut bytes).unwrap();
-            let last = bytes.len() - 1;
-            bytes[last] ^= 1;
+            bytes[0] ^= 1;
             wal_file.seek(SeekFrom::Start(0)).unwrap();
             wal_file.write_all(&bytes).unwrap();
             wal_file.sync_all().unwrap();
