@@ -329,6 +329,11 @@ impl From<LogManagerFlushError> for StorageError {
                     },
                 ))
             }
+            err @ LogManagerFlushError::Poisoned => {
+                Self::Internal(InternalError::InvariantViolation(InvariantViolation::WalLog {
+                    message: err.to_string(),
+                }))
+            }
         }
     }
 }
