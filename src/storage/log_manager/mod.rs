@@ -499,8 +499,9 @@ impl LogManager {
 ///
 /// A torn or incomplete final frame is treated as a non-durable tail: it is
 /// truncated from the WAL and reported through [`RecoveryLogScan::truncated_tail`].
-/// Corruption in a complete-looking frame, such as bad magic or a checksum
-/// mismatch, is returned as an error and the WAL is left intact.
+/// A decode failure in the final frame is also treated as a non-durable tail:
+/// crashes can leave the expected file length even when some sectors did not
+/// reach stable storage. Corruption before the final frame remains an error.
 pub(crate) fn read_recovery_log(
     db_file_path: impl AsRef<Path>,
 ) -> Result<RecoveryLogScan, LogManagerError> {
@@ -530,7 +531,8 @@ pub(crate) fn read_recovery_log(
 
         let frame_len = match transaction_frame_len(&buf[offset..]) {
             Ok(frame_len) => frame_len,
-            Err(LogManagerError::TruncatedFrame { .. }) => {
+            Err(LogManagerError::TruncatedFrame { .. })
+            | Err(LogManagerError::InvalidHeaderMagic { .. }) => {
                 truncated_tail = true;
                 break;
             }
@@ -544,7 +546,14 @@ pub(crate) fn read_recovery_log(
             break;
         }
 
-        let transaction = deserialize_transaction(&buf[offset..frame_end])?;
+        let transaction = match deserialize_transaction(&buf[offset..frame_end]) {
+            Ok(transaction) => transaction,
+            Err(_) if frame_end == buf.len() => {
+                truncated_tail = true;
+                break;
+            }
+            Err(error) => return Err(error),
+        };
         max_txn_id = max_txn_id.max(transaction.txn_id);
         complete_record_count = complete_record_count
             .checked_add(
@@ -989,7 +998,6 @@ mod tests {
     // the expected file length while a sector contains stale or partial data, but a
     // checksum, magic, or footer failure in that final frame is treated as corruption.
     #[test]
-    #[ignore = "known WAL bug: full-length torn tail is fatal"]
     fn read_recovery_log_truncates_full_length_torn_final_frame() {
         let file = NamedTempFile::new().unwrap();
         let valid_frame = serialize_to_vec(
