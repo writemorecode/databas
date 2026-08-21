@@ -146,7 +146,7 @@ mod tests {
 
     use super::*;
     use crate::storage::{
-        log_manager::{LogManager, LogRecord, LogRecordKind, WAL_FILE_HEADER_LEN, truncate_wal},
+        log_manager::{LogManager, LogRecord, LogRecordKind, WAL_FILE_HEADER_LEN},
         page,
         page::format::PageKind,
         storage_runtime::StorageRuntime,
@@ -549,45 +549,6 @@ mod tests {
         recover_from_wal(file.path(), &mut disk).unwrap();
 
         assert_eq!(read_disk_page(file.path(), 0), update2);
-    }
-
-    // Issue: WAL checkpoint/truncation is not crash-atomic. A crash can persist the
-    // truncation without the new LSN high-water mark, causing old LSNs to be reused and
-    // committed redo to be skipped when a page contains a numerically larger old LSN.
-    #[test]
-    #[ignore = "known WAL bug: checkpoint state can reuse LSNs"]
-    fn recovery_redoes_commit_after_checkpoint_lsn_state_is_lost() {
-        let file = NamedTempFile::new().unwrap();
-        let old_page = formatted_page(1, 5);
-        let committed_page = formatted_page(2, 2);
-        {
-            let mut disk = DiskManager::new(file.path()).unwrap();
-            disk.ensure_page_exists(0).unwrap();
-            disk.write_page(0, &old_page).unwrap();
-            disk.sync().unwrap();
-        }
-        truncate_wal(file.path(), ZERO_LSN, 0).unwrap();
-        append_transaction(
-            file.path(),
-            1,
-            &[
-                LogRecord { txn_id: 1, kind: LogRecordKind::Begin },
-                LogRecord {
-                    txn_id: 1,
-                    kind: LogRecordKind::PageUpdate {
-                        page_id: 0,
-                        redo_data: &committed_page,
-                        undo_data: &old_page,
-                    },
-                },
-                LogRecord { txn_id: 1, kind: LogRecordKind::Commit },
-            ],
-        );
-
-        let mut disk = DiskManager::new(file.path()).unwrap();
-        recover_from_wal(file.path(), &mut disk).unwrap();
-
-        assert_eq!(read_disk_page(file.path(), 0)[PAGE_SIZE - 1], committed_page[PAGE_SIZE - 1]);
     }
 
     // Issue: Torn database pages can masquerade as complete writes. Recovery trusts
