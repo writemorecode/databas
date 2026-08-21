@@ -146,13 +146,11 @@ mod tests {
 
     use super::*;
     use crate::storage::{
-        log_manager::{LogManager, LogRecord, LogRecordKind, truncate_wal},
+        log_manager::{LogManager, LogRecord, LogRecordKind, WAL_FILE_HEADER_LEN, truncate_wal},
         page,
         page::format::PageKind,
         storage_runtime::StorageRuntime,
     };
-
-    const WAL_FILE_HEADER_LEN: u64 = 24;
 
     fn formatted_page(seed: u8, lsn: Lsn) -> [u8; PAGE_SIZE] {
         let mut page = [seed; PAGE_SIZE];
@@ -378,7 +376,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(read_disk_page(file.path(), 0), after);
-        assert_eq!(wal_len(file.path()), WAL_FILE_HEADER_LEN);
+        assert_eq!(wal_len(file.path()), WAL_FILE_HEADER_LEN as u64);
         assert_eq!(runtime.begin_transaction().unwrap(), 42);
     }
 
@@ -436,7 +434,7 @@ mod tests {
         }
 
         assert_eq!(read_disk_page(file.path(), 0), old_wal_update);
-        assert_eq!(wal_len(file.path()), WAL_FILE_HEADER_LEN);
+        assert_eq!(wal_len(file.path()), WAL_FILE_HEADER_LEN as u64);
 
         append_transaction(
             file.path(),
