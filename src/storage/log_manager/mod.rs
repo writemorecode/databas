@@ -33,11 +33,11 @@ use crate::core::{PAGE_SIZE, PageId};
 mod frame;
 
 #[cfg(test)]
-pub(crate) use frame::read_log_record_kinds_for_test;
+use frame::FOOTER_LEN;
 #[cfg(test)]
-use frame::{CRC32, FOOTER_LEN};
+pub(crate) use frame::read_log_record_kinds_for_test;
 use frame::{
-    HEADER_LEN, deserialize_transaction, scan_transaction_frame, serialize_transaction,
+    CRC32, HEADER_LEN, deserialize_transaction, scan_transaction_frame, serialize_transaction,
     transaction_frame_len, validate_record_txn_ids, wal_open_error,
 };
 
@@ -51,8 +51,9 @@ pub(crate) const ZERO_LSN: Lsn = 0;
 const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
-const WAL_FILE_HEADER_VERSION: u16 = 1;
-const WAL_FILE_HEADER_LEN: usize = 24;
+const WAL_FILE_HEADER_VERSION: u16 = 2;
+pub(crate) const WAL_FILE_HEADER_LEN: usize = 32;
+const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
 
 /// Errors raised while opening, writing, or decoding WAL frames.
 #[derive(Debug, Error)]
@@ -105,6 +106,9 @@ pub enum LogManagerError {
     /// A page update record did not contain full `PAGE_SIZE` images.
     #[error("WAL full-page image has invalid length: expected {expected}, got {actual}")]
     InvalidPageImageLength { expected: usize, actual: usize },
+    /// The WAL file header failed its integrity checksum.
+    #[error("WAL file header checksum mismatch: expected {expected}, got {actual}")]
+    FileHeaderChecksumMismatch { expected: u32, actual: u32 },
     /// A previous append may have left a partial frame in this WAL stream.
     #[error("WAL manager is poisoned after a failed append")]
     Poisoned,
@@ -221,8 +225,9 @@ struct WalFileHeader {
 }
 
 fn ensure_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
-    if wal_file.metadata()?.len() == 0 {
+    if wal_file.metadata()?.len() < WAL_FILE_HEADER_LEN as u64 {
         write_wal_file_header(wal_file, ZERO_LSN)?;
+        wal_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
         wal_file.sync_all()?;
         return Ok(WalFileHeader { last_assigned_lsn: ZERO_LSN });
     }
@@ -247,6 +252,15 @@ fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManager
         });
     }
 
+    let expected = u32::from_le_bytes(
+        header[WAL_FILE_HEADER_CHECKSUM_RANGE].try_into().expect("checksum slice length is fixed"),
+    );
+    header[WAL_FILE_HEADER_CHECKSUM_RANGE].fill(0);
+    let actual = CRC32.checksum(&header);
+    if actual != expected {
+        return Err(LogManagerError::FileHeaderChecksumMismatch { expected, actual });
+    }
+
     let last_assigned_lsn =
         u64::from_le_bytes(header[16..24].try_into().expect("slice length is fixed"));
     Ok(WalFileHeader { last_assigned_lsn })
@@ -260,6 +274,8 @@ fn write_wal_file_header(
     header[0..8].copy_from_slice(&WAL_FILE_HEADER_MAGIC);
     header[8..10].copy_from_slice(&WAL_FILE_HEADER_VERSION.to_le_bytes());
     header[16..24].copy_from_slice(&last_assigned_lsn.to_le_bytes());
+    let checksum = CRC32.checksum(&header);
+    header[WAL_FILE_HEADER_CHECKSUM_RANGE].copy_from_slice(&checksum.to_le_bytes());
     wal_file.seek(SeekFrom::Start(0))?;
     wal_file.write_all(&header)?;
     Ok(())
@@ -1058,9 +1074,10 @@ mod tests {
 
     // Issue: The WAL header is an unprotected single point of failure.
     // `last_assigned_lsn` has no checksum or redundant copy, so an undetected bit flip
-    // can cause LSN reuse and skipped redo.
+    // can cause LSN reuse and skipped redo. A crash leaving 1–23 header bytes produces
+    // `UnexpectedEof`, making the database unopenable instead of recognizing an
+    // incomplete new WAL.
     #[test]
-    #[ignore = "known WAL bug: WAL header LSN corruption is not detected"]
     fn read_recovery_log_rejects_corrupted_header_lsn() {
         let file = NamedTempFile::new().unwrap();
         let wal_file_path = file.path().with_added_extension("wal");
@@ -1073,6 +1090,21 @@ mod tests {
         }
 
         assert!(read_recovery_log(file.path()).is_err());
+    }
+
+    // Issue: The WAL header is an unprotected single point of failure.
+    // A crash leaving 1–23 header bytes produces `UnexpectedEof`, making a database
+    // with an incomplete newly-created WAL unopenable.
+    #[test]
+    fn incomplete_new_wal_header_is_reinitialized() {
+        let file = NamedTempFile::new().unwrap();
+        let wal_file_path = file.path().with_added_extension("wal");
+        std::fs::write(&wal_file_path, b"DBWAL").unwrap();
+
+        let scan = read_recovery_log(file.path()).unwrap();
+
+        assert!(scan.records.is_empty());
+        assert_eq!(std::fs::metadata(wal_file_path).unwrap().len(), WAL_FILE_HEADER_LEN as u64);
     }
 
     #[test]
