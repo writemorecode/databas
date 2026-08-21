@@ -598,6 +598,28 @@ mod tests {
         buf
     }
 
+    struct FailAfterWriter {
+        bytes: Vec<u8>,
+        remaining_before_failure: usize,
+    }
+
+    impl Write for FailAfterWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.remaining_before_failure == 0 {
+                return Err(std::io::Error::other("injected partial WAL append failure"));
+            }
+
+            let write_len = buf.len().min(self.remaining_before_failure);
+            self.bytes.extend_from_slice(&buf[..write_len]);
+            self.remaining_before_failure -= write_len;
+            Ok(write_len)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn serializes_and_deserializes_empty_transaction() {
         let records = [];
@@ -927,6 +949,116 @@ mod tests {
             std::fs::metadata(wal_file_path).unwrap().len(),
             (WAL_FILE_HEADER_LEN + valid_frame.len()) as u64
         );
+    }
+
+    // Issue: Opening the same database twice can destroy the WAL. Each `LogManager`
+    // independently scans, seeks to EOF, and buffers writes without file locking or
+    // `O_APPEND`; writers can overwrite frames and allocate colliding LSNs and txn ids.
+    #[test]
+    #[ignore = "known WAL bug: concurrent handles overwrite frames"]
+    fn two_log_managers_preserve_both_committed_frames() {
+        let file = NamedTempFile::new().unwrap();
+        let mut first = LogManager::new(file.path()).unwrap();
+        let mut second = LogManager::new(file.path()).unwrap();
+        let first_records = [
+            LogRecord { txn_id: 1, kind: LogRecordKind::Begin },
+            LogRecord { txn_id: 1, kind: LogRecordKind::Commit },
+        ];
+        let second_records = [
+            LogRecord { txn_id: 2, kind: LogRecordKind::Begin },
+            LogRecord { txn_id: 2, kind: LogRecordKind::Commit },
+        ];
+
+        let first_lsn = first.append_transaction(1, &first_records).unwrap();
+        first.flush_through(first_lsn).unwrap();
+        let second_lsn = second.append_transaction(2, &second_records).unwrap();
+        second.flush_through(second_lsn).unwrap();
+        drop(first);
+        drop(second);
+
+        let scan = read_recovery_log(file.path()).unwrap();
+        assert_eq!(
+            scan.records.iter().map(|record| record.txn_id).collect::<Vec<_>>(),
+            [1, 1, 2, 2]
+        );
+    }
+
+    // Issue: A full-length torn final WAL frame prevents recovery. A crash can leave
+    // the expected file length while a sector contains stale or partial data, but a
+    // checksum, magic, or footer failure in that final frame is treated as corruption.
+    #[test]
+    #[ignore = "known WAL bug: full-length torn tail is fatal"]
+    fn read_recovery_log_truncates_full_length_torn_final_frame() {
+        let file = NamedTempFile::new().unwrap();
+        let valid_frame = serialize_to_vec(
+            11,
+            &[
+                LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+            ],
+        );
+        let mut torn_frame = serialize_to_vec(
+            12,
+            &[
+                LogRecord { txn_id: 12, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 12, kind: LogRecordKind::Commit },
+            ],
+        );
+        *torn_frame.last_mut().unwrap() ^= 1;
+        let wal_file_path = file.path().with_added_extension("wal");
+        {
+            let _manager = LogManager::new(file.path()).unwrap();
+            let mut wal_file = OpenOptions::new().append(true).open(&wal_file_path).unwrap();
+            wal_file.write_all(&valid_frame).unwrap();
+            wal_file.write_all(&torn_frame).unwrap();
+            wal_file.sync_all().unwrap();
+        }
+
+        let scan = read_recovery_log(file.path()).unwrap();
+
+        assert!(scan.truncated_tail);
+        assert_eq!(scan.records.len(), 2);
+        assert_eq!(
+            std::fs::metadata(wal_file_path).unwrap().len(),
+            (WAL_FILE_HEADER_LEN + valid_frame.len()) as u64
+        );
+    }
+
+    // Issue: An append I/O error leaves the manager reusable after a partial frame.
+    // Serialization writes incrementally while bookkeeping advances only after success,
+    // so later successful appends can follow an unrecoverable partial frame.
+    #[test]
+    #[ignore = "known WAL bug: failed serialization leaves partial frame bytes"]
+    fn failed_frame_serialization_leaves_no_partial_bytes() {
+        let records = [
+            LogRecord { txn_id: 1, kind: LogRecordKind::Begin },
+            LogRecord { txn_id: 1, kind: LogRecordKind::Commit },
+        ];
+        let mut writer =
+            FailAfterWriter { bytes: Vec::new(), remaining_before_failure: HEADER_LEN + 1 };
+
+        assert!(serialize_transaction(&mut writer, 1, &records).is_err());
+
+        assert!(writer.bytes.is_empty(), "failed append left a partial WAL frame");
+    }
+
+    // Issue: The WAL header is an unprotected single point of failure.
+    // `last_assigned_lsn` has no checksum or redundant copy, so an undetected bit flip
+    // can cause LSN reuse and skipped redo.
+    #[test]
+    #[ignore = "known WAL bug: WAL header LSN corruption is not detected"]
+    fn read_recovery_log_rejects_corrupted_header_lsn() {
+        let file = NamedTempFile::new().unwrap();
+        let wal_file_path = file.path().with_added_extension("wal");
+        {
+            let _manager = LogManager::new(file.path()).unwrap();
+            let mut wal_file = OpenOptions::new().write(true).open(&wal_file_path).unwrap();
+            wal_file.seek(SeekFrom::Start(23)).unwrap();
+            wal_file.write_all(&[1]).unwrap();
+            wal_file.sync_all().unwrap();
+        }
+
+        assert!(read_recovery_log(file.path()).is_err());
     }
 
     #[test]

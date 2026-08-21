@@ -146,7 +146,7 @@ mod tests {
 
     use super::*;
     use crate::storage::{
-        log_manager::{LogManager, LogRecord, LogRecordKind},
+        log_manager::{LogManager, LogRecord, LogRecordKind, truncate_wal},
         page,
         page::format::PageKind,
         storage_runtime::StorageRuntime,
@@ -552,5 +552,109 @@ mod tests {
         recover_from_wal(file.path(), &mut disk).unwrap();
 
         assert_eq!(read_disk_page(file.path(), 0), update2);
+    }
+
+    // Issue: WAL checkpoint/truncation is not crash-atomic. A crash can persist the
+    // truncation without the new LSN high-water mark, causing old LSNs to be reused and
+    // committed redo to be skipped when a page contains a numerically larger old LSN.
+    #[test]
+    #[ignore = "known WAL bug: checkpoint state can reuse LSNs"]
+    fn recovery_redoes_commit_after_checkpoint_lsn_state_is_lost() {
+        let file = NamedTempFile::new().unwrap();
+        let old_page = formatted_page(1, 5);
+        let committed_page = formatted_page(2, 2);
+        {
+            let mut disk = DiskManager::new(file.path()).unwrap();
+            disk.ensure_page_exists(0).unwrap();
+            disk.write_page(0, &old_page).unwrap();
+            disk.sync().unwrap();
+        }
+        truncate_wal(file.path(), ZERO_LSN).unwrap();
+        append_transaction(
+            file.path(),
+            1,
+            &[
+                LogRecord { txn_id: 1, kind: LogRecordKind::Begin },
+                LogRecord {
+                    txn_id: 1,
+                    kind: LogRecordKind::PageUpdate {
+                        page_id: 0,
+                        redo_data: &committed_page,
+                        undo_data: &old_page,
+                    },
+                },
+                LogRecord { txn_id: 1, kind: LogRecordKind::Commit },
+            ],
+        );
+
+        let mut disk = DiskManager::new(file.path()).unwrap();
+        recover_from_wal(file.path(), &mut disk).unwrap();
+
+        assert_eq!(read_disk_page(file.path(), 0)[PAGE_SIZE - 1], committed_page[PAGE_SIZE - 1]);
+    }
+
+    // Issue: Torn database pages can masquerade as complete writes. Recovery trusts
+    // only the LSN near the start of the 4 KiB page, so it can skip redo when that LSN
+    // persisted but later sectors still contain stale or corrupted bytes.
+    #[test]
+    #[ignore = "known WAL bug: matching page LSN hides torn page body"]
+    fn recovery_repairs_torn_page_with_current_lsn() {
+        let file = NamedTempFile::new().unwrap();
+        let before = formatted_page(1, ZERO_LSN);
+        let after = formatted_page(2, 2);
+        let mut torn = after;
+        torn[PAGE_SIZE - 1] ^= 1;
+        {
+            let mut disk = DiskManager::new(file.path()).unwrap();
+            disk.ensure_page_exists(0).unwrap();
+            disk.write_page(0, &torn).unwrap();
+            disk.sync().unwrap();
+        }
+        append_transaction(
+            file.path(),
+            1,
+            &[
+                LogRecord { txn_id: 1, kind: LogRecordKind::Begin },
+                LogRecord {
+                    txn_id: 1,
+                    kind: LogRecordKind::PageUpdate {
+                        page_id: 0,
+                        redo_data: &after,
+                        undo_data: &before,
+                    },
+                },
+                LogRecord { txn_id: 1, kind: LogRecordKind::Commit },
+            ],
+        );
+
+        let mut disk = DiskManager::new(file.path()).unwrap();
+        recover_from_wal(file.path(), &mut disk).unwrap();
+
+        assert_eq!(read_disk_page(file.path(), 0)[PAGE_SIZE - 1], after[PAGE_SIZE - 1]);
+    }
+
+    // Issue: Transaction IDs are not actually monotonic across restarts. Recovery
+    // derives the maximum ID only from frames, while truncation preserves only the LSN,
+    // so a second reopen with no intervening transaction forgets the previous maximum.
+    #[test]
+    #[ignore = "known WAL bug: checkpoint forgets maximum transaction id"]
+    fn recovery_preserves_max_transaction_id_across_multiple_reopens() {
+        let file = NamedTempFile::new().unwrap();
+        append_transaction(
+            file.path(),
+            41,
+            &[
+                LogRecord { txn_id: 41, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 41, kind: LogRecordKind::Commit },
+            ],
+        );
+
+        let mut first_disk = DiskManager::new(file.path()).unwrap();
+        let first = recover_from_wal(file.path(), &mut first_disk).unwrap();
+        assert_eq!(first.max_txn_id, 41);
+
+        let mut second_disk = DiskManager::new(file.path()).unwrap();
+        let second = recover_from_wal(file.path(), &mut second_disk).unwrap();
+        assert_eq!(second.max_txn_id, 41);
     }
 }
