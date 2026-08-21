@@ -112,6 +112,13 @@ pub enum LogManagerError {
     /// A previous append may have left a partial frame in this WAL stream.
     #[error("WAL manager is poisoned after a failed append")]
     Poisoned,
+    /// A WAL frame buffer could not be allocated during recovery.
+    #[error("failed to allocate {byte_count} bytes for a WAL frame: {source}")]
+    FrameAllocationFailed {
+        byte_count: usize,
+        #[source]
+        source: std::collections::TryReserveError,
+    },
 }
 
 /// Errors raised while forcing appended WAL bytes to durable storage.
@@ -533,70 +540,57 @@ pub(crate) fn read_recovery_log(
         .truncate(false)
         .open(wal_file_path)?;
     let wal_header = ensure_wal_file_header(&mut wal_file)?;
-    let mut buf = Vec::new();
-    wal_file.seek(SeekFrom::Start(0))?;
-    wal_file.read_to_end(&mut buf)?;
+    let wal_len = wal_file.metadata()?.len();
+    wal_file.seek(SeekFrom::Start(WAL_FILE_HEADER_LEN as u64))?;
 
-    let mut frame_ranges = Vec::new();
-    let mut offset = WAL_FILE_HEADER_LEN;
-    let mut complete_record_count = 0u64;
+    let mut offset = WAL_FILE_HEADER_LEN as u64;
     let mut max_txn_id = wal_header.max_txn_id;
     let mut truncated_tail = false;
+    let mut next_lsn = wal_header.last_assigned_lsn;
+    let mut records = Vec::new();
 
-    while offset < buf.len() {
-        if buf.len() - offset < HEADER_LEN {
+    while offset < wal_len {
+        if wal_len - offset < HEADER_LEN as u64 {
             truncated_tail = true;
             break;
         }
 
-        let frame_len = match transaction_frame_len(&buf[offset..]) {
+        let mut frame_header = [0; HEADER_LEN];
+        wal_file.read_exact(&mut frame_header)?;
+        let frame_len = match transaction_frame_len(&frame_header) {
             Ok(frame_len) => frame_len,
             Err(LogManagerError::TruncatedFrame { .. })
             | Err(LogManagerError::InvalidHeaderMagic { .. }) => {
                 truncated_tail = true;
                 break;
             }
-            Err(err) => return Err(err),
+            Err(error) => return Err(error),
         };
 
         let frame_end =
-            offset.checked_add(frame_len).ok_or(LogManagerError::PayloadLengthOverflow)?;
-        if frame_end > buf.len() {
+            offset.checked_add(frame_len as u64).ok_or(LogManagerError::PayloadLengthOverflow)?;
+        if frame_end > wal_len {
             truncated_tail = true;
             break;
         }
 
-        let transaction = match deserialize_transaction(&buf[offset..frame_end]) {
+        let mut frame = Vec::new();
+        frame.try_reserve_exact(frame_len).map_err(|source| {
+            LogManagerError::FrameAllocationFailed { byte_count: frame_len, source }
+        })?;
+        frame.extend_from_slice(&frame_header);
+        frame.resize(frame_len, 0);
+        wal_file.read_exact(&mut frame[HEADER_LEN..])?;
+
+        let transaction = match deserialize_transaction(&frame) {
             Ok(transaction) => transaction,
-            Err(_) if frame_end == buf.len() => {
+            Err(_) if frame_end == wal_len => {
                 truncated_tail = true;
                 break;
             }
             Err(error) => return Err(error),
         };
         max_txn_id = max_txn_id.max(transaction.txn_id);
-        complete_record_count = complete_record_count
-            .checked_add(
-                u64::try_from(transaction.records.len()).expect("usize record count fits in u64"),
-            )
-            .ok_or(LogManagerError::LsnExhausted)?;
-        frame_ranges.push((offset, frame_end));
-        offset = frame_end;
-    }
-
-    if truncated_tail {
-        wal_file.set_len(offset as u64)?;
-        wal_file.sync_all()?;
-    }
-
-    let last_assigned_lsn = wal_header
-        .last_assigned_lsn
-        .checked_add(complete_record_count)
-        .ok_or(LogManagerError::LsnExhausted)?;
-    let mut next_lsn = wal_header.last_assigned_lsn;
-    let mut records = Vec::new();
-    for (frame_start, frame_end) in frame_ranges {
-        let transaction = deserialize_transaction(&buf[frame_start..frame_end])?;
         for record in transaction.records {
             next_lsn = next_lsn.checked_add(1).ok_or(LogManagerError::LsnExhausted)?;
             records.push(RecoveryLogRecord {
@@ -605,9 +599,15 @@ pub(crate) fn read_recovery_log(
                 kind: RecoveryLogRecordKind::from_log_record_kind(record.kind)?,
             });
         }
+        offset = frame_end;
     }
 
-    Ok(RecoveryLogScan { records, truncated_tail, max_txn_id, last_assigned_lsn })
+    if truncated_tail {
+        wal_file.set_len(offset)?;
+        wal_file.sync_all()?;
+    }
+
+    Ok(RecoveryLogScan { records, truncated_tail, max_txn_id, last_assigned_lsn: next_lsn })
 }
 
 /// Removes all WAL contents after recovery has made the database file consistent.
