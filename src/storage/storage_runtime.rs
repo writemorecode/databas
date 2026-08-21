@@ -28,6 +28,7 @@ pub(crate) struct StorageRuntime {
 
 impl StorageRuntime {
     pub(crate) fn new(path: PathBuf, mut disk: DiskManager) -> StorageResult<Self> {
+        disk.lock_exclusive()?;
         let recovery = recover_from_wal(&path, &mut disk)?;
         let log = LogManager::new(&path)?;
         let max_txn_id = recovery.max_txn_id.max(log.highest_txn_id());
@@ -69,6 +70,11 @@ impl StorageRuntime {
 
     pub(crate) fn sync_database_file(&self) -> Result<(), DiskManagerError> {
         self.disk.borrow().sync()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unlock_for_crash_for_test(&self) -> Result<(), DiskManagerError> {
+        self.disk.borrow_mut().unlock_for_crash_for_test()
     }
 
     pub(crate) fn flush_wal_through(&self, lsn: Lsn) -> StorageResult<()> {

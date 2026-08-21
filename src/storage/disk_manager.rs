@@ -13,6 +13,7 @@ use crate::core::{
 pub struct DiskManager {
     file: File,
     page_count: u64,
+    locked: bool,
 }
 
 impl DiskManager {
@@ -49,7 +50,25 @@ impl DiskManager {
 
         let page_count = file_size / (PAGE_SIZE as u64);
 
-        Ok(Self { file, page_count })
+        Ok(Self { file, page_count, locked: false })
+    }
+
+    /// Acquire the process-wide exclusive lock held for an open database.
+    pub(crate) fn lock_exclusive(&mut self) -> DiskManagerResult<()> {
+        if !self.locked {
+            self.file.try_lock().map_err(std::io::Error::from)?;
+            self.locked = true;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unlock_for_crash_for_test(&mut self) -> DiskManagerResult<()> {
+        if self.locked {
+            self.file.unlock()?;
+            self.locked = false;
+        }
+        Ok(())
     }
 
     pub(crate) fn page_count(&self) -> u64 {

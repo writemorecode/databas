@@ -591,6 +591,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::core::{Database, error::StorageError};
 
     fn serialize_to_vec(txn_id: TxnId, records: &[LogRecord<'_>]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -955,32 +956,16 @@ mod tests {
     // independently scans, seeks to EOF, and buffers writes without file locking or
     // `O_APPEND`; writers can overwrite frames and allocate colliding LSNs and txn ids.
     #[test]
-    #[ignore = "known WAL bug: concurrent handles overwrite frames"]
-    fn two_log_managers_preserve_both_committed_frames() {
+    fn second_database_handle_is_rejected_while_the_first_is_open() {
         let file = NamedTempFile::new().unwrap();
-        let mut first = LogManager::new(file.path()).unwrap();
-        let mut second = LogManager::new(file.path()).unwrap();
-        let first_records = [
-            LogRecord { txn_id: 1, kind: LogRecordKind::Begin },
-            LogRecord { txn_id: 1, kind: LogRecordKind::Commit },
-        ];
-        let second_records = [
-            LogRecord { txn_id: 2, kind: LogRecordKind::Begin },
-            LogRecord { txn_id: 2, kind: LogRecordKind::Commit },
-        ];
+        let _first = Database::open_or_create(file.path()).unwrap();
 
-        let first_lsn = first.append_transaction(1, &first_records).unwrap();
-        first.flush_through(first_lsn).unwrap();
-        let second_lsn = second.append_transaction(2, &second_records).unwrap();
-        second.flush_through(second_lsn).unwrap();
-        drop(first);
-        drop(second);
+        let second = Database::open(file.path());
 
-        let scan = read_recovery_log(file.path()).unwrap();
-        assert_eq!(
-            scan.records.iter().map(|record| record.txn_id).collect::<Vec<_>>(),
-            [1, 1, 2, 2]
-        );
+        assert!(matches!(
+            second,
+            Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
     }
 
     // Issue: A full-length torn final WAL frame prevents recovery. A crash can leave

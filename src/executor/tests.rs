@@ -1053,6 +1053,7 @@ fn failed_multi_row_insert_in_explicit_transaction_rolls_back_statement_before_c
     .unwrap();
     execute_sql_with_session(&mut session, "COMMIT;").unwrap();
     drop(session);
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
@@ -1669,6 +1670,7 @@ CREATE INDEX idx_users_name ON users (name);
 COMMIT;
 ",
     );
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
@@ -1917,6 +1919,7 @@ fn committed_create_table_recovers_from_wal_after_crash_without_database_flush()
     database.flush().unwrap();
 
     execute_sql(&database, "CREATE TABLE recovered (id INT PRIMARY KEY, name TEXT);").unwrap();
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
@@ -1944,6 +1947,7 @@ fn committed_create_index_backfill_recovers_from_wal_after_crash_without_databas
     .unwrap();
     database.flush().unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
@@ -1961,6 +1965,7 @@ fn committed_large_insert_with_btree_splits_recovers_from_wal_after_crash() {
     database.flush().unwrap();
 
     execute_sql(&database, &insert_many_users_sql(500)).unwrap();
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
@@ -1981,6 +1986,7 @@ fn committed_overflow_insert_recovers_from_wal_after_crash() {
     let insert = format!("INSERT INTO users (id, name, active) VALUES (1, '{large_name}', TRUE);");
 
     execute_sql(&database, &insert).unwrap();
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
@@ -2010,6 +2016,7 @@ fn failed_indexed_multi_row_insert_rolls_back_after_reopen() {
     assert!(result.is_err_and(|error| {
         is_database_type_mismatch_error(error, "active", DataType::Boolean, "text")
     }));
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
@@ -2048,6 +2055,7 @@ fn uncommitted_flushed_insert_is_undone_during_recovery() {
     )
     .unwrap();
     database.flush().unwrap();
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
@@ -2065,6 +2073,7 @@ fn create_without_explicit_flush_does_not_promise_catalog_durability() {
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
 
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     assert!(Database::open(&path).is_err());
@@ -2079,6 +2088,7 @@ fn committed_insert_recovers_from_wal_after_crash_without_database_flush() {
     database.flush().unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
@@ -2105,6 +2115,7 @@ fn committed_delete_recovers_from_wal_after_crash() {
     )
     .unwrap();
     execute_sql(&database, "DELETE FROM users WHERE name == 'Ada';").unwrap();
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
@@ -2127,6 +2138,7 @@ fn committed_update_recovers_from_wal_after_crash() {
         .unwrap();
     execute_sql(&database, "UPDATE users SET name = 'Linus', active = FALSE WHERE id == 1;")
         .unwrap();
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
@@ -2158,6 +2170,7 @@ fn uncommitted_flushed_delete_is_undone_during_recovery() {
     execute_sql_with_session(&mut session, "DELETE FROM users WHERE id == 1;").unwrap();
     database.flush().unwrap();
     std::mem::forget(session);
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
@@ -2184,6 +2197,7 @@ fn uncommitted_flushed_update_is_undone_during_recovery() {
         .unwrap();
     database.flush().unwrap();
     std::mem::forget(session);
+    database.unlock_for_crash_for_test();
     std::mem::forget(database);
 
     let reopened = Database::open(&path).unwrap();
