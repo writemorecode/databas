@@ -105,6 +105,9 @@ pub enum LogManagerError {
     /// A page update record did not contain full `PAGE_SIZE` images.
     #[error("WAL full-page image has invalid length: expected {expected}, got {actual}")]
     InvalidPageImageLength { expected: usize, actual: usize },
+    /// A previous append may have left a partial frame in this WAL stream.
+    #[error("WAL manager is poisoned after a failed append")]
+    Poisoned,
 }
 
 /// Errors raised while forcing appended WAL bytes to durable storage.
@@ -118,6 +121,9 @@ pub(crate) enum LogManagerFlushError {
         "requested WAL flush through LSN {requested_lsn}, but highest appended LSN is {highest_appended_lsn:?}"
     )]
     LsnNotAppended { requested_lsn: Lsn, highest_appended_lsn: Option<Lsn> },
+    /// A previous append may have left a partial frame in this WAL stream.
+    #[error("WAL manager is poisoned after a failed append")]
+    Poisoned,
 }
 
 /// Borrowed WAL record used while serializing a transaction frame.
@@ -272,8 +278,11 @@ pub(crate) struct LogManager {
     highest_txn_id: TxnId,
     highest_appended_lsn: Option<Lsn>,
     highest_durable_lsn: Option<Lsn>,
+    poisoned: bool,
     #[cfg(test)]
     fail_next_flush: bool,
+    #[cfg(test)]
+    fail_next_append_after_bytes: Option<usize>,
 }
 
 impl LogManager {
@@ -326,8 +335,11 @@ impl LogManager {
             highest_txn_id,
             highest_durable_lsn: None,
             highest_appended_lsn,
+            poisoned: false,
             #[cfg(test)]
             fail_next_flush: false,
+            #[cfg(test)]
+            fail_next_append_after_bytes: None,
         })
     }
 
@@ -368,6 +380,9 @@ impl LogManager {
         txn_id: TxnId,
         records: &[LogRecord<'a>],
     ) -> Result<Lsn, LogManagerError> {
+        if self.poisoned {
+            return Err(LogManagerError::Poisoned);
+        }
         validate_record_txn_ids(txn_id, records)?;
 
         let record_count = u64::try_from(records.len()).expect("usize record count fits in u64");
@@ -377,7 +392,12 @@ impl LogManager {
             .checked_add(record_count)
             .ok_or(LogManagerError::LsnExhausted)?;
 
-        serialize_transaction(&mut self.wal_writer, txn_id, records)?;
+        let mut frame = Vec::new();
+        serialize_transaction(&mut frame, txn_id, records)?;
+        if let Err(error) = self.write_frame(&frame) {
+            self.poisoned = true;
+            return Err(LogManagerError::Io(error));
+        }
 
         self.highest_txn_id = self.highest_txn_id.max(txn_id);
         if record_count > 0 {
@@ -393,6 +413,9 @@ impl LogManager {
     /// manager conservatively marks all currently appended records durable
     /// because the underlying file sync covers the whole WAL file.
     pub(crate) fn flush_through(&mut self, requested_lsn: Lsn) -> Result<(), LogManagerFlushError> {
+        if self.poisoned {
+            return Err(LogManagerFlushError::Poisoned);
+        }
         if requested_lsn == ZERO_LSN {
             return Ok(());
         }
@@ -430,6 +453,17 @@ impl LogManager {
         Ok(())
     }
 
+    fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
+        #[cfg(test)]
+        if let Some(byte_count) = self.fail_next_append_after_bytes.take() {
+            let byte_count = byte_count.min(frame.len());
+            self.wal_writer.write_all(&frame[..byte_count])?;
+            return Err(std::io::Error::other("injected partial WAL append failure"));
+        }
+
+        self.wal_writer.write_all(frame)
+    }
+
     #[cfg(test)]
     pub(crate) fn highest_appended_lsn(&self) -> Option<Lsn> {
         self.highest_appended_lsn
@@ -448,6 +482,11 @@ impl LogManager {
     #[cfg(test)]
     pub(crate) fn fail_next_flush_for_test(&mut self) {
         self.fail_next_flush = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_append_after_bytes_for_test(&mut self, byte_count: usize) {
+        self.fail_next_append_after_bytes = Some(byte_count);
     }
 
     #[cfg(test)]
@@ -597,28 +636,6 @@ mod tests {
         let mut buf = Vec::new();
         serialize_transaction(&mut buf, txn_id, records).unwrap();
         buf
-    }
-
-    struct FailAfterWriter {
-        bytes: Vec<u8>,
-        remaining_before_failure: usize,
-    }
-
-    impl Write for FailAfterWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            if self.remaining_before_failure == 0 {
-                return Err(std::io::Error::other("injected partial WAL append failure"));
-            }
-
-            let write_len = buf.len().min(self.remaining_before_failure);
-            self.bytes.extend_from_slice(&buf[..write_len]);
-            self.remaining_before_failure -= write_len;
-            Ok(write_len)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 
     #[test]
@@ -1013,18 +1030,22 @@ mod tests {
     // Serialization writes incrementally while bookkeeping advances only after success,
     // so later successful appends can follow an unrecoverable partial frame.
     #[test]
-    #[ignore = "known WAL bug: failed serialization leaves partial frame bytes"]
-    fn failed_frame_serialization_leaves_no_partial_bytes() {
+    fn failed_frame_append_poisons_the_log_manager() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
         let records = [
             LogRecord { txn_id: 1, kind: LogRecordKind::Begin },
             LogRecord { txn_id: 1, kind: LogRecordKind::Commit },
         ];
-        let mut writer =
-            FailAfterWriter { bytes: Vec::new(), remaining_before_failure: HEADER_LEN + 1 };
+        manager.fail_next_append_after_bytes_for_test(HEADER_LEN + 1);
 
-        assert!(serialize_transaction(&mut writer, 1, &records).is_err());
+        assert!(matches!(manager.append_transaction(1, &records), Err(LogManagerError::Io(_))));
+        assert!(matches!(manager.append_transaction(2, &records), Err(LogManagerError::Poisoned)));
+        drop(manager);
 
-        assert!(writer.bytes.is_empty(), "failed append left a partial WAL frame");
+        let scan = read_recovery_log(file.path()).unwrap();
+        assert!(scan.truncated_tail);
+        assert!(scan.records.is_empty());
     }
 
     // Issue: The WAL header is an unprotected single point of failure.
