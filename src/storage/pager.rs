@@ -49,6 +49,7 @@ impl Pager {
     ) -> StorageResult<Self> {
         let path = path.as_ref().to_path_buf();
         let mut disk_manager = DiskManager::create_new(&path)?;
+        disk_manager.lock_exclusive()?;
         initialize_header_page(&mut disk_manager)?;
         Self::from_disk_manager(path, disk_manager, options)
     }
@@ -65,6 +66,7 @@ impl Pager {
     ) -> StorageResult<Self> {
         let path = path.as_ref().to_path_buf();
         let mut disk_manager = DiskManager::open_existing(&path)?;
+        disk_manager.lock_exclusive()?;
         validate_header_page(&mut disk_manager)?;
         Self::from_disk_manager(path, disk_manager, options)
     }
@@ -81,6 +83,7 @@ impl Pager {
     ) -> StorageResult<Self> {
         let path = path.as_ref().to_path_buf();
         let mut disk_manager = DiskManager::new(&path)?;
+        disk_manager.lock_exclusive()?;
         if disk_manager.page_count() == 0 {
             initialize_header_page(&mut disk_manager)?;
         } else {
@@ -171,6 +174,7 @@ mod tests {
         assert_eq!(pager.create_tree().unwrap().root_page_id(), 1);
         assert_eq!(pager.create_tree().unwrap().root_page_id(), 2);
         pager.flush().unwrap();
+        drop(pager);
 
         let pager = Pager::open(file.path()).unwrap();
         assert_eq!(pager.opened_page_count(), 3);

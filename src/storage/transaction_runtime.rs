@@ -22,6 +22,13 @@ impl TransactionRuntime {
         Self { runtime, page_cache }
     }
 
+    #[cfg(test)]
+    pub(crate) fn unlock_for_crash_for_test(
+        &self,
+    ) -> Result<(), crate::core::error::DiskManagerError> {
+        self.runtime.unlock_for_crash_for_test()
+    }
+
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
         self.runtime.begin_transaction()
     }

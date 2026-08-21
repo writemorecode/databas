@@ -62,6 +62,11 @@ impl Database {
         self.catalog.flush()
     }
 
+    #[cfg(test)]
+    pub(crate) fn unlock_for_crash_for_test(&self) {
+        self.transactions.unlock_for_crash_for_test().unwrap();
+    }
+
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
         self.transactions.begin_transaction()
     }
@@ -262,6 +267,7 @@ mod tests {
 
         let database = Database::create(&path).unwrap();
         database.flush().unwrap();
+        drop(database);
 
         let reopened = Database::open(&path).unwrap();
         assert_eq!(reopened.path(), path);
