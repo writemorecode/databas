@@ -222,14 +222,15 @@ pub(crate) struct LogTransaction<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WalFileHeader {
     last_assigned_lsn: Lsn,
+    max_txn_id: TxnId,
 }
 
 fn ensure_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
     if wal_file.metadata()?.len() < WAL_FILE_HEADER_LEN as u64 {
-        write_wal_file_header(wal_file, ZERO_LSN)?;
+        write_wal_file_header(wal_file, ZERO_LSN, 0)?;
         wal_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
         wal_file.sync_all()?;
-        return Ok(WalFileHeader { last_assigned_lsn: ZERO_LSN });
+        return Ok(WalFileHeader { last_assigned_lsn: ZERO_LSN, max_txn_id: 0 });
     }
     read_wal_file_header(wal_file)
 }
@@ -263,17 +264,20 @@ fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManager
 
     let last_assigned_lsn =
         u64::from_le_bytes(header[16..24].try_into().expect("slice length is fixed"));
-    Ok(WalFileHeader { last_assigned_lsn })
+    let max_txn_id = u64::from_le_bytes(header[24..32].try_into().expect("slice length is fixed"));
+    Ok(WalFileHeader { last_assigned_lsn, max_txn_id })
 }
 
 fn write_wal_file_header(
     wal_file: &mut File,
     last_assigned_lsn: Lsn,
+    max_txn_id: TxnId,
 ) -> Result<(), LogManagerError> {
     let mut header = [0; WAL_FILE_HEADER_LEN];
     header[0..8].copy_from_slice(&WAL_FILE_HEADER_MAGIC);
     header[8..10].copy_from_slice(&WAL_FILE_HEADER_VERSION.to_le_bytes());
     header[16..24].copy_from_slice(&last_assigned_lsn.to_le_bytes());
+    header[24..32].copy_from_slice(&max_txn_id.to_le_bytes());
     let checksum = CRC32.checksum(&header);
     header[WAL_FILE_HEADER_CHECKSUM_RANGE].copy_from_slice(&checksum.to_le_bytes());
     wal_file.seek(SeekFrom::Start(0))?;
@@ -324,7 +328,7 @@ impl LogManager {
         } else {
             Some(wal_header.last_assigned_lsn)
         };
-        let mut highest_txn_id = 0;
+        let mut highest_txn_id = wal_header.max_txn_id;
         wal_file.seek(SeekFrom::Start(WAL_FILE_HEADER_LEN as u64))?;
         {
             let mut wal_reader = BufReader::with_capacity(WAL_READ_BUFFER_LEN, &mut wal_file);
@@ -536,7 +540,7 @@ pub(crate) fn read_recovery_log(
     let mut frame_ranges = Vec::new();
     let mut offset = WAL_FILE_HEADER_LEN;
     let mut complete_record_count = 0u64;
-    let mut max_txn_id = 0;
+    let mut max_txn_id = wal_header.max_txn_id;
     let mut truncated_tail = false;
 
     while offset < buf.len() {
@@ -610,6 +614,7 @@ pub(crate) fn read_recovery_log(
 pub(crate) fn truncate_wal(
     db_file_path: impl AsRef<Path>,
     last_assigned_lsn: Lsn,
+    max_txn_id: TxnId,
 ) -> Result<(), LogManagerError> {
     let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
     let mut wal_file = OpenOptions::new()
@@ -618,7 +623,7 @@ pub(crate) fn truncate_wal(
         .write(true)
         .truncate(false)
         .open(wal_file_path)?;
-    write_wal_file_header(&mut wal_file, last_assigned_lsn)?;
+    write_wal_file_header(&mut wal_file, last_assigned_lsn, max_txn_id)?;
     wal_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
     wal_file.sync_all()?;
     Ok(())
