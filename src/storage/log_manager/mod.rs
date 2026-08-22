@@ -30,8 +30,12 @@ use thiserror::Error;
 
 use crate::core::{PAGE_SIZE, PageId};
 
+#[cfg(test)]
+mod fault_injection;
 mod frame;
 
+#[cfg(test)]
+use fault_injection::FaultInjectingWriter;
 #[cfg(test)]
 use frame::FOOTER_LEN;
 #[cfg(test)]
@@ -54,6 +58,31 @@ const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const WAL_FILE_HEADER_VERSION: u16 = 2;
 pub(crate) const WAL_FILE_HEADER_LEN: usize = 32;
 const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
+
+trait DurableWrite: Write {
+    fn sync_all(&mut self) -> std::io::Result<()>;
+}
+
+impl DurableWrite for BufWriter<File> {
+    fn sync_all(&mut self) -> std::io::Result<()> {
+        self.get_ref().sync_all()
+    }
+}
+
+#[cfg(not(test))]
+type ActiveWalWriter = BufWriter<File>;
+#[cfg(test)]
+type ActiveWalWriter = FaultInjectingWriter<BufWriter<File>>;
+
+#[cfg(not(test))]
+fn make_wal_writer(file: File) -> ActiveWalWriter {
+    BufWriter::with_capacity(WAL_WRITE_BUFFER_LEN, file)
+}
+
+#[cfg(test)]
+fn make_wal_writer(file: File) -> ActiveWalWriter {
+    FaultInjectingWriter::new(BufWriter::with_capacity(WAL_WRITE_BUFFER_LEN, file))
+}
 
 /// Errors raised while opening, writing, or decoding WAL frames.
 #[derive(Debug, Error)]
@@ -300,16 +329,12 @@ fn write_wal_file_header(
 /// dirty page whose page header references a logged LSN.
 #[derive(Debug)]
 pub(crate) struct LogManager {
-    wal_writer: BufWriter<File>,
+    wal_writer: ActiveWalWriter,
 
     highest_txn_id: TxnId,
     highest_appended_lsn: Option<Lsn>,
     highest_durable_lsn: Option<Lsn>,
     poisoned: bool,
-    #[cfg(test)]
-    fail_next_flush: bool,
-    #[cfg(test)]
-    fail_next_append_after_bytes: Option<usize>,
 }
 
 impl LogManager {
@@ -359,7 +384,7 @@ impl LogManager {
         }
         wal_file.seek(SeekFrom::End(0))?;
 
-        let wal_writer = BufWriter::with_capacity(WAL_WRITE_BUFFER_LEN, wal_file);
+        let wal_writer = make_wal_writer(wal_file);
 
         Ok(Self {
             wal_writer,
@@ -367,10 +392,6 @@ impl LogManager {
             highest_durable_lsn: None,
             highest_appended_lsn,
             poisoned: false,
-            #[cfg(test)]
-            fail_next_flush: false,
-            #[cfg(test)]
-            fail_next_append_after_bytes: None,
         })
     }
 
@@ -470,28 +491,12 @@ impl LogManager {
         }
 
         self.wal_writer.flush()?;
-
-        #[cfg(test)]
-        if self.fail_next_flush {
-            self.fail_next_flush = false;
-            return Err(LogManagerFlushError::Io(std::io::Error::other(
-                "injected WAL flush failure",
-            )));
-        }
-
-        self.wal_writer.get_ref().sync_all()?;
+        self.wal_writer.sync_all()?;
         self.highest_durable_lsn = Some(highest_appended_lsn);
         Ok(())
     }
 
     fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
-        #[cfg(test)]
-        if let Some(byte_count) = self.fail_next_append_after_bytes.take() {
-            let byte_count = byte_count.min(frame.len());
-            self.wal_writer.write_all(&frame[..byte_count])?;
-            return Err(std::io::Error::other("injected partial WAL append failure"));
-        }
-
         self.wal_writer.write_all(frame)
     }
 
@@ -512,12 +517,12 @@ impl LogManager {
 
     #[cfg(test)]
     pub(crate) fn fail_next_flush_for_test(&mut self) {
-        self.fail_next_flush = true;
+        self.wal_writer.fail_next_sync();
     }
 
     #[cfg(test)]
     pub(crate) fn fail_next_append_after_bytes_for_test(&mut self, byte_count: usize) {
-        self.fail_next_append_after_bytes = Some(byte_count);
+        self.wal_writer.fail_next_write_all_after(byte_count);
     }
 
     #[cfg(test)]
