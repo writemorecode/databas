@@ -444,11 +444,13 @@ impl LogManager {
             .checked_add(record_count)
             .ok_or(LogManagerError::LsnExhausted)?;
 
-        let mut frame = Vec::new();
-        serialize_transaction(&mut frame, txn_id, records)?;
-        if let Err(error) = self.write_frame(&frame) {
-            self.poisoned = true;
-            return Err(LogManagerError::Io(error));
+        if let Err(error) = serialize_transaction(&mut self.wal_writer, txn_id, records) {
+            // Serialization validates and sizes the complete transaction before emitting bytes,
+            // so only an I/O error can leave a partial frame in the WAL stream.
+            if matches!(&error, LogManagerError::Io(_)) {
+                self.poisoned = true;
+            }
+            return Err(error);
         }
 
         self.highest_txn_id = self.highest_txn_id.max(txn_id);
@@ -494,10 +496,6 @@ impl LogManager {
         self.wal_writer.sync_all()?;
         self.highest_durable_lsn = Some(highest_appended_lsn);
         Ok(())
-    }
-
-    fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
-        self.wal_writer.write_all(frame)
     }
 
     #[cfg(test)]
@@ -1114,6 +1112,36 @@ mod tests {
         let scan = read_recovery_log(file.path()).unwrap();
         assert!(scan.truncated_tail);
         assert!(scan.records.is_empty());
+    }
+
+    #[test]
+    fn serialization_error_does_not_poison_the_log_manager() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+        let invalid_redo = [1, 2, 3, 4];
+        let undo = [9; PAGE_SIZE];
+        let invalid_records = [LogRecord {
+            txn_id: 1,
+            kind: LogRecordKind::PageUpdate {
+                page_id: 7,
+                redo_data: &invalid_redo,
+                undo_data: &undo,
+            },
+        }];
+
+        assert!(matches!(
+            manager.append_transaction(1, &invalid_records),
+            Err(LogManagerError::InvalidPageImageLength { expected: PAGE_SIZE, actual: 4 })
+        ));
+
+        let valid_records = [LogRecord { txn_id: 1, kind: LogRecordKind::Begin }];
+        assert_eq!(manager.append_transaction(1, &valid_records).unwrap(), 1);
+        drop(manager);
+
+        let scan = read_recovery_log(file.path()).unwrap();
+        assert!(!scan.truncated_tail);
+        assert_eq!(scan.records.len(), 1);
+        assert!(matches!(scan.records[0].kind, RecoveryLogRecordKind::Begin));
     }
 
     // Issue: The WAL header is an unprotected single point of failure.
