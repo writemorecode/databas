@@ -31,6 +31,9 @@ use std::{collections::HashSet, fmt};
 
 use thiserror::Error;
 
+#[cfg(test)]
+use crate::core::access::DdlAccess;
+
 use crate::{
     core::{
         ColumnSchema, DataType, Database, IndexKeyBound, IndexKeyRange, IndexSchema, TableKey,

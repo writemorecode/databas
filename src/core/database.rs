@@ -27,18 +27,33 @@ pub struct Database {
 
 impl Database {
     /// Creates a new database file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file already exists, cannot be initialized,
+    /// or its initial catalog and write-ahead log cannot be written.
     pub fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
         let pager = Pager::create(path)?;
         Self::from_pager(pager)
     }
 
     /// Opens an existing database file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be opened, its format is invalid,
+    /// or recovery cannot restore it to a consistent state.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
         let pager = Pager::open(path)?;
         Self::from_pager(pager)
     }
 
     /// Opens a database file, creating and initializing it if needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be opened or initialized, its
+    /// format is invalid, or recovery cannot restore it to a consistent state.
     pub fn open_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
         let pager = Pager::open_or_create(path)?;
         Self::from_pager(pager)
@@ -58,6 +73,11 @@ impl Database {
     }
 
     /// Flushes all dirty, currently unpinned pages to disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a dirty page cannot be written or when an active
+    /// page pin prevents a consistent flush.
     pub fn flush(&self) -> StorageResult<()> {
         self.catalog.flush()
     }
@@ -108,70 +128,9 @@ impl Database {
         self.transactions.fail_next_wal_flush_for_test();
     }
 
-    pub(crate) fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
-        self.catalog.create_table(name, row)
-    }
-
-    pub(crate) fn create_index(
-        &self,
-        name: &str,
-        table_name: &str,
-        columns: &[&str],
-    ) -> StorageResult<IndexSchema> {
-        self.indexes.create_index(name, table_name, columns)
-    }
-
-    pub(crate) fn table_schema_by_name(&self, name: &str) -> StorageResult<TableSchema> {
-        self.catalog.table_schema_by_name(name)
-    }
-
-    pub(crate) fn index_schemas_for_table(
-        &self,
-        table: &TableSchema,
-    ) -> StorageResult<Vec<IndexSchema>> {
-        self.catalog.index_schemas_for_table(table)
-    }
-
     #[cfg(test)]
     pub(crate) fn table_cursor_by_name(&self, name: &str) -> StorageResult<TableCursor> {
         self.catalog.table_cursor_by_name(name)
-    }
-
-    pub(crate) fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
-        self.records.scan_table(table)
-    }
-
-    pub(crate) fn scan_table_range(
-        &self,
-        table: &TableSchema,
-        range: TableKeyRange,
-    ) -> StorageResult<TableScan> {
-        self.records.scan_table_range(table, range)
-    }
-
-    pub(crate) fn insert_table_row(
-        &self,
-        table: &TableSchema,
-        values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord> {
-        self.records.insert_table_row(table, values)
-    }
-
-    pub(crate) fn delete_table_row(
-        &self,
-        table: &TableSchema,
-        record: &OwnedTableRecord,
-    ) -> StorageResult<()> {
-        self.records.delete_table_row(table, record)
-    }
-
-    pub(crate) fn update_table_row(
-        &self,
-        table: &TableSchema,
-        record: &OwnedTableRecord,
-        values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord> {
-        self.records.update_table_row(table, record, values)
     }
 
     #[cfg(test)]
@@ -182,17 +141,17 @@ impl Database {
 
 impl SchemaAccess for Database {
     fn table_schema_by_name(&self, name: &str) -> StorageResult<TableSchema> {
-        Database::table_schema_by_name(self, name)
+        self.catalog.table_schema_by_name(name)
     }
 
     fn index_schemas_for_table(&self, table: &TableSchema) -> StorageResult<Vec<IndexSchema>> {
-        Database::index_schemas_for_table(self, table)
+        self.catalog.index_schemas_for_table(table)
     }
 }
 
 impl DdlAccess for Database {
     fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
-        Database::create_table(self, name, row)
+        self.catalog.create_table(name, row)
     }
 
     fn create_index(
@@ -201,13 +160,13 @@ impl DdlAccess for Database {
         table_name: &str,
         columns: &[&str],
     ) -> StorageResult<IndexSchema> {
-        Database::create_index(self, name, table_name, columns)
+        self.indexes.create_index(name, table_name, columns)
     }
 }
 
 impl RecordAccess for Database {
     fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
-        Database::scan_table(self, table)
+        self.records.scan_table(table)
     }
 
     fn scan_table_range(
@@ -215,7 +174,7 @@ impl RecordAccess for Database {
         table: &TableSchema,
         range: TableKeyRange,
     ) -> StorageResult<TableScan> {
-        Database::scan_table_range(self, table, range)
+        self.records.scan_table_range(table, range)
     }
 
     fn scan_index(
@@ -232,7 +191,7 @@ impl RecordAccess for Database {
         table: &TableSchema,
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord> {
-        Database::insert_table_row(self, table, values)
+        self.records.insert_table_row(table, values)
     }
 
     fn delete_table_row(
@@ -240,7 +199,7 @@ impl RecordAccess for Database {
         table: &TableSchema,
         record: &OwnedTableRecord,
     ) -> StorageResult<()> {
-        Database::delete_table_row(self, table, record)
+        self.records.delete_table_row(table, record)
     }
 
     fn update_table_row(
@@ -249,7 +208,7 @@ impl RecordAccess for Database {
         record: &OwnedTableRecord,
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord> {
-        Database::update_table_row(self, table, record, values)
+        self.records.update_table_row(table, record, values)
     }
 }
 

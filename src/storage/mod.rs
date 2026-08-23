@@ -1,6 +1,7 @@
 pub(crate) mod btree;
 pub(crate) mod database_header;
 pub(crate) mod disk_manager;
+mod error;
 pub(crate) mod log_manager;
 pub(crate) mod overflow;
 pub(crate) mod page;

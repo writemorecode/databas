@@ -1,6 +1,8 @@
 use std::rc::Rc;
 
 use crate::core::error::StorageResult;
+#[cfg(test)]
+use crate::storage::disk_manager::DiskManagerError;
 use crate::storage::{
     log_manager::TxnId, page_cache::PageCache, storage_runtime::StorageRuntime,
     transaction_manager::TransactionSavepoint,
@@ -23,9 +25,7 @@ impl TransactionRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn unlock_for_crash_for_test(
-        &self,
-    ) -> Result<(), crate::core::error::DiskManagerError> {
+    pub(crate) fn unlock_for_crash_for_test(&self) -> Result<(), DiskManagerError> {
         self.runtime.unlock_for_crash_for_test()
     }
 
