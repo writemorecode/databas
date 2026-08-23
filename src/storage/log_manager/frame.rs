@@ -14,9 +14,7 @@ const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const FOOTER_MAGIC: [u8; 8] = *b"DBWALFTR";
 const WAL_FORMAT_VERSION: u16 = 2;
 pub(super) const HEADER_LEN: usize = 8 + 2 + 8 + 4 + 8;
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) const FOOTER_LEN: usize = 8 + 8 + 4;
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 const WAL_SCAN_BUFFER_LEN: usize = 8192;
 
