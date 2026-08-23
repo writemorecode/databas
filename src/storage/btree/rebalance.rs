@@ -157,7 +157,6 @@ impl TreeCursor {
     }
 
     /// Returns whether `child_page_id` is still linked from `parent_page_id`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn interior_page_has_child(
         &self,
         parent_page_id: PageId,
@@ -945,7 +944,6 @@ impl TreeCursor {
     }
 
     /// Refreshes separators along the still-reachable delete path.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn refresh_path_separators(&self, tree_path: &[PathFrame]) -> StorageResult<()> {
         if tree_path.is_empty() {
             return Ok(());
