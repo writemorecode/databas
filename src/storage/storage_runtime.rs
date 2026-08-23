@@ -1,11 +1,8 @@
 use std::{cell::RefCell, path::PathBuf};
 
-use crate::core::{
-    PAGE_SIZE, PageId,
-    error::{DiskManagerError, StorageResult},
-};
+use crate::core::{PAGE_SIZE, PageId, error::StorageResult};
 use crate::storage::{
-    disk_manager::DiskManager,
+    disk_manager::{DiskManager, DiskManagerError},
     log_manager::{LogManager, Lsn, TxnId},
     recovery::recover_from_wal,
     transaction_manager::{

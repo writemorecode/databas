@@ -28,6 +28,7 @@ use std::{
 
 use thiserror::Error;
 
+pub(crate) use crate::core::{Lsn, TxnId};
 use crate::core::{PAGE_SIZE, PageId};
 
 #[cfg(test)]
@@ -45,10 +46,6 @@ use frame::{
     transaction_frame_len, validate_record_txn_ids, wal_open_error,
 };
 
-/// Monotonic identifier for a transaction in the WAL.
-pub(crate) type TxnId = u64;
-/// Log sequence number assigned to one WAL record.
-pub(crate) type Lsn = u64;
 /// Sentinel LSN used for pages that do not reflect any logged update.
 pub(crate) const ZERO_LSN: Lsn = 0;
 

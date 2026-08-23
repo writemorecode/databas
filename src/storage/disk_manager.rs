@@ -4,10 +4,21 @@ use std::{
     path::Path,
 };
 
-use crate::core::{
-    error::{DiskManagerError, DiskManagerResult},
-    {PAGE_SIZE, PageId},
-};
+use thiserror::Error;
+
+use crate::core::{PAGE_SIZE, PageId};
+
+#[derive(Debug, Error)]
+pub(crate) enum DiskManagerError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("invalid page id: {page_id}")]
+    InvalidPageId { page_id: PageId },
+    #[error("invalid file size (not multiple of page size): {size}")]
+    InvalidFileSize { size: u64 },
+}
+
+pub(crate) type DiskManagerResult<T> = Result<T, DiskManagerError>;
 
 /// Reads and writes pages to and from a database file.
 pub struct DiskManager {

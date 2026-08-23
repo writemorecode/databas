@@ -18,21 +18,47 @@
 
 use std::{
     cell::{Cell, Ref, RefCell, RefMut},
-    collections::HashMap,
+    collections::{HashMap, TryReserveError},
     rc::Rc,
 };
 
-use crate::core::{
-    error::{PageCacheError, PageCacheResult},
-    {PAGE_SIZE, PageId},
-};
+use thiserror::Error;
+
+use crate::core::{PAGE_SIZE, PageId, error::StorageError};
 use crate::storage::{
+    disk_manager::DiskManagerError,
     log_manager::{Lsn, ZERO_LSN},
     page::{NodeMarker, Page, PageResult, Read, Write},
     page_replacement::ClockPolicy,
     storage_runtime::StorageRuntime,
     transaction_manager::PageRestore,
 };
+
+#[derive(Debug, Error)]
+pub(crate) enum PageCacheError {
+    #[error("disk manager error: {0}")]
+    Disk(#[from] DiskManagerError),
+    #[error("transaction error: {0}")]
+    Transaction(Box<StorageError>),
+    #[error("no evictable frame available")]
+    NoEvictableFrame,
+    #[error("page {page_id} is pinned")]
+    PinnedPage { page_id: PageId },
+    #[error("page {page_id} cannot be borrowed immutably while a mutable borrow is active")]
+    PageImmutableBorrowConflict { page_id: PageId },
+    #[error("page {page_id} cannot be borrowed mutably while another borrow is active")]
+    PageMutableBorrowConflict { page_id: PageId },
+    #[error("invalid frame count: {frame_count}")]
+    InvalidFrameCount { frame_count: usize },
+    #[error("failed to allocate {frame_count} page cache frames: {source}")]
+    FrameAllocationFailed { frame_count: usize, source: TryReserveError },
+    #[error(
+        "corrupt page table entry: page {page_id} maps to invalid frame {frame_id} (frame count: {frame_count})"
+    )]
+    CorruptPageTableEntry { page_id: PageId, frame_id: usize, frame_count: usize },
+}
+
+pub(crate) type PageCacheResult<T> = Result<T, PageCacheError>;
 
 pub(crate) type FrameId = usize;
 
@@ -1130,9 +1156,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(PageCacheError::Disk(crate::core::error::DiskManagerError::InvalidPageId {
-                page_id: 99
-            }))
+            Err(PageCacheError::Disk(DiskManagerError::InvalidPageId { page_id: 99 }))
         ));
         assert!(cache.inner.frames[0].dirty.get());
     }
@@ -1297,10 +1321,7 @@ mod tests {
         let mut disk_manager = DiskManager::new(file.path()).unwrap();
         let mut page = [0u8; PAGE_SIZE];
         let read_result = disk_manager.read_page(0, &mut page);
-        assert!(matches!(
-            read_result,
-            Err(crate::core::error::DiskManagerError::InvalidPageId { page_id: 0 })
-        ));
+        assert!(matches!(read_result, Err(DiskManagerError::InvalidPageId { page_id: 0 })));
     }
 
     #[test]

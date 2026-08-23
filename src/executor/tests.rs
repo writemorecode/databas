@@ -6,6 +6,7 @@ use super::*;
 use crate::{
     core::{
         ColumnSchema, DataType, OwnedTableRecord, PAGE_SIZE, TableKey, Tuple, TupleSchema,
+        access::{DdlAccess, SchemaAccess},
         error::{ConstraintError, InternalError, InvariantViolation, StorageError},
     },
     error::DatabaseError,
