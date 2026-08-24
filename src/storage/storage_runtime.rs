@@ -1,6 +1,8 @@
 use std::{cell::RefCell, path::PathBuf};
 
 use crate::core::{PAGE_SIZE, PageId, error::StorageResult};
+#[cfg(test)]
+use crate::storage::transaction_manager::FaultInjectingTransactionManager;
 use crate::storage::{
     disk_manager::{DiskManager, DiskManagerError},
     log_manager::{LogManager, Lsn, TxnId},
@@ -11,6 +13,21 @@ use crate::storage::{
     },
 };
 
+#[cfg(not(test))]
+type ActiveTransactionManager = TransactionManager;
+#[cfg(test)]
+type ActiveTransactionManager = FaultInjectingTransactionManager;
+
+#[cfg(not(test))]
+fn make_transaction_manager(max_txn_id: TxnId) -> ActiveTransactionManager {
+    TransactionManager::new(max_txn_id)
+}
+
+#[cfg(test)]
+fn make_transaction_manager(max_txn_id: TxnId) -> ActiveTransactionManager {
+    FaultInjectingTransactionManager::new(TransactionManager::new(max_txn_id))
+}
+
 /// Shared concrete storage runtime for database pages and the write-ahead log.
 ///
 /// The runtime keeps raw database-file I/O and WAL I/O adjacent without making
@@ -20,7 +37,7 @@ pub(crate) struct StorageRuntime {
     path: PathBuf,
     disk: RefCell<DiskManager>,
     log: RefCell<LogManager>,
-    transactions: RefCell<TransactionManager>,
+    transactions: RefCell<ActiveTransactionManager>,
 }
 
 impl StorageRuntime {
@@ -33,7 +50,7 @@ impl StorageRuntime {
             path,
             disk: RefCell::new(disk),
             log: RefCell::new(log),
-            transactions: RefCell::new(TransactionManager::new(max_txn_id)),
+            transactions: RefCell::new(make_transaction_manager(max_txn_id)),
         })
     }
 
@@ -86,6 +103,11 @@ impl StorageRuntime {
         if !self.transactions.borrow_mut().force_next_lsn_exhausted_for_test() {
             self.log.borrow_mut().force_next_lsn_exhausted_for_test();
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_savepoint_rollback_for_test(&self) {
+        self.transactions.borrow_mut().fail_next_savepoint_rollback();
     }
 
     #[cfg(test)]

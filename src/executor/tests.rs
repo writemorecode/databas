@@ -1081,7 +1081,7 @@ fn savepoint_rollback_error_takes_precedence_over_executor_error() {
     let mut session = Session::new(&database);
 
     execute_sql_with_session(&mut session, "BEGIN;").unwrap();
-    session.fail_next_savepoint_rollback_for_test();
+    database.fail_next_savepoint_rollback_for_test();
     let result = execute_sql_with_session(
         &mut session,
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', 'yes');",
