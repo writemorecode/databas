@@ -459,8 +459,28 @@ impl TransactionManager {
             });
         }
 
-        active.undo_pages.truncate(savepoint.undo_len);
         Ok(restore_pages)
+    }
+
+    /// Discards undo entries after their savepoint restore images are installed.
+    pub(crate) fn complete_savepoint_rollback(
+        &mut self,
+        savepoint: TransactionSavepoint,
+    ) -> StorageResult<()> {
+        let active = self.active.as_mut().ok_or_else(no_active_transaction)?;
+        if active.txn_id != savepoint.txn_id {
+            return Err(transaction_mismatch(active.txn_id, savepoint.txn_id));
+        }
+        if savepoint.undo_len > active.undo_pages.len() {
+            return Err(invariant(InvariantViolation::InvalidTransactionSavepoint {
+                txn_id: savepoint.txn_id,
+                undo_len: savepoint.undo_len,
+                active_undo_len: active.undo_pages.len(),
+            }));
+        }
+
+        active.undo_pages.truncate(savepoint.undo_len);
+        Ok(())
     }
 
     /// Returns the active transaction's undo images for rollback.
@@ -750,6 +770,7 @@ mod tests {
         transactions.record_page_update(7, &after_first, &after_second).unwrap();
 
         let restore_pages = transactions.rollback_to_savepoint(savepoint).unwrap();
+        transactions.complete_savepoint_rollback(savepoint).unwrap();
 
         assert_eq!(restore_pages.len(), 1);
         assert_eq!(restore_pages[0].page_id, 7);

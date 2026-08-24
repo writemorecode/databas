@@ -159,6 +159,13 @@ impl StorageRuntime {
         self.transactions.borrow_mut().rollback_to_savepoint(savepoint)
     }
 
+    pub(crate) fn complete_savepoint_rollback(
+        &self,
+        savepoint: TransactionSavepoint,
+    ) -> StorageResult<()> {
+        self.transactions.borrow_mut().complete_savepoint_rollback(savepoint)
+    }
+
     pub(crate) fn prepare_rollback_pages(
         &self,
         txn_id: TxnId,
