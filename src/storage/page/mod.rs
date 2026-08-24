@@ -11,7 +11,7 @@
 //!
 //! Layout details that are part of the stable page format are re-exported from
 //! [`mod@format`], including header sizes, slot entry width, and the current
-//! [`FORMAT_VERSION`].
+//! [`format::FORMAT_VERSION`].
 
 mod cell;
 mod core;
