@@ -94,6 +94,7 @@ struct ActiveTransaction {
     pending_records: Vec<PendingLogRecord>,
     pending_page_updates: HashMap<PageId, usize>,
     undo_pages: Vec<PageUndo>,
+    rollback_lsn: Option<Lsn>,
     poisoned: bool,
 }
 
@@ -146,6 +147,7 @@ impl TransactionManager {
             }],
             pending_page_updates: HashMap::new(),
             undo_pages: Vec::new(),
+            rollback_lsn: None,
             poisoned: false,
         });
         Ok(txn_id)
@@ -527,17 +529,27 @@ impl TransactionManager {
         log: &mut LogManager,
         txn_id: TxnId,
     ) -> StorageResult<()> {
-        let active = self.active.take().ok_or_else(no_active_transaction)?;
+        let active = self.active.as_mut().ok_or_else(no_active_transaction)?;
         if active.txn_id != txn_id {
-            let expected = active.txn_id;
-            self.active = Some(active);
-            return Err(transaction_mismatch(expected, txn_id));
+            return Err(transaction_mismatch(active.txn_id, txn_id));
         }
 
-        if active.pending_records.iter().any(|record| record.appended) {
-            let lsn = log.append_record(txn_id, LogRecordKind::Rollback)?;
-            log.flush_through(lsn)?;
+        if !active.pending_records.iter().any(|record| record.appended) {
+            self.active = None;
+            return Ok(());
         }
+
+        active.poisoned = true;
+        let rollback_lsn = match active.rollback_lsn {
+            Some(lsn) => lsn,
+            None => {
+                let lsn = log.append_record(txn_id, LogRecordKind::Rollback)?;
+                active.rollback_lsn = Some(lsn);
+                lsn
+            }
+        };
+        log.flush_through(rollback_lsn)?;
+        self.active = None;
         Ok(())
     }
 
@@ -810,6 +822,37 @@ mod tests {
                 }
             ))) if actual_txn_id == txn_id
         ));
+    }
+
+    // Issue: A rollback-complete WAL flush failure removes the active transaction.
+    // The one-shot failure is retryable, but `finish_rollback` took the transaction
+    // before flushing, so the caller could neither retry nor inspect its rollback state.
+    #[test]
+    fn rollback_flush_failure_keeps_transaction_active_for_retry() {
+        let file = NamedTempFile::new().unwrap();
+        let mut log = LogManager::new(file.path()).unwrap();
+        let mut transactions = TransactionManager::new(0);
+        let before = [0; PAGE_SIZE];
+        let after = [1; PAGE_SIZE];
+
+        let txn_id = transactions.begin(&mut log).unwrap();
+        transactions.record_page_update(7, &before, &after).unwrap();
+        transactions.append_pending_through(&mut log, 2).unwrap();
+        log.fail_next_flush_for_test();
+
+        assert!(transactions.finish_rollback(&mut log, txn_id).is_err());
+
+        assert_eq!(transactions.active_transaction_id(), Some(txn_id));
+        transactions.finish_rollback(&mut log, txn_id).unwrap();
+        assert_eq!(transactions.active_transaction_id(), None);
+        assert_eq!(
+            read_log_record_kinds_for_test(file.path()),
+            [
+                (txn_id, OwnedLogRecordKind::Begin),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 7 }),
+                (txn_id, OwnedLogRecordKind::Rollback),
+            ]
+        );
     }
 
     #[test]
