@@ -534,16 +534,21 @@ impl TransactionManager {
             return Err(transaction_mismatch(active.txn_id, txn_id));
         }
 
-        if !active.pending_records.iter().any(|record| record.appended) {
-            self.active = None;
-            return Ok(());
-        }
-
         active.poisoned = true;
         let rollback_lsn = match active.rollback_lsn {
             Some(lsn) => lsn,
             None => {
-                let lsn = log.append_record(txn_id, LogRecordKind::Rollback)?;
+                let lsn = if active.pending_records.iter().any(|record| record.appended) {
+                    log.append_record(txn_id, LogRecordKind::Rollback)?
+                } else {
+                    log.append_transaction(
+                        txn_id,
+                        &[
+                            LogRecord { txn_id, kind: LogRecordKind::Begin },
+                            LogRecord { txn_id, kind: LogRecordKind::Rollback },
+                        ],
+                    )?
+                };
                 active.rollback_lsn = Some(lsn);
                 lsn
             }
@@ -853,6 +858,30 @@ mod tests {
                 (txn_id, OwnedLogRecordKind::Rollback),
             ]
         );
+    }
+
+    // Issue: A transaction that rolled back before any WAL record was appended left
+    // no durable trace of its assigned ID. Reopening seeded the manager from the WAL,
+    // so the next transaction reused that ID instead of remaining monotonic.
+    #[test]
+    fn clean_rollback_preserves_transaction_id_across_reopen() {
+        let file = NamedTempFile::new().unwrap();
+        {
+            let mut log = LogManager::new(file.path()).unwrap();
+            let mut transactions = TransactionManager::new(0);
+            let txn_id = transactions.begin(&mut log).unwrap();
+            transactions.finish_rollback(&mut log, txn_id).unwrap();
+            assert_eq!(txn_id, 1);
+            assert_eq!(
+                read_log_record_kinds_for_test(file.path()),
+                [(txn_id, OwnedLogRecordKind::Begin), (txn_id, OwnedLogRecordKind::Rollback),]
+            );
+        }
+
+        let mut reopened_log = LogManager::new(file.path()).unwrap();
+        let mut reopened_transactions = TransactionManager::new(reopened_log.highest_txn_id());
+
+        assert_eq!(reopened_transactions.begin(&mut reopened_log).unwrap(), 2);
     }
 
     #[test]
