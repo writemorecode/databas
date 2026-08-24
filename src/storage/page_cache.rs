@@ -1027,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback_without_forced_wal_flush_restores_page_and_drops_buffered_records() {
+    fn rollback_without_forced_wal_flush_restores_page_and_logs_transaction_outcome() {
         let page = formatted_page_with_lsn(15, ZERO_LSN);
         let (file, runtime) = create_disk_with_pages(&[page]);
         let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
@@ -1045,7 +1045,10 @@ mod tests {
         runtime.finish_rollback(txn_id).unwrap();
 
         assert_eq!(read_disk_page(file.path(), 0), page);
-        assert_eq!(read_log_record_kinds_for_test(file.path()), []);
+        assert_eq!(
+            read_log_record_kinds_for_test(file.path()),
+            [(txn_id, OwnedLogRecordKind::Begin), (txn_id, OwnedLogRecordKind::Rollback),]
+        );
     }
 
     #[test]
