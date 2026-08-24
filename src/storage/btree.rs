@@ -27,6 +27,8 @@ use crate::storage::{
 mod mutation;
 mod payload;
 mod rebalance;
+mod rebalance_policy;
+mod rebalance_repair;
 mod record;
 mod root;
 mod search;
