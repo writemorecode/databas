@@ -12,7 +12,7 @@ pub(crate) enum PageError {
     /// The encoded page kind tag does not match the expected page kind.
     #[error("invalid page kind: expected {expected:?}, got raw tag {actual}")]
     InvalidPageKind { expected: PageKind, actual: u8 },
-    /// The encoded page version does not match [`super::FORMAT_VERSION`].
+    /// The encoded page version does not match [`super::format::FORMAT_VERSION`].
     #[error("invalid page version: expected {expected}, got {actual}")]
     InvalidPageVersion { expected: u8, actual: u8 },
     /// A requested slot index is out of bounds for the current slot count.
