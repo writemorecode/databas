@@ -124,6 +124,11 @@ impl Database {
     }
 
     #[cfg(test)]
+    pub(crate) fn fail_next_savepoint_rollback_for_test(&self) {
+        self.transactions.fail_next_savepoint_rollback_for_test();
+    }
+
+    #[cfg(test)]
     pub(crate) fn fail_next_wal_flush_for_test(&self) {
         self.transactions.fail_next_wal_flush_for_test();
     }

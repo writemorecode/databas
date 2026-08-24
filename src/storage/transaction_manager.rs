@@ -18,6 +18,12 @@ use crate::storage::{
     page,
 };
 
+#[cfg(test)]
+mod fault_injection;
+
+#[cfg(test)]
+pub(crate) use fault_injection::FaultInjectingTransactionManager;
+
 #[derive(Debug, Clone)]
 struct PageUndo {
     /// Page to restore.

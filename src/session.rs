@@ -34,24 +34,12 @@ pub enum SessionError {
 pub struct Session<'db> {
     database: &'db Database,
     active_txn: Option<u64>,
-    #[cfg(test)]
-    fail_next_savepoint_rollback: bool,
 }
 
 impl<'db> Session<'db> {
     /// Creates a new session over `database`.
     pub fn new(database: &'db Database) -> Self {
-        Self {
-            database,
-            active_txn: None,
-            #[cfg(test)]
-            fail_next_savepoint_rollback: false,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_next_savepoint_rollback_for_test(&mut self) {
-        self.fail_next_savepoint_rollback = true;
+        Self { database, active_txn: None }
     }
 
     /// Parses and executes one top-level SQL item.
@@ -165,12 +153,6 @@ impl<'db> Session<'db> {
                 Ok(output)
             }
             Err(error) => {
-                #[cfg(test)]
-                if self.fail_next_savepoint_rollback {
-                    self.fail_next_savepoint_rollback = false;
-                    self.database.force_next_lsn_exhausted_for_test();
-                }
-
                 self.rollback_failed_explicit_transaction_statement(savepoint, error.into())
             }
         }
