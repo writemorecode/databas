@@ -52,13 +52,16 @@ pub(crate) struct PageRestore {
 /// Physical rollback work for the active transaction.
 #[derive(Debug, Clone)]
 pub(crate) struct TransactionRollback {
+    /// Restore operations in reverse mutation order.
     pub(crate) pages: Vec<PageRestore>,
 }
 
 /// In-memory checkpoint for rolling back one statement inside a transaction.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TransactionSavepoint {
+    /// Transaction that created this savepoint, used to reject stale handles.
     txn_id: TxnId,
+    /// Undo-log boundary before the statement made any page changes.
     undo_len: usize,
 }
 
@@ -83,33 +86,96 @@ pub(crate) struct LoggedPageUpdate {
 /// partially logged.
 #[derive(Debug)]
 pub(crate) struct TransactionManager {
+    /// Greatest transaction ID issued by this manager or observed during open.
     max_txn_id: TxnId,
+    /// The only transaction currently accepted by the storage runtime.
     active: Option<ActiveTransaction>,
 }
 
+/// In-memory state for the transaction currently owned by the storage runtime.
+///
+/// WAL records can be assigned logical LSNs before they are physically appended.
+/// Consequently, `last_lsn` and the LSNs in `pending_records` describe the
+/// transaction's intended WAL order, while each record's `appended` flag records
+/// how much of that order has actually reached the WAL writer.
 #[derive(Debug)]
 struct ActiveTransaction {
+    /// ID assigned when the transaction began.
     txn_id: TxnId,
+    /// Greatest logical LSN reserved for a buffered record in this transaction.
+    ///
+    /// This can be ahead of the log manager's highest appended LSN. Repeated
+    /// updates coalesced into one pending page record reuse that record's LSN and
+    /// therefore do not advance this value.
     last_lsn: Lsn,
+    /// Transaction records in reserved LSN order.
+    ///
+    /// Appended entries remain in the vector because [`PageUndo`] values refer
+    /// to records by stable index when deciding whether rollback needs a WAL
+    /// flush before writing a before-image.
     pending_records: Vec<PendingLogRecord>,
+    /// Unappended page-update record currently eligible for redo coalescing.
+    ///
+    /// Each value indexes `pending_records`. The entry is removed when its WAL
+    /// record is appended or when savepoint compensation starts for the page,
+    /// after which another update must reserve a new record and LSN.
     pending_page_updates: HashMap<PageId, usize>,
+    /// One before-image per logical page mutation, in mutation order.
+    ///
+    /// Unlike `pending_records`, this log is not coalesced: explicit rollback
+    /// walks every entry in reverse so repeated writes restore intermediate
+    /// images before finally restoring the transaction's original image.
     undo_pages: Vec<PageUndo>,
+    /// LSN of an appended rollback outcome awaiting or having completed flush.
+    ///
+    /// `Some` means physical page restoration has finished and rollback
+    /// finalization has begun. If flushing fails, retrying uses this same LSN
+    /// instead of appending a duplicate outcome. Pending transaction records
+    /// must not be appended once this is set because the rollback record already
+    /// occupies the next physical WAL position.
     rollback_lsn: Option<Lsn>,
+    /// Whether commit is unsafe for this transaction.
+    ///
+    /// Logging or mutation failures set this flag conservatively. Rollback
+    /// finalization also sets it so a transaction retained after a flush error
+    /// cannot subsequently commit; rollback and rollback-flush retry remain
+    /// allowed.
     poisoned: bool,
 }
 
+/// WAL record reserved by the active transaction.
 #[derive(Debug)]
 struct PendingLogRecord {
+    /// Logical LSN this record must receive if it is appended.
     lsn: Lsn,
+    /// Payload retained until commit, rollback, or write-ahead flushing decides its fate.
     kind: PendingLogRecordKind,
+    /// Whether a complete frame containing this record was appended.
+    ///
+    /// This does not imply durability; [`LogManager::flush_through`] establishes
+    /// that separately.
     appended: bool,
 }
 
+/// Owned payload for a WAL record buffered by the transaction manager.
 #[derive(Debug)]
 enum PendingLogRecordKind {
+    /// Start marker reserved when the transaction is created.
     Begin,
-    PageUpdate { page_id: PageId, redo_data: Box<[u8; PAGE_SIZE]>, undo_data: Box<[u8; PAGE_SIZE]> },
-    PageAlloc { page_id: PageId },
+    /// Full-page physical update used for both redo and undo during recovery.
+    PageUpdate {
+        /// Page changed by this record.
+        page_id: PageId,
+        /// Latest page image to install when redoing the transaction.
+        redo_data: Box<[u8; PAGE_SIZE]>,
+        /// Earliest page image covered by this record, restored when undoing it.
+        undo_data: Box<[u8; PAGE_SIZE]>,
+    },
+    /// Page whose allocation becomes visible if the transaction commits.
+    PageAlloc {
+        /// Allocated database page.
+        page_id: PageId,
+    },
 }
 
 impl TransactionManager {
@@ -258,6 +324,11 @@ impl TransactionManager {
     }
 
     /// Appends buffered records up to `requested_lsn`, preserving record order.
+    ///
+    /// This is a no-op after a rollback outcome has been appended. At that point
+    /// the outcome occupies the next physical WAL position and only its durability
+    /// flush may be retried; appending older reserved records would assign them
+    /// different LSNs from those stamped into their page images.
     pub(crate) fn append_pending_through(
         &mut self,
         log: &mut LogManager,
@@ -418,6 +489,11 @@ impl TransactionManager {
     /// page updates in the same transaction, so if the transaction later commits
     /// crash recovery replays both the failed statement's physical updates and
     /// these compensating updates in LSN order.
+    ///
+    /// This is the first half of a two-phase in-memory rollback. Undo entries are
+    /// deliberately retained until [`Self::complete_savepoint_rollback`] confirms
+    /// that the page cache installed every returned image. If installation fails,
+    /// those entries remain available to a full transaction rollback.
     pub(crate) fn rollback_to_savepoint(
         &mut self,
         savepoint: TransactionSavepoint,
@@ -468,6 +544,11 @@ impl TransactionManager {
     }
 
     /// Discards undo entries after their savepoint restore images are installed.
+    ///
+    /// Call this only after every [`PageRestore`] returned by
+    /// [`Self::rollback_to_savepoint`] has been installed successfully. Keeping
+    /// this step separate prevents a partial page-cache restore from destroying
+    /// the fallback undo state needed by a full transaction rollback.
     pub(crate) fn complete_savepoint_rollback(
         &mut self,
         savepoint: TransactionSavepoint,
@@ -526,7 +607,13 @@ impl TransactionManager {
     /// Writes and flushes the `Rollback` record after undo pages reach disk.
     ///
     /// Callers perform the physical page restoration first, then use this
-    /// method to make the completed rollback durable in the WAL.
+    /// method to make the completed rollback durable in the WAL. When no prior
+    /// record was appended, a compact `Begin`/`Rollback` frame is written so the
+    /// assigned transaction ID remains observable after restart.
+    ///
+    /// If the outcome is appended but flushing fails, the active transaction is
+    /// retained with `rollback_lsn` set. Calling this method again flushes through
+    /// the same LSN and does not append another rollback outcome.
     pub(crate) fn finish_rollback(
         &mut self,
         log: &mut LogManager,
