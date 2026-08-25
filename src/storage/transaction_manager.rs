@@ -270,6 +270,9 @@ impl TransactionManager {
         let Some(active) = self.active.as_mut() else {
             return Ok(());
         };
+        if active.rollback_lsn.is_some() {
+            return Ok(());
+        }
 
         let Some(start) = active.pending_records.iter().position(|record| !record.appended) else {
             return Ok(());
@@ -850,6 +853,38 @@ mod tests {
         assert_eq!(transactions.active_transaction_id(), Some(txn_id));
         transactions.finish_rollback(&mut log, txn_id).unwrap();
         assert_eq!(transactions.active_transaction_id(), None);
+        assert_eq!(
+            read_log_record_kinds_for_test(file.path()),
+            [
+                (txn_id, OwnedLogRecordKind::Begin),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 7 }),
+                (txn_id, OwnedLogRecordKind::Rollback),
+            ]
+        );
+    }
+
+    // Issue: Retaining a transaction after its rollback flush failed left lower-LSN
+    // pending records appendable after the rollback marker. A later page flush could
+    // append one at a new LSN and poison the transaction with an LSN mismatch.
+    #[test]
+    fn pending_records_are_not_appended_while_rollback_flush_is_pending() {
+        let file = NamedTempFile::new().unwrap();
+        let mut log = LogManager::new(file.path()).unwrap();
+        let mut transactions = TransactionManager::new(0);
+        let before = [0; PAGE_SIZE];
+        let after_first = [1; PAGE_SIZE];
+        let after_second = [2; PAGE_SIZE];
+
+        let txn_id = transactions.begin(&mut log).unwrap();
+        transactions.record_page_update(7, &before, &after_first).unwrap();
+        transactions.append_pending_through(&mut log, 2).unwrap();
+        transactions.record_page_update(8, &before, &after_second).unwrap();
+        log.fail_next_flush_for_test();
+        assert!(transactions.finish_rollback(&mut log, txn_id).is_err());
+
+        transactions.append_pending_through(&mut log, 3).unwrap();
+        transactions.finish_rollback(&mut log, txn_id).unwrap();
+
         assert_eq!(
             read_log_record_kinds_for_test(file.path()),
             [
