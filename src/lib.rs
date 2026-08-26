@@ -5,6 +5,7 @@ pub mod executor;
 pub mod planner;
 pub mod protocol;
 pub(crate) mod relational;
+pub mod server;
 pub mod session;
 pub mod sql_parser;
 pub(crate) mod storage;
