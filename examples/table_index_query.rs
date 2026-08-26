@@ -1,32 +1,37 @@
-use databas::{core::Database, executor::ExecutionOutput, session::Session};
+use databas::{
+    client::{Client, QueryResult},
+    core::Value,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_dir = tempfile::tempdir()?;
-    let db_path = db_dir.path().join("example.db");
-    let database = Database::create(&db_path)?;
-    let mut session = Session::new(&database);
+    // Start `server example example.db` before running this example.
+    let mut client = Client::connect("127.0.0.1:5432", "example")?;
 
-    session.execute_sql(
+    client.execute(
         "CREATE TABLE users (
             id INT PRIMARY KEY,
             name TEXT,
             email TEXT
         );",
     )?;
-    session.execute_sql("CREATE INDEX idx_users_email ON users (email);")?;
-    session.execute_sql(
+    client.execute("CREATE INDEX idx_users_email ON users (email);")?;
+    client.execute(
         "INSERT INTO users (id, name, email) VALUES
             (1, 'Ada Lovelace', 'ada@example.test');",
     )?;
 
-    let output = session.execute_sql("SELECT id, name, email FROM users WHERE id = 1;")?;
-    let rows = match output {
-        ExecutionOutput::Rows { rows } => rows.collect::<Result<Vec<_>, _>>()?,
-        other => panic!("SELECT should return rows, got {other:?}"),
+    let result = client.execute("SELECT id, name, email FROM users WHERE id = 1;")?;
+    let QueryResult::Rows(rows) = result else {
+        return Err("SELECT did not return rows".into());
     };
-
-    assert_eq!(rows.len(), 1);
-    println!("found user: {}", rows[0]);
+    assert_eq!(
+        rows,
+        vec![vec![
+            Value::Integer(1),
+            Value::String("Ada Lovelace".to_owned()),
+            Value::String("ada@example.test".to_owned()),
+        ]]
+    );
 
     Ok(())
 }

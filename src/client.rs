@@ -1,160 +1,219 @@
+//! Synchronous TCP client for a Databas server.
+//!
+//! A client owns one TCP connection and executes one query at a time. Databas
+//! currently has no pipelining or concurrent-query support.
+
 use std::{
-    env,
-    io::{BufRead, Write, stdout},
-    process,
+    fmt,
+    net::{TcpStream, ToSocketAddrs},
 };
 
-use databas::{core::Database, error::DatabaseError, executor::ExecutionOutput, session::Session};
+use thiserror::Error;
 
-pub fn run() -> Result<(), DatabaseError<'static>> {
-    let mut args = env::args();
-    let program = args.next().unwrap_or_else(|| "databas".to_owned());
-    let cli = parse_args(args).unwrap_or_else(|()| usage(&program));
+use crate::{
+    core::Value,
+    protocol::{
+        self, COMPLETE, COMPLETE_COMMAND_OK, COMPLETE_EXPLAIN, COMPLETE_ROWS,
+        COMPLETE_ROWS_AFFECTED, COMPLETE_SCHEMA_AFFECTED, ERROR, ErrorCode, Frame, QUERY, READY,
+        ROW, STARTUP,
+    },
+};
 
-    let result: Result<Database, DatabaseError<'static>> =
-        Database::open_or_create(&cli.path).map_err(DatabaseError::from);
+/// A server-reported database error.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("server error {code:?} ({}): {message}", code.as_u16())]
+pub struct ServerError {
+    /// Stable, machine-readable error category.
+    pub code: ErrorCode,
+    /// Human-readable diagnostic supplied by the server.
+    pub message: String,
+}
 
-    let db = match result {
-        Ok(db) => db,
-        Err(err) => {
-            eprintln!("{err}");
-            process::exit(1);
+/// Errors returned by the network client.
+#[derive(Debug, Error)]
+pub enum ClientError {
+    /// The TCP connection or wire encoding failed.
+    #[error(transparent)]
+    Protocol(#[from] protocol::ProtocolError),
+    /// The server rejected a startup or query request.
+    #[error(transparent)]
+    Server(#[from] ServerError),
+    /// The server sent a valid frame in an invalid protocol state.
+    #[error("unexpected server message: {0}")]
+    UnexpectedMessage(&'static str),
+    /// The database name is empty or exceeds the protocol limit.
+    #[error("invalid database name: {0}")]
+    InvalidDatabaseName(&'static str),
+}
+
+/// Complete result of one SQL request.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum QueryResult {
+    /// Textual physical plan returned by `EXPLAIN`.
+    Explain(String),
+    /// Typed rows returned by a row-producing statement.
+    Rows(Vec<Vec<Value>>),
+    /// Number of rows changed by a data-modification statement.
+    RowsAffected(u64),
+    /// A schema statement completed successfully.
+    SchemaAffected,
+    /// A transaction command completed successfully.
+    CommandOk,
+}
+
+impl fmt::Display for QueryResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Explain(plan) => formatter.write_str(plan),
+            Self::Rows(rows) => write!(formatter, "{} rows returned.", rows.len()),
+            Self::RowsAffected(count) => write!(formatter, "{count} rows affected."),
+            Self::SchemaAffected => formatter.write_str("Schema affected."),
+            Self::CommandOk => formatter.write_str("Command executed."),
         }
+    }
+}
+
+/// One synchronous connection to a Databas server.
+#[derive(Debug)]
+pub struct Client {
+    stream: TcpStream,
+}
+
+impl Client {
+    /// Connects to `address` and selects `database_name`.
+    ///
+    /// The server hosts exactly one configured database in protocol version 1;
+    /// a different name is rejected with [`ErrorCode::DatabaseNotFound`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the name is invalid, TCP connection fails, the
+    /// handshake is malformed, or the server rejects the database name.
+    pub fn connect(address: impl ToSocketAddrs, database_name: &str) -> Result<Self, ClientError> {
+        validate_database_name(database_name)?;
+        let mut stream = TcpStream::connect(address).map_err(protocol::ProtocolError::from)?;
+        stream.set_nodelay(true).map_err(protocol::ProtocolError::from)?;
+        protocol::write_frame(&mut stream, STARTUP, database_name.as_bytes())?;
+
+        let frame = read_required_frame(&mut stream, "server closed during startup")?;
+        match frame.kind {
+            READY if frame.payload.is_empty() => Ok(Self { stream }),
+            READY => Err(ClientError::UnexpectedMessage("READY payload must be empty")),
+            ERROR => Err(decode_server_error(&frame.payload)?.into()),
+            _ => Err(ClientError::UnexpectedMessage("expected READY or ERROR during startup")),
+        }
+    }
+
+    /// Executes one SQL item and collects its complete result.
+    ///
+    /// Row frames are streamed by the server but collected into memory by this
+    /// convenience API. Calls are strictly sequential on this connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if SQL execution fails, the connection is interrupted,
+    /// or the server sends a malformed response. A server execution error does
+    /// not close the connection, so the client may issue another query.
+    pub fn execute(&mut self, sql: &str) -> Result<QueryResult, ClientError> {
+        protocol::write_frame(&mut self.stream, QUERY, sql.as_bytes())?;
+        let mut rows = Vec::new();
+
+        loop {
+            let frame = read_required_frame(&mut self.stream, "server closed during query")?;
+            match frame.kind {
+                ROW => rows.push(protocol::decode_row(&frame.payload)?),
+                COMPLETE => return decode_complete(&frame.payload, rows),
+                ERROR => return Err(decode_server_error(&frame.payload)?.into()),
+                _ => {
+                    return Err(ClientError::UnexpectedMessage(
+                        "expected ROW, COMPLETE, or ERROR during query",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn validate_database_name(name: &str) -> Result<(), ClientError> {
+    if name.is_empty() {
+        return Err(ClientError::InvalidDatabaseName("name cannot be empty"));
+    }
+    if name.len() > 255 {
+        return Err(ClientError::InvalidDatabaseName("name cannot exceed 255 bytes"));
+    }
+    if name.as_bytes().contains(&0) {
+        return Err(ClientError::InvalidDatabaseName("name cannot contain NUL"));
+    }
+    Ok(())
+}
+
+fn read_required_frame(
+    stream: &mut TcpStream,
+    eof_message: &'static str,
+) -> Result<Frame, ClientError> {
+    protocol::read_frame(stream)?.ok_or(ClientError::UnexpectedMessage(eof_message))
+}
+
+fn decode_server_error(payload: &[u8]) -> Result<ServerError, ClientError> {
+    let (code, message) = protocol::decode_error(payload)?;
+    Ok(ServerError { code, message })
+}
+
+fn decode_complete(payload: &[u8], rows: Vec<Vec<Value>>) -> Result<QueryResult, ClientError> {
+    let Some((&kind, data)) = payload.split_first() else {
+        return Err(ClientError::UnexpectedMessage("COMPLETE payload is empty"));
     };
-
-    match cli.mode {
-        ClientMode::Repl => run_repl(db),
-        ClientMode::Command(command) => run_command(db, command),
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct Cli {
-    path: String,
-    mode: ClientMode,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum ClientMode {
-    Repl,
-    Command(String),
-}
-
-fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Cli, ()> {
-    let mut args = args.into_iter();
-    match args.next() {
-        Some(flag) if flag == "-c" => {
-            let command = args.next().ok_or(())?;
-            let path = args.next().ok_or(())?;
-            if args.next().is_some() {
-                return Err(());
+    match kind {
+        COMPLETE_ROWS => {
+            if data.len() != 8 {
+                return Err(ClientError::UnexpectedMessage("row completion count is invalid"));
             }
-            Ok(Cli { path, mode: ClientMode::Command(command) })
-        }
-        Some(path) if path.starts_with('-') => Err(()),
-        Some(path) => {
-            if args.next().is_some() {
-                return Err(());
+            let expected =
+                u64::from_be_bytes(data.try_into().map_err(|_| {
+                    ClientError::UnexpectedMessage("row completion count is invalid")
+                })?);
+            if expected != rows.len() as u64 {
+                return Err(ClientError::UnexpectedMessage("row completion count does not match"));
             }
-            Ok(Cli { path, mode: ClientMode::Repl })
+            Ok(QueryResult::Rows(rows))
         }
-        None => Err(()),
-    }
-}
-
-fn run_repl(db: Database) -> Result<(), DatabaseError<'static>> {
-    let mut session = Session::new(&db);
-
-    println!("Databas");
-
-    let mut buf = String::new();
-    let mut stdio = std::io::stdin().lock();
-    loop {
-        buf.clear();
-        print!(">>> ");
-        stdout().flush()?;
-        let count = stdio.read_line(&mut buf)?;
-        if count == 0 {
-            break;
+        COMPLETE_EXPLAIN => {
+            require_no_rows(&rows)?;
+            let plan = std::str::from_utf8(data)
+                .map_err(|_| ClientError::UnexpectedMessage("EXPLAIN result is not UTF-8"))?;
+            Ok(QueryResult::Explain(plan.to_owned()))
         }
-        let buf = buf.trim_end();
-        if buf.is_empty() {
-            continue;
-        }
-        if buf == ".exit" {
-            break;
-        }
-        let timer = std::time::Instant::now();
-        let exec_res = session.execute_sql(buf);
-        match exec_res {
-            Ok(output) => {
-                let mut stdout = stdout();
-                if let Err(err) = write_execution_output(output, &mut stdout) {
-                    if matches!(&err, DatabaseError::Io(_)) {
-                        return Err(err);
-                    }
-                    eprintln!("{err}");
-                }
+        COMPLETE_ROWS_AFFECTED => {
+            require_no_rows(&rows)?;
+            if data.len() != 8 {
+                return Err(ClientError::UnexpectedMessage("rows-affected count is invalid"));
             }
-            Err(err) => eprintln!("{err}"),
-        };
-        let elapsed = timer.elapsed();
-        println!("Executed query in {elapsed:?}.");
-    }
-    db.flush()?;
-    Ok(())
-}
-
-fn run_command(db: Database, command: String) -> Result<(), DatabaseError<'static>> {
-    let command = command_with_trailing_semicolon(command);
-    let mut session = Session::new(&db);
-
-    match session.execute_sql(&command) {
-        Ok(output) => {
-            let mut stdout = stdout();
-            if let Err(err) = write_execution_output(output, &mut stdout) {
-                if matches!(&err, DatabaseError::Io(_)) {
-                    return Err(err);
-                }
-                eprintln!("{err}");
-                db.flush()?;
-                process::exit(1);
-            }
+            let count =
+                u64::from_be_bytes(data.try_into().map_err(|_| {
+                    ClientError::UnexpectedMessage("rows-affected count is invalid")
+                })?);
+            Ok(QueryResult::RowsAffected(count))
         }
-        Err(err) => {
-            eprintln!("{err}");
-            db.flush()?;
-            process::exit(1);
+        COMPLETE_SCHEMA_AFFECTED if data.is_empty() => {
+            require_no_rows(&rows)?;
+            Ok(QueryResult::SchemaAffected)
         }
-    }
-
-    db.flush()?;
-    Ok(())
-}
-
-fn command_with_trailing_semicolon(mut command: String) -> String {
-    if !command.trim_end().ends_with(';') {
-        command.push(';');
-    }
-    command
-}
-
-fn write_execution_output(
-    output: ExecutionOutput,
-    writer: &mut impl Write,
-) -> Result<(), DatabaseError<'static>> {
-    match output {
-        ExecutionOutput::Rows { rows } => {
-            for row in rows {
-                writeln!(writer, "{}", row?)?;
-            }
+        COMPLETE_COMMAND_OK if data.is_empty() => {
+            require_no_rows(&rows)?;
+            Ok(QueryResult::CommandOk)
         }
-        output => writeln!(writer, "{output}")?,
+        COMPLETE_SCHEMA_AFFECTED | COMPLETE_COMMAND_OK => {
+            Err(ClientError::UnexpectedMessage("completion payload has trailing bytes"))
+        }
+        _ => Err(ClientError::UnexpectedMessage("unknown completion kind")),
     }
-    Ok(())
 }
 
-fn usage(program: &str) -> ! {
-    eprintln!("usage: {program} [-c COMMAND] <database-file>");
-    process::exit(2);
+fn require_no_rows(rows: &[Vec<Value>]) -> Result<(), ClientError> {
+    if rows.is_empty() {
+        Ok(())
+    } else {
+        Err(ClientError::UnexpectedMessage("non-row result followed ROW frames"))
+    }
 }
