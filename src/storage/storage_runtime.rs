@@ -1,6 +1,9 @@
 use std::{cell::RefCell, path::PathBuf};
 
-use crate::core::{PAGE_SIZE, PageId, error::StorageResult};
+use crate::core::{
+    PAGE_SIZE, PageId,
+    error::{InternalError, InvariantViolation, StorageError, StorageResult},
+};
 #[cfg(test)]
 use crate::storage::transaction_manager::FaultInjectingTransactionManager;
 use crate::storage::{
@@ -63,7 +66,10 @@ impl StorageRuntime {
     }
 
     pub(crate) fn record_page_alloc(&self, page_id: PageId) -> StorageResult<Option<Lsn>> {
-        self.transactions.borrow_mut().record_page_alloc(page_id)
+        let Some(txn_id) = self.active_transaction_id() else {
+            return Ok(None);
+        };
+        self.transactions.borrow_mut().record_page_alloc(txn_id, page_id)
     }
 
     pub(crate) fn read_page(
@@ -93,7 +99,9 @@ impl StorageRuntime {
 
     pub(crate) fn flush_wal_through(&self, lsn: Lsn) -> StorageResult<()> {
         let mut log = self.log.borrow_mut();
-        self.transactions.borrow_mut().append_pending_through(&mut log, lsn)?;
+        if let Some(txn_id) = self.active_transaction_id() {
+            self.transactions.borrow_mut().append_pending_through(txn_id, &mut log, lsn)?;
+        }
         log.flush_through(lsn)?;
         Ok(())
     }
@@ -116,6 +124,11 @@ impl StorageRuntime {
     }
 
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
+        if let Some(txn_id) = self.active_transaction_id() {
+            return Err(StorageError::Internal(InternalError::InvariantViolation(
+                InvariantViolation::ActiveTransaction { txn_id },
+            )));
+        }
         self.transactions.borrow_mut().begin(&mut self.log.borrow_mut())
     }
 
@@ -125,15 +138,21 @@ impl StorageRuntime {
         before: &[u8; PAGE_SIZE],
         after: &[u8; PAGE_SIZE],
     ) -> StorageResult<Option<LoggedPageUpdate>> {
-        let result = self.transactions.borrow_mut().record_page_update(page_id, before, after);
+        let Some(txn_id) = self.active_transaction_id() else {
+            return Ok(None);
+        };
+        let result =
+            self.transactions.borrow_mut().record_page_update(txn_id, page_id, before, after);
         if result.is_err() {
-            self.transactions.borrow_mut().record_failure();
+            self.transactions.borrow_mut().record_failure(txn_id);
         }
         result
     }
 
     pub(crate) fn record_transaction_failure(&self) {
-        self.transactions.borrow_mut().record_failure();
+        if let Some(txn_id) = self.active_transaction_id() {
+            self.transactions.borrow_mut().record_failure(txn_id);
+        }
     }
 
     pub(crate) fn active_transaction_id(&self) -> Option<TxnId> {

@@ -1,11 +1,10 @@
-//! Single-transaction coordinator for WAL-backed page changes.
+//! Transaction coordinator for WAL-backed page changes.
 //!
-//! The storage layer currently allows at most one active transaction per
-//! [`TransactionManager`]. While that transaction is active, page allocations
-//! and full-page updates are assigned LSNs immediately, but WAL bytes are only
-//! appended when the write-ahead rule requires them or when the transaction
-//! commits. Rollback uses the in-memory undo images accumulated here; crash
-//! recovery uses the durable WAL records written by [`LogManager`].
+//! While a transaction is active, page allocations and full-page updates are
+//! assigned LSNs immediately, but WAL bytes are only appended when the
+//! write-ahead rule requires them or when the transaction commits. Rollback
+//! uses the in-memory undo images accumulated here; crash recovery uses the
+//! durable WAL records written by [`LogManager`].
 
 use std::collections::HashMap;
 
@@ -77,22 +76,22 @@ pub(crate) struct LoggedPageUpdate {
     pub(crate) redo: [u8; PAGE_SIZE],
 }
 
-/// Tracks the single active transaction and its rollback state.
+/// Tracks active transactions and their rollback state.
 ///
 /// `TransactionManager` is deliberately small: it assigns monotonically
 /// increasing transaction ids, buffers or appends transaction-control records,
-/// remembers in-memory undo images for explicit rollback, and marks the active
+/// remembers in-memory undo images for explicit rollback, and marks a
 /// transaction as poisoned after an error that may have left its effects only
 /// partially logged.
 #[derive(Debug)]
 pub(crate) struct TransactionManager {
     /// Greatest transaction ID issued by this manager or observed during open.
     max_txn_id: TxnId,
-    /// The only transaction currently accepted by the storage runtime.
-    active: Option<ActiveTransaction>,
+    /// Transactions currently accepted by the storage runtime, keyed by id.
+    transactions: HashMap<TxnId, ActiveTransaction>,
 }
 
-/// In-memory state for the transaction currently owned by the storage runtime.
+/// In-memory state for one transaction owned by the storage runtime.
 ///
 /// WAL records can be assigned logical LSNs before they are physically appended.
 /// Consequently, `last_lsn` and the LSNs in `pending_records` describe the
@@ -185,49 +184,60 @@ impl TransactionManager {
     /// recovery and WAL reopening so transaction ids remain monotonic across
     /// process restarts.
     pub(crate) fn new(max_txn_id: TxnId) -> Self {
-        Self { max_txn_id, active: None }
+        Self { max_txn_id, transactions: HashMap::new() }
     }
 
-    /// Begins the only active transaction and buffers its `Begin` WAL record.
+    /// Begins a transaction and buffers its `Begin` WAL record.
     ///
-    /// Returns an invariant violation if another transaction is already active
-    /// or if the transaction-id counter is exhausted.
+    /// Returns an invariant violation if the transaction-id counter is exhausted.
     pub(crate) fn begin(&mut self, log: &mut LogManager) -> StorageResult<TxnId> {
-        if let Some(active) = &self.active {
-            return Err(invariant(InvariantViolation::ActiveTransaction { txn_id: active.txn_id }));
-        }
-
         let txn_id = self
             .max_txn_id
             .checked_add(1)
             .ok_or_else(|| invariant(InvariantViolation::TransactionIdExhausted))?;
-        let lsn = log.next_lsn()?;
+        let lsn = self.next_lsn(log)?;
         self.max_txn_id = txn_id;
-        self.active = Some(ActiveTransaction {
+        self.transactions.insert(
             txn_id,
-            last_lsn: lsn,
-            pending_records: vec![PendingLogRecord {
-                lsn,
-                kind: PendingLogRecordKind::Begin,
-                appended: false,
-            }],
-            pending_page_updates: HashMap::new(),
-            undo_pages: Vec::new(),
-            rollback_lsn: None,
-            poisoned: false,
-        });
+            ActiveTransaction {
+                txn_id,
+                last_lsn: lsn,
+                pending_records: vec![PendingLogRecord {
+                    lsn,
+                    kind: PendingLogRecordKind::Begin,
+                    appended: false,
+                }],
+                pending_page_updates: HashMap::new(),
+                undo_pages: Vec::new(),
+                rollback_lsn: None,
+                poisoned: false,
+            },
+        );
         Ok(txn_id)
     }
 
-    /// Records a page allocation for the active transaction, if any.
+    /// Reserves an LSN after both the log and all active transactions.
+    fn next_lsn(&self, log: &LogManager) -> StorageResult<Lsn> {
+        self.transactions
+            .values()
+            .map(|active| active.last_lsn)
+            .max()
+            .map_or_else(|| log.next_lsn().map_err(Into::into), next_lsn)
+    }
+
+    /// Records a page allocation for a transaction, if it exists.
     ///
     /// Page allocations outside a transaction are allowed and do not write WAL.
     /// Allocated page ids are currently not reclaimed during rollback; the WAL
     /// record exists so crash recovery can make committed allocations visible
     /// before replaying their updates.
-    pub(crate) fn record_page_alloc(&mut self, page_id: PageId) -> StorageResult<Option<Lsn>> {
+    pub(crate) fn record_page_alloc(
+        &mut self,
+        txn_id: TxnId,
+        page_id: PageId,
+    ) -> StorageResult<Option<Lsn>> {
         // Allocated page ids are not reclaimed on rollback until a freelist exists.
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.transactions.get_mut(&txn_id) else {
             return Ok(None);
         };
         let lsn = match next_lsn(active.last_lsn) {
@@ -246,9 +256,9 @@ impl TransactionManager {
         Ok(Some(lsn))
     }
 
-    /// Buffers a full-page update record for the active transaction, if any.
+    /// Buffers a full-page update record for a transaction, if any.
     ///
-    /// When no transaction is active, the update is not logged and `Ok(None)`
+    /// When the transaction is not active, the update is not logged and `Ok(None)`
     /// is returned. With an active transaction, this method reserves the next
     /// LSN, stamps it into the redo image for current B+-tree pages, buffers a
     /// `PageUpdate` WAL record containing both redo and undo full-page images,
@@ -259,11 +269,12 @@ impl TransactionManager {
     /// longer prove that all page effects were logged.
     pub(crate) fn record_page_update(
         &mut self,
+        txn_id: TxnId,
         page_id: PageId,
         before: &[u8; PAGE_SIZE],
         after: &[u8; PAGE_SIZE],
     ) -> StorageResult<Option<LoggedPageUpdate>> {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.transactions.get_mut(&txn_id) else {
             return Ok(None);
         };
 
@@ -323,7 +334,7 @@ impl TransactionManager {
         Ok(Some(LoggedPageUpdate { lsn, redo }))
     }
 
-    /// Appends buffered records up to `requested_lsn`, preserving record order.
+    /// Appends a transaction's buffered records up to `requested_lsn`, preserving record order.
     ///
     /// This is a no-op after a rollback outcome has been appended. At that point
     /// the outcome occupies the next physical WAL position and only its durability
@@ -331,6 +342,7 @@ impl TransactionManager {
     /// different LSNs from those stamped into their page images.
     pub(crate) fn append_pending_through(
         &mut self,
+        txn_id: TxnId,
         log: &mut LogManager,
         requested_lsn: Lsn,
     ) -> StorageResult<()> {
@@ -338,7 +350,7 @@ impl TransactionManager {
             return Ok(());
         }
 
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.transactions.get_mut(&txn_id) else {
             return Ok(());
         };
         if active.rollback_lsn.is_some() {
@@ -398,42 +410,37 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Marks the active transaction as unsafe to commit.
+    /// Marks a transaction as unsafe to commit.
     ///
     /// Storage layers call this after an error outside direct WAL append paths
-    /// when the active transaction may have observed a partial mutation.
-    pub(crate) fn record_failure(&mut self) {
-        if let Some(active) = self.active.as_mut() {
+    /// when the transaction may have observed a partial mutation.
+    pub(crate) fn record_failure(&mut self, txn_id: TxnId) {
+        if let Some(active) = self.transactions.get_mut(&txn_id) {
             active.poisoned = true;
         }
     }
 
-    /// Returns the active transaction id, if a transaction is open.
+    /// Returns one active transaction id, if a transaction is open.
+    ///
+    /// The storage runtime is currently strictly sequential, so callers only
+    /// use this when there is at most one transaction making page changes.
     pub(crate) fn active_transaction_id(&self) -> Option<TxnId> {
-        self.active.as_ref().map(|active| active.txn_id)
+        self.transactions.keys().next().copied()
     }
 
-    /// Returns whether the active transaction has observed an unrecoverable error.
+    /// Returns whether a transaction has observed an unrecoverable error.
     pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
-        let active = self.active.as_ref().ok_or_else(no_active_transaction)?;
-        if active.txn_id != txn_id {
-            return Err(transaction_mismatch(active.txn_id, txn_id));
-        }
-
-        Ok(active.poisoned)
+        Ok(self.transaction(txn_id)?.poisoned)
     }
 
-    /// Commits the active transaction and flushes its commit record to durable storage.
+    /// Commits a transaction and flushes its commit record to durable storage.
     ///
     /// The active transaction is cleared after the commit record is appended.
     /// If the subsequent WAL flush fails, callers receive the flush error but
     /// the transaction is no longer available for explicit rollback; recovery
     /// will decide the outcome from the WAL contents on the next open.
     pub(crate) fn commit(&mut self, log: &mut LogManager, txn_id: TxnId) -> StorageResult<()> {
-        let active = self.active.as_ref().ok_or_else(no_active_transaction)?;
-        if active.txn_id != txn_id {
-            return Err(transaction_mismatch(active.txn_id, txn_id));
-        }
+        let active = self.transaction(txn_id)?;
         if active.poisoned {
             return Err(invariant(InvariantViolation::TransactionPoisoned { txn_id }));
         }
@@ -441,7 +448,7 @@ impl TransactionManager {
         let commit_lsn = match next_lsn(active.last_lsn) {
             Ok(lsn) => lsn,
             Err(err) => {
-                if let Some(active) = self.active.as_mut() {
+                if let Some(active) = self.transactions.get_mut(&txn_id) {
                     active.poisoned = true;
                 }
                 return Err(err);
@@ -457,14 +464,14 @@ impl TransactionManager {
         let appended_lsn = match log.append_transaction(txn_id, &records) {
             Ok(lsn) => lsn,
             Err(err) => {
-                if let Some(active) = self.active.as_mut() {
+                if let Some(active) = self.transactions.get_mut(&txn_id) {
                     active.poisoned = true;
                 }
                 return Err(err.into());
             }
         };
         if appended_lsn != commit_lsn {
-            if let Some(active) = self.active.as_mut() {
+            if let Some(active) = self.transactions.get_mut(&txn_id) {
                 active.poisoned = true;
             }
             return Err(invariant(InvariantViolation::WalLog {
@@ -474,17 +481,14 @@ impl TransactionManager {
             }));
         }
 
-        self.active = None;
+        self.transactions.remove(&txn_id);
         log.flush_through(commit_lsn)?;
         Ok(())
     }
 
-    /// Creates a checkpoint at the current end of the active transaction's undo log.
+    /// Creates a checkpoint at the current end of a transaction's undo log.
     pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
-        let active = self.active.as_ref().ok_or_else(no_active_transaction)?;
-        if active.txn_id != txn_id {
-            return Err(transaction_mismatch(active.txn_id, txn_id));
-        }
+        let active = self.transaction(txn_id)?;
 
         Ok(TransactionSavepoint { txn_id, undo_len: active.undo_pages.len() })
     }
@@ -504,10 +508,8 @@ impl TransactionManager {
         &mut self,
         savepoint: TransactionSavepoint,
     ) -> StorageResult<Vec<PageRestore>> {
-        let active = self.active.as_mut().ok_or_else(no_active_transaction)?;
-        if active.txn_id != savepoint.txn_id {
-            return Err(transaction_mismatch(active.txn_id, savepoint.txn_id));
-        }
+        let active =
+            self.transactions.get_mut(&savepoint.txn_id).ok_or_else(no_active_transaction)?;
         if savepoint.undo_len > active.undo_pages.len() {
             return Err(invariant(InvariantViolation::InvalidTransactionSavepoint {
                 txn_id: savepoint.txn_id,
@@ -559,10 +561,8 @@ impl TransactionManager {
         &mut self,
         savepoint: TransactionSavepoint,
     ) -> StorageResult<()> {
-        let active = self.active.as_mut().ok_or_else(no_active_transaction)?;
-        if active.txn_id != savepoint.txn_id {
-            return Err(transaction_mismatch(active.txn_id, savepoint.txn_id));
-        }
+        let active =
+            self.transactions.get_mut(&savepoint.txn_id).ok_or_else(no_active_transaction)?;
         if savepoint.undo_len > active.undo_pages.len() {
             return Err(invariant(InvariantViolation::InvalidTransactionSavepoint {
                 txn_id: savepoint.txn_id,
@@ -575,7 +575,7 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Returns the active transaction's undo images for rollback.
+    /// Returns a transaction's undo images for rollback.
     ///
     /// The returned vector is ordered from newest update to oldest update. The
     /// active transaction stays available while callers restore pages because
@@ -585,10 +585,7 @@ impl TransactionManager {
         &mut self,
         txn_id: TxnId,
     ) -> StorageResult<TransactionRollback> {
-        let active = self.active.as_ref().ok_or_else(no_active_transaction)?;
-        if active.txn_id != txn_id {
-            return Err(transaction_mismatch(active.txn_id, txn_id));
-        }
+        let active = self.transaction(txn_id)?;
 
         let mut pages = active
             .undo_pages
@@ -625,10 +622,7 @@ impl TransactionManager {
         log: &mut LogManager,
         txn_id: TxnId,
     ) -> StorageResult<()> {
-        let active = self.active.as_mut().ok_or_else(no_active_transaction)?;
-        if active.txn_id != txn_id {
-            return Err(transaction_mismatch(active.txn_id, txn_id));
-        }
+        let active = self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
 
         active.poisoned = true;
         let rollback_lsn = match active.rollback_lsn {
@@ -650,13 +644,25 @@ impl TransactionManager {
             }
         };
         log.flush_through(rollback_lsn)?;
-        self.active = None;
+        self.transactions.remove(&txn_id);
         Ok(())
+    }
+
+    fn transaction(&self, txn_id: TxnId) -> StorageResult<&ActiveTransaction> {
+        if let Some(active) = self.transactions.get(&txn_id) {
+            return Ok(active);
+        }
+        if self.transactions.len() == 1
+            && let Some(&expected) = self.transactions.keys().next()
+        {
+            return Err(transaction_mismatch(expected, txn_id));
+        }
+        Err(no_active_transaction())
     }
 
     #[cfg(test)]
     pub(crate) fn force_next_lsn_exhausted_for_test(&mut self) -> bool {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.transactions.values_mut().next() else {
             return false;
         };
         active.last_lsn = Lsn::MAX;
@@ -730,7 +736,7 @@ mod tests {
         let _log = LogManager::new(file.path()).unwrap();
         let mut transactions = TransactionManager::new(0);
 
-        let lsn = transactions.record_page_alloc(7).unwrap();
+        let lsn = transactions.record_page_alloc(0, 7).unwrap();
 
         assert_eq!(lsn, None);
         assert_eq!(read_log_record_kinds_for_test(file.path()), []);
@@ -743,7 +749,7 @@ mod tests {
         let mut transactions = TransactionManager::new(0);
 
         let txn_id = transactions.begin(&mut log).unwrap();
-        let alloc_lsn = transactions.record_page_alloc(7).unwrap();
+        let alloc_lsn = transactions.record_page_alloc(txn_id, 7).unwrap();
 
         assert_eq!(read_log_record_kinds_for_test(file.path()), []);
         transactions.commit(&mut log, txn_id).unwrap();
@@ -772,9 +778,10 @@ mod tests {
         let after_second = [2; PAGE_SIZE];
 
         let txn_id = transactions.begin(&mut log).unwrap();
-        let first_update = transactions.record_page_update(7, &before, &after_first).unwrap();
+        let first_update =
+            transactions.record_page_update(txn_id, 7, &before, &after_first).unwrap();
         let second_update =
-            transactions.record_page_update(7, &after_first, &after_second).unwrap();
+            transactions.record_page_update(txn_id, 7, &after_first, &after_second).unwrap();
         transactions.commit(&mut log, txn_id).unwrap();
 
         assert_eq!(first_update.as_ref().map(|update| update.lsn), Some(2));
@@ -799,8 +806,8 @@ mod tests {
         let after_second = [2; PAGE_SIZE];
 
         let txn_id = transactions.begin(&mut log).unwrap();
-        transactions.record_page_update(7, &before, &after_first).unwrap();
-        transactions.record_page_update(7, &after_first, &after_second).unwrap();
+        transactions.record_page_update(txn_id, 7, &before, &after_first).unwrap();
+        transactions.record_page_update(txn_id, 7, &after_first, &after_second).unwrap();
         transactions.commit(&mut log, txn_id).unwrap();
 
         let scan = read_recovery_log(file.path()).unwrap();
@@ -826,9 +833,9 @@ mod tests {
         let after_a_second = [2; PAGE_SIZE];
 
         let txn_id = transactions.begin(&mut log).unwrap();
-        transactions.record_page_update(7, &before_a, &after_a_first).unwrap();
-        transactions.record_page_update(8, &before_b, &after_b).unwrap();
-        transactions.record_page_update(7, &after_a_first, &after_a_second).unwrap();
+        transactions.record_page_update(txn_id, 7, &before_a, &after_a_first).unwrap();
+        transactions.record_page_update(txn_id, 8, &before_b, &after_b).unwrap();
+        transactions.record_page_update(txn_id, 7, &after_a_first, &after_a_second).unwrap();
         transactions.commit(&mut log, txn_id).unwrap();
 
         assert_eq!(
@@ -852,9 +859,9 @@ mod tests {
         let after_second = [2; PAGE_SIZE];
 
         let txn_id = transactions.begin(&mut log).unwrap();
-        transactions.record_page_update(7, &before, &after_first).unwrap();
-        transactions.append_pending_through(&mut log, 2).unwrap();
-        transactions.record_page_update(7, &after_first, &after_second).unwrap();
+        transactions.record_page_update(txn_id, 7, &before, &after_first).unwrap();
+        transactions.append_pending_through(txn_id, &mut log, 2).unwrap();
+        transactions.record_page_update(txn_id, 7, &after_first, &after_second).unwrap();
         transactions.commit(&mut log, txn_id).unwrap();
 
         assert_eq!(
@@ -878,9 +885,9 @@ mod tests {
         let after_second = [2; PAGE_SIZE];
 
         let txn_id = transactions.begin(&mut log).unwrap();
-        transactions.record_page_update(7, &before, &after_first).unwrap();
+        transactions.record_page_update(txn_id, 7, &before, &after_first).unwrap();
         let savepoint = transactions.statement_savepoint(txn_id).unwrap();
-        transactions.record_page_update(7, &after_first, &after_second).unwrap();
+        transactions.record_page_update(txn_id, 7, &after_first, &after_second).unwrap();
 
         let restore_pages = transactions.rollback_to_savepoint(savepoint).unwrap();
         transactions.complete_savepoint_rollback(savepoint).unwrap();
@@ -937,8 +944,8 @@ mod tests {
         let after = [1; PAGE_SIZE];
 
         let txn_id = transactions.begin(&mut log).unwrap();
-        transactions.record_page_update(7, &before, &after).unwrap();
-        transactions.append_pending_through(&mut log, 2).unwrap();
+        transactions.record_page_update(txn_id, 7, &before, &after).unwrap();
+        transactions.append_pending_through(txn_id, &mut log, 2).unwrap();
         log.fail_next_flush_for_test();
 
         assert!(transactions.finish_rollback(&mut log, txn_id).is_err());
@@ -969,13 +976,13 @@ mod tests {
         let after_second = [2; PAGE_SIZE];
 
         let txn_id = transactions.begin(&mut log).unwrap();
-        transactions.record_page_update(7, &before, &after_first).unwrap();
-        transactions.append_pending_through(&mut log, 2).unwrap();
-        transactions.record_page_update(8, &before, &after_second).unwrap();
+        transactions.record_page_update(txn_id, 7, &before, &after_first).unwrap();
+        transactions.append_pending_through(txn_id, &mut log, 2).unwrap();
+        transactions.record_page_update(txn_id, 8, &before, &after_second).unwrap();
         log.fail_next_flush_for_test();
         assert!(transactions.finish_rollback(&mut log, txn_id).is_err());
 
-        transactions.append_pending_through(&mut log, 3).unwrap();
+        transactions.append_pending_through(txn_id, &mut log, 3).unwrap();
         transactions.finish_rollback(&mut log, txn_id).unwrap();
 
         assert_eq!(
@@ -1021,7 +1028,7 @@ mod tests {
         let after = [1; PAGE_SIZE];
 
         let txn_id = transactions.begin(&mut log).unwrap();
-        transactions.record_page_update(7, &before, &after).unwrap();
+        transactions.record_page_update(txn_id, 7, &before, &after).unwrap();
         log.fail_next_flush_for_test();
 
         let result = transactions.commit(&mut log, txn_id);
