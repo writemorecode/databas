@@ -58,6 +58,9 @@ impl From<PageCacheError> for StorageError {
                     frame_count,
                 })
             }
+            PageCacheError::PinCountOverflow { page_id } => {
+                invariant(InvariantViolation::PagePinCountOverflow { page_id })
+            }
         }
     }
 }

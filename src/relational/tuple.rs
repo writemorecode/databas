@@ -181,7 +181,7 @@ impl Tuple {
 
     /// Deserializes one count-prefixed TLV tuple from `bytes`.
     pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
-        EncodedTupleView::parse(bytes).map(|view| view.to_owned_tuple())
+        EncodedTupleView::parse(bytes)?.to_owned_tuple()
     }
 
     /// Serializes this tuple into a byte vector.
@@ -280,7 +280,7 @@ impl<'a> EncodedTupleView<'a> {
     }
 
     /// Returns an iterator over borrowed values in tuple order.
-    pub fn values(&self) -> impl Iterator<Item = ValueRef<'a>> + '_ {
+    pub fn values(&self) -> impl Iterator<Item = io::Result<ValueRef<'a>>> + '_ {
         self.values.iter().map(|field| self.value_ref(field))
     }
 
@@ -290,33 +290,43 @@ impl<'a> EncodedTupleView<'a> {
     }
 
     /// Copies this encoded tuple view into an owned tuple.
-    pub fn to_owned_tuple(&self) -> Tuple {
-        self.values().map(Value::from).collect()
+    pub fn to_owned_tuple(&self) -> io::Result<Tuple> {
+        self.values()
+            .map(|value| value.map(Value::from))
+            .collect::<io::Result<Vec<_>>>()
+            .map(Tuple::new)
     }
 
-    fn value_ref(&self, field: &ValueField) -> ValueRef<'a> {
+    fn value_ref(&self, field: &ValueField) -> io::Result<ValueRef<'a>> {
         value_ref_from_field(self.bytes, field)
     }
 }
 
-fn value_ref_from_field<'a>(bytes: &'a [u8], field: &ValueField) -> ValueRef<'a> {
-    let payload = &bytes[field.value_range.clone()];
+fn value_ref_from_field<'a>(bytes: &'a [u8], field: &ValueField) -> io::Result<ValueRef<'a>> {
+    let payload = bytes.get(field.value_range.clone()).ok_or_else(unexpected_eof)?;
     match field.tag {
-        TAG_NULL => ValueRef::Null,
-        TAG_STRING => {
-            ValueRef::String(std::str::from_utf8(payload).expect("validated string payload"))
+        TAG_NULL => Ok(ValueRef::Null),
+        TAG_STRING => std::str::from_utf8(payload).map(ValueRef::String).map_err(invalid_data),
+        TAG_BOOLEAN => match payload {
+            [0] => Ok(ValueRef::Boolean(false)),
+            [1] => Ok(ValueRef::Boolean(true)),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid boolean payload")),
+        },
+        TAG_INTEGER => {
+            payload.try_into().map(decode_ordered_i32).map(ValueRef::Integer).map_err(invalid_data)
         }
-        TAG_BOOLEAN => ValueRef::Boolean(payload[0] == 1),
-        TAG_INTEGER => ValueRef::Integer(decode_ordered_i32(
-            payload.try_into().expect("validated i32 payload"),
-        )),
         TAG_FLOAT => {
-            ValueRef::Float(decode_ordered_f32(payload.try_into().expect("validated f32 payload")))
+            payload.try_into().map(decode_ordered_f32).map(ValueRef::Float).map_err(invalid_data)
         }
-        TAG_UNSIGNED_INTEGER => ValueRef::UnsignedInteger(u64::from_be_bytes(
-            payload.try_into().expect("validated u64 payload"),
+        TAG_UNSIGNED_INTEGER => payload
+            .try_into()
+            .map(u64::from_be_bytes)
+            .map(ValueRef::UnsignedInteger)
+            .map_err(invalid_data),
+        actual => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unknown tuple value tag: {actual}"),
         )),
-        _ => unreachable!("validated tuple value tag"),
     }
 }
 
@@ -395,7 +405,7 @@ impl<'a> IntoIterator for &'a TupleRef<'a> {
 }
 
 impl<'a> IntoIterator for &'a EncodedTupleView<'a> {
-    type Item = ValueRef<'a>;
+    type Item = io::Result<ValueRef<'a>>;
     type IntoIter = EncodedTupleViewIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -410,7 +420,7 @@ pub struct EncodedTupleViewIter<'a> {
 }
 
 impl<'a> Iterator for EncodedTupleViewIter<'a> {
-    type Item = ValueRef<'a>;
+    type Item = io::Result<ValueRef<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.fields.next().map(|field| value_ref_from_field(self.bytes, field))
@@ -547,7 +557,8 @@ fn validate_value_payload(tag: u8, payload: &[u8]) -> io::Result<()> {
         TAG_INTEGER => validate_len(tag, payload.len() as u32, I32_LENGTH),
         TAG_FLOAT => {
             validate_len(tag, payload.len() as u32, F32_LENGTH)?;
-            validate_float(decode_ordered_f32(payload.try_into().expect("validated f32 payload")))
+            let bytes = payload.try_into().map_err(invalid_data)?;
+            validate_float(decode_ordered_f32(bytes))
         }
         TAG_UNSIGNED_INTEGER => validate_len(tag, payload.len() as u32, U64_LENGTH),
         actual => Err(io::Error::new(
@@ -600,7 +611,8 @@ fn read_u32_from_slice(bytes: &[u8], offset: usize) -> io::Result<(u32, usize)> 
         .checked_add(size_of::<u32>())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "offset overflows usize"))?;
     let value = bytes.get(offset..end).ok_or_else(unexpected_eof)?;
-    Ok((u32::from_le_bytes(value.try_into().expect("u32 slice has fixed width")), end))
+    let value = value.try_into().map_err(invalid_data)?;
+    Ok((u32::from_le_bytes(value), end))
 }
 
 fn read_value_len_from_slice(bytes: &[u8], offset: usize) -> io::Result<(u32, usize)> {
@@ -608,7 +620,8 @@ fn read_value_len_from_slice(bytes: &[u8], offset: usize) -> io::Result<(u32, us
         .checked_add(size_of::<u32>())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "offset overflows usize"))?;
     let value = bytes.get(offset..end).ok_or_else(unexpected_eof)?;
-    Ok((u32::from_be_bytes(value.try_into().expect("u32 slice has fixed width")), end))
+    let value = value.try_into().map_err(invalid_data)?;
+    Ok((u32::from_be_bytes(value), end))
 }
 
 fn encode_ordered_i32(value: i32) -> [u8; size_of::<i32>()] {
@@ -848,8 +861,14 @@ mod tests {
         assert_eq!(view.len(), 6);
         assert!(!view.is_empty());
         assert_eq!(view.bytes(), bytes);
-        assert_eq!(view.values().collect::<Vec<_>>(), tuple.value_refs().collect::<Vec<_>>());
-        assert_eq!((&view).into_iter().collect::<Vec<_>>(), tuple.value_refs().collect::<Vec<_>>());
+        assert_eq!(
+            view.values().collect::<io::Result<Vec<_>>>().unwrap(),
+            tuple.value_refs().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            (&view).into_iter().collect::<io::Result<Vec<_>>>().unwrap(),
+            tuple.value_refs().collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -858,7 +877,7 @@ mod tests {
         let bytes = tuple.to_bytes().unwrap();
         let view = EncodedTupleView::parse(&bytes).unwrap();
 
-        assert_eq!(view.to_owned_tuple(), tuple);
+        assert_eq!(view.to_owned_tuple().unwrap(), tuple);
     }
 
     #[test]

@@ -56,6 +56,8 @@ pub(crate) enum PageCacheError {
         "corrupt page table entry: page {page_id} maps to invalid frame {frame_id} (frame count: {frame_count})"
     )]
     CorruptPageTableEntry { page_id: PageId, frame_id: usize, frame_count: usize },
+    #[error("page {page_id} pin count overflowed")]
+    PinCountOverflow { page_id: PageId },
 }
 
 pub(crate) type PageCacheResult<T> = Result<T, PageCacheError>;
@@ -156,7 +158,12 @@ impl PageCache {
     pub(crate) fn fetch_page(&self, page_id: PageId) -> PageCacheResult<PinGuard> {
         if let Some(frame_id) = self.resident_frame_id(page_id)? {
             let frame = &self.inner.frames[frame_id];
-            frame.pin_count.set(frame.pin_count.get().checked_add(1).expect("pin count overflow"));
+            let pin_count = frame
+                .pin_count
+                .get()
+                .checked_add(1)
+                .ok_or(PageCacheError::PinCountOverflow { page_id })?;
+            frame.pin_count.set(pin_count);
             self.inner.meta.borrow_mut().replacement.record_access(frame_id);
             return Ok(PinGuard::new(Rc::clone(&self.inner), frame_id, page_id));
         }

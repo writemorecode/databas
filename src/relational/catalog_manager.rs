@@ -3,8 +3,8 @@ use std::path::Path;
 use crate::core::{
     CatalogId, IndexSchema, PageId, TableRecord, TableSchema, Tuple, TupleSchema,
     error::{
-        ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind,
-        InvalidArgumentError, StorageError, StorageResult,
+        ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InternalError,
+        InvalidArgumentError, InvariantViolation, StorageError, StorageResult,
     },
 };
 use crate::relational::{
@@ -343,9 +343,13 @@ impl CatalogManager {
             return Ok(rows);
         }
 
-        let mut record = cursor
-            .current_record()?
-            .expect("positioned catalog cursor should have a current record");
+        let mut record = cursor.current_record()?.ok_or_else(|| {
+            StorageError::Internal(InternalError::InvariantViolation(
+                InvariantViolation::CatalogCursorMissingRecord {
+                    table: catalog_table_name.to_owned(),
+                },
+            ))
+        })?;
         loop {
             rows.push(decode_catalog_record(catalog_table_name, &record, &decode)?);
             match cursor.next_record()? {

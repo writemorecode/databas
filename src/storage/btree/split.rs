@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use crate::core::error::{InternalError, InvariantViolation};
+
 use super::payload::{cell_corruption, materialize_payload};
 use super::root::read_page_kind;
 use super::*;
@@ -298,8 +300,13 @@ impl TreeCursor {
             next_page.set_prev_page_id(Some(right_page_id));
         }
 
-        let separator =
-            left_cells.last().expect("leaf split must leave a non-empty left page").key().to_vec();
+        let separator = left_cells
+            .last()
+            .ok_or(StorageError::Internal(InternalError::InvariantViolation(
+                InvariantViolation::EmptyLeafSplit,
+            )))?
+            .key()
+            .to_vec();
 
         let target_page_id =
             if target_key <= separator.as_slice() { leaf_page_id } else { right_page_id };
@@ -307,7 +314,9 @@ impl TreeCursor {
         let target_slot_index = target_cells
             .iter()
             .position(|cell| cell.key() == target_key)
-            .expect("leaf split must retain the target key") as u16;
+            .ok_or(StorageError::Internal(InternalError::InvariantViolation(
+                InvariantViolation::LeafSplitTargetMissing,
+            )))? as u16;
         self.set_positioned_state(target_page_id, target_slot_index);
 
         Ok(PendingSplit { separator, left_page_id: leaf_page_id, right_page_id })

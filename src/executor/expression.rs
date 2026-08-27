@@ -110,7 +110,8 @@ pub(super) fn execute_update<R: RecordAccess + ?Sized>(
         let owned_row = row?.into_owned_record()?;
 
         let context = EvaluationContext::from_owned_record(&owned_row)?;
-        let mut values = context.tuple.to_owned_tuple().into_values();
+        let mut values =
+            context.tuple.to_owned_tuple().map_err(ExecutorError::InvalidTuple)?.into_values();
 
         for assignment in &assignments {
             let len = values.len();
@@ -244,9 +245,10 @@ impl<'a> EvaluationContext<'a> {
     /// Reads the value at `ordinal`, using `column_name` for diagnostics.
     fn value_at(&self, ordinal: usize, column_name: &str) -> ExecutorResult<Value> {
         let len = self.tuple.len();
-        self.tuple.values().nth(ordinal).map(Value::from).ok_or_else(|| {
+        let value = self.tuple.values().nth(ordinal).ok_or_else(|| {
             ExecutorError::ColumnOrdinalOutOfBounds { column: column_name.to_owned(), ordinal, len }
-        })
+        })?;
+        value.map(Value::from).map_err(ExecutorError::InvalidTuple)
     }
 }
 
@@ -295,7 +297,7 @@ fn evaluate_logical_binary(
         (value, op @ (Op::And | Op::Or)) => {
             Err(ExecutorError::NonBooleanLogicalOperand { op, value })
         }
-        (_, _) => unreachable!("evaluate_logical_binary only accepts logical operators"),
+        (_, op) => Err(ExecutorError::InvalidLogicalOperator { op }),
     }
 }
 
@@ -352,12 +354,12 @@ fn evaluate_equality(left: Value, op: Op, right: Value) -> ExecutorResult<Value>
 /// Evaluates ordering comparisons for same-type ordered values.
 fn evaluate_ordering(left: Value, op: Op, right: Value) -> ExecutorResult<Value> {
     let result = match (&left, &right) {
-        (Value::String(left), Value::String(right)) => compare_ordered(left, op, right),
-        (Value::Boolean(left), Value::Boolean(right)) => compare_ordered(left, op, right),
-        (Value::Integer(left), Value::Integer(right)) => compare_ordered(left, op, right),
-        (Value::Float(left), Value::Float(right)) => compare_ordered(left, op, right),
+        (Value::String(left), Value::String(right)) => compare_ordered(left, op, right)?,
+        (Value::Boolean(left), Value::Boolean(right)) => compare_ordered(left, op, right)?,
+        (Value::Integer(left), Value::Integer(right)) => compare_ordered(left, op, right)?,
+        (Value::Float(left), Value::Float(right)) => compare_ordered(left, op, right)?,
         (Value::UnsignedInteger(left), Value::UnsignedInteger(right)) => {
-            compare_ordered(left, op, right)
+            compare_ordered(left, op, right)?
         }
         _ => return Err(comparison_type_mismatch(left, op, right)),
     };
@@ -386,13 +388,13 @@ fn value_type_name(value: &Value) -> &'static str {
 }
 
 /// Applies an ordering operator to values with a Rust [`PartialOrd`] relation.
-fn compare_ordered<T: PartialOrd>(left: &T, op: Op, right: &T) -> bool {
+fn compare_ordered<T: PartialOrd>(left: &T, op: Op, right: &T) -> ExecutorResult<bool> {
     match op {
-        Op::LessThan => left < right,
-        Op::GreaterThan => left > right,
-        Op::LessThanOrEqual => left <= right,
-        Op::GreaterThanOrEqual => left >= right,
-        _ => unreachable!("compare_ordered only accepts ordering operators"),
+        Op::LessThan => Ok(left < right),
+        Op::GreaterThan => Ok(left > right),
+        Op::LessThanOrEqual => Ok(left <= right),
+        Op::GreaterThanOrEqual => Ok(left >= right),
+        op => Err(ExecutorError::InvalidOrderingOperator { op }),
     }
 }
 

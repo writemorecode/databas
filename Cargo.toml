@@ -13,3 +13,16 @@ thiserror = "2.0.18"
 fastrand = "2.3.0"
 proptest = "1.9.0"
 tempfile = "3.25.0"
+
+[lints.clippy]
+# Don't panic
+expect_used = "deny"
+get_unwrap = "deny"
+panic = "deny"
+panic_in_result_fn = "deny"
+todo = "deny"
+unchecked_time_subtraction = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+unwrap_in_result = "deny"
+unwrap_used = "deny"

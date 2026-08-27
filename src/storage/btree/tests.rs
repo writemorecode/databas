@@ -320,7 +320,7 @@ fn random_insert_update_simulation_replaces_values_for_all_keys() {
     rng.shuffle(&mut keys);
     let mut updated = BTreeMap::new();
     for (index, key) in keys.iter().enumerate() {
-        let old_value = expected.get(key).unwrap();
+        let old_value = &expected[key];
         let new_value = loop {
             let value_len = if index % OVERSIZED_EVERY_NTH == 0 {
                 PAGE_SIZE + rng.usize(1..=PAGE_SIZE)
@@ -386,7 +386,7 @@ fn random_mixed_operation_simulation_matches_btreemap_model() {
                     assert!(cursor.get(&key).unwrap().is_none());
                 } else {
                     let key = random_existing_key(&mut rng, &expected);
-                    let expected_value = expected.get(key).unwrap();
+                    let expected_value = &expected[key];
                     let record = cursor
                         .get(key)
                         .unwrap()
@@ -396,7 +396,7 @@ fn random_mixed_operation_simulation_matches_btreemap_model() {
             }
             65..=84 => {
                 let key = random_existing_key(&mut rng, &expected).to_vec();
-                let old_value = expected.get(&key).unwrap();
+                let old_value = &expected[&key];
                 let new_value = loop {
                     let value_len = if step % OVERSIZED_EVERY_NTH == 0 {
                         PAGE_SIZE + rng.usize(1..=PAGE_SIZE)

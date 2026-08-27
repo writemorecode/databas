@@ -291,12 +291,13 @@ fn read_crc_discard<R: Read>(
 }
 
 fn parse_header(header_bytes: &[u8; HEADER_LEN]) -> Result<WalFrameHeader, LogManagerError> {
-    let header_magic: [u8; 8] = header_bytes[0..8].try_into().expect("header magic len is fixed");
+    let mut cursor = FrameReader::new(header_bytes);
+    let header_magic = cursor.read_array::<8>()?;
     if header_magic != HEADER_MAGIC {
         return Err(LogManagerError::InvalidHeaderMagic { actual: header_magic });
     }
 
-    let version = u16::from_le_bytes(header_bytes[8..10].try_into().expect("version len fixed"));
+    let version = cursor.read_u16()?;
     if version != WAL_FORMAT_VERSION {
         return Err(LogManagerError::UnsupportedVersion {
             expected: WAL_FORMAT_VERSION,
@@ -305,13 +306,9 @@ fn parse_header(header_bytes: &[u8; HEADER_LEN]) -> Result<WalFrameHeader, LogMa
     }
 
     Ok(WalFrameHeader {
-        txn_id: u64::from_le_bytes(header_bytes[10..18].try_into().expect("txn id len fixed")),
-        entry_count: u32::from_le_bytes(
-            header_bytes[18..22].try_into().expect("entry count len fixed"),
-        ),
-        payload_len: u64::from_le_bytes(
-            header_bytes[22..30].try_into().expect("payload len fixed"),
-        ),
+        txn_id: cursor.read_u64()?,
+        entry_count: cursor.read_u32()?,
+        payload_len: cursor.read_u64()?,
     })
 }
 
@@ -320,13 +317,15 @@ fn validate_footer(
     txn_id: TxnId,
     actual_crc: u32,
 ) -> Result<(), LogManagerError> {
-    let footer_magic: [u8; 8] = footer_bytes[0..8].try_into().expect("footer magic len is fixed");
+    let mut footer_magic = [0; 8];
+    footer_magic.copy_from_slice(&footer_bytes[..8]);
     if footer_magic != FOOTER_MAGIC {
         return Err(LogManagerError::InvalidFooterMagic { actual: footer_magic });
     }
 
-    let footer_txn_id =
-        u64::from_le_bytes(footer_bytes[8..16].try_into().expect("footer txn id len fixed"));
+    let mut footer_txn_id_bytes = [0; 8];
+    footer_txn_id_bytes.copy_from_slice(&footer_bytes[8..16]);
+    let footer_txn_id = u64::from_le_bytes(footer_txn_id_bytes);
     if footer_txn_id != txn_id {
         return Err(LogManagerError::FooterTxnIdMismatch {
             expected: txn_id,
@@ -334,8 +333,9 @@ fn validate_footer(
         });
     }
 
-    let expected_crc =
-        u32::from_le_bytes(footer_bytes[16..20].try_into().expect("footer crc len fixed"));
+    let mut expected_crc_bytes = [0; 4];
+    expected_crc_bytes.copy_from_slice(&footer_bytes[16..20]);
+    let expected_crc = u32::from_le_bytes(expected_crc_bytes);
     if actual_crc != expected_crc {
         return Err(LogManagerError::ChecksumMismatch {
             expected: expected_crc,
@@ -358,7 +358,10 @@ pub(super) fn transaction_frame_len(buf: &'_ [u8]) -> Result<usize, LogManagerEr
         return Err(LogManagerError::TruncatedFrame { needed: HEADER_LEN, remaining: buf.len() });
     }
 
-    let header = parse_header(buf[..HEADER_LEN].try_into().expect("header len is fixed"))?;
+    let header_bytes: &[u8; HEADER_LEN] = (&buf[..HEADER_LEN]).try_into().map_err(|_| {
+        LogManagerError::TruncatedFrame { needed: HEADER_LEN, remaining: buf.len() }
+    })?;
+    let header = parse_header(header_bytes)?;
     let payload_len = usize::try_from(header.payload_len)
         .map_err(|_| LogManagerError::PayloadLengthTooLarge { payload_len: header.payload_len })?;
 
@@ -589,7 +592,9 @@ impl<'a> FrameReader<'a> {
 
     fn read_array<const N: usize>(&mut self) -> Result<[u8; N], LogManagerError> {
         let slice = self.read_slice(N)?;
-        Ok(slice.try_into().expect("slice length is fixed"))
+        let mut bytes = [0; N];
+        bytes.copy_from_slice(slice);
+        Ok(bytes)
     }
 
     fn read_slice(&mut self, len: usize) -> Result<&'a [u8], LogManagerError> {
