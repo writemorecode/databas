@@ -142,7 +142,7 @@ pub struct TableSchema {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexColumnSchema {
     /// Ordinal of the source column in the indexed table schema.
-    pub source_column_ordinal: u64,
+    pub source_column_ordinal: usize,
     /// Column metadata copied into the index key schema.
     pub column: ColumnSchema,
 }
@@ -384,10 +384,7 @@ impl IndexSchema {
                     table: table.name.clone(),
                     column: (*column_name).to_owned(),
                 })?;
-            columns.push(IndexColumnSchema {
-                source_column_ordinal: source_column_ordinal as u64,
-                column: column.clone(),
-            });
+            columns.push(IndexColumnSchema { source_column_ordinal, column: column.clone() });
         }
 
         Ok(Self {

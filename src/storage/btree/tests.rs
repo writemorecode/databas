@@ -478,10 +478,10 @@ fn failed_interior_rewrite_leaves_page_unchanged() {
         let page = pin.read().unwrap();
         *page.page()
     };
-    let children: Vec<_> = (0..16)
+    let children: Vec<_> = (0u8..16)
         .map(|index| ChildEntry {
-            page_id: 100 + index,
-            max_key: Some(vec![index as u8; PAGE_SIZE]),
+            page_id: 100 + u64::from(index),
+            max_key: Some(vec![index; PAGE_SIZE]),
         })
         .collect();
 

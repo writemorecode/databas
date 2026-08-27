@@ -1,5 +1,5 @@
 use crate::core::{
-    PAGE_SIZE, PageId,
+    PAGE_SIZE, PAGE_SIZE_U16, PageId,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
 };
 
@@ -17,7 +17,7 @@ impl DatabaseHeader {
         let mut page = [0u8; PAGE_SIZE];
         page[0..8].copy_from_slice(MAGIC);
         page[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
-        page[10..12].copy_from_slice(&(PAGE_SIZE as u16).to_le_bytes());
+        page[10..12].copy_from_slice(&PAGE_SIZE_U16.to_le_bytes());
         page
     }
 

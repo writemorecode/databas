@@ -25,8 +25,10 @@ pub fn evaluate_expression(
 /// Each values row is evaluated against an empty synthetic record. The row's
 /// position in the `VALUES` list becomes the result table key.
 pub(super) fn execute_values(rows: Vec<Vec<PlannedExpression>>) -> ExecutorResult<ExecutionOutput> {
-    let rows = rows.into_iter().enumerate().map(|(table_key, expressions)| {
-        let input = empty_record(table_key as TableKey)?;
+    let rows = rows.into_iter().enumerate().map(|(row_index, expressions)| {
+        let table_key = TableKey::try_from(row_index)
+            .map_err(|_| ExecutorError::ValuesRowIndexOutOfRange { row_index })?;
+        let input = empty_record(table_key)?;
         evaluate_expressions(&expressions, &input)
     });
     Ok(ExecutionOutput::Rows { rows: Box::new(rows) })

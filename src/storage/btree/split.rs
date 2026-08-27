@@ -316,7 +316,12 @@ impl TreeCursor {
             .position(|cell| cell.key() == target_key)
             .ok_or(StorageError::Internal(InternalError::InvariantViolation(
                 InvariantViolation::LeafSplitTargetMissing,
-            )))? as u16;
+            )))?;
+        let target_slot_index = u16::try_from(target_slot_index).map_err(|_| {
+            StorageError::Internal(InternalError::InvariantViolation(
+                InvariantViolation::LeafSplitTargetSlotOutOfRange { slot_index: target_slot_index },
+            ))
+        })?;
         self.set_positioned_state(target_page_id, target_slot_index);
 
         Ok(PendingSplit { separator, left_page_id: leaf_page_id, right_page_id })

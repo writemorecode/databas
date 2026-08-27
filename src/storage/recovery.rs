@@ -148,7 +148,7 @@ mod tests {
         page::format::write_u16(
             &mut page,
             page::format::CONTENT_START_OFFSET,
-            page::format::USABLE_SPACE_END as u16,
+            page::format::USABLE_SPACE_END_U16,
         );
         page::format::write_u64(&mut page, page::format::LSN_OFFSET, lsn);
         page

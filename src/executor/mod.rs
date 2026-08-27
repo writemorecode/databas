@@ -102,6 +102,12 @@ pub enum ExecutorError {
         /// Operand value rejected by the operator.
         value: Value,
     },
+    /// A synthetic row index for a `VALUES` result exceeded the table-key range.
+    #[error("VALUES row index {row_index} does not fit in a table key")]
+    ValuesRowIndexOutOfRange {
+        /// Zero-based position of the row in the `VALUES` list.
+        row_index: usize,
+    },
     /// Integer arithmetic overflowed.
     #[error("integer overflow while evaluating operator {op}")]
     IntegerOverflow {

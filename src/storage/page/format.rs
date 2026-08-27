@@ -4,15 +4,17 @@
 //! upward from the header, a packed cell-content region that grows downward
 //! from the end of usable space, and a zeroed reserved footer.
 
-use crate::core::{PAGE_SIZE, PageId, SlotId};
+use crate::core::{PAGE_SIZE, PAGE_SIZE_U16, PageId, SlotId};
 use crate::storage::log_manager::Lsn;
 
 /// Current on-disk page format version.
 pub(crate) const FORMAT_VERSION: u8 = 5;
 /// Number of bytes reserved at the end of every page.
-pub(crate) const RESERVED_FOOTER_SIZE: usize = 4;
+pub(crate) const RESERVED_FOOTER_SIZE_U16: u16 = 4;
 /// Exclusive end offset of the usable region within a page buffer.
-pub(crate) const USABLE_SPACE_END: usize = PAGE_SIZE - RESERVED_FOOTER_SIZE;
+pub(crate) const USABLE_SPACE_END_U16: u16 = PAGE_SIZE_U16 - RESERVED_FOOTER_SIZE_U16;
+/// Exclusive end offset of the usable region within a page buffer.
+pub(crate) const USABLE_SPACE_END: usize = USABLE_SPACE_END_U16 as usize;
 /// Width in bytes of a single slot directory entry.
 pub(crate) const SLOT_ENTRY_SIZE: usize = 2;
 /// Width in bytes of the length prefix at the start of every cell.

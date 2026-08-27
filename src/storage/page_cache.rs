@@ -513,8 +513,8 @@ mod tests {
     /// Generates a deterministic page payload from a seed byte.
     fn page_with_pattern(seed: u8) -> [u8; PAGE_SIZE] {
         let mut page = [0u8; PAGE_SIZE];
-        for (index, byte) in page.iter_mut().enumerate() {
-            *byte = seed.wrapping_add(index as u8);
+        for (index, byte) in (0u8..=u8::MAX).cycle().zip(&mut page) {
+            *byte = seed.wrapping_add(index);
         }
         page::format::write_u64(&mut page, page::format::LSN_OFFSET, ZERO_LSN);
         page

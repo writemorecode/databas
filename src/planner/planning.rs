@@ -738,7 +738,7 @@ fn exact_single_column_index(
 ) -> bool {
     index.table_id == table.table_id
         && index.columns.len() == 1
-        && index.columns[0].source_column_ordinal as usize == column.ordinal
+        && index.columns[0].source_column_ordinal == column.ordinal
 }
 
 fn value_matches_data_type(value: &Value, data_type: DataType) -> bool {

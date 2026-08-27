@@ -115,10 +115,8 @@ impl CatalogManager {
                         column: (*column_name).to_owned(),
                     })
                 })?;
-            index_columns.push(IndexColumnSchema {
-                source_column_ordinal: source_column_ordinal as u64,
-                column: source_column.clone(),
-            });
+            index_columns
+                .push(IndexColumnSchema { source_column_ordinal, column: source_column.clone() });
             catalog_columns.push(ColumnCatalogRow {
                 column_id,
                 object_kind: CatalogObjectKind::Index,
@@ -276,7 +274,7 @@ impl CatalogManager {
             })
             .collect();
 
-        Ok(index_schema_from_rows(index, columns))
+        index_schema_from_rows(index, columns)
     }
 
     pub(crate) fn index_schemas_for_table(
@@ -302,7 +300,7 @@ impl CatalogManager {
                     })
                     .cloned()
                     .collect();
-                Ok(index_schema_from_rows(index, columns))
+                index_schema_from_rows(index, columns)
             })
             .collect()
     }
@@ -465,23 +463,26 @@ fn column_schema_from_row(row: ColumnCatalogRow) -> ColumnSchema {
 fn index_schema_from_rows(
     index: IndexCatalogRow,
     mut columns: Vec<ColumnCatalogRow>,
-) -> IndexSchema {
+) -> StorageResult<IndexSchema> {
     columns.sort_by_key(|row| row.ordinal);
+    let columns = columns
+        .into_iter()
+        .map(|row| {
+            let source_column_ordinal = row.source_column_ordinal.unwrap_or(row.ordinal);
+            let source_column_ordinal = usize::try_from(source_column_ordinal)
+                .map_err(|error| invalid_catalog_row("sys_columns", error))?;
+            Ok(IndexColumnSchema { source_column_ordinal, column: column_schema_from_row(row) })
+        })
+        .collect::<StorageResult<_>>()?;
 
-    IndexSchema {
+    Ok(IndexSchema {
         index_id: index.index_id,
         name: index.name,
         table_id: index.table_id,
         root_page_id: index.root_page_id,
         unique: index.unique,
-        columns: columns
-            .into_iter()
-            .map(|row| IndexColumnSchema {
-                source_column_ordinal: row.source_column_ordinal.unwrap_or(row.ordinal),
-                column: column_schema_from_row(row),
-            })
-            .collect(),
-    }
+        columns,
+    })
 }
 
 #[cfg(test)]
@@ -608,7 +609,7 @@ mod tests {
         let mut tables = manager.table_cursor(SYS_TABLES_ROOT_PAGE_ID);
         assert_table_catalog_row(&mut tables, table.table_id, "users", table.root_page_id);
 
-        let first_user_column_id = system_column_rows().len() as CatalogId + 1;
+        let first_user_column_id = CatalogId::try_from(system_column_rows().len()).unwrap() + 1;
         let mut columns = manager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID);
         assert_column_catalog_row(
             &mut columns,
@@ -706,8 +707,9 @@ mod tests {
             },
         );
 
-        let index_column_id =
-            system_column_rows().len() as CatalogId + table.row.columns.len() as CatalogId + 1;
+        let index_column_id = CatalogId::try_from(system_column_rows().len()).unwrap()
+            + CatalogId::try_from(table.row.columns.len()).unwrap()
+            + 1;
         let mut columns = manager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID);
         assert_column_catalog_row(
             &mut columns,

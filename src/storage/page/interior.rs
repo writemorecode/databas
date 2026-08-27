@@ -95,11 +95,11 @@ pub(crate) fn write_cell_with_payload(
     bytes: &mut [u8; PAGE_SIZE],
     cell_offset: usize,
     left_child: PageId,
-    key_len: usize,
+    key_len: u16,
     first_overflow_page_id: Option<PageId>,
     inline_payload: &[u8],
 ) {
-    format::write_u16(bytes, cell_offset, key_len as u16);
+    format::write_u16(bytes, cell_offset, key_len);
     format::write_optional_u64(
         bytes,
         cell_offset + FIRST_OVERFLOW_PAGE_ID_OFFSET,
@@ -107,7 +107,7 @@ pub(crate) fn write_cell_with_payload(
     );
     let cell_len = INTERIOR_CELL_PREFIX_SIZE + inline_payload.len();
     write_left_child(&mut bytes[cell_offset..cell_offset + cell_len], left_child);
-    format::write_u16(bytes, cell_offset + KEY_LENGTH_OFFSET, key_len as u16);
+    format::write_u16(bytes, cell_offset + KEY_LENGTH_OFFSET, key_len);
     let payload_start = cell_offset + INTERIOR_CELL_PREFIX_SIZE;
     bytes[payload_start..payload_start + inline_payload.len()].copy_from_slice(inline_payload);
 }
@@ -177,9 +177,8 @@ where
         first_overflow_page_id: Option<PageId>,
         inline_payload: &[u8],
     ) -> PageResult<SlotId> {
-        if key_len > u16::MAX as usize {
-            return Err(PageError::CellTooLarge { len: key_len, max: u16::MAX as usize });
-        }
+        let encoded_key_len = u16::try_from(key_len)
+            .map_err(|_| PageError::CellTooLarge { len: key_len, max: u16::MAX as usize })?;
         let Some(expected_inline_len) = format::inline_payload_len(key_len, first_overflow_page_id)
         else {
             return Err(PageError::CellTooLarge { len: key_len, max: u16::MAX as usize });
@@ -200,7 +199,7 @@ where
             self.bytes_mut(),
             cell_offset as usize,
             left_child,
-            key_len,
+            encoded_key_len,
             first_overflow_page_id,
             inline_payload,
         );

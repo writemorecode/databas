@@ -91,38 +91,40 @@ where
 pub(crate) fn write_cell_with_payload(
     bytes: &mut [u8; PAGE_SIZE],
     cell_offset: usize,
-    key_len: usize,
-    value_len: usize,
+    payload_len: u16,
+    key_len: u16,
+    value_len: u16,
     first_overflow_page_id: Option<PageId>,
     inline_payload: &[u8],
 ) {
-    let payload_len = key_len + value_len;
-    format::write_u16(bytes, cell_offset, payload_len as u16);
+    format::write_u16(bytes, cell_offset, payload_len);
     format::write_optional_u64(
         bytes,
         cell_offset + FIRST_OVERFLOW_PAGE_ID_OFFSET,
         first_overflow_page_id,
     );
-    format::write_u16(bytes, cell_offset + KEY_LENGTH_OFFSET, key_len as u16);
-    format::write_u16(bytes, cell_offset + VALUE_LENGTH_OFFSET, value_len as u16);
+    format::write_u16(bytes, cell_offset + KEY_LENGTH_OFFSET, key_len);
+    format::write_u16(bytes, cell_offset + VALUE_LENGTH_OFFSET, value_len);
     let payload_start = cell_offset + LEAF_CELL_PREFIX_SIZE;
     bytes[payload_start..payload_start + inline_payload.len()].copy_from_slice(inline_payload);
 }
 
-/// Validates raw leaf payload lengths and returns the total logical payload length.
+/// Validates raw leaf payload lengths and returns their encoded representations.
 fn validate_payload_parts(
     key_len: usize,
     value_len: usize,
     first_overflow_page_id: Option<PageId>,
     inline_payload: &[u8],
-) -> PageResult<usize> {
-    let payload_len = key_len + value_len;
-    if key_len > u16::MAX as usize
-        || value_len > u16::MAX as usize
-        || payload_len > u16::MAX as usize
-    {
-        return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize });
-    }
+) -> PageResult<(u16, u16, u16)> {
+    let payload_len = key_len
+        .checked_add(value_len)
+        .ok_or(PageError::CellTooLarge { len: usize::MAX, max: u16::MAX as usize })?;
+    let encoded_key_len = u16::try_from(key_len)
+        .map_err(|_| PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize })?;
+    let encoded_value_len = u16::try_from(value_len)
+        .map_err(|_| PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize })?;
+    let encoded_payload_len = u16::try_from(payload_len)
+        .map_err(|_| PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize })?;
     let Some(expected_inline_len) = format::inline_payload_len(payload_len, first_overflow_page_id)
     else {
         return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize });
@@ -133,7 +135,7 @@ fn validate_payload_parts(
             max: LEAF_CELL_PREFIX_SIZE + expected_inline_len,
         });
     }
-    Ok(payload_len)
+    Ok((encoded_payload_len, encoded_key_len, encoded_value_len))
 }
 
 fn compare_key<A>(
@@ -188,7 +190,8 @@ where
         first_overflow_page_id: Option<PageId>,
         inline_payload: &[u8],
     ) -> PageResult<SlotId> {
-        validate_payload_parts(key_len, value_len, first_overflow_page_id, inline_payload)?;
+        let (payload_len, key_len, value_len) =
+            validate_payload_parts(key_len, value_len, first_overflow_page_id, inline_payload)?;
         if slot_index > self.slot_count() {
             return Err(PageError::InvalidSlotIndex { slot_index, slot_count: self.slot_count() });
         }
@@ -198,6 +201,7 @@ where
         write_cell_with_payload(
             self.bytes_mut(),
             cell_offset as usize,
+            payload_len,
             key_len,
             value_len,
             first_overflow_page_id,
@@ -216,7 +220,8 @@ where
         first_overflow_page_id: Option<PageId>,
         inline_payload: &[u8],
     ) -> PageResult<SlotId> {
-        validate_payload_parts(key_len, value_len, first_overflow_page_id, inline_payload)?;
+        let (payload_len, encoded_key_len, encoded_value_len) =
+            validate_payload_parts(key_len, value_len, first_overflow_page_id, inline_payload)?;
         self.validate_slot_index(slot_index)?;
 
         let cell_len = LEAF_CELL_PREFIX_SIZE + inline_payload.len();
@@ -226,8 +231,9 @@ where
             write_cell_with_payload(
                 self.bytes_mut(),
                 old_offset as usize,
-                key_len,
-                value_len,
+                payload_len,
+                encoded_key_len,
+                encoded_value_len,
                 first_overflow_page_id,
                 inline_payload,
             );

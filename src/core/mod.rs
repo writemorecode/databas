@@ -29,4 +29,5 @@ pub use types::{
 };
 pub(crate) use types::{Lsn, SlotId, TxnId};
 
-pub(crate) const PAGE_SIZE: usize = 4096;
+pub(crate) const PAGE_SIZE_U16: u16 = 4096;
+pub(crate) const PAGE_SIZE: usize = PAGE_SIZE_U16 as usize;
