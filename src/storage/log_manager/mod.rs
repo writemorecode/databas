@@ -441,7 +441,7 @@ impl LogManager {
         validate_record_txn_ids(txn_id, records)?;
 
         let record_count = u64::try_from(records.len())
-            .map_err(|_| LogManagerError::TooManyRecords { count: records.len() })?;
+            .map_err(|_out_of_range| LogManagerError::TooManyRecords { count: records.len() })?;
         let lsn = self
             .highest_appended_lsn
             .unwrap_or(ZERO_LSN)
@@ -687,9 +687,8 @@ impl RecoveryLogRecordKind {
 }
 
 fn page_image_array(image: &[u8]) -> Result<Box<[u8; PAGE_SIZE]>, LogManagerError> {
-    let image = image.try_into().map_err(|_| LogManagerError::InvalidPageImageLength {
-        expected: PAGE_SIZE,
-        actual: image.len(),
+    let image = image.try_into().map_err(|_wrong_length| {
+        LogManagerError::InvalidPageImageLength { expected: PAGE_SIZE, actual: image.len() }
     })?;
     Ok(Box::new(image))
 }

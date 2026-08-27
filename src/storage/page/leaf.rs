@@ -119,12 +119,15 @@ fn validate_payload_parts(
     let payload_len = key_len
         .checked_add(value_len)
         .ok_or(PageError::CellTooLarge { len: usize::MAX, max: u16::MAX as usize })?;
-    let encoded_key_len = u16::try_from(key_len)
-        .map_err(|_| PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize })?;
-    let encoded_value_len = u16::try_from(value_len)
-        .map_err(|_| PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize })?;
-    let encoded_payload_len = u16::try_from(payload_len)
-        .map_err(|_| PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize })?;
+    let encoded_key_len = u16::try_from(key_len).map_err(|_out_of_range| {
+        PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize }
+    })?;
+    let encoded_value_len = u16::try_from(value_len).map_err(|_out_of_range| {
+        PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize }
+    })?;
+    let encoded_payload_len = u16::try_from(payload_len).map_err(|_out_of_range| {
+        PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize }
+    })?;
     let Some(expected_inline_len) = format::inline_payload_len(payload_len, first_overflow_page_id)
     else {
         return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize });

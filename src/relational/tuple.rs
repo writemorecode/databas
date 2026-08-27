@@ -434,7 +434,7 @@ where
     I::IntoIter: ExactSizeIterator,
 {
     let values = values.into_iter();
-    let value_count = u32::try_from(values.len()).map_err(|_| {
+    let value_count = u32::try_from(values.len()).map_err(|_out_of_range| {
         io::Error::new(io::ErrorKind::InvalidInput, "tuple value count exceeds u32::MAX")
     })?;
     writer.write_all(&value_count.to_le_bytes())?;
@@ -450,7 +450,7 @@ fn write_value_ref<W: Write>(writer: &mut W, value: ValueRef<'_>) -> io::Result<
     match value {
         ValueRef::Null => write_tlv_header(writer, TAG_NULL, NULL_LENGTH),
         ValueRef::String(value) => {
-            let len = u32::try_from(value.len()).map_err(|_| {
+            let len = u32::try_from(value.len()).map_err(|_out_of_range| {
                 io::Error::new(io::ErrorKind::InvalidInput, "string length exceeds u32::MAX")
             })?;
             write_tlv_header(writer, TAG_STRING, len)?;

@@ -147,8 +147,9 @@ impl TreeCursor {
         if child_index == usize::from(slot_count) {
             return Ok(interior.rightmost_child());
         }
-        let slot_index = u16::try_from(child_index)
-            .map_err(|_| PageError::InvalidSlotIndex { slot_index: u16::MAX, slot_count })?;
+        let slot_index = u16::try_from(child_index).map_err(|_out_of_range| {
+            PageError::InvalidSlotIndex { slot_index: u16::MAX, slot_count }
+        })?;
         if slot_index > slot_count {
             return Err(PageError::InvalidSlotIndex { slot_index, slot_count }.into());
         }

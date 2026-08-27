@@ -27,7 +27,7 @@ pub fn evaluate_expression(
 pub(super) fn execute_values(rows: Vec<Vec<PlannedExpression>>) -> ExecutorResult<ExecutionOutput> {
     let rows = rows.into_iter().enumerate().map(|(row_index, expressions)| {
         let table_key = TableKey::try_from(row_index)
-            .map_err(|_| ExecutorError::ValuesRowIndexOutOfRange { row_index })?;
+            .map_err(|_out_of_range| ExecutorError::ValuesRowIndexOutOfRange { row_index })?;
         let input = empty_record(table_key)?;
         evaluate_expressions(&expressions, &input)
     });
