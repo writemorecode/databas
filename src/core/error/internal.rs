@@ -54,6 +54,8 @@ pub enum InvariantViolation {
     EmptyLeafSplit,
     #[error("leaf split target key is missing")]
     LeafSplitTargetMissing,
+    #[error("leaf split target slot {slot_index} exceeds the slot-id range")]
+    LeafSplitTargetSlotOutOfRange { slot_index: usize },
     #[error("page {page_id} pin count overflowed")]
     PagePinCountOverflow { page_id: PageId },
 }

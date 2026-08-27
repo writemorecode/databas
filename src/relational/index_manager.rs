@@ -101,7 +101,7 @@ fn index_key_from_record_bytes(
     let mut values = Vec::with_capacity(index.columns.len());
 
     for column in &index.columns {
-        let ordinal = column.source_column_ordinal as usize;
+        let ordinal = column.source_column_ordinal;
         let value = tuple.values().nth(ordinal).ok_or_else(|| {
             invalid_table_record(
                 table,

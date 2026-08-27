@@ -108,10 +108,10 @@ pub(super) fn deserialize_transaction(
         records.push(deserialize_log_record(&mut payload_cursor, txn_id)?);
     }
 
-    if records.len() != entry_count as usize {
+    if u32::try_from(records.len()) != Ok(entry_count) {
         return Err(LogManagerError::RecordCountMismatch {
             expected: entry_count,
-            actual: records.len() as u32,
+            actual: records.len(),
         });
     }
 
@@ -167,16 +167,19 @@ pub(super) fn scan_transaction_frame<R: Read>(
         .map_err(|_| LogManagerError::PayloadLengthTooLarge { payload_len: header.payload_len })?;
     let mut remaining = payload_len;
     let mut digest = CRC32.digest();
-    let mut actual_record_count = 0u32;
+    let mut actual_record_count = 0usize;
 
     while remaining > 0 {
         scan_log_record_payload(reader, &mut digest, &mut remaining)?;
         actual_record_count = actual_record_count.checked_add(1).ok_or({
-            LogManagerError::RecordCountMismatch { expected: header.entry_count, actual: u32::MAX }
+            LogManagerError::RecordCountMismatch {
+                expected: header.entry_count,
+                actual: usize::MAX,
+            }
         })?;
     }
 
-    if actual_record_count != header.entry_count {
+    if u32::try_from(actual_record_count) != Ok(header.entry_count) {
         return Err(LogManagerError::RecordCountMismatch {
             expected: header.entry_count,
             actual: actual_record_count,
@@ -186,7 +189,7 @@ pub(super) fn scan_transaction_frame<R: Read>(
     let footer_bytes = read_exact_or_eof::<_, FOOTER_LEN>(reader)?
         .ok_or(LogManagerError::TruncatedFrame { needed: FOOTER_LEN, remaining: 0 })?;
     validate_footer(&footer_bytes, header.txn_id, digest.finalize())?;
-    Ok(Some(ScannedWalFrame { txn_id: header.txn_id, record_count: actual_record_count }))
+    Ok(Some(ScannedWalFrame { txn_id: header.txn_id, record_count: header.entry_count }))
 }
 
 fn scan_log_record_payload<R: Read>(

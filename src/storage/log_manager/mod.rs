@@ -122,7 +122,7 @@ pub enum LogManagerError {
     RecordTxnIdMismatch { expected: TxnId, actual: TxnId },
     /// The decoded payload record count differed from the header count.
     #[error("WAL record count mismatch: expected {expected}, got {actual}")]
-    RecordCountMismatch { expected: u32, actual: u32 },
+    RecordCountMismatch { expected: u32, actual: usize },
     /// A transaction frame contains more records than the format can encode.
     #[error("too many WAL records in transaction: {count}")]
     TooManyRecords { count: usize },
@@ -1292,11 +1292,12 @@ mod tests {
 
     fn rewrite_crc(buf: &mut [u8]) {
         let payload_len_start = 8 + 2 + 8 + 4;
-        let payload_len = u64::from_le_bytes(
+        let payload_len = usize::try_from(u64::from_le_bytes(
             buf[payload_len_start..payload_len_start + 8]
                 .try_into()
                 .expect("payload length slice has fixed width"),
-        ) as usize;
+        ))
+        .unwrap();
         let payload_start = HEADER_LEN;
         let payload_end = payload_start + payload_len;
         let crc = CRC32.checksum(&buf[payload_start..payload_end]);

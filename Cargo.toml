@@ -26,3 +26,7 @@ unimplemented = "deny"
 unreachable = "deny"
 unwrap_in_result = "deny"
 unwrap_used = "deny"
+
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"

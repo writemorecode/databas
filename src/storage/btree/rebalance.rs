@@ -144,15 +144,16 @@ impl TreeCursor {
         let page = pin.read()?;
         let interior = page.open::<Interior>()?;
         let slot_count = interior.slot_count();
-        if child_index > slot_count as usize {
-            let slot_index = child_index.try_into().unwrap_or(u16::MAX);
-            return Err(PageError::InvalidSlotIndex { slot_index, slot_count }.into());
-        }
-        if child_index == slot_count as usize {
+        if child_index == usize::from(slot_count) {
             return Ok(interior.rightmost_child());
         }
+        let slot_index = u16::try_from(child_index)
+            .map_err(|_| PageError::InvalidSlotIndex { slot_index: u16::MAX, slot_count })?;
+        if slot_index > slot_count {
+            return Err(PageError::InvalidSlotIndex { slot_index, slot_count }.into());
+        }
 
-        let (left_child, _, _, _) = interior.cell_payload_parts(child_index as u16)?;
+        let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
         Ok(left_child)
     }
 
@@ -389,12 +390,12 @@ impl TreeCursor {
     ) -> StorageResult<bool> {
         let child_page_ids = self.read_interior_child_page_ids(page_id)?;
         for (slot_index, &child_page_id) in
-            child_page_ids[..child_page_ids.len() - 1].iter().enumerate()
+            (0u16..).zip(&child_page_ids[..child_page_ids.len() - 1])
         {
             let matches = self.with_subtree_max_key(child_page_id, |expected_key| {
                 let expected_key =
                     expected_key.ok_or_else(|| Self::missing_child_max_key_error(page_id))?;
-                self.compare_interior_key(page_id, slot_index as u16, expected_key)
+                self.compare_interior_key(page_id, slot_index, expected_key)
                     .map(|ordering| ordering == Ordering::Equal)
             })?;
             if !matches {

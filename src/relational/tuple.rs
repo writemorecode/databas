@@ -53,9 +53,9 @@ const TAG_UNSIGNED_INTEGER: u8 = 0x06;
 
 const NULL_LENGTH: u32 = 0;
 const BOOL_LENGTH: u32 = 1;
-const I32_LENGTH: u32 = size_of::<i32>() as u32;
-const F32_LENGTH: u32 = size_of::<f32>() as u32;
-const U64_LENGTH: u32 = size_of::<u64>() as u32;
+const I32_LENGTH: u32 = i32::BITS / 8;
+const F32_LENGTH: u32 = 4;
+const U64_LENGTH: u32 = u64::BITS / 8;
 
 /// A single typed value stored in a [`Tuple`].
 #[derive(Debug, Clone, PartialEq)]
@@ -539,13 +539,13 @@ fn read_value<R: Read>(reader: &mut R, tag: u8, len: u32) -> io::Result<Value> {
 
 fn validate_value_payload(tag: u8, payload: &[u8]) -> io::Result<()> {
     match tag {
-        TAG_NULL => validate_len(tag, payload.len() as u32, NULL_LENGTH),
+        TAG_NULL => validate_payload_len(tag, payload.len(), 0),
         TAG_STRING => {
             std::str::from_utf8(payload).map_err(invalid_data)?;
             Ok(())
         }
         TAG_BOOLEAN => {
-            validate_len(tag, payload.len() as u32, BOOL_LENGTH)?;
+            validate_payload_len(tag, payload.len(), 1)?;
             match payload[0] {
                 0 | 1 => Ok(()),
                 actual => Err(io::Error::new(
@@ -554,17 +554,28 @@ fn validate_value_payload(tag: u8, payload: &[u8]) -> io::Result<()> {
                 )),
             }
         }
-        TAG_INTEGER => validate_len(tag, payload.len() as u32, I32_LENGTH),
+        TAG_INTEGER => validate_payload_len(tag, payload.len(), size_of::<i32>()),
         TAG_FLOAT => {
-            validate_len(tag, payload.len() as u32, F32_LENGTH)?;
+            validate_payload_len(tag, payload.len(), size_of::<f32>())?;
             let bytes = payload.try_into().map_err(invalid_data)?;
             validate_float(decode_ordered_f32(bytes))
         }
-        TAG_UNSIGNED_INTEGER => validate_len(tag, payload.len() as u32, U64_LENGTH),
+        TAG_UNSIGNED_INTEGER => validate_payload_len(tag, payload.len(), size_of::<u64>()),
         actual => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown tuple value tag: {actual}"),
         )),
+    }
+}
+
+fn validate_payload_len(tag: u8, actual: usize, expected: usize) -> io::Result<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid length {actual} for tuple value tag {tag}; expected {expected}"),
+        ))
     }
 }
 
@@ -625,11 +636,11 @@ fn read_value_len_from_slice(bytes: &[u8], offset: usize) -> io::Result<(u32, us
 }
 
 fn encode_ordered_i32(value: i32) -> [u8; size_of::<i32>()] {
-    ((value as u32) ^ 0x8000_0000).to_be_bytes()
+    (value.cast_unsigned() ^ 0x8000_0000).to_be_bytes()
 }
 
 fn decode_ordered_i32(bytes: [u8; size_of::<i32>()]) -> i32 {
-    (u32::from_be_bytes(bytes) ^ 0x8000_0000) as i32
+    (u32::from_be_bytes(bytes) ^ 0x8000_0000).cast_signed()
 }
 
 fn encode_ordered_f32(value: f32) -> io::Result<[u8; size_of::<f32>()]> {
