@@ -317,7 +317,7 @@ impl TreeCursor {
             .ok_or(StorageError::Internal(InternalError::InvariantViolation(
                 InvariantViolation::LeafSplitTargetMissing,
             )))?;
-        let target_slot_index = u16::try_from(target_slot_index).map_err(|_| {
+        let target_slot_index = u16::try_from(target_slot_index).map_err(|_out_of_range| {
             StorageError::Internal(InternalError::InvariantViolation(
                 InvariantViolation::LeafSplitTargetSlotOutOfRange { slot_index: target_slot_index },
             ))

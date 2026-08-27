@@ -120,7 +120,8 @@ impl Freeblock {
 }
 
 fn encode_page_u16(value: usize) -> PageResult<u16> {
-    u16::try_from(value).map_err(|_| PageError::CellTooLarge { len: value, max: u16::MAX as usize })
+    u16::try_from(value)
+        .map_err(|_out_of_range| PageError::CellTooLarge { len: value, max: u16::MAX as usize })
 }
 
 #[derive(Debug, Clone, Copy)]

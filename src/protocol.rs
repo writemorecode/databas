@@ -130,6 +130,24 @@ pub enum ProtocolError {
     /// A frame or message payload is malformed.
     #[error("malformed protocol message: {0}")]
     Malformed(&'static str),
+    /// A text field in a message payload is not valid UTF-8.
+    #[error("malformed protocol message: {context}")]
+    InvalidUtf8 {
+        /// Description of the malformed text field.
+        context: &'static str,
+        /// The underlying UTF-8 decoding failure.
+        #[source]
+        source: std::str::Utf8Error,
+    },
+    /// Memory for decoded row values could not be reserved.
+    #[error("failed to allocate storage for {value_count} row values")]
+    RowAllocationFailed {
+        /// Number of values declared by the row payload.
+        value_count: usize,
+        /// The underlying allocation failure.
+        #[source]
+        source: std::collections::TryReserveError,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -179,7 +197,7 @@ pub(crate) fn write_frame(
         return Err(ProtocolError::FrameTooLarge { length: payload.len() });
     }
     let length = u32::try_from(payload.len())
-        .map_err(|_| ProtocolError::FrameTooLarge { length: payload.len() })?;
+        .map_err(|_out_of_range| ProtocolError::FrameTooLarge { length: payload.len() })?;
     let mut header = [0_u8; HEADER_LEN];
     header[..4].copy_from_slice(&MAGIC);
     header[4..6].copy_from_slice(&VERSION.to_be_bytes());
@@ -202,14 +220,15 @@ pub(crate) fn decode_error(payload: &[u8]) -> Result<(ErrorCode, String), Protoc
         return Err(ProtocolError::Malformed("error response has no error code"));
     }
     let code = ErrorCode::from_u16(u16::from_be_bytes([payload[0], payload[1]]));
-    let message = std::str::from_utf8(&payload[2..])
-        .map_err(|_| ProtocolError::Malformed("error message is not UTF-8"))?;
+    let message = std::str::from_utf8(&payload[2..]).map_err(|source| {
+        ProtocolError::InvalidUtf8 { context: "error message is not UTF-8", source }
+    })?;
     Ok((code, message.to_owned()))
 }
 
 pub(crate) fn encode_row(values: &[Value]) -> Result<Vec<u8>, ProtocolError> {
     let count = u32::try_from(values.len())
-        .map_err(|_| ProtocolError::Malformed("row has too many values"))?;
+        .map_err(|_out_of_range| ProtocolError::Malformed("row has too many values"))?;
     let mut payload = Vec::new();
     payload.extend_from_slice(&count.to_be_bytes());
     for value in values {
@@ -218,7 +237,7 @@ pub(crate) fn encode_row(values: &[Value]) -> Result<Vec<u8>, ProtocolError> {
             Value::String(value) => {
                 payload.push(0x01);
                 let length = u32::try_from(value.len())
-                    .map_err(|_| ProtocolError::Malformed("text value is too large"))?;
+                    .map_err(|_out_of_range| ProtocolError::Malformed("text value is too large"))?;
                 payload.extend_from_slice(&length.to_be_bytes());
                 payload.extend_from_slice(value.as_bytes());
             }
@@ -258,15 +277,16 @@ pub(crate) fn decode_row(payload: &[u8]) -> Result<Vec<Value>, ProtocolError> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(count)
-        .map_err(|_| ProtocolError::Malformed("cannot allocate row values"))?;
+        .map_err(|source| ProtocolError::RowAllocationFailed { value_count: count, source })?;
     for _ in 0..count {
         values.push(match decoder.u8()? {
             0x00 => Value::Null,
             0x01 => {
                 let length = decoder.u32()? as usize;
                 let bytes = decoder.bytes(length)?;
-                let value = std::str::from_utf8(bytes)
-                    .map_err(|_| ProtocolError::Malformed("text value is not UTF-8"))?;
+                let value = std::str::from_utf8(bytes).map_err(|source| {
+                    ProtocolError::InvalidUtf8 { context: "text value is not UTF-8", source }
+                })?;
                 Value::String(value.to_owned())
             }
             0x02 => match decoder.u8()? {
@@ -318,9 +338,9 @@ impl<'a> Decoder<'a> {
     }
 
     fn array<const N: usize>(&mut self) -> Result<[u8; N], ProtocolError> {
-        self.bytes(N)?
-            .try_into()
-            .map_err(|_| ProtocolError::Malformed("message payload is truncated"))
+        let mut array = [0; N];
+        array.copy_from_slice(self.bytes(N)?);
+        Ok(array)
     }
 
     fn u8(&mut self) -> Result<u8, ProtocolError> {

@@ -15,10 +15,11 @@ fn encode_table_key(table_key: TableKey) -> [u8; TABLE_KEY_SIZE] {
 }
 
 fn decode_table_key(key: &[u8]) -> StorageResult<TableKey> {
-    let bytes: [u8; TABLE_KEY_SIZE] = key.try_into().map_err(|_| PageError::CorruptCell {
-        slot_index: 0,
-        kind: CellCorruption::InvalidTableKeyLength { actual: key.len() },
-    })?;
+    let bytes: [u8; TABLE_KEY_SIZE] =
+        key.try_into().map_err(|_wrong_length| PageError::CorruptCell {
+            slot_index: 0,
+            kind: CellCorruption::InvalidTableKeyLength { actual: key.len() },
+        })?;
     Ok(TableKey::from_be_bytes(bytes) ^ TableKey::MIN)
 }
 
@@ -34,10 +35,11 @@ pub(crate) fn encode_index_entry_key(index_key: &[u8], table_key: TableKey) -> V
 }
 
 fn decode_index_table_key(value: &[u8]) -> StorageResult<TableKey> {
-    let bytes: [u8; TABLE_KEY_SIZE] = value.try_into().map_err(|_| PageError::CorruptCell {
-        slot_index: 0,
-        kind: CellCorruption::InvalidIndexTableKeyValueLength { actual: value.len() },
-    })?;
+    let bytes: [u8; TABLE_KEY_SIZE] =
+        value.try_into().map_err(|_wrong_length| PageError::CorruptCell {
+            slot_index: 0,
+            kind: CellCorruption::InvalidIndexTableKeyValueLength { actual: value.len() },
+        })?;
     Ok(TableKey::from_be_bytes(bytes) ^ TableKey::MIN)
 }
 

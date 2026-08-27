@@ -36,7 +36,7 @@ pub(super) fn serialize_transaction<'a, W: Write>(
 ) -> Result<(), LogManagerError> {
     validate_record_txn_ids(txn_id, records)?;
     let entry_count = u32::try_from(records.len())
-        .map_err(|_| LogManagerError::TooManyRecords { count: records.len() })?;
+        .map_err(|_out_of_range| LogManagerError::TooManyRecords { count: records.len() })?;
     let payload_len = serialized_records_len(records)?;
 
     write_frame_header(&mut writer, txn_id, entry_count, payload_len)?;
@@ -87,7 +87,7 @@ pub(super) fn deserialize_transaction(
     let entry_count = cursor.read_u32()?;
     let payload_len = cursor.read_u64()?;
     let payload_len = usize::try_from(payload_len)
-        .map_err(|_| LogManagerError::PayloadLengthTooLarge { payload_len })?;
+        .map_err(|_out_of_range| LogManagerError::PayloadLengthTooLarge { payload_len })?;
 
     let payload_start = cursor.position;
     let payload_end =
@@ -163,8 +163,9 @@ pub(super) fn scan_transaction_frame<R: Read>(
         return Ok(None);
     };
     let header = parse_header(&header_bytes)?;
-    let payload_len = usize::try_from(header.payload_len)
-        .map_err(|_| LogManagerError::PayloadLengthTooLarge { payload_len: header.payload_len })?;
+    let payload_len = usize::try_from(header.payload_len).map_err(|_out_of_range| {
+        LogManagerError::PayloadLengthTooLarge { payload_len: header.payload_len }
+    })?;
     let mut remaining = payload_len;
     let mut digest = CRC32.digest();
     let mut actual_record_count = 0usize;
@@ -361,12 +362,12 @@ pub(super) fn transaction_frame_len(buf: &'_ [u8]) -> Result<usize, LogManagerEr
         return Err(LogManagerError::TruncatedFrame { needed: HEADER_LEN, remaining: buf.len() });
     }
 
-    let header_bytes: &[u8; HEADER_LEN] = (&buf[..HEADER_LEN]).try_into().map_err(|_| {
-        LogManagerError::TruncatedFrame { needed: HEADER_LEN, remaining: buf.len() }
+    let mut header_bytes = [0; HEADER_LEN];
+    header_bytes.copy_from_slice(&buf[..HEADER_LEN]);
+    let header = parse_header(&header_bytes)?;
+    let payload_len = usize::try_from(header.payload_len).map_err(|_out_of_range| {
+        LogManagerError::PayloadLengthTooLarge { payload_len: header.payload_len }
     })?;
-    let header = parse_header(header_bytes)?;
-    let payload_len = usize::try_from(header.payload_len)
-        .map_err(|_| LogManagerError::PayloadLengthTooLarge { payload_len: header.payload_len })?;
 
     HEADER_LEN
         .checked_add(payload_len)
@@ -464,10 +465,10 @@ fn serialized_record_len<'a>(kind: &LogRecordKind<'a>) -> Result<u64, LogManager
         LogRecordKind::PageUpdate { redo_data, undo_data, .. } => {
             validate_page_image_len(redo_data)?;
             validate_page_image_len(undo_data)?;
-            let redo_len = u32::try_from(redo_data.len()).map_err(|_| {
+            let redo_len = u32::try_from(redo_data.len()).map_err(|_out_of_range| {
                 LogManagerError::PayloadLengthTooLarge { payload_len: redo_data.len() as u64 }
             })?;
-            let undo_len = u32::try_from(undo_data.len()).map_err(|_| {
+            let undo_len = u32::try_from(undo_data.len()).map_err(|_out_of_range| {
                 LogManagerError::PayloadLengthTooLarge { payload_len: undo_data.len() as u64 }
             })?;
             Ok(1 + 8 + 4 + 4 + u64::from(redo_len) + u64::from(undo_len))
@@ -523,10 +524,10 @@ fn write_log_record_payload<'a, W: Write>(
         LogRecordKind::PageUpdate { page_id, redo_data, undo_data } => {
             validate_page_image_len(redo_data)?;
             validate_page_image_len(undo_data)?;
-            let redo_len = u32::try_from(redo_data.len()).map_err(|_| {
+            let redo_len = u32::try_from(redo_data.len()).map_err(|_out_of_range| {
                 LogManagerError::PayloadLengthTooLarge { payload_len: redo_data.len() as u64 }
             })?;
-            let undo_len = u32::try_from(undo_data.len()).map_err(|_| {
+            let undo_len = u32::try_from(undo_data.len()).map_err(|_out_of_range| {
                 LogManagerError::PayloadLengthTooLarge { payload_len: undo_data.len() as u64 }
             })?;
 

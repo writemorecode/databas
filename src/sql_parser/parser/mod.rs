@@ -242,9 +242,12 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier(id) => Expression::Identifier(id),
             TokenKind::Asterisk => Expression::Wildcard,
             TokenKind::LeftParen => {
-                let lhs = self
-                    .expr_bp(0)
-                    .map_err(|_| SQLError::new(SQLErrorKind::UnclosedParenthesis, token.offset))?;
+                let lhs = self.expr_bp(0).map_err(|error| match error.kind {
+                    SQLErrorKind::UnexpectedEnd => {
+                        SQLError::new(SQLErrorKind::UnclosedParenthesis, token.offset)
+                    }
+                    _ => error,
+                })?;
                 self.lexer.expect_token(TokenKind::RightParen)?;
                 lhs
             }
@@ -403,6 +406,25 @@ mod parser_tests {
             SQLErrorKind::InvalidOperator { op: TokenKind::Identifier("invalid_operator") },
             8,
         );
+        assert_eq!(Err(expected_err), parser.expr());
+    }
+
+    #[test]
+    fn test_parenthesized_expression_preserves_inner_error() {
+        let parser = Parser::new("(operand invalid_operator)");
+        let expected_err = SQLError::new(
+            SQLErrorKind::InvalidOperator { op: TokenKind::Identifier("invalid_operator") },
+            9,
+        );
+
+        assert_eq!(Err(expected_err), parser.expr());
+    }
+
+    #[test]
+    fn test_unclosed_parenthesized_expression_maps_unexpected_end() {
+        let parser = Parser::new("(operand +");
+        let expected_err = SQLError::new(SQLErrorKind::UnclosedParenthesis, 0);
+
         assert_eq!(Err(expected_err), parser.expr());
     }
 

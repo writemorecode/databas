@@ -30,3 +30,5 @@ unwrap_used = "deny"
 cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"
 cast_sign_loss = "deny"
+
+map_err_ignore = "deny"

@@ -41,6 +41,13 @@ pub enum ClientError {
     /// The server sent a valid frame in an invalid protocol state.
     #[error("unexpected server message: {0}")]
     UnexpectedMessage(&'static str),
+    /// An `EXPLAIN` response contained invalid UTF-8.
+    #[error("unexpected server message: EXPLAIN result is not UTF-8")]
+    InvalidExplainUtf8 {
+        /// The underlying UTF-8 decoding failure.
+        #[source]
+        source: std::str::Utf8Error,
+    },
     /// The database name is empty or exceeds the protocol limit.
     #[error("invalid database name: {0}")]
     InvalidDatabaseName(&'static str),
@@ -166,13 +173,7 @@ fn decode_complete(payload: &[u8], rows: Vec<Vec<Value>>) -> Result<QueryResult,
     };
     match kind {
         COMPLETE_ROWS => {
-            if data.len() != 8 {
-                return Err(ClientError::UnexpectedMessage("row completion count is invalid"));
-            }
-            let expected =
-                u64::from_be_bytes(data.try_into().map_err(|_| {
-                    ClientError::UnexpectedMessage("row completion count is invalid")
-                })?);
+            let expected = decode_completion_count(data, "row completion count is invalid")?;
             if expected != rows.len() as u64 {
                 return Err(ClientError::UnexpectedMessage("row completion count does not match"));
             }
@@ -181,18 +182,12 @@ fn decode_complete(payload: &[u8], rows: Vec<Vec<Value>>) -> Result<QueryResult,
         COMPLETE_EXPLAIN => {
             require_no_rows(&rows)?;
             let plan = std::str::from_utf8(data)
-                .map_err(|_| ClientError::UnexpectedMessage("EXPLAIN result is not UTF-8"))?;
+                .map_err(|source| ClientError::InvalidExplainUtf8 { source })?;
             Ok(QueryResult::Explain(plan.to_owned()))
         }
         COMPLETE_ROWS_AFFECTED => {
             require_no_rows(&rows)?;
-            if data.len() != 8 {
-                return Err(ClientError::UnexpectedMessage("rows-affected count is invalid"));
-            }
-            let count =
-                u64::from_be_bytes(data.try_into().map_err(|_| {
-                    ClientError::UnexpectedMessage("rows-affected count is invalid")
-                })?);
+            let count = decode_completion_count(data, "rows-affected count is invalid")?;
             Ok(QueryResult::RowsAffected(count))
         }
         COMPLETE_SCHEMA_AFFECTED if data.is_empty() => {
@@ -208,6 +203,13 @@ fn decode_complete(payload: &[u8], rows: Vec<Vec<Value>>) -> Result<QueryResult,
         }
         _ => Err(ClientError::UnexpectedMessage("unknown completion kind")),
     }
+}
+
+fn decode_completion_count(data: &[u8], invalid_message: &'static str) -> Result<u64, ClientError> {
+    let [b0, b1, b2, b3, b4, b5, b6, b7] = data else {
+        return Err(ClientError::UnexpectedMessage(invalid_message));
+    };
+    Ok(u64::from_be_bytes([*b0, *b1, *b2, *b3, *b4, *b5, *b6, *b7]))
 }
 
 fn require_no_rows(rows: &[Vec<Value>]) -> Result<(), ClientError> {

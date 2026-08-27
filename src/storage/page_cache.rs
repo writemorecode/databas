@@ -271,7 +271,7 @@ impl PageCache {
         self.inner.runtime.read_page(new_page_id, &mut data)?;
 
         {
-            let mut frame_data = frame.data.try_borrow_mut().map_err(|_| {
+            let mut frame_data = frame.data.try_borrow_mut().map_err(|_borrow_conflict| {
                 PageCacheError::PageMutableBorrowConflict {
                     page_id: old_page_id.unwrap_or(new_page_id),
                 }
@@ -307,7 +307,7 @@ impl PageCache {
         let page = frame
             .data
             .try_borrow()
-            .map_err(|_| PageCacheError::PageImmutableBorrowConflict { page_id })?;
+            .map_err(|_borrow_conflict| PageCacheError::PageImmutableBorrowConflict { page_id })?;
         self.inner
             .runtime
             .flush_wal_through(frame.lsn.get())
@@ -325,7 +325,7 @@ impl PageCache {
             let pin = self.fetch_page(restore.page_id)?;
             let frame = &self.inner.frames[pin.frame_id];
             {
-                let mut data = frame.data.try_borrow_mut().map_err(|_| {
+                let mut data = frame.data.try_borrow_mut().map_err(|_borrow_conflict| {
                     PageCacheError::PageMutableBorrowConflict { page_id: restore.page_id }
                 })?;
                 *data = restore.image;
@@ -369,10 +369,9 @@ impl PinGuard {
     /// fails while a write guard is active.
     pub(crate) fn read(&self) -> PageCacheResult<PageReadGuard<'_>> {
         let frame = &self.page_cache.frames[self.frame_id];
-        let page = frame
-            .data
-            .try_borrow()
-            .map_err(|_| PageCacheError::PageImmutableBorrowConflict { page_id: self.page_id })?;
+        let page = frame.data.try_borrow().map_err(|_borrow_conflict| {
+            PageCacheError::PageImmutableBorrowConflict { page_id: self.page_id }
+        })?;
         Ok(PageReadGuard { page })
     }
 
@@ -383,10 +382,9 @@ impl PinGuard {
     /// caller later decides not to mutate the page bytes.
     pub(crate) fn write(&self) -> PageCacheResult<PageWriteGuard<'_>> {
         let frame = &self.page_cache.frames[self.frame_id];
-        let page = frame
-            .data
-            .try_borrow_mut()
-            .map_err(|_| PageCacheError::PageMutableBorrowConflict { page_id: self.page_id })?;
+        let page = frame.data.try_borrow_mut().map_err(|_borrow_conflict| {
+            PageCacheError::PageMutableBorrowConflict { page_id: self.page_id }
+        })?;
         let before = *page;
         let was_dirty = frame.dirty.get();
         frame.dirty.set(true);

@@ -123,7 +123,7 @@ impl TreeCursor {
                 let child_ref = if child_index + 1 == child_count {
                     ChildSlotRef::Rightmost
                 } else {
-                    let slot_index = u16::try_from(child_index).map_err(|_| {
+                    let slot_index = u16::try_from(child_index).map_err(|_out_of_range| {
                         PageError::InvalidSlotIndex { slot_index: u16::MAX, slot_count }
                     })?;
                     ChildSlotRef::Slot(slot_index)

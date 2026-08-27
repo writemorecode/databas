@@ -177,8 +177,9 @@ where
         first_overflow_page_id: Option<PageId>,
         inline_payload: &[u8],
     ) -> PageResult<SlotId> {
-        let encoded_key_len = u16::try_from(key_len)
-            .map_err(|_| PageError::CellTooLarge { len: key_len, max: u16::MAX as usize })?;
+        let encoded_key_len = u16::try_from(key_len).map_err(|_out_of_range| {
+            PageError::CellTooLarge { len: key_len, max: u16::MAX as usize }
+        })?;
         let Some(expected_inline_len) = format::inline_payload_len(key_len, first_overflow_page_id)
         else {
             return Err(PageError::CellTooLarge { len: key_len, max: u16::MAX as usize });
