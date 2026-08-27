@@ -113,6 +113,9 @@ fn index_key_from_record_bytes(
                 ),
             )
         })?;
+        let value = value.map_err(|error| {
+            invalid_table_record(table, table_key, format!("invalid tuple value: {error}"))
+        })?;
         values.push(Value::from(value));
     }
 

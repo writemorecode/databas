@@ -441,7 +441,9 @@ impl TransactionManager {
         let commit_lsn = match next_lsn(active.last_lsn) {
             Ok(lsn) => lsn,
             Err(err) => {
-                self.active.as_mut().expect("active transaction exists").poisoned = true;
+                if let Some(active) = self.active.as_mut() {
+                    active.poisoned = true;
+                }
                 return Err(err);
             }
         };
@@ -455,12 +457,16 @@ impl TransactionManager {
         let appended_lsn = match log.append_transaction(txn_id, &records) {
             Ok(lsn) => lsn,
             Err(err) => {
-                self.active.as_mut().expect("active transaction exists").poisoned = true;
+                if let Some(active) = self.active.as_mut() {
+                    active.poisoned = true;
+                }
                 return Err(err.into());
             }
         };
         if appended_lsn != commit_lsn {
-            self.active.as_mut().expect("active transaction exists").poisoned = true;
+            if let Some(active) = self.active.as_mut() {
+                active.poisoned = true;
+            }
             return Err(invariant(InvariantViolation::WalLog {
                 message: format!(
                     "commit WAL append assigned LSN {appended_lsn}, expected {commit_lsn}"

@@ -9,7 +9,6 @@
 - `cargo fmt --check`: verifies formatting using `rustfmt.toml`.
 - `cargo clippy --all-targets --all-features`: runs lint checks across library, binary, tests, and examples.
 - `cargo run`: starts the local database client.
-- `cargo run --example table_index_query`: runs the table/index query example.
 
 ## Coding Style & Naming Conventions
 Use standard Rust formatting with the repository rustfmt settings. Keep modules small and domain-oriented. Use `snake_case` for functions, modules, and variables; `CamelCase` for types and traits; `SCREAMING_SNAKE_CASE` for constants. Prefer explicit error types and `Result` propagation over panics outside tests.

@@ -48,4 +48,12 @@ pub enum InvariantViolation {
     TransactionIdExhausted,
     #[error("transaction {txn_id} failed before commit")]
     TransactionPoisoned { txn_id: TxnId },
+    #[error("catalog table {table} cursor had no current record after positioning")]
+    CatalogCursorMissingRecord { table: String },
+    #[error("leaf split has no left-hand cells")]
+    EmptyLeafSplit,
+    #[error("leaf split target key is missing")]
+    LeafSplitTargetMissing,
+    #[error("page {page_id} pin count overflowed")]
+    PagePinCountOverflow { page_id: PageId },
 }

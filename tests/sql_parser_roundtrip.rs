@@ -1,3 +1,5 @@
+#![allow(clippy::panic, reason = "panics in tests provide clear assertion failures")]
+
 use databas::sql_parser::parser::{Parser, SqlItem, stmt::Statement};
 use proptest::prelude::*;
 

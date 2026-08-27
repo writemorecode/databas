@@ -273,12 +273,15 @@ fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManager
     wal_file.seek(SeekFrom::Start(0))?;
     wal_file.read_exact(&mut header)?;
 
-    let magic: [u8; 8] = header[0..8].try_into().expect("slice length is fixed");
+    let mut magic = [0; 8];
+    magic.copy_from_slice(&header[..8]);
     if magic != WAL_FILE_HEADER_MAGIC {
         return Err(LogManagerError::InvalidHeaderMagic { actual: magic });
     }
 
-    let version = u16::from_le_bytes(header[8..10].try_into().expect("slice length is fixed"));
+    let mut version_bytes = [0; 2];
+    version_bytes.copy_from_slice(&header[8..10]);
+    let version = u16::from_le_bytes(version_bytes);
     if version != WAL_FILE_HEADER_VERSION {
         return Err(LogManagerError::UnsupportedVersion {
             expected: WAL_FILE_HEADER_VERSION,
@@ -286,18 +289,21 @@ fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManager
         });
     }
 
-    let expected = u32::from_le_bytes(
-        header[WAL_FILE_HEADER_CHECKSUM_RANGE].try_into().expect("checksum slice length is fixed"),
-    );
+    let mut checksum_bytes = [0; 4];
+    checksum_bytes.copy_from_slice(&header[WAL_FILE_HEADER_CHECKSUM_RANGE]);
+    let expected = u32::from_le_bytes(checksum_bytes);
     header[WAL_FILE_HEADER_CHECKSUM_RANGE].fill(0);
     let actual = CRC32.checksum(&header);
     if actual != expected {
         return Err(LogManagerError::FileHeaderChecksumMismatch { expected, actual });
     }
 
-    let last_assigned_lsn =
-        u64::from_le_bytes(header[16..24].try_into().expect("slice length is fixed"));
-    let max_txn_id = u64::from_le_bytes(header[24..32].try_into().expect("slice length is fixed"));
+    let mut last_assigned_lsn_bytes = [0; 8];
+    last_assigned_lsn_bytes.copy_from_slice(&header[16..24]);
+    let last_assigned_lsn = u64::from_le_bytes(last_assigned_lsn_bytes);
+    let mut max_txn_id_bytes = [0; 8];
+    max_txn_id_bytes.copy_from_slice(&header[24..32]);
+    let max_txn_id = u64::from_le_bytes(max_txn_id_bytes);
     Ok(WalFileHeader { last_assigned_lsn, max_txn_id })
 }
 
@@ -434,7 +440,8 @@ impl LogManager {
         }
         validate_record_txn_ids(txn_id, records)?;
 
-        let record_count = u64::try_from(records.len()).expect("usize record count fits in u64");
+        let record_count = u64::try_from(records.len())
+            .map_err(|_| LogManagerError::TooManyRecords { count: records.len() })?;
         let lsn = self
             .highest_appended_lsn
             .unwrap_or(ZERO_LSN)

@@ -111,6 +111,12 @@ pub enum ExecutorError {
     /// A division expression used zero as the divisor.
     #[error("division by zero")]
     DivisionByZero,
+    /// A logical evaluator received a non-logical operator.
+    #[error("invalid logical operator: {op}")]
+    InvalidLogicalOperator { op: Op },
+    /// An ordering evaluator received a non-ordering operator.
+    #[error("invalid ordering operator: {op}")]
+    InvalidOrderingOperator { op: Op },
     /// A row operator received a non-row-producing child plan.
     #[error("{operator} expected its input plan to return rows")]
     ExpectedRows {

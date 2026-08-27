@@ -164,7 +164,9 @@ pub(crate) fn write_optional_u16(bytes: &mut [u8; PAGE_SIZE], offset: usize, val
 
 /// Reads a little-endian `u64` from `bytes` at `offset`.
 pub(crate) fn read_u64(bytes: &[u8; PAGE_SIZE], offset: usize) -> u64 {
-    u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("u64 slice has fixed width"))
+    let mut value = [0; size_of::<u64>()];
+    value.copy_from_slice(&bytes[offset..offset + size_of::<u64>()]);
+    u64::from_le_bytes(value)
 }
 
 /// Reads a sentinel-encoded optional `u64` from `bytes` at `offset`.
