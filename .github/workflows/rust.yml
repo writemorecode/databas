@@ -57,5 +57,11 @@ jobs:
             ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
             ${{ runner.os }}-cargo-
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Test
-        run: cargo test --all-features
+        run: cargo nextest run --all-features
+
+      - name: Documentation tests
+        run: cargo test --doc --all-features
