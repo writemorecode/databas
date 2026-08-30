@@ -7,8 +7,8 @@ pub type CatalogId = i32;
 /// Integer primary key used by table B+-trees.
 pub type TableKey = i32;
 pub(crate) type SlotId = u16;
-/// Monotonic identifier for a transaction in the write-ahead log.
-pub(crate) type TxnId = u64;
+/// Monotonic identifier for a database transaction.
+pub type TxnId = u64;
 /// Log sequence number assigned to one write-ahead-log record.
 pub(crate) type Lsn = u64;
 
