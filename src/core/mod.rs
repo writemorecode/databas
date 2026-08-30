@@ -10,6 +10,7 @@
 pub(crate) mod access;
 pub(crate) mod database;
 pub mod error;
+pub mod lock_manager;
 mod types;
 
 pub use crate::relational::catalog::{
@@ -24,10 +25,11 @@ pub use error::{
     ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InternalError,
     InvalidArgumentError, LimitExceededError, StorageError, StorageResult,
 };
+pub use types::TxnId;
 pub use types::{
     CatalogId, IndexKeyBound, IndexKeyRange, PageId, TableKey, TableKeyBound, TableKeyRange,
 };
-pub(crate) use types::{Lsn, SlotId, TxnId};
+pub(crate) use types::{Lsn, SlotId};
 
 pub(crate) const PAGE_SIZE_U16: u16 = 4096;
 pub(crate) const PAGE_SIZE: usize = PAGE_SIZE_U16 as usize;
