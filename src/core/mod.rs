@@ -11,6 +11,7 @@ pub(crate) mod access;
 pub(crate) mod database;
 pub mod error;
 pub mod lock_manager;
+pub(crate) mod transaction;
 mod types;
 
 pub use crate::relational::catalog::{

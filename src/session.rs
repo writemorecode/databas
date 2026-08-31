@@ -141,10 +141,12 @@ impl<'db> Session<'db> {
         txn_id: u64,
         plan: PhysicalPlan,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        let savepoint = self.database.statement_savepoint(txn_id)?;
-        match Executor::new(self.database).execute(plan) {
+        let transaction = self.database.transaction(txn_id);
+        debug_assert_eq!(transaction.id(), txn_id);
+        let savepoint = transaction.statement_savepoint()?;
+        match Executor::new(&transaction).execute(plan) {
             Ok(output) => {
-                if self.database.transaction_is_poisoned(txn_id)? {
+                if transaction.is_poisoned()? {
                     return self.rollback_failed_explicit_transaction_statement(
                         savepoint,
                         transaction_poisoned(txn_id).into(),
@@ -174,7 +176,8 @@ impl<'db> Session<'db> {
         plan: PhysicalPlan,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
         let txn_id = self.database.begin_transaction()?;
-        match Executor::new(self.database).execute(plan) {
+        let transaction = self.database.transaction(txn_id);
+        match Executor::new(&transaction).execute(plan) {
             Ok(output) => match self.database.commit_transaction(txn_id) {
                 Ok(()) => Ok(output),
                 Err(commit_error) => {
