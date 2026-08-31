@@ -1,12 +1,12 @@
 use crate::{
-    core::{
-        OwnedTableRecord, TableKey, TableSchema, Tuple, TupleView, Value, access::RecordAccess,
-    },
+    core::{OwnedTableRecord, TableKey, TableSchema, Tuple, TupleView, Value},
     planner::{BoundColumn, PlannedExpression, UpdateAssignment},
     sql_parser::parser::op::Op,
 };
 
-use super::{ExecutionOutput, ExecutorError, ExecutorResult, ExecutorRow, RowStream};
+use super::{
+    ExecutionDatabase, ExecutionOutput, ExecutorError, ExecutorResult, ExecutorRow, RowStream,
+};
 
 /// Evaluates one planned scalar expression against a record.
 ///
@@ -59,8 +59,8 @@ pub(super) fn offset_rows(mut rows: RowStream, mut remaining: usize) -> RowStrea
 ///
 /// Each value row is evaluated, expanded into the target table layout, and then
 /// handed to storage for validation and insertion.
-pub(super) fn execute_insert_values<R: RecordAccess + ?Sized>(
-    records: &R,
+pub(super) fn execute_insert_values(
+    records: &ExecutionDatabase<'_>,
     table: TableSchema,
     columns: Vec<BoundColumn>,
     values: Vec<Vec<PlannedExpression>>,
@@ -100,8 +100,8 @@ pub(super) fn execute_insert_values<R: RecordAccess + ?Sized>(
 }
 
 /// Executes an `UPDATE` plan by consuming and mutating one target row at a time.
-pub(super) fn execute_update<R: RecordAccess + ?Sized>(
-    records: &R,
+pub(super) fn execute_update(
+    records: &ExecutionDatabase<'_>,
     table: TableSchema,
     assignments: Vec<UpdateAssignment>,
     target_rows: RowStream,
@@ -136,8 +136,8 @@ pub(super) fn execute_update<R: RecordAccess + ?Sized>(
 }
 
 /// Executes a `DELETE` plan by consuming and deleting one target row at a time.
-pub(super) fn execute_delete<R: RecordAccess + ?Sized>(
-    records: &R,
+pub(super) fn execute_delete(
+    records: &ExecutionDatabase<'_>,
     table: TableSchema,
     target_rows: RowStream,
 ) -> ExecutorResult<ExecutionOutput> {

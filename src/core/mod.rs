@@ -26,9 +26,9 @@ pub use error::{
     ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InternalError,
     InvalidArgumentError, LimitExceededError, StorageError, StorageResult,
 };
-pub use types::TxnId;
+pub(crate) use transaction::Transaction;
 pub use types::{
-    CatalogId, IndexKeyBound, IndexKeyRange, PageId, TableKey, TableKeyBound, TableKeyRange,
+    CatalogId, IndexKeyBound, IndexKeyRange, PageId, TableKey, TableKeyBound, TableKeyRange, TxnId,
 };
 pub(crate) use types::{Lsn, SlotId};
 

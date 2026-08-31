@@ -13,8 +13,8 @@
 
 use crate::{
     core::{
-        OwnedTableRecord, TableKey, TableRecord as BorrowedTableRecord, Tuple, Value,
-        access::ExecutionAccess,
+        Database, IndexKeyRange, IndexSchema, OwnedTableRecord, TableKey, TableKeyRange,
+        TableRecord as BorrowedTableRecord, TableSchema, Transaction, Tuple, TupleSchema, Value,
         error::{StorageError, StorageResult},
     },
     planner::PhysicalPlan,
@@ -23,8 +23,6 @@ use crate::{
 
 mod expression;
 
-#[cfg(test)]
-use crate::core::Database;
 pub use expression::evaluate_expression;
 #[cfg(test)]
 use expression::record_from_values;
@@ -286,13 +284,112 @@ impl std::fmt::Display for ExecutionOutput {
 /// transaction-scoped gateway or, temporarily during migration, a database
 /// handle for non-transactional reads.
 pub struct Executor<'db> {
-    database: &'db dyn ExecutionAccess,
+    database: ExecutionDatabase<'db>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ExecutionDatabase<'db> {
+    Unscoped(&'db Database),
+    Transaction(&'db Transaction<'db>),
+}
+
+impl ExecutionDatabase<'_> {
+    fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
+        match self {
+            Self::Unscoped(database) => database.create_table(name, row),
+            Self::Transaction(transaction) => transaction.create_table(name, row),
+        }
+    }
+
+    fn create_index(
+        &self,
+        name: &str,
+        table: &str,
+        columns: &[&str],
+    ) -> StorageResult<IndexSchema> {
+        match self {
+            Self::Unscoped(database) => database.create_index(name, table, columns),
+            Self::Transaction(transaction) => transaction.create_index(name, table, columns),
+        }
+    }
+
+    fn scan_table(
+        &self,
+        table: &TableSchema,
+    ) -> StorageResult<crate::relational::record_manager::TableScan> {
+        match self {
+            Self::Unscoped(database) => database.scan_table(table),
+            Self::Transaction(transaction) => transaction.scan_table(table),
+        }
+    }
+
+    fn scan_table_range(
+        &self,
+        table: &TableSchema,
+        range: TableKeyRange,
+    ) -> StorageResult<crate::relational::record_manager::TableScan> {
+        match self {
+            Self::Unscoped(database) => database.scan_table_range(table, range),
+            Self::Transaction(transaction) => transaction.scan_table_range(table, range),
+        }
+    }
+
+    fn scan_index(
+        &self,
+        table: &TableSchema,
+        index: &IndexSchema,
+        range: IndexKeyRange,
+    ) -> StorageResult<crate::relational::record_manager::IndexScan> {
+        match self {
+            Self::Unscoped(database) => database.scan_index(table, index, range),
+            Self::Transaction(transaction) => transaction.scan_index(table, index, range),
+        }
+    }
+
+    fn insert_table_row(
+        &self,
+        table: &TableSchema,
+        values: Vec<Value>,
+    ) -> StorageResult<OwnedTableRecord> {
+        match self {
+            Self::Unscoped(database) => database.insert_table_row(table, values),
+            Self::Transaction(transaction) => transaction.insert_table_row(table, values),
+        }
+    }
+
+    fn delete_table_row(
+        &self,
+        table: &TableSchema,
+        record: &OwnedTableRecord,
+    ) -> StorageResult<()> {
+        match self {
+            Self::Unscoped(database) => database.delete_table_row(table, record),
+            Self::Transaction(transaction) => transaction.delete_table_row(table, record),
+        }
+    }
+
+    fn update_table_row(
+        &self,
+        table: &TableSchema,
+        record: &OwnedTableRecord,
+        values: Vec<Value>,
+    ) -> StorageResult<OwnedTableRecord> {
+        match self {
+            Self::Unscoped(database) => database.update_table_row(table, record, values),
+            Self::Transaction(transaction) => transaction.update_table_row(table, record, values),
+        }
+    }
 }
 
 impl<'db> Executor<'db> {
-    /// Creates an executor that runs plans against `database`.
-    pub(crate) fn new(database: &'db dyn ExecutionAccess) -> Self {
-        Self { database }
+    /// Creates an executor for legacy unscoped reads and focused executor tests.
+    pub(crate) fn new(database: &'db Database) -> Self {
+        Self { database: ExecutionDatabase::Unscoped(database) }
+    }
+
+    /// Creates an executor scoped to an active transaction.
+    pub(crate) fn in_transaction(transaction: &'db Transaction<'db>) -> Self {
+        Self { database: ExecutionDatabase::Transaction(transaction) }
     }
 
     /// Executes a physical plan and returns its output.
@@ -315,15 +412,20 @@ impl<'db> Executor<'db> {
             }
             PhysicalPlan::Values { rows } => execute_values(rows),
             PhysicalPlan::InsertValues { table, columns, values } => {
-                execute_insert_values(self.database, table, columns, values)
+                execute_insert_values(&self.database, table, columns, values)
             }
             PhysicalPlan::Update { table, assignments, input } => {
                 let output_inner = self.execute(*input)?;
-                execute_update(self.database, table, assignments, output_inner.into_rows("UPDATE")?)
+                execute_update(
+                    &self.database,
+                    table,
+                    assignments,
+                    output_inner.into_rows("UPDATE")?,
+                )
             }
             PhysicalPlan::Delete { table, input } => {
                 let output_inner = self.execute(*input)?;
-                execute_delete(self.database, table, output_inner.into_rows("DELETE")?)
+                execute_delete(&self.database, table, output_inner.into_rows("DELETE")?)
             }
             PhysicalPlan::OneRow => Ok(ExecutionOutput::Rows {
                 rows: Box::new(std::iter::once_with(|| empty_record(0))),

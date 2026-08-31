@@ -42,7 +42,7 @@ use crate::{
     core::{
         ColumnSchema, DataType, Database, IndexKeyBound, IndexKeyRange, IndexSchema, TableKey,
         TableKeyBound, TableKeyRange, TableSchema, Tuple, TupleSchema, Value,
-        access::SchemaAccess,
+        access::CatalogRead,
         error::{InvalidArgumentError, StorageError},
     },
     relational::cursor::encode_index_entry_key,

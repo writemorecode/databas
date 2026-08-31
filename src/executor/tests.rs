@@ -6,7 +6,7 @@ use super::*;
 use crate::{
     core::{
         ColumnSchema, DataType, OwnedTableRecord, PAGE_SIZE, TableKey, Tuple, TupleSchema,
-        access::{DdlAccess, SchemaAccess},
+        access::CatalogRead,
         error::{ConstraintError, InternalError, InvariantViolation, StorageError},
     },
     error::DatabaseError,
@@ -2037,11 +2037,13 @@ fn uncommitted_flushed_insert_is_undone_during_recovery() {
     database.create_table("users", users_schema()).unwrap();
     database.create_index("idx_users_name", "users", &["name"]).unwrap();
     database.flush().unwrap();
-    database.begin_transaction().unwrap();
+    let txn_id = database.begin_transaction().unwrap();
     let table = database.table_schema_by_name("users").unwrap();
+    let transaction = database.transaction(txn_id);
+    let access = ExecutionDatabase::Transaction(&transaction);
 
     execute_insert_values(
-        &database,
+        &access,
         table,
         vec![
             bound("id", 0, DataType::Integer),

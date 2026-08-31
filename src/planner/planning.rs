@@ -7,7 +7,7 @@ use super::*;
 /// perform writes. Even DDL and DML statements are represented only as plan
 /// nodes until an executor runs the physical plan.
 pub struct Planner<'db> {
-    schema: &'db dyn SchemaAccess,
+    schema: &'db dyn CatalogRead,
 }
 
 impl<'db> Planner<'db> {
@@ -24,7 +24,7 @@ impl<'db> Planner<'db> {
     /// Keeping this constructor crate-visible lets focused tests and other
     /// internal planning clients provide lightweight schema access without
     /// constructing a storage-backed database.
-    pub(crate) fn with_schema(schema: &'db dyn SchemaAccess) -> Self {
+    pub(crate) fn with_schema(schema: &'db dyn CatalogRead) -> Self {
         Self { schema }
     }
 
