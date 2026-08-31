@@ -13,7 +13,7 @@
 
 use crate::{
     core::{
-        Database, OwnedTableRecord, TableKey, TableRecord as BorrowedTableRecord, Tuple, Value,
+        OwnedTableRecord, TableKey, TableRecord as BorrowedTableRecord, Tuple, Value,
         access::ExecutionAccess,
         error::{StorageError, StorageResult},
     },
@@ -23,6 +23,8 @@ use crate::{
 
 mod expression;
 
+#[cfg(test)]
+use crate::core::Database;
 pub use expression::evaluate_expression;
 #[cfg(test)]
 use expression::record_from_values;
@@ -278,18 +280,18 @@ impl std::fmt::Display for ExecutionOutput {
     }
 }
 
-/// Executes physical query plans against a database handle.
+/// Executes physical query plans through a relational access gateway.
 ///
-/// The executor borrows a [`Database`] and performs catalog, table, and index
-/// operations through that handle. It owns no transaction state; mutation
-/// ordering is encoded directly in each operator implementation.
+/// The executor owns no transaction state; the caller supplies either a
+/// transaction-scoped gateway or, temporarily during migration, a database
+/// handle for non-transactional reads.
 pub struct Executor<'db> {
     database: &'db dyn ExecutionAccess,
 }
 
 impl<'db> Executor<'db> {
     /// Creates an executor that runs plans against `database`.
-    pub fn new(database: &'db Database) -> Self {
+    pub(crate) fn new(database: &'db dyn ExecutionAccess) -> Self {
         Self { database }
     }
 

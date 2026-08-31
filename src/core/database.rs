@@ -91,6 +91,11 @@ impl Database {
         self.transactions.begin_transaction()
     }
 
+    /// Returns the concrete relational gateway for an active transaction.
+    pub(crate) fn transaction(&self, txn_id: TxnId) -> crate::core::transaction::Transaction<'_> {
+        crate::core::transaction::Transaction::new(self, txn_id)
+    }
+
     pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
         self.transactions.commit_transaction(txn_id)
     }
