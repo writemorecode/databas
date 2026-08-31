@@ -1,59 +1,8 @@
-use crate::core::{
-    IndexKeyRange, IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
-    error::StorageResult,
-};
-use crate::relational::record_manager::{IndexScan, TableScan};
+use crate::core::{IndexSchema, TableSchema, error::StorageResult};
 
-pub(crate) trait SchemaAccess {
+/// Minimal catalog seam used by the planner and its lightweight tests.
+pub(crate) trait CatalogRead {
     fn table_schema_by_name(&self, name: &str) -> StorageResult<TableSchema>;
 
     fn index_schemas_for_table(&self, table: &TableSchema) -> StorageResult<Vec<IndexSchema>>;
 }
-
-pub(crate) trait DdlAccess {
-    fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema>;
-
-    fn create_index(
-        &self,
-        name: &str,
-        table_name: &str,
-        columns: &[&str],
-    ) -> StorageResult<IndexSchema>;
-}
-
-pub(crate) trait RecordAccess {
-    fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan>;
-
-    fn scan_table_range(
-        &self,
-        table: &TableSchema,
-        range: TableKeyRange,
-    ) -> StorageResult<TableScan>;
-
-    fn scan_index(
-        &self,
-        table: &TableSchema,
-        index: &IndexSchema,
-        key_range: IndexKeyRange,
-    ) -> StorageResult<IndexScan>;
-
-    fn insert_table_row(
-        &self,
-        table: &TableSchema,
-        values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord>;
-
-    fn delete_table_row(&self, table: &TableSchema, record: &OwnedTableRecord)
-    -> StorageResult<()>;
-
-    fn update_table_row(
-        &self,
-        table: &TableSchema,
-        record: &OwnedTableRecord,
-        values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord>;
-}
-
-pub(crate) trait ExecutionAccess: DdlAccess + RecordAccess {}
-
-impl<T> ExecutionAccess for T where T: DdlAccess + RecordAccess {}

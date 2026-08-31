@@ -8,9 +8,7 @@
 use crate::{
     core::{
         IndexKeyRange, IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema,
-        Value,
-        access::{DdlAccess, RecordAccess},
-        error::StorageResult,
+        Value, error::StorageResult,
     },
     relational::record_manager::{IndexScan, TableScan},
     storage::{log_manager::TxnId, transaction_manager::TransactionSavepoint},
@@ -43,12 +41,12 @@ impl<'db> Transaction<'db> {
     }
 }
 
-impl DdlAccess for Transaction<'_> {
-    fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
+impl Transaction<'_> {
+    pub(crate) fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
         self.database.create_table(name, row)
     }
 
-    fn create_index(
+    pub(crate) fn create_index(
         &self,
         name: &str,
         table_name: &str,
@@ -58,12 +56,12 @@ impl DdlAccess for Transaction<'_> {
     }
 }
 
-impl RecordAccess for Transaction<'_> {
-    fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
+impl Transaction<'_> {
+    pub(crate) fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
         self.database.scan_table(table)
     }
 
-    fn scan_table_range(
+    pub(crate) fn scan_table_range(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
@@ -71,7 +69,7 @@ impl RecordAccess for Transaction<'_> {
         self.database.scan_table_range(table, range)
     }
 
-    fn scan_index(
+    pub(crate) fn scan_index(
         &self,
         table: &TableSchema,
         index: &IndexSchema,
@@ -80,7 +78,7 @@ impl RecordAccess for Transaction<'_> {
         self.database.scan_index(table, index, key_range)
     }
 
-    fn insert_table_row(
+    pub(crate) fn insert_table_row(
         &self,
         table: &TableSchema,
         values: Vec<Value>,
@@ -88,7 +86,7 @@ impl RecordAccess for Transaction<'_> {
         self.database.insert_table_row(table, values)
     }
 
-    fn delete_table_row(
+    pub(crate) fn delete_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,
@@ -96,7 +94,7 @@ impl RecordAccess for Transaction<'_> {
         self.database.delete_table_row(table, record)
     }
 
-    fn update_table_row(
+    pub(crate) fn update_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,

@@ -2,7 +2,7 @@ use tempfile::tempdir;
 
 use super::*;
 use crate::{
-    core::{ColumnSchema, DataType, access::DdlAccess},
+    core::{ColumnSchema, DataType},
     sql_parser::parser::Parser,
 };
 
@@ -45,7 +45,7 @@ fn database_with_users() -> (tempfile::TempDir, Database) {
 
 struct EmptyCatalog;
 
-impl SchemaAccess for EmptyCatalog {
+impl CatalogRead for EmptyCatalog {
     fn table_schema_by_name(&self, name: &str) -> Result<TableSchema, StorageError> {
         Err(StorageError::InvalidArgument(InvalidArgumentError::TableNotFound {
             name: name.to_owned(),

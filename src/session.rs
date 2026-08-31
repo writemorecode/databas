@@ -144,7 +144,7 @@ impl<'db> Session<'db> {
         let transaction = self.database.transaction(txn_id);
         debug_assert_eq!(transaction.id(), txn_id);
         let savepoint = transaction.statement_savepoint()?;
-        match Executor::new(&transaction).execute(plan) {
+        match Executor::in_transaction(&transaction).execute(plan) {
             Ok(output) => {
                 if transaction.is_poisoned()? {
                     return self.rollback_failed_explicit_transaction_statement(
@@ -177,7 +177,7 @@ impl<'db> Session<'db> {
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
         let txn_id = self.database.begin_transaction()?;
         let transaction = self.database.transaction(txn_id);
-        match Executor::new(&transaction).execute(plan) {
+        match Executor::in_transaction(&transaction).execute(plan) {
             Ok(output) => match self.database.commit_transaction(txn_id) {
                 Ok(()) => Ok(output),
                 Err(commit_error) => {

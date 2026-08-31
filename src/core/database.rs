@@ -2,8 +2,7 @@ use std::path::Path;
 
 use crate::core::{
     IndexKeyRange, IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
-    access::{DdlAccess, RecordAccess, SchemaAccess},
-    error::StorageResult,
+    access::CatalogRead, error::StorageResult,
 };
 #[cfg(test)]
 use crate::relational::cursor::{IndexCursor, TableCursor};
@@ -149,7 +148,7 @@ impl Database {
     }
 }
 
-impl SchemaAccess for Database {
+impl CatalogRead for Database {
     fn table_schema_by_name(&self, name: &str) -> StorageResult<TableSchema> {
         self.catalog.table_schema_by_name(name)
     }
@@ -159,12 +158,12 @@ impl SchemaAccess for Database {
     }
 }
 
-impl DdlAccess for Database {
-    fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
+impl Database {
+    pub(crate) fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
         self.catalog.create_table(name, row)
     }
 
-    fn create_index(
+    pub(crate) fn create_index(
         &self,
         name: &str,
         table_name: &str,
@@ -174,12 +173,12 @@ impl DdlAccess for Database {
     }
 }
 
-impl RecordAccess for Database {
-    fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
+impl Database {
+    pub(crate) fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
         self.records.scan_table(table)
     }
 
-    fn scan_table_range(
+    pub(crate) fn scan_table_range(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
@@ -187,7 +186,7 @@ impl RecordAccess for Database {
         self.records.scan_table_range(table, range)
     }
 
-    fn scan_index(
+    pub(crate) fn scan_index(
         &self,
         table: &TableSchema,
         index: &IndexSchema,
@@ -196,7 +195,7 @@ impl RecordAccess for Database {
         self.records.scan_index(table, index, key_range)
     }
 
-    fn insert_table_row(
+    pub(crate) fn insert_table_row(
         &self,
         table: &TableSchema,
         values: Vec<Value>,
@@ -204,7 +203,7 @@ impl RecordAccess for Database {
         self.records.insert_table_row(table, values)
     }
 
-    fn delete_table_row(
+    pub(crate) fn delete_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,
@@ -212,7 +211,7 @@ impl RecordAccess for Database {
         self.records.delete_table_row(table, record)
     }
 
-    fn update_table_row(
+    pub(crate) fn update_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,
