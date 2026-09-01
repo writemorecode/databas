@@ -10,7 +10,8 @@ use crate::relational::{
     index_manager,
 };
 
-/// Internal manager for table record access and mutation.
+/// Compatibility wrapper retained for focused relational tests.
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct RecordManager {
     catalog: CatalogManager,
@@ -36,100 +37,136 @@ pub(crate) struct IndexScan {
     done: bool,
 }
 
+pub(crate) fn scan_table(
+    catalog: &CatalogManager,
+    table: &TableSchema,
+) -> StorageResult<TableScan> {
+    scan_table_range(catalog, table, TableKeyRange::unbounded())
+}
+
+pub(crate) fn scan_table_range(
+    catalog: &CatalogManager,
+    table: &TableSchema,
+    range: TableKeyRange,
+) -> StorageResult<TableScan> {
+    let cursor = catalog.table_cursor_by_name(&table.name)?;
+    let observed_mutation_epoch = cursor.mutation_epoch();
+    Ok(TableScan {
+        cursor,
+        range,
+        last_table_key: None,
+        observed_mutation_epoch,
+        initialized: false,
+        done: false,
+    })
+}
+
+pub(crate) fn scan_index(
+    catalog: &CatalogManager,
+    table: &TableSchema,
+    index: &IndexSchema,
+    key_range: IndexKeyRange,
+) -> StorageResult<IndexScan> {
+    Ok(IndexScan {
+        table: table.clone(),
+        table_cursor: catalog.table_cursor_by_name(&table.name)?,
+        index_cursor: catalog.index_cursor_by_name(&index.name)?,
+        key_range,
+        initialized: false,
+        done: false,
+    })
+}
+
+pub(crate) fn insert_table_row(
+    catalog: &CatalogManager,
+    table: &TableSchema,
+    values: Vec<Value>,
+) -> StorageResult<OwnedTableRecord> {
+    validate_table_row(table, &values)?;
+
+    let table_key = table_key_from_values(table, &values)?;
+    let record = Tuple::new(values).to_bytes()?;
+    let mut table_cursor = catalog.table_cursor_by_name(&table.name)?;
+    table_cursor.insert(table_key, &record)?;
+
+    let record = OwnedTableRecord { table_key, record: record.into_boxed_slice() };
+    index_manager::insert_index_entries(catalog, table, &record)?;
+    Ok(record)
+}
+
+pub(crate) fn delete_table_row(
+    catalog: &CatalogManager,
+    table: &TableSchema,
+    record: &OwnedTableRecord,
+) -> StorageResult<()> {
+    index_manager::delete_index_entries(catalog, table, record)?;
+    let mut table_cursor = catalog.table_cursor_by_name(&table.name)?;
+    table_cursor.delete(record.table_key)
+}
+
+pub(crate) fn update_table_row(
+    catalog: &CatalogManager,
+    table: &TableSchema,
+    record: &OwnedTableRecord,
+    values: Vec<Value>,
+) -> StorageResult<OwnedTableRecord> {
+    validate_table_row(table, &values)?;
+    let updated_table_key = table_key_from_values(table, &values)?;
+    if updated_table_key != record.table_key {
+        return Err(StorageError::InvalidArgument(InvalidArgumentError::PrimaryKeyUpdate {
+            table: table.name.clone(),
+            column: table.row.columns[0].name.clone(),
+        }));
+    }
+
+    let updated = Tuple::new(values).to_bytes()?;
+    let updated =
+        OwnedTableRecord { table_key: record.table_key, record: updated.into_boxed_slice() };
+
+    index_manager::delete_index_entries(catalog, table, record)?;
+    let mut table_cursor = catalog.table_cursor_by_name(&table.name)?;
+    table_cursor.update(record.table_key, &updated.record)?;
+    index_manager::insert_index_entries(catalog, table, &updated)?;
+
+    Ok(updated)
+}
+
+#[cfg(test)]
 impl RecordManager {
     pub(crate) fn new(catalog: CatalogManager) -> Self {
         Self { catalog }
     }
-
     pub(crate) fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
-        self.scan_table_range(table, TableKeyRange::unbounded())
+        scan_table(&self.catalog, table)
     }
-
     pub(crate) fn scan_table_range(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
     ) -> StorageResult<TableScan> {
-        let cursor = self.catalog.table_cursor_by_name(&table.name)?;
-        let observed_mutation_epoch = cursor.mutation_epoch();
-        Ok(TableScan {
-            cursor,
-            range,
-            last_table_key: None,
-            observed_mutation_epoch,
-            initialized: false,
-            done: false,
-        })
+        scan_table_range(&self.catalog, table, range)
     }
-
-    pub(crate) fn scan_index(
-        &self,
-        table: &TableSchema,
-        index: &IndexSchema,
-        key_range: IndexKeyRange,
-    ) -> StorageResult<IndexScan> {
-        Ok(IndexScan {
-            table: table.clone(),
-            table_cursor: self.catalog.table_cursor_by_name(&table.name)?,
-            index_cursor: self.catalog.index_cursor_by_name(&index.name)?,
-            key_range,
-            initialized: false,
-            done: false,
-        })
-    }
-
     pub(crate) fn insert_table_row(
         &self,
         table: &TableSchema,
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord> {
-        validate_table_row(table, &values)?;
-
-        let table_key = table_key_from_values(table, &values)?;
-        let record = Tuple::new(values).to_bytes()?;
-        let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
-        table_cursor.insert(table_key, &record)?;
-
-        let record = OwnedTableRecord { table_key, record: record.into_boxed_slice() };
-        index_manager::insert_index_entries(&self.catalog, table, &record)?;
-        Ok(record)
+        insert_table_row(&self.catalog, table, values)
     }
-
     pub(crate) fn delete_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,
     ) -> StorageResult<()> {
-        index_manager::delete_index_entries(&self.catalog, table, record)?;
-        let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
-        table_cursor.delete(record.table_key)
+        delete_table_row(&self.catalog, table, record)
     }
-
     pub(crate) fn update_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord> {
-        validate_table_row(table, &values)?;
-        let updated_table_key = table_key_from_values(table, &values)?;
-        if updated_table_key != record.table_key {
-            return Err(StorageError::InvalidArgument(InvalidArgumentError::PrimaryKeyUpdate {
-                table: table.name.clone(),
-                column: table.row.columns[0].name.clone(),
-            }));
-        }
-
-        let updated = Tuple::new(values).to_bytes()?;
-        let updated =
-            OwnedTableRecord { table_key: record.table_key, record: updated.into_boxed_slice() };
-
-        index_manager::delete_index_entries(&self.catalog, table, record)?;
-        let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
-        table_cursor.update(record.table_key, &updated.record)?;
-        index_manager::insert_index_entries(&self.catalog, table, &updated)?;
-
-        Ok(updated)
+        update_table_row(&self.catalog, table, record, values)
     }
 }
 
