@@ -4,12 +4,72 @@ use crate::core::{
 };
 use crate::relational::{catalog_manager::CatalogManager, cursor::encode_index_entry_key};
 
-/// Internal manager for secondary-index data maintenance.
+/// Creates and backfills a secondary index.
+pub(crate) fn create_index(
+    catalog: &CatalogManager,
+    name: &str,
+    table_name: &str,
+    columns: &[&str],
+) -> StorageResult<IndexSchema> {
+    let table = catalog.table_schema_by_name(table_name)?;
+    let index = catalog.create_index(name, table_name, columns)?;
+    backfill_index(catalog, &table, &index)?;
+    Ok(index)
+}
+
+pub(crate) fn insert_index_entries(
+    catalog: &CatalogManager,
+    table: &TableSchema,
+    record: &OwnedTableRecord,
+) -> StorageResult<()> {
+    for index in catalog.index_schemas_for_table(table)? {
+        let key = index_key_from_record(table, &index, record)?;
+        let key = encode_index_entry_key(&key, record.table_key);
+        let mut index_cursor = catalog.index_cursor_by_name(&index.name)?;
+        index_cursor.insert(&key, record.table_key)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_index_entries(
+    catalog: &CatalogManager,
+    table: &TableSchema,
+    record: &OwnedTableRecord,
+) -> StorageResult<()> {
+    for index in catalog.index_schemas_for_table(table)? {
+        let key = index_key_from_record(table, &index, record)?;
+        let key = encode_index_entry_key(&key, record.table_key);
+        let mut index_cursor = catalog.index_cursor_by_name(&index.name)?;
+        index_cursor.delete(&key)?;
+    }
+    Ok(())
+}
+
+fn backfill_index(
+    catalog: &CatalogManager,
+    table: &TableSchema,
+    index: &IndexSchema,
+) -> StorageResult<()> {
+    let mut table_cursor = catalog.table_cursor_by_name(&table.name)?;
+    let mut index_cursor = catalog.index_cursor_by_name(&index.name)?;
+    while let Some(record) = table_cursor.next_record()? {
+        let key = index_key_from_table_record(table, index, &record)?;
+        let table_key = record.table_key();
+        let key = encode_index_entry_key(&key, table_key);
+        index_cursor.insert(&key, table_key)?;
+    }
+    Ok(())
+}
+
+/// Compatibility wrapper retained only for focused module tests during the
+/// manager-to-operation migration.
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct IndexManager {
     catalog: CatalogManager,
 }
 
+#[cfg(test)]
 impl IndexManager {
     pub(crate) fn new(catalog: CatalogManager) -> Self {
         Self { catalog }
@@ -21,54 +81,7 @@ impl IndexManager {
         table_name: &str,
         columns: &[&str],
     ) -> StorageResult<IndexSchema> {
-        let table = self.catalog.table_schema_by_name(table_name)?;
-        let index = self.catalog.create_index(name, table_name, columns)?;
-        self.backfill_index(&table, &index)?;
-        Ok(index)
-    }
-
-    pub(crate) fn insert_index_entries(
-        &self,
-        table: &TableSchema,
-        record: &OwnedTableRecord,
-    ) -> StorageResult<()> {
-        for index in self.catalog.index_schemas_for_table(table)? {
-            let key = index_key_from_record(table, &index, record)?;
-            let key = encode_index_entry_key(&key, record.table_key);
-            let mut index_cursor = self.catalog.index_cursor_by_name(&index.name)?;
-            index_cursor.insert(&key, record.table_key)?;
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn delete_index_entries(
-        &self,
-        table: &TableSchema,
-        record: &OwnedTableRecord,
-    ) -> StorageResult<()> {
-        for index in self.catalog.index_schemas_for_table(table)? {
-            let key = index_key_from_record(table, &index, record)?;
-            let key = encode_index_entry_key(&key, record.table_key);
-            let mut index_cursor = self.catalog.index_cursor_by_name(&index.name)?;
-            index_cursor.delete(&key)?;
-        }
-
-        Ok(())
-    }
-
-    fn backfill_index(&self, table: &TableSchema, index: &IndexSchema) -> StorageResult<()> {
-        let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
-        let mut index_cursor = self.catalog.index_cursor_by_name(&index.name)?;
-
-        while let Some(record) = table_cursor.next_record()? {
-            let key = index_key_from_table_record(table, index, &record)?;
-            let table_key = record.table_key();
-            let key = encode_index_entry_key(&key, table_key);
-            index_cursor.insert(&key, table_key)?;
-        }
-
-        Ok(())
+        create_index(&self.catalog, name, table_name, columns)
     }
 }
 
@@ -182,7 +195,7 @@ mod tests {
     fn create_index_backfills_existing_table_rows() {
         let file = NamedTempFile::new().unwrap();
         let (catalog, indexes) = open(file.path()).unwrap();
-        let records = RecordManager::new(catalog.clone(), indexes.clone());
+        let records = RecordManager::new(catalog.clone());
         let table = catalog.create_table("users", users_schema()).unwrap();
         records
             .insert_table_row(
@@ -208,7 +221,7 @@ mod tests {
     fn create_index_backfills_duplicate_index_values() {
         let file = NamedTempFile::new().unwrap();
         let (catalog, indexes) = open(file.path()).unwrap();
-        let records = RecordManager::new(catalog.clone(), indexes.clone());
+        let records = RecordManager::new(catalog.clone());
         let table = catalog.create_table("users", users_schema()).unwrap();
         records
             .insert_table_row(

@@ -7,14 +7,13 @@ use crate::core::{
 use crate::relational::{
     catalog_manager::CatalogManager,
     cursor::{IndexCursor, TableCursor},
-    index_manager::IndexManager,
+    index_manager,
 };
 
 /// Internal manager for table record access and mutation.
 #[derive(Clone)]
 pub(crate) struct RecordManager {
     catalog: CatalogManager,
-    indexes: IndexManager,
 }
 
 /// Iterator over records in one table.
@@ -38,8 +37,8 @@ pub(crate) struct IndexScan {
 }
 
 impl RecordManager {
-    pub(crate) fn new(catalog: CatalogManager, indexes: IndexManager) -> Self {
-        Self { catalog, indexes }
+    pub(crate) fn new(catalog: CatalogManager) -> Self {
+        Self { catalog }
     }
 
     pub(crate) fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
@@ -92,7 +91,7 @@ impl RecordManager {
         table_cursor.insert(table_key, &record)?;
 
         let record = OwnedTableRecord { table_key, record: record.into_boxed_slice() };
-        self.indexes.insert_index_entries(table, &record)?;
+        index_manager::insert_index_entries(&self.catalog, table, &record)?;
         Ok(record)
     }
 
@@ -101,7 +100,7 @@ impl RecordManager {
         table: &TableSchema,
         record: &OwnedTableRecord,
     ) -> StorageResult<()> {
-        self.indexes.delete_index_entries(table, record)?;
+        index_manager::delete_index_entries(&self.catalog, table, record)?;
         let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
         table_cursor.delete(record.table_key)
     }
@@ -125,10 +124,10 @@ impl RecordManager {
         let updated =
             OwnedTableRecord { table_key: record.table_key, record: updated.into_boxed_slice() };
 
-        self.indexes.delete_index_entries(table, record)?;
+        index_manager::delete_index_entries(&self.catalog, table, record)?;
         let mut table_cursor = self.catalog.table_cursor_by_name(&table.name)?;
         table_cursor.update(record.table_key, &updated.record)?;
-        self.indexes.insert_index_entries(table, &updated)?;
+        index_manager::insert_index_entries(&self.catalog, table, &updated)?;
 
         Ok(updated)
     }
@@ -415,8 +414,7 @@ mod tests {
 
     fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, RecordManager)> {
         let catalog = CatalogManager::from_pager(Pager::open_or_create(path)?)?;
-        let indexes = IndexManager::new(catalog.clone());
-        let records = RecordManager::new(catalog.clone(), indexes);
+        let records = RecordManager::new(catalog.clone());
         Ok((catalog, records))
     }
 
