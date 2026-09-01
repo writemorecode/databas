@@ -12,14 +12,13 @@ use crate::relational::{
     record_manager::{self, IndexScan, TableScan},
 };
 use crate::storage::{
-    log_manager::TxnId, pager::Pager, transaction_manager::TransactionSavepoint,
-    transaction_runtime::TransactionRuntime,
+    engine::Storage, log_manager::TxnId, transaction_manager::TransactionSavepoint,
 };
 
 /// Public database handle for one database file.
 pub struct Database {
     catalog: CatalogManager,
-    transactions: TransactionRuntime,
+    storage: Storage,
 }
 
 impl Database {
@@ -30,8 +29,8 @@ impl Database {
     /// Returns an error when the file already exists, cannot be initialized,
     /// or its initial catalog and write-ahead log cannot be written.
     pub fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let pager = Pager::create(path)?;
-        Self::from_pager(pager)
+        let storage = Storage::create(path)?;
+        Self::from_storage(storage)
     }
 
     /// Opens an existing database file.
@@ -41,8 +40,8 @@ impl Database {
     /// Returns an error when the file cannot be opened, its format is invalid,
     /// or recovery cannot restore it to a consistent state.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let pager = Pager::open(path)?;
-        Self::from_pager(pager)
+        let storage = Storage::open(path)?;
+        Self::from_storage(storage)
     }
 
     /// Opens a database file, creating and initializing it if needed.
@@ -52,14 +51,13 @@ impl Database {
     /// Returns an error when the file cannot be opened or initialized, its
     /// format is invalid, or recovery cannot restore it to a consistent state.
     pub fn open_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let pager = Pager::open_or_create(path)?;
-        Self::from_pager(pager)
+        let storage = Storage::open_or_create(path)?;
+        Self::from_storage(storage)
     }
 
-    fn from_pager(pager: Pager) -> StorageResult<Self> {
-        let transactions = pager.transaction_runtime();
-        let catalog = CatalogManager::from_pager(pager)?;
-        Ok(Self { catalog, transactions })
+    fn from_storage(storage: Storage) -> StorageResult<Self> {
+        let catalog = CatalogManager::from_storage(storage.clone())?;
+        Ok(Self { catalog, storage })
     }
 
     /// Returns the database-file path associated with this database.
@@ -79,11 +77,11 @@ impl Database {
 
     #[cfg(test)]
     pub(crate) fn unlock_for_crash_for_test(&self) {
-        self.transactions.unlock_for_crash_for_test().unwrap();
+        self.storage.unlock_for_crash_for_test().unwrap();
     }
 
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
-        self.transactions.begin_transaction()
+        self.storage.begin_transaction()
     }
 
     /// Returns the concrete relational gateway for an active transaction.
@@ -92,45 +90,45 @@ impl Database {
     }
 
     pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        self.transactions.commit_transaction(txn_id)
+        self.storage.commit_transaction(txn_id)
     }
 
     pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
-        self.transactions.statement_savepoint(txn_id)
+        self.storage.statement_savepoint(txn_id)
     }
 
     pub(crate) fn rollback_to_savepoint(
         &self,
         savepoint: TransactionSavepoint,
     ) -> StorageResult<()> {
-        self.transactions.rollback_to_savepoint(savepoint)
+        self.storage.rollback_to_savepoint(savepoint)
     }
 
     pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        self.transactions.rollback_transaction(txn_id)
+        self.storage.rollback_transaction(txn_id)
     }
 
     pub(crate) fn active_transaction_id(&self) -> Option<TxnId> {
-        self.transactions.active_transaction_id()
+        self.storage.active_transaction_id()
     }
 
     pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
-        self.transactions.transaction_is_poisoned(txn_id)
+        self.storage.transaction_is_poisoned(txn_id)
     }
 
     #[cfg(test)]
     pub(crate) fn force_next_lsn_exhausted_for_test(&self) {
-        self.transactions.force_next_lsn_exhausted_for_test();
+        self.storage.force_next_lsn_exhausted_for_test();
     }
 
     #[cfg(test)]
     pub(crate) fn fail_next_savepoint_rollback_for_test(&self) {
-        self.transactions.fail_next_savepoint_rollback_for_test();
+        self.storage.fail_next_savepoint_rollback_for_test();
     }
 
     #[cfg(test)]
     pub(crate) fn fail_next_wal_flush_for_test(&self) {
-        self.transactions.fail_next_wal_flush_for_test();
+        self.storage.fail_next_wal_flush_for_test();
     }
 
     #[cfg(test)]

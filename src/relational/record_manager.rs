@@ -447,10 +447,10 @@ mod tests {
         cursor::{IndexCursor, encode_index_entry_key},
         index_manager::IndexManager,
     };
-    use crate::storage::pager::Pager;
+    use crate::storage::engine::Storage;
 
     fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, RecordManager)> {
-        let catalog = CatalogManager::from_pager(Pager::open_or_create(path)?)?;
+        let catalog = CatalogManager::from_storage(Storage::open_or_create(path)?)?;
         let records = RecordManager::new(catalog.clone());
         Ok((catalog, records))
     }
