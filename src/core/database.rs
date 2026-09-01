@@ -8,7 +8,7 @@ use crate::core::{
 use crate::relational::cursor::{IndexCursor, TableCursor};
 use crate::relational::{
     catalog_manager::CatalogManager,
-    index_manager::IndexManager,
+    index_manager,
     record_manager::{IndexScan, RecordManager, TableScan},
 };
 use crate::storage::{
@@ -19,7 +19,6 @@ use crate::storage::{
 /// Public database handle for one database file.
 pub struct Database {
     catalog: CatalogManager,
-    indexes: IndexManager,
     records: RecordManager,
     transactions: TransactionRuntime,
 }
@@ -61,9 +60,8 @@ impl Database {
     fn from_pager(pager: Pager) -> StorageResult<Self> {
         let transactions = pager.transaction_runtime();
         let catalog = CatalogManager::from_pager(pager)?;
-        let indexes = IndexManager::new(catalog.clone());
-        let records = RecordManager::new(catalog.clone(), indexes.clone());
-        Ok(Self { catalog, indexes, records, transactions })
+        let records = RecordManager::new(catalog.clone());
+        Ok(Self { catalog, records, transactions })
     }
 
     /// Returns the database-file path associated with this database.
@@ -169,7 +167,7 @@ impl Database {
         table_name: &str,
         columns: &[&str],
     ) -> StorageResult<IndexSchema> {
-        self.indexes.create_index(name, table_name, columns)
+        index_manager::create_index(&self.catalog, name, table_name, columns)
     }
 }
 
