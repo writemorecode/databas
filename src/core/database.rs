@@ -9,7 +9,7 @@ use crate::relational::cursor::{IndexCursor, TableCursor};
 use crate::relational::{
     catalog_manager::CatalogManager,
     index_manager,
-    record_manager::{IndexScan, RecordManager, TableScan},
+    record_manager::{self, IndexScan, TableScan},
 };
 use crate::storage::{
     log_manager::TxnId, pager::Pager, transaction_manager::TransactionSavepoint,
@@ -19,7 +19,6 @@ use crate::storage::{
 /// Public database handle for one database file.
 pub struct Database {
     catalog: CatalogManager,
-    records: RecordManager,
     transactions: TransactionRuntime,
 }
 
@@ -60,8 +59,7 @@ impl Database {
     fn from_pager(pager: Pager) -> StorageResult<Self> {
         let transactions = pager.transaction_runtime();
         let catalog = CatalogManager::from_pager(pager)?;
-        let records = RecordManager::new(catalog.clone());
-        Ok(Self { catalog, records, transactions })
+        Ok(Self { catalog, transactions })
     }
 
     /// Returns the database-file path associated with this database.
@@ -173,7 +171,7 @@ impl Database {
 
 impl Database {
     pub(crate) fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
-        self.records.scan_table(table)
+        record_manager::scan_table(&self.catalog, table)
     }
 
     pub(crate) fn scan_table_range(
@@ -181,7 +179,7 @@ impl Database {
         table: &TableSchema,
         range: TableKeyRange,
     ) -> StorageResult<TableScan> {
-        self.records.scan_table_range(table, range)
+        record_manager::scan_table_range(&self.catalog, table, range)
     }
 
     pub(crate) fn scan_index(
@@ -190,7 +188,7 @@ impl Database {
         index: &IndexSchema,
         key_range: IndexKeyRange,
     ) -> StorageResult<IndexScan> {
-        self.records.scan_index(table, index, key_range)
+        record_manager::scan_index(&self.catalog, table, index, key_range)
     }
 
     pub(crate) fn insert_table_row(
@@ -198,7 +196,7 @@ impl Database {
         table: &TableSchema,
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord> {
-        self.records.insert_table_row(table, values)
+        record_manager::insert_table_row(&self.catalog, table, values)
     }
 
     pub(crate) fn delete_table_row(
@@ -206,7 +204,7 @@ impl Database {
         table: &TableSchema,
         record: &OwnedTableRecord,
     ) -> StorageResult<()> {
-        self.records.delete_table_row(table, record)
+        record_manager::delete_table_row(&self.catalog, table, record)
     }
 
     pub(crate) fn update_table_row(
@@ -215,7 +213,7 @@ impl Database {
         record: &OwnedTableRecord,
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord> {
-        self.records.update_table_row(table, record, values)
+        record_manager::update_table_row(&self.catalog, table, record, values)
     }
 }
 
