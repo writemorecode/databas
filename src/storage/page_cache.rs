@@ -506,7 +506,6 @@ mod tests {
     use crate::storage::page::format::PageKind;
     use crate::storage::page::{Leaf, Page, Write};
     use crate::storage::storage_runtime::StorageRuntime;
-    use crate::storage::transaction_runtime::TransactionRuntime;
 
     /// Generates a deterministic page payload from a seed byte.
     fn page_with_pattern(seed: u8) -> [u8; PAGE_SIZE] {
@@ -1095,9 +1094,8 @@ mod tests {
         ];
         let (file, runtime) = create_disk_with_pages(&pages);
         let cache = PageCache::new(Rc::clone(&runtime), 2).unwrap();
-        let transactions = TransactionRuntime::new(Rc::clone(&runtime), cache.clone());
 
-        let txn_id = transactions.begin_transaction().unwrap();
+        let txn_id = runtime.begin_transaction().unwrap();
         {
             let guard = cache.fetch_page(0).unwrap();
             guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 100;

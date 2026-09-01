@@ -15,20 +15,20 @@ use crate::relational::{
     },
     cursor::{IndexCursor, TableCursor},
 };
-use crate::storage::pager::Pager;
+use crate::storage::engine::Storage;
 
 /// Internal catalog manager for one database file.
 ///
-/// `CatalogManager` owns the low-level pager and manages catalog metadata for
+/// `CatalogManager` owns the low-level storage and manages catalog metadata for
 /// table and index B+-trees.
 #[derive(Clone)]
 pub struct CatalogManager {
-    pager: Pager,
+    storage: Storage,
 }
 
 impl CatalogManager {
-    pub(crate) fn from_pager(pager: Pager) -> StorageResult<Self> {
-        let manager = Self { pager };
+    pub(crate) fn from_storage(storage: Storage) -> StorageResult<Self> {
+        let manager = Self { storage };
         manager.initialize_or_validate_system_catalog()?;
         manager.validate_page_formats()?;
         Ok(manager)
@@ -36,12 +36,12 @@ impl CatalogManager {
 
     /// Returns the database-file path associated with this manager.
     pub fn path(&self) -> &Path {
-        self.pager.path()
+        self.storage.path()
     }
 
     /// Flushes all dirty, currently unpinned pages to disk.
     pub fn flush(&self) -> StorageResult<()> {
-        self.pager.flush()
+        self.storage.flush()
     }
 
     /// Creates a cataloged table, allocates its root page, and records its columns.
@@ -54,7 +54,7 @@ impl CatalogManager {
         }
 
         let table_id = self.next_object_id()?;
-        let root_page_id = self.pager.create_tree()?.root_page_id();
+        let root_page_id = self.storage.create_tree()?.root_page_id();
         let schema = TableSchema { table_id, name: name.to_owned(), root_page_id, row };
 
         self.insert_table_catalog_row(&schema.catalog_row())?;
@@ -131,7 +131,7 @@ impl CatalogManager {
             });
         }
 
-        let root_page_id = self.pager.create_tree()?.root_page_id();
+        let root_page_id = self.storage.create_tree()?.root_page_id();
         let schema = IndexSchema {
             index_id,
             name: name.to_owned(),
@@ -160,16 +160,16 @@ impl CatalogManager {
     }
 
     fn initialize_or_validate_system_catalog(&self) -> StorageResult<()> {
-        match self.pager.opened_page_count() {
+        match self.storage.opened_page_count() {
             0 => Err(crate::storage::database_header::missing_header()),
             1 => self.initialize_system_catalog(),
-            2..=3 => Err(missing_system_catalog_root(self.pager.opened_page_count())),
+            2..=3 => Err(missing_system_catalog_root(self.storage.opened_page_count())),
             _ => Ok(()),
         }
     }
 
     fn initialize_system_root(&self, expected_page_id: PageId) -> StorageResult<()> {
-        let actual_page_id = self.pager.create_tree()?.root_page_id();
+        let actual_page_id = self.storage.create_tree()?.root_page_id();
         if actual_page_id == expected_page_id {
             Ok(())
         } else {
@@ -202,18 +202,18 @@ impl CatalogManager {
     }
 
     fn table_cursor(&self, root_page_id: PageId) -> TableCursor {
-        TableCursor::new(self.pager.tree_cursor(root_page_id))
+        TableCursor::new(self.storage.tree_cursor(root_page_id))
     }
 
     fn index_cursor(&self, root_page_id: PageId) -> IndexCursor {
-        IndexCursor::new(self.pager.tree_cursor(root_page_id))
+        IndexCursor::new(self.storage.tree_cursor(root_page_id))
     }
 
     fn validate_page_formats(&self) -> StorageResult<()> {
         let system_roots =
             [SYS_TABLES_ROOT_PAGE_ID, SYS_INDEXES_ROOT_PAGE_ID, SYS_COLUMNS_ROOT_PAGE_ID];
         for root_page_id in system_roots {
-            self.pager.validate_tree_page_formats(root_page_id)?;
+            self.storage.validate_tree_page_formats(root_page_id)?;
         }
 
         let mut roots = system_roots.to_vec();
@@ -226,7 +226,7 @@ impl CatalogManager {
             if system_roots.contains(&root_page_id) {
                 continue;
             }
-            self.pager.validate_tree_page_formats(root_page_id)?;
+            self.storage.validate_tree_page_formats(root_page_id)?;
         }
         Ok(())
     }
@@ -498,7 +498,7 @@ mod tests {
     use crate::storage::{database_header::DatabaseHeader, disk_manager::DiskManager};
 
     fn open(path: impl AsRef<Path>) -> StorageResult<CatalogManager> {
-        CatalogManager::from_pager(Pager::open_or_create(path)?)
+        CatalogManager::from_storage(Storage::open_or_create(path)?)
     }
 
     #[test]
@@ -506,7 +506,7 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let manager = open(file.path()).unwrap();
 
-        assert_eq!(manager.pager.create_tree().unwrap().root_page_id(), 4);
+        assert_eq!(manager.storage.create_tree().unwrap().root_page_id(), 4);
 
         let mut tables = manager.table_cursor(SYS_TABLES_ROOT_PAGE_ID);
         assert_table_catalog_row(
