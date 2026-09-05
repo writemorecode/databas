@@ -11,6 +11,8 @@ pub(crate) mod access;
 pub(crate) mod database;
 pub mod error;
 pub mod lock_manager;
+#[cfg(test)]
+pub(crate) mod test_utils;
 pub(crate) mod transaction;
 mod types;
 
@@ -26,6 +28,7 @@ pub use error::{
     ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InternalError,
     InvalidArgumentError, LimitExceededError, StorageError, StorageResult,
 };
+pub use lock_manager::{LockError, TableId};
 pub(crate) use transaction::Transaction;
 pub use types::{
     CatalogId, IndexKeyBound, IndexKeyRange, PageId, TableKey, TableKeyBound, TableKeyRange, TxnId,

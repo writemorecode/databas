@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, rc::Rc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use fastrand::Rng;
 use tempfile::NamedTempFile;
@@ -52,14 +52,14 @@ fn assert_supported_cell(key: &[u8], value: &[u8]) {
 fn temp_page_cache(cache_frames: usize) -> PageCache {
     let file = NamedTempFile::new().unwrap();
     let disk_manager = DiskManager::new(file.path()).unwrap();
-    let runtime = Rc::new(StorageRuntime::new(file.path().to_path_buf(), disk_manager).unwrap());
+    let runtime = Arc::new(StorageRuntime::new(file.path().to_path_buf(), disk_manager).unwrap());
     PageCache::new(runtime, cache_frames).unwrap()
 }
 
 fn temp_tree_cursor(cache_frames: usize) -> TreeCursor {
     let page_cache = temp_page_cache(cache_frames);
-    let root_page_id = initialize_empty_root(&page_cache).unwrap();
-    TreeCursor::new(page_cache, root_page_id)
+    let root_page_id = initialize_empty_root(&page_cache, None).unwrap();
+    TreeCursor::new(page_cache, root_page_id).unwrap()
 }
 
 fn tree_height(cursor: &TreeCursor) -> StorageResult<usize> {
@@ -117,7 +117,7 @@ fn rejected_mutations_do_not_advance_tree_epoch() {
 #[test]
 fn successful_mutations_advance_shared_tree_epoch_once() {
     let mut cursor = temp_tree_cursor(32);
-    let observer = TreeCursor::new(cursor.page_cache.clone(), cursor.root_page_id());
+    let observer = TreeCursor::new(cursor.page_cache.clone(), cursor.root_page_id()).unwrap();
 
     let before_insert = observer.mutation_epoch();
     cursor.insert(b"key", b"value").unwrap();
@@ -464,15 +464,15 @@ fn insert_get_supports_oversized_keys_promoted_to_interior_pages() {
 #[test]
 fn failed_interior_rewrite_leaves_page_unchanged() {
     let page_cache = temp_page_cache(16);
-    let (page_id, pin) = page_cache.new_page().unwrap();
+    let (page_id, pin) = page_cache.new_page(None).unwrap();
     {
-        let mut guard = pin.write().unwrap();
+        let mut guard = pin.write(None).unwrap();
         let mut interior = RawInterior::<Write<'_>>::initialize_with_rightmost(guard.page_mut(), 2);
         interior.insert_payload_at(0, 0, b"stable".len(), None, b"stable").unwrap();
     }
     drop(pin);
 
-    let cursor = TreeCursor::new(page_cache.clone(), page_id);
+    let cursor = TreeCursor::new(page_cache.clone(), page_id).unwrap();
     let original_page = {
         let pin = page_cache.fetch_page(page_id).unwrap();
         let page = pin.read().unwrap();
@@ -503,10 +503,10 @@ fn failed_interior_rewrite_leaves_page_unchanged() {
 fn unchanged_path_separator_refresh_does_not_grow_file() {
     let file = NamedTempFile::new().unwrap();
     let disk_manager = DiskManager::new(file.path()).unwrap();
-    let runtime = Rc::new(StorageRuntime::new(file.path().to_path_buf(), disk_manager).unwrap());
+    let runtime = Arc::new(StorageRuntime::new(file.path().to_path_buf(), disk_manager).unwrap());
     let page_cache = PageCache::new(runtime, 256).unwrap();
-    let root_page_id = initialize_empty_root(&page_cache).unwrap();
-    let mut cursor = TreeCursor::new(page_cache, root_page_id);
+    let root_page_id = initialize_empty_root(&page_cache, None).unwrap();
+    let mut cursor = TreeCursor::new(page_cache, root_page_id).unwrap();
     let mut expected = BTreeMap::new();
 
     for index in 0..96 {

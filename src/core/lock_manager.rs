@@ -30,25 +30,15 @@
 //! # Loom testing
 //!
 //! The synchronization primitives are substituted with Loom's modeled types
-//! in test builds using the `loom` feature. Run the focused models with
-//! `cargo test --features loom core::lock_manager::loom_tests`.
+//! in test builds using the `loom` configuration flag. Run the focused models
+//! with `RUSTFLAGS="--cfg loom" cargo test --lib core::lock_manager::loom_tests`.
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fmt,
 };
 
-#[cfg(all(test, feature = "loom"))]
-mod sync {
-    pub(super) use loom::sync::{Arc, Condvar, Mutex, MutexGuard};
-}
-
-#[cfg(not(all(test, feature = "loom")))]
-mod sync {
-    pub(super) use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-}
-
-use sync::{Arc, Condvar, Mutex, MutexGuard};
+use crate::sync::{Arc, Condvar, Mutex, MutexGuard};
 use thiserror::Error;
 
 use crate::core::{CatalogId, TxnId};
@@ -311,13 +301,13 @@ impl WaitForGraph {
     }
 
     /// Returns whether `txn_id` has an outgoing edge.
-    #[cfg(all(test, not(feature = "loom")))]
+    #[cfg(all(test, not(loom)))]
     fn contains(&self, txn_id: TxnId) -> bool {
         self.edges.contains_key(&txn_id)
     }
 
     /// Returns whether the graph has no edges.
-    #[cfg(all(test, feature = "loom"))]
+    #[cfg(all(test, loom))]
     fn is_empty(&self) -> bool {
         self.edges.is_empty()
     }
@@ -363,7 +353,7 @@ struct LockManagerInner {
     /// Transaction registry, wait-for edges, and DDL admission state.
     graph: Mutex<GraphState>,
     /// Test-only synchronization proving that a modeled waiter has enqueued.
-    #[cfg(all(test, feature = "loom"))]
+    #[cfg(all(test, loom))]
     enqueue_signal: Mutex<Option<loom::sync::mpsc::Sender<()>>>,
 }
 
@@ -443,6 +433,27 @@ impl LockManager {
         Ok(())
     }
 
+    /// Reserves the database-wide DDL gate for an active ordinary transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LockError::TransactionNotActive`] if `txn_id` is unknown,
+    /// or [`LockError::DdlBusy`] unless it is the sole active transaction.
+    pub fn acquire_ddl_gate(&self, txn_id: TxnId) -> Result<(), LockError> {
+        let mut graph = self.lock_graph()?;
+        if !graph.transactions.contains_key(&txn_id) {
+            return Err(LockError::TransactionNotActive { txn_id });
+        }
+        if graph.ddl_owner == Some(txn_id) {
+            return Ok(());
+        }
+        if graph.transactions.len() != 1 || graph.ddl_owner.is_some() {
+            return Err(LockError::DdlBusy { txn_id });
+        }
+        graph.ddl_owner = Some(txn_id);
+        Ok(())
+    }
+
     /// Returns the lock-acquisition phase of an active transaction.
     ///
     /// # Errors
@@ -456,6 +467,19 @@ impl LockManager {
             .get(&txn_id)
             .map(|transaction| transaction.phase)
             .ok_or(LockError::TransactionNotActive { txn_id })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transaction_is_waiting_for(
+        &self,
+        txn_id: TxnId,
+        table_id: TableId,
+    ) -> Result<bool, LockError> {
+        let graph = self.lock_graph()?;
+        Ok(graph
+            .transactions
+            .get(&txn_id)
+            .is_some_and(|transaction| transaction.waiting_for == Some(table_id)))
     }
 
     /// Acquires an exclusive table lock, waiting in FIFO order when contended.
@@ -549,7 +573,7 @@ impl LockManager {
             return Ok(AcquireDecision::Deadlock);
         }
 
-        #[cfg(all(test, feature = "loom"))]
+        #[cfg(all(test, loom))]
         self.signal_waiter_enqueued()?;
         Ok(AcquireDecision::Wait)
     }
@@ -609,7 +633,7 @@ impl LockManager {
     }
 
     /// Sends the test-only notification that a Loom waiter is fully queued.
-    #[cfg(all(test, feature = "loom"))]
+    #[cfg(all(test, loom))]
     fn signal_waiter_enqueued(&self) -> Result<(), LockError> {
         if let Some(signal) = lock(&self.inner.enqueue_signal, "Loom enqueue signal")?.take() {
             signal
@@ -841,7 +865,7 @@ impl LockManager {
     }
 
     /// Arms a Loom-only notification for the next successfully queued waiter.
-    #[cfg(all(test, feature = "loom"))]
+    #[cfg(all(test, loom))]
     fn signal_next_enqueue(&self) -> Result<loom::sync::mpsc::Receiver<()>, LockError> {
         let (send, receive) = loom::sync::mpsc::channel();
         let mut signal = lock(&self.inner.enqueue_signal, "Loom enqueue signal")?;
@@ -855,7 +879,8 @@ impl LockManager {
     ///
     /// Callers use this only after worker threads join because its diagnostic
     /// multi-queue traversal does not follow the production latch protocol.
-    #[cfg(all(test, not(feature = "loom")))]
+    #[cfg(all(test, not(loom)))]
+    #[allow(clippy::unwrap_used)]
     fn assert_invariants(&self) {
         let queues = self.inner.queues.lock().unwrap();
         let graph = self.inner.graph.lock().unwrap();
@@ -987,7 +1012,8 @@ fn invariant(message: impl Into<String>) -> LockError {
     LockError::Invariant { message: message.into() }
 }
 
-#[cfg(all(test, not(feature = "loom")))]
+#[cfg(all(test, not(loom)))]
+#[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use std::{
         sync::{Arc, Barrier, mpsc},
@@ -1067,6 +1093,17 @@ mod tests {
         manager.acquire(2, 7).unwrap(); // CREATE INDEX parent-table lock.
         rollback(&manager, 2);
         manager.begin_transaction(3).unwrap();
+    }
+
+    #[test]
+    fn ordinary_transaction_can_acquire_ddl_gate_only_when_solo() {
+        let manager = manager_with_transactions(&[1, 2]);
+        assert_eq!(manager.acquire_ddl_gate(1), Err(LockError::DdlBusy { txn_id: 1 }));
+        rollback(&manager, 2);
+
+        manager.acquire_ddl_gate(1).unwrap();
+        manager.acquire_ddl_gate(1).unwrap();
+        assert_eq!(manager.begin_transaction(3), Err(LockError::DdlBusy { txn_id: 3 }));
     }
 
     #[test]
@@ -1326,32 +1363,37 @@ mod tests {
         );
         rollback(&manager, 1);
     }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn poisoned_graph_lock_is_reported() {
+        let manager = Arc::new(LockManager::new());
+        let poisoned_manager = Arc::clone(&manager);
+        let panicked = thread::spawn(move || {
+            let _graph = poisoned_manager.inner.graph.lock().unwrap();
+            panic!("poison wait-for graph");
+        })
+        .join();
+        assert!(panicked.is_err());
+
+        assert_eq!(
+            manager.begin_transaction(1),
+            Err(LockError::Poisoned { mutex: "wait-for graph" })
+        );
+    }
 }
 
-#[cfg(all(test, feature = "loom"))]
+#[cfg(all(test, loom))]
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod loom_tests {
-    use loom::{
-        model::Builder,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-            mpsc,
-        },
-        thread,
+    use loom::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
     };
 
     use super::*;
-
-    fn check_model(model: impl Fn() + Send + Sync + 'static) {
-        let mut builder = Builder::new();
-        // These protocols are small, but condition-variable wakeups can create
-        // many equivalent schedules. Two preemptions cover the races targeted
-        // by these tests while keeping the suite suitable for routine use.
-        builder.preemption_bound = Some(2);
-        builder.max_branches = 200;
-        builder.check(model);
-    }
+    use crate::loom_support::{check_model, thread};
 
     fn rollback(manager: &LockManager, txn_id: TxnId) {
         manager.begin_rollback(txn_id).unwrap();

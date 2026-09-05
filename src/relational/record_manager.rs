@@ -1,7 +1,7 @@
 use crate::core::{
     CorruptionComponent, CorruptionError, CorruptionKind, DataType, IndexEntry, IndexKeyRange,
     IndexSchema, OwnedTableRecord, TableKey, TableKeyBound, TableKeyRange, TableRecord,
-    TableSchema, Tuple, Value,
+    TableSchema, Tuple, TxnId, Value,
     error::{ConstraintError, InvalidArgumentError, StorageError, StorageResult},
 };
 use crate::relational::{
@@ -39,17 +39,19 @@ pub(crate) struct IndexScan {
 
 pub(crate) fn scan_table(
     catalog: &CatalogManager,
+    txn_id: Option<TxnId>,
     table: &TableSchema,
 ) -> StorageResult<TableScan> {
-    scan_table_range(catalog, table, TableKeyRange::unbounded())
+    scan_table_range(catalog, txn_id, table, TableKeyRange::unbounded())
 }
 
 pub(crate) fn scan_table_range(
     catalog: &CatalogManager,
+    txn_id: Option<TxnId>,
     table: &TableSchema,
     range: TableKeyRange,
 ) -> StorageResult<TableScan> {
-    let cursor = catalog.table_cursor_by_name(&table.name)?;
+    let cursor = table_cursor(catalog, txn_id, &table.name)?;
     let observed_mutation_epoch = cursor.mutation_epoch();
     Ok(TableScan {
         cursor,
@@ -63,14 +65,15 @@ pub(crate) fn scan_table_range(
 
 pub(crate) fn scan_index(
     catalog: &CatalogManager,
+    txn_id: Option<TxnId>,
     table: &TableSchema,
     index: &IndexSchema,
     key_range: IndexKeyRange,
 ) -> StorageResult<IndexScan> {
     Ok(IndexScan {
         table: table.clone(),
-        table_cursor: catalog.table_cursor_by_name(&table.name)?,
-        index_cursor: catalog.index_cursor_by_name(&index.name)?,
+        table_cursor: table_cursor(catalog, txn_id, &table.name)?,
+        index_cursor: index_cursor(catalog, txn_id, &index.name)?,
         key_range,
         initialized: false,
         done: false,
@@ -79,6 +82,7 @@ pub(crate) fn scan_index(
 
 pub(crate) fn insert_table_row(
     catalog: &CatalogManager,
+    txn_id: Option<TxnId>,
     table: &TableSchema,
     values: Vec<Value>,
 ) -> StorageResult<OwnedTableRecord> {
@@ -86,26 +90,28 @@ pub(crate) fn insert_table_row(
 
     let table_key = table_key_from_values(table, &values)?;
     let record = Tuple::new(values).to_bytes()?;
-    let mut table_cursor = catalog.table_cursor_by_name(&table.name)?;
+    let mut table_cursor = table_cursor(catalog, txn_id, &table.name)?;
     table_cursor.insert(table_key, &record)?;
 
     let record = OwnedTableRecord { table_key, record: record.into_boxed_slice() };
-    index_manager::insert_index_entries(catalog, table, &record)?;
+    index_manager::insert_index_entries(catalog, txn_id, table, &record)?;
     Ok(record)
 }
 
 pub(crate) fn delete_table_row(
     catalog: &CatalogManager,
+    txn_id: Option<TxnId>,
     table: &TableSchema,
     record: &OwnedTableRecord,
 ) -> StorageResult<()> {
-    index_manager::delete_index_entries(catalog, table, record)?;
-    let mut table_cursor = catalog.table_cursor_by_name(&table.name)?;
+    index_manager::delete_index_entries(catalog, txn_id, table, record)?;
+    let mut table_cursor = table_cursor(catalog, txn_id, &table.name)?;
     table_cursor.delete(record.table_key)
 }
 
 pub(crate) fn update_table_row(
     catalog: &CatalogManager,
+    txn_id: Option<TxnId>,
     table: &TableSchema,
     record: &OwnedTableRecord,
     values: Vec<Value>,
@@ -123,12 +129,34 @@ pub(crate) fn update_table_row(
     let updated =
         OwnedTableRecord { table_key: record.table_key, record: updated.into_boxed_slice() };
 
-    index_manager::delete_index_entries(catalog, table, record)?;
-    let mut table_cursor = catalog.table_cursor_by_name(&table.name)?;
+    index_manager::delete_index_entries(catalog, txn_id, table, record)?;
+    let mut table_cursor = table_cursor(catalog, txn_id, &table.name)?;
     table_cursor.update(record.table_key, &updated.record)?;
-    index_manager::insert_index_entries(catalog, table, &updated)?;
+    index_manager::insert_index_entries(catalog, txn_id, table, &updated)?;
 
     Ok(updated)
+}
+
+fn table_cursor(
+    catalog: &CatalogManager,
+    txn_id: Option<TxnId>,
+    name: &str,
+) -> StorageResult<TableCursor> {
+    match txn_id {
+        Some(txn_id) => catalog.transaction_table_cursor_by_name(txn_id, name),
+        None => catalog.table_cursor_by_name(name),
+    }
+}
+
+fn index_cursor(
+    catalog: &CatalogManager,
+    txn_id: Option<TxnId>,
+    name: &str,
+) -> StorageResult<IndexCursor> {
+    match txn_id {
+        Some(txn_id) => catalog.transaction_index_cursor_by_name(txn_id, name),
+        None => catalog.index_cursor_by_name(name),
+    }
 }
 
 #[cfg(test)]
@@ -137,28 +165,28 @@ impl RecordManager {
         Self { catalog }
     }
     pub(crate) fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
-        scan_table(&self.catalog, table)
+        scan_table(&self.catalog, None, table)
     }
     pub(crate) fn scan_table_range(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
     ) -> StorageResult<TableScan> {
-        scan_table_range(&self.catalog, table, range)
+        scan_table_range(&self.catalog, None, table, range)
     }
     pub(crate) fn insert_table_row(
         &self,
         table: &TableSchema,
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord> {
-        insert_table_row(&self.catalog, table, values)
+        insert_table_row(&self.catalog, None, table, values)
     }
     pub(crate) fn delete_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,
     ) -> StorageResult<()> {
-        delete_table_row(&self.catalog, table, record)
+        delete_table_row(&self.catalog, None, table, record)
     }
     pub(crate) fn update_table_row(
         &self,
@@ -166,7 +194,7 @@ impl RecordManager {
         record: &OwnedTableRecord,
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord> {
-        update_table_row(&self.catalog, table, record, values)
+        update_table_row(&self.catalog, None, table, record, values)
     }
 }
 

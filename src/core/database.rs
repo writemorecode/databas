@@ -1,16 +1,14 @@
 use std::path::Path;
 
 use crate::core::{
-    IndexKeyRange, IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
-    access::CatalogRead, error::StorageResult,
+    IndexSchema, TableId, TableSchema,
+    access::CatalogRead,
+    error::StorageResult,
+    lock_manager::{LockManager, TableLease},
 };
+use crate::relational::catalog_manager::CatalogManager;
 #[cfg(test)]
 use crate::relational::cursor::{IndexCursor, TableCursor};
-use crate::relational::{
-    catalog_manager::CatalogManager,
-    index_manager,
-    record_manager::{self, IndexScan, TableScan},
-};
 use crate::storage::{
     engine::Storage, log_manager::TxnId, transaction_manager::TransactionSavepoint,
 };
@@ -19,6 +17,13 @@ use crate::storage::{
 pub struct Database {
     catalog: CatalogManager,
     storage: Storage,
+    locks: LockManager,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StatementTransactionMode {
+    Ordinary,
+    Ddl,
 }
 
 impl Database {
@@ -57,7 +62,7 @@ impl Database {
 
     fn from_storage(storage: Storage) -> StorageResult<Self> {
         let catalog = CatalogManager::from_storage(storage.clone())?;
-        Ok(Self { catalog, storage })
+        Ok(Self { catalog, storage, locks: LockManager::default() })
     }
 
     /// Returns the database-file path associated with this database.
@@ -81,16 +86,56 @@ impl Database {
     }
 
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
-        self.storage.begin_transaction()
+        self.begin_statement_transaction(StatementTransactionMode::Ordinary)
+    }
+
+    pub(crate) fn acquire_ddl_gate(&self, txn_id: TxnId) -> StorageResult<()> {
+        self.locks.acquire_ddl_gate(txn_id).map_err(Into::into)
+    }
+
+    pub(crate) fn begin_statement_transaction(
+        &self,
+        mode: StatementTransactionMode,
+    ) -> StorageResult<TxnId> {
+        let txn_id = self.storage.begin_transaction()?;
+        let admission = match mode {
+            StatementTransactionMode::Ordinary => self.locks.begin_transaction(txn_id),
+            StatementTransactionMode::Ddl => self.locks.begin_ddl_transaction(txn_id),
+        };
+        if let Err(error) = admission {
+            self.storage.rollback_transaction(txn_id)?;
+            return Err(error.into());
+        }
+        Ok(txn_id)
+    }
+
+    pub(crate) fn acquire_table_leases(
+        &self,
+        txn_id: TxnId,
+        table_ids: &[TableId],
+    ) -> StorageResult<Vec<TableLease>> {
+        table_ids
+            .iter()
+            .map(|table_id| self.locks.acquire(txn_id, *table_id).map_err(Into::into))
+            .collect()
     }
 
     /// Returns the concrete relational gateway for an active transaction.
-    pub(crate) fn transaction(&self, txn_id: TxnId) -> crate::core::transaction::Transaction<'_> {
-        crate::core::transaction::Transaction::new(self, txn_id)
+    pub(crate) fn transaction(
+        &self,
+        txn_id: TxnId,
+        leases: Vec<TableLease>,
+    ) -> crate::core::transaction::Transaction<'_> {
+        crate::core::transaction::Transaction::new(self, txn_id, leases)
     }
 
     pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        self.storage.commit_transaction(txn_id)
+        let result = self.storage.commit_transaction(txn_id);
+        if !self.storage.transaction_is_active(txn_id)? {
+            self.locks.begin_commit(txn_id)?;
+            self.locks.finish_transaction(txn_id)?;
+        }
+        result
     }
 
     pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
@@ -105,11 +150,14 @@ impl Database {
     }
 
     pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        self.storage.rollback_transaction(txn_id)
+        self.locks.begin_rollback(txn_id)?;
+        self.storage.rollback_transaction(txn_id)?;
+        self.locks.finish_transaction(txn_id)?;
+        Ok(())
     }
 
-    pub(crate) fn active_transaction_id(&self) -> Option<TxnId> {
-        self.storage.active_transaction_id()
+    pub(crate) fn transaction_is_active(&self, txn_id: TxnId) -> StorageResult<bool> {
+        self.storage.transaction_is_active(txn_id)
     }
 
     pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
@@ -118,17 +166,26 @@ impl Database {
 
     #[cfg(test)]
     pub(crate) fn force_next_lsn_exhausted_for_test(&self) {
-        self.storage.force_next_lsn_exhausted_for_test();
+        self.storage.force_next_lsn_exhausted_for_test().unwrap();
     }
 
     #[cfg(test)]
     pub(crate) fn fail_next_savepoint_rollback_for_test(&self) {
-        self.storage.fail_next_savepoint_rollback_for_test();
+        self.storage.fail_next_savepoint_rollback_for_test().unwrap();
     }
 
     #[cfg(test)]
     pub(crate) fn fail_next_wal_flush_for_test(&self) {
-        self.storage.fail_next_wal_flush_for_test();
+        self.storage.fail_next_wal_flush_for_test().unwrap();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transaction_is_waiting_for_test(
+        &self,
+        txn_id: TxnId,
+        table_id: TableId,
+    ) -> StorageResult<bool> {
+        Ok(self.locks.transaction_is_waiting_for(txn_id, table_id)?)
     }
 
     #[cfg(test)]
@@ -139,6 +196,10 @@ impl Database {
     #[cfg(test)]
     pub(crate) fn index_cursor_by_name(&self, name: &str) -> StorageResult<IndexCursor> {
         self.catalog.index_cursor_by_name(name)
+    }
+
+    pub(super) fn catalog(&self) -> &CatalogManager {
+        &self.catalog
     }
 }
 
@@ -152,75 +213,21 @@ impl CatalogRead for Database {
     }
 }
 
-impl Database {
-    pub(crate) fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
-        self.catalog.create_table(name, row)
-    }
-
-    pub(crate) fn create_index(
-        &self,
-        name: &str,
-        table_name: &str,
-        columns: &[&str],
-    ) -> StorageResult<IndexSchema> {
-        index_manager::create_index(&self.catalog, name, table_name, columns)
-    }
-}
-
-impl Database {
-    pub(crate) fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
-        record_manager::scan_table(&self.catalog, table)
-    }
-
-    pub(crate) fn scan_table_range(
-        &self,
-        table: &TableSchema,
-        range: TableKeyRange,
-    ) -> StorageResult<TableScan> {
-        record_manager::scan_table_range(&self.catalog, table, range)
-    }
-
-    pub(crate) fn scan_index(
-        &self,
-        table: &TableSchema,
-        index: &IndexSchema,
-        key_range: IndexKeyRange,
-    ) -> StorageResult<IndexScan> {
-        record_manager::scan_index(&self.catalog, table, index, key_range)
-    }
-
-    pub(crate) fn insert_table_row(
-        &self,
-        table: &TableSchema,
-        values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord> {
-        record_manager::insert_table_row(&self.catalog, table, values)
-    }
-
-    pub(crate) fn delete_table_row(
-        &self,
-        table: &TableSchema,
-        record: &OwnedTableRecord,
-    ) -> StorageResult<()> {
-        record_manager::delete_table_row(&self.catalog, table, record)
-    }
-
-    pub(crate) fn update_table_row(
-        &self,
-        table: &TableSchema,
-        record: &OwnedTableRecord,
-        values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord> {
-        record_manager::update_table_row(&self.catalog, table, record, values)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use tempfile::{NamedTempFile, tempdir};
 
     use super::*;
-    use crate::core::error::{CorruptionError, CorruptionKind, StorageError};
+    use crate::core::{
+        LockError,
+        error::{CorruptionError, CorruptionKind, StorageError},
+    };
+
+    #[test]
+    fn database_handle_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Database>();
+    }
 
     #[test]
     fn create_initializes_database_that_can_be_opened() {
@@ -250,6 +257,27 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
 
         assert!(Database::create(file.path()).is_err());
+    }
+
+    #[test]
+    fn failed_lock_admission_rolls_back_the_new_storage_transaction() {
+        let dir = tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+        let ddl_txn = database.begin_statement_transaction(StatementTransactionMode::Ddl).unwrap();
+        let rejected_txn = ddl_txn + 1;
+
+        assert!(matches!(
+            database.begin_statement_transaction(StatementTransactionMode::Ordinary),
+            Err(StorageError::Lock(LockError::DdlBusy { txn_id }))
+                if txn_id == rejected_txn
+        ));
+        assert!(!database.storage.transaction_is_active(rejected_txn).unwrap());
+        assert_eq!(
+            database.locks.transaction_phase(rejected_txn),
+            Err(LockError::TransactionNotActive { txn_id: rejected_txn })
+        );
+
+        database.rollback_transaction(ddl_txn).unwrap();
     }
 
     #[test]

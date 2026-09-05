@@ -1,9 +1,12 @@
 use super::*;
 
 /// Allocates and initializes a brand-new empty raw root leaf page.
-pub(crate) fn initialize_empty_root(page_cache: &PageCache) -> StorageResult<PageId> {
-    let (page_id, pin) = page_cache.new_page()?;
-    let mut page = pin.write()?;
+pub(crate) fn initialize_empty_root(
+    page_cache: &PageCache,
+    txn_id: Option<TxnId>,
+) -> StorageResult<PageId> {
+    let (page_id, pin) = page_cache.new_page(txn_id)?;
+    let mut page = pin.write(txn_id)?;
     let _ = RawLeaf::<Write<'_>>::initialize(page.page_mut());
     Ok(page_id)
 }

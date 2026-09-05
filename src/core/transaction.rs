@@ -8,9 +8,14 @@
 use crate::{
     core::{
         IndexKeyRange, IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema,
-        Value, error::StorageResult,
+        Value,
+        error::{StorageError, StorageResult},
+        lock_manager::{LockError, TableId, TableLease},
     },
-    relational::record_manager::{IndexScan, TableScan},
+    relational::{
+        index_manager,
+        record_manager::{self, IndexScan, TableScan},
+    },
     storage::{log_manager::TxnId, transaction_manager::TransactionSavepoint},
 };
 
@@ -20,11 +25,12 @@ use super::Database;
 pub(crate) struct Transaction<'db> {
     database: &'db Database,
     txn_id: TxnId,
+    leases: Vec<TableLease>,
 }
 
 impl<'db> Transaction<'db> {
-    pub(super) fn new(database: &'db Database, txn_id: TxnId) -> Self {
-        Self { database, txn_id }
+    pub(super) fn new(database: &'db Database, txn_id: TxnId, leases: Vec<TableLease>) -> Self {
+        Self { database, txn_id, leases }
     }
 
     /// Returns the storage transaction identity associated with this gateway.
@@ -39,11 +45,20 @@ impl<'db> Transaction<'db> {
     pub(crate) fn is_poisoned(&self) -> StorageResult<bool> {
         self.database.transaction_is_poisoned(self.txn_id)
     }
+
+    fn require_table(&self, table: &TableSchema) -> StorageResult<()> {
+        let table_id = TableId::from(table.table_id);
+        if self.leases.iter().any(|lease| lease.authorize(self.txn_id, table_id).is_ok()) {
+            Ok(())
+        } else {
+            Err(StorageError::Lock(LockError::LeaseMismatch { txn_id: self.txn_id, table_id }))
+        }
+    }
 }
 
 impl Transaction<'_> {
     pub(crate) fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
-        self.database.create_table(name, row)
+        self.database.catalog().for_transaction(self.txn_id).create_table(name, row)
     }
 
     pub(crate) fn create_index(
@@ -52,13 +67,19 @@ impl Transaction<'_> {
         table_name: &str,
         columns: &[&str],
     ) -> StorageResult<IndexSchema> {
-        self.database.create_index(name, table_name, columns)
+        index_manager::create_index(
+            &self.database.catalog().for_transaction(self.txn_id),
+            name,
+            table_name,
+            columns,
+        )
     }
 }
 
 impl Transaction<'_> {
     pub(crate) fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
-        self.database.scan_table(table)
+        self.require_table(table)?;
+        record_manager::scan_table(self.database.catalog(), Some(self.txn_id), table)
     }
 
     pub(crate) fn scan_table_range(
@@ -66,7 +87,8 @@ impl Transaction<'_> {
         table: &TableSchema,
         range: TableKeyRange,
     ) -> StorageResult<TableScan> {
-        self.database.scan_table_range(table, range)
+        self.require_table(table)?;
+        record_manager::scan_table_range(self.database.catalog(), Some(self.txn_id), table, range)
     }
 
     pub(crate) fn scan_index(
@@ -75,7 +97,14 @@ impl Transaction<'_> {
         index: &IndexSchema,
         key_range: IndexKeyRange,
     ) -> StorageResult<IndexScan> {
-        self.database.scan_index(table, index, key_range)
+        self.require_table(table)?;
+        record_manager::scan_index(
+            self.database.catalog(),
+            Some(self.txn_id),
+            table,
+            index,
+            key_range,
+        )
     }
 
     pub(crate) fn insert_table_row(
@@ -83,7 +112,8 @@ impl Transaction<'_> {
         table: &TableSchema,
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord> {
-        self.database.insert_table_row(table, values)
+        self.require_table(table)?;
+        record_manager::insert_table_row(self.database.catalog(), Some(self.txn_id), table, values)
     }
 
     pub(crate) fn delete_table_row(
@@ -91,7 +121,8 @@ impl Transaction<'_> {
         table: &TableSchema,
         record: &OwnedTableRecord,
     ) -> StorageResult<()> {
-        self.database.delete_table_row(table, record)
+        self.require_table(table)?;
+        record_manager::delete_table_row(self.database.catalog(), Some(self.txn_id), table, record)
     }
 
     pub(crate) fn update_table_row(
@@ -100,6 +131,13 @@ impl Transaction<'_> {
         record: &OwnedTableRecord,
         values: Vec<Value>,
     ) -> StorageResult<OwnedTableRecord> {
-        self.database.update_table_row(table, record, values)
+        self.require_table(table)?;
+        record_manager::update_table_row(
+            self.database.catalog(),
+            Some(self.txn_id),
+            table,
+            record,
+            values,
+        )
     }
 }

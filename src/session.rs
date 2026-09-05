@@ -10,7 +10,9 @@ use crate::storage::transaction_manager::TransactionSavepoint;
 use crate::{
     core::{
         Database,
+        database::StatementTransactionMode,
         error::{InternalError, InvariantViolation, StorageError},
+        lock_manager::TableLease,
     },
     error::DatabaseError,
     executor::{ExecutionOutput, Executor},
@@ -42,6 +44,11 @@ impl<'db> Session<'db> {
         Self { database, active_txn: None }
     }
 
+    #[cfg(test)]
+    pub(crate) fn active_transaction_id_for_test(&self) -> Option<u64> {
+        self.active_txn
+    }
+
     /// Parses and executes one top-level SQL item.
     pub fn execute_sql<'sql>(
         &mut self,
@@ -66,17 +73,25 @@ impl<'db> Session<'db> {
         &mut self,
         statement: Statement<'sql>,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        let mutating = statement_is_mutating(&statement);
+        let transaction_mode = statement_transaction_mode(&statement);
         let plan = Planner::new(self.database).plan_physical_statement(&statement)?;
-
-        if !mutating {
-            return self.execute_plan(plan);
-        }
+        let table_ids = plan_table_ids(&plan);
 
         if let Some(txn_id) = self.active_txn {
-            self.execute_explicit_transaction_statement(txn_id, plan)
+            if transaction_mode == StatementTransactionMode::Ddl {
+                self.database.acquire_ddl_gate(txn_id)?;
+            }
+            let leases = match self.database.acquire_table_leases(txn_id, &table_ids) {
+                Ok(leases) => leases,
+                Err(error) => {
+                    self.database.rollback_transaction(txn_id)?;
+                    self.active_txn = None;
+                    return Err(error.into());
+                }
+            };
+            self.execute_explicit_transaction_statement(txn_id, leases, plan)
         } else {
-            self.execute_implicit_transaction(plan)
+            self.execute_implicit_transaction(plan, table_ids, transaction_mode)
         }
     }
 
@@ -109,7 +124,7 @@ impl<'db> Session<'db> {
                 Ok(ExecutionOutput::CommandOk)
             }
             Err(error) => {
-                self.sync_active_transaction(txn_id);
+                self.sync_active_transaction(txn_id)?;
                 Err(error.into())
             }
         }
@@ -123,25 +138,19 @@ impl<'db> Session<'db> {
                 Ok(ExecutionOutput::CommandOk)
             }
             Err(error) => {
-                self.sync_active_transaction(txn_id);
+                self.sync_active_transaction(txn_id)?;
                 Err(error.into())
             }
         }
     }
 
-    fn execute_plan<'sql>(
-        &self,
-        plan: PhysicalPlan,
-    ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        Ok(Executor::new(self.database).execute(plan)?)
-    }
-
     fn execute_explicit_transaction_statement<'sql>(
         &mut self,
         txn_id: u64,
+        leases: Vec<TableLease>,
         plan: PhysicalPlan,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        let transaction = self.database.transaction(txn_id);
+        let transaction = self.database.transaction(txn_id, leases);
         debug_assert_eq!(transaction.id(), txn_id);
         let savepoint = transaction.statement_savepoint()?;
         match Executor::in_transaction(&transaction).execute(plan) {
@@ -174,14 +183,24 @@ impl<'db> Session<'db> {
     fn execute_implicit_transaction<'sql>(
         &self,
         plan: PhysicalPlan,
+        table_ids: Vec<crate::core::TableId>,
+        mode: StatementTransactionMode,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        let txn_id = self.database.begin_transaction()?;
-        let transaction = self.database.transaction(txn_id);
+        let txn_id = self.database.begin_statement_transaction(mode)?;
+        let leases = match self.database.acquire_table_leases(txn_id, &table_ids) {
+            Ok(leases) => leases,
+            Err(error) => {
+                self.database.rollback_transaction(txn_id)?;
+                return Err(error.into());
+            }
+        };
+        let transaction = self.database.transaction(txn_id, leases);
         match Executor::in_transaction(&transaction).execute(plan) {
             Ok(output) => match self.database.commit_transaction(txn_id) {
                 Ok(()) => Ok(output),
                 Err(commit_error) => {
-                    if let Err(rollback_error) = self.database.rollback_transaction(txn_id)
+                    if self.database.transaction_is_active(txn_id)?
+                        && let Err(rollback_error) = self.database.rollback_transaction(txn_id)
                         && !is_no_active_transaction(&rollback_error)
                     {
                         return Err(rollback_error.into());
@@ -198,10 +217,11 @@ impl<'db> Session<'db> {
         }
     }
 
-    fn sync_active_transaction(&mut self, txn_id: u64) {
-        if self.database.active_transaction_id() != Some(txn_id) {
+    fn sync_active_transaction(&mut self, txn_id: u64) -> Result<(), StorageError> {
+        if !self.database.transaction_is_active(txn_id)? {
             self.active_txn = None;
         }
+        Ok(())
     }
 }
 
@@ -213,14 +233,42 @@ impl Drop for Session<'_> {
     }
 }
 
-fn statement_is_mutating(statement: &Statement<'_>) -> bool {
+fn statement_transaction_mode(statement: &Statement<'_>) -> StatementTransactionMode {
     match statement {
-        Statement::CreateTable(_)
-        | Statement::CreateIndex(_)
-        | Statement::Insert(_)
-        | Statement::Update(_)
-        | Statement::Delete(_) => true,
-        Statement::Select(_) | Statement::Explain(_) => false,
+        Statement::CreateTable(_) | Statement::CreateIndex(_) => StatementTransactionMode::Ddl,
+        _ => StatementTransactionMode::Ordinary,
+    }
+}
+
+fn plan_table_ids(plan: &PhysicalPlan) -> Vec<crate::core::TableId> {
+    let mut table_ids = Vec::new();
+    collect_plan_table_ids(plan, &mut table_ids);
+    table_ids.sort_unstable();
+    table_ids.dedup();
+    table_ids
+}
+
+fn collect_plan_table_ids(plan: &PhysicalPlan, table_ids: &mut Vec<crate::core::TableId>) {
+    match plan {
+        PhysicalPlan::CreateIndex { table, .. }
+        | PhysicalPlan::InsertValues { table, .. }
+        | PhysicalPlan::Update { table, .. }
+        | PhysicalPlan::Delete { table, .. }
+        | PhysicalPlan::FullTableScan { table }
+        | PhysicalPlan::PrimaryKeyRangeScan { table, .. } => table_ids.push(table.table_id.into()),
+        PhysicalPlan::SecondaryIndexScan { scan } => table_ids.push(scan.table.table_id.into()),
+        _ => {}
+    }
+    match plan {
+        PhysicalPlan::Explain { input }
+        | PhysicalPlan::Update { input, .. }
+        | PhysicalPlan::Delete { input, .. }
+        | PhysicalPlan::Filter { input, .. }
+        | PhysicalPlan::Sort { input, .. }
+        | PhysicalPlan::Project { input, .. }
+        | PhysicalPlan::Offset { input, .. }
+        | PhysicalPlan::Limit { input, .. } => collect_plan_table_ids(input, table_ids),
+        _ => {}
     }
 }
 

@@ -1,8 +1,5 @@
-use std::{path::Path, rc::Rc};
+use std::path::Path;
 
-use crate::core::{PageId, error::StorageResult};
-#[cfg(test)]
-use crate::storage::disk_manager::DiskManagerError;
 use crate::storage::{
     btree::{TreeCursor, initialize_empty_root, validate_tree_page_formats},
     database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header},
@@ -11,6 +8,10 @@ use crate::storage::{
     page_cache::PageCache,
     storage_runtime::StorageRuntime,
     transaction_manager::TransactionSavepoint,
+};
+use crate::{
+    core::{PageId, error::StorageResult},
+    sync::Arc,
 };
 
 const DEFAULT_PAGE_CACHE_SIZE: usize = 16384;
@@ -34,7 +35,7 @@ impl Default for StorageOptions {
 /// only for producing raw B+-tree cursors rooted at specific page ids.
 #[derive(Clone)]
 pub(crate) struct Storage {
-    runtime: Rc<StorageRuntime>,
+    runtime: Arc<StorageRuntime>,
     page_cache: PageCache,
     opened_page_count: u64,
 }
@@ -101,8 +102,8 @@ impl Storage {
         options: StorageOptions,
     ) -> StorageResult<Self> {
         let opened_page_count = disk_manager.page_count();
-        let runtime = Rc::new(StorageRuntime::new(path, disk_manager)?);
-        let page_cache = PageCache::new(Rc::clone(&runtime), options.cache_frames)?;
+        let runtime = Arc::new(StorageRuntime::new(path, disk_manager)?);
+        let page_cache = PageCache::new(Arc::clone(&runtime), options.cache_frames)?;
         Ok(Self { runtime, page_cache, opened_page_count })
     }
 
@@ -124,7 +125,7 @@ impl Storage {
     }
 
     #[cfg(test)]
-    pub(crate) fn unlock_for_crash_for_test(&self) -> Result<(), DiskManagerError> {
+    pub(crate) fn unlock_for_crash_for_test(&self) -> StorageResult<()> {
         self.runtime.unlock_for_crash_for_test()
     }
 
@@ -136,8 +137,8 @@ impl Storage {
         self.runtime.commit_transaction(txn_id)
     }
 
-    pub(crate) fn active_transaction_id(&self) -> Option<TxnId> {
-        self.runtime.active_transaction_id()
+    pub(crate) fn transaction_is_active(&self, txn_id: TxnId) -> StorageResult<bool> {
+        self.runtime.transaction_is_active(txn_id)
     }
 
     pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
@@ -154,7 +155,7 @@ impl Storage {
     ) -> StorageResult<()> {
         let undo_pages = self.runtime.rollback_to_savepoint(savepoint)?;
         if let Err(err) = self.page_cache.restore_rollback_pages(undo_pages) {
-            self.runtime.record_transaction_failure();
+            self.runtime.record_transaction_failure(savepoint.txn_id)?;
             return Err(err.into());
         }
         self.runtime.complete_savepoint_rollback(savepoint)
@@ -162,37 +163,56 @@ impl Storage {
 
     pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
         let rollback = self.runtime.prepare_rollback_pages(txn_id)?;
+        let mut restored_page_ids =
+            rollback.pages.iter().map(|restore| restore.page_id).collect::<Vec<_>>();
+        restored_page_ids.sort_unstable();
+        restored_page_ids.dedup();
         self.page_cache.restore_rollback_pages(rollback.pages)?;
-        self.page_cache.flush_all()?;
+        for page_id in restored_page_ids {
+            self.page_cache.flush_page(page_id)?;
+        }
         self.runtime.sync_database_file()?;
         self.runtime.finish_rollback(txn_id)?;
         Ok(())
     }
 
     #[cfg(test)]
-    pub(crate) fn force_next_lsn_exhausted_for_test(&self) {
-        self.runtime.force_next_lsn_exhausted_for_test();
+    pub(crate) fn force_next_lsn_exhausted_for_test(&self) -> StorageResult<()> {
+        self.runtime.force_next_lsn_exhausted_for_test()
     }
 
     #[cfg(test)]
-    pub(crate) fn fail_next_savepoint_rollback_for_test(&self) {
-        self.runtime.fail_next_savepoint_rollback_for_test();
+    pub(crate) fn fail_next_savepoint_rollback_for_test(&self) -> StorageResult<()> {
+        self.runtime.fail_next_savepoint_rollback_for_test()
     }
 
     #[cfg(test)]
-    pub(crate) fn fail_next_wal_flush_for_test(&self) {
-        self.runtime.fail_next_wal_flush_for_test();
+    pub(crate) fn fail_next_wal_flush_for_test(&self) -> StorageResult<()> {
+        self.runtime.fail_next_wal_flush_for_test()
     }
 
     /// Creates a new empty raw tree and returns a cursor rooted at it.
     pub(crate) fn create_tree(&self) -> StorageResult<TreeCursor> {
-        let root_page_id = initialize_empty_root(&self.page_cache)?;
-        Ok(TreeCursor::new(self.page_cache.clone(), root_page_id))
+        let root_page_id = initialize_empty_root(&self.page_cache, None)?;
+        TreeCursor::new(self.page_cache.clone(), root_page_id)
+    }
+
+    pub(crate) fn transaction_create_tree(&self, txn_id: TxnId) -> StorageResult<TreeCursor> {
+        let root_page_id = initialize_empty_root(&self.page_cache, Some(txn_id))?;
+        Ok(TreeCursor::new(self.page_cache.clone(), root_page_id)?.for_transaction(txn_id))
     }
 
     /// Returns a raw cursor rooted at an existing tree.
-    pub(crate) fn tree_cursor(&self, root_page_id: PageId) -> TreeCursor {
+    pub(crate) fn tree_cursor(&self, root_page_id: PageId) -> StorageResult<TreeCursor> {
         TreeCursor::new(self.page_cache.clone(), root_page_id)
+    }
+
+    pub(crate) fn transaction_tree_cursor(
+        &self,
+        txn_id: TxnId,
+        root_page_id: PageId,
+    ) -> StorageResult<TreeCursor> {
+        Ok(self.tree_cursor(root_page_id)?.for_transaction(txn_id))
     }
 
     /// Validates every B+-tree page reachable from `root_page_id`.
@@ -238,7 +258,26 @@ mod tests {
 
         let storage = Storage::open(file.path()).unwrap();
         assert_eq!(storage.opened_page_count(), 3);
-        assert_eq!(storage.tree_cursor(1).root_page_id(), 1);
-        assert_eq!(storage.tree_cursor(2).root_page_id(), 2);
+        assert_eq!(storage.tree_cursor(1).unwrap().root_page_id(), 1);
+        assert_eq!(storage.tree_cursor(2).unwrap().root_page_id(), 2);
+    }
+
+    #[test]
+    fn rollback_does_not_flush_pages_pinned_by_other_work() {
+        let file = NamedTempFile::new().unwrap();
+        let storage = Storage::open_or_create(file.path()).unwrap();
+        let first_root = storage.create_tree().unwrap().root_page_id();
+        let second_root = storage.create_tree().unwrap().root_page_id();
+        storage.flush().unwrap();
+
+        let txn_id = storage.begin_transaction().unwrap();
+        storage
+            .transaction_tree_cursor(txn_id, first_root)
+            .unwrap()
+            .insert(b"key", b"value")
+            .unwrap();
+        let _unrelated_pin = storage.page_cache.fetch_page(second_root).unwrap();
+
+        storage.rollback_transaction(txn_id).unwrap();
     }
 }

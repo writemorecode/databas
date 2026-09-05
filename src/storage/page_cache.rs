@@ -1,7 +1,7 @@
-//! Single-threaded page cache with explicit pin and page-access guards.
+//! Shared page cache with explicit pin and page-access guards.
 //!
 //! [`PageCache`] is a cheap-to-clone handle that shares cache state through
-//! [`Rc`]. The cache is intentionally single-threaded today and uses interior
+//! [`Arc`]. The cache uses synchronized interior
 //! mutability to allow multiple concurrent pins without requiring a mutable
 //! borrow of the cache handle itself.
 //!
@@ -17,17 +17,20 @@
 //! explicit flushes or eviction.
 
 use std::{
-    cell::{Cell, Ref, RefCell, RefMut},
     collections::{HashMap, TryReserveError},
-    rc::Rc,
+    sync::TryLockError,
+};
+
+use crate::sync::{
+    Arc, AtomicBool, AtomicU32, AtomicU64, Mutex, MutexGuard, Ordering, RwLock, RwLockReadGuard,
+    RwLockWriteGuard,
 };
 
 use thiserror::Error;
 
-use crate::core::{PAGE_SIZE, PageId, error::StorageError};
+use crate::core::{PAGE_SIZE, PageId, TxnId, error::StorageError};
 use crate::storage::{
-    disk_manager::DiskManagerError,
-    log_manager::{Lsn, ZERO_LSN},
+    log_manager::ZERO_LSN,
     page::{NodeMarker, Page, PageResult, Read, Write},
     page_replacement::ClockPolicy,
     storage_runtime::StorageRuntime,
@@ -36,10 +39,8 @@ use crate::storage::{
 
 #[derive(Debug, Error)]
 pub(crate) enum PageCacheError {
-    #[error("disk manager error: {0}")]
-    Disk(#[from] DiskManagerError),
-    #[error("transaction error: {0}")]
-    Transaction(Box<StorageError>),
+    #[error("storage runtime error: {0}")]
+    Storage(Box<StorageError>),
     #[error("no evictable frame available")]
     NoEvictableFrame,
     #[error("page {page_id} is pinned")]
@@ -58,30 +59,75 @@ pub(crate) enum PageCacheError {
     CorruptPageTableEntry { page_id: PageId, frame_id: usize, frame_count: usize },
     #[error("page {page_id} pin count overflowed")]
     PinCountOverflow { page_id: PageId },
+    #[error("synchronization lock poisoned: {lock}")]
+    Poisoned { lock: &'static str },
 }
 
 pub(crate) type PageCacheResult<T> = Result<T, PageCacheError>;
+
+fn runtime_error(error: StorageError) -> PageCacheError {
+    PageCacheError::Storage(Box::new(error))
+}
+
+fn try_read_page_data(
+    data: &RwLock<[u8; PAGE_SIZE]>,
+    page_id: PageId,
+) -> PageCacheResult<RwLockReadGuard<'_, [u8; PAGE_SIZE]>> {
+    match data.try_read() {
+        Ok(page) => Ok(page),
+        Err(TryLockError::WouldBlock) => {
+            Err(PageCacheError::PageImmutableBorrowConflict { page_id })
+        }
+        Err(TryLockError::Poisoned(_poisoned)) => {
+            Err(PageCacheError::Poisoned { lock: "page data" })
+        }
+    }
+}
+
+fn try_write_page_data(
+    data: &RwLock<[u8; PAGE_SIZE]>,
+    page_id: PageId,
+) -> PageCacheResult<RwLockWriteGuard<'_, [u8; PAGE_SIZE]>> {
+    match data.try_write() {
+        Ok(page) => Ok(page),
+        Err(TryLockError::WouldBlock) => Err(PageCacheError::PageMutableBorrowConflict { page_id }),
+        Err(TryLockError::Poisoned(_poisoned)) => {
+            Err(PageCacheError::Poisoned { lock: "page data" })
+        }
+    }
+}
 
 pub(crate) type FrameId = usize;
 
 #[derive(Debug)]
 struct Frame {
-    page_id: Cell<Option<PageId>>,
-    data: RefCell<[u8; PAGE_SIZE]>,
-    dirty: Cell<bool>,
-    lsn: Cell<Lsn>,
-    pin_count: Cell<u32>,
+    page_id: AtomicU64,
+    data: RwLock<[u8; PAGE_SIZE]>,
+    dirty: AtomicBool,
+    lsn: AtomicU64,
+    pin_count: AtomicU32,
 }
 
 impl Frame {
+    fn page_id(&self) -> Option<PageId> {
+        match self.page_id.load(Ordering::Acquire) {
+            u64::MAX => None,
+            page_id => Some(page_id),
+        }
+    }
+
+    fn set_page_id(&self, page_id: Option<PageId>) {
+        self.page_id.store(page_id.unwrap_or(u64::MAX), Ordering::Release);
+    }
+
     /// Creates an empty frame with zeroed page data and cleared metadata bits.
     fn empty() -> Self {
         Self {
-            page_id: Cell::new(None),
-            data: RefCell::new([0u8; PAGE_SIZE]),
-            dirty: Cell::new(false),
-            lsn: Cell::new(ZERO_LSN),
-            pin_count: Cell::new(0),
+            page_id: AtomicU64::new(u64::MAX),
+            data: RwLock::new([0u8; PAGE_SIZE]),
+            dirty: AtomicBool::new(false),
+            lsn: AtomicU64::new(ZERO_LSN),
+            pin_count: AtomicU32::new(0),
         }
     }
 }
@@ -89,29 +135,37 @@ impl Frame {
 struct CacheMeta {
     page_table: HashMap<PageId, FrameId>,
     replacement: ClockPolicy,
-    tree_mutation_epochs: HashMap<PageId, Rc<Cell<u64>>>,
+    tree_mutation_epochs: HashMap<PageId, Arc<AtomicU64>>,
 }
 
 struct PageCacheInner {
-    runtime: Rc<StorageRuntime>,
-    meta: RefCell<CacheMeta>,
+    runtime: Arc<StorageRuntime>,
+    meta: Mutex<CacheMeta>,
     frames: Vec<Frame>,
 }
 
-/// Shared handle to the single-threaded page cache.
+impl PageCacheInner {
+    fn lock_meta(&self) -> PageCacheResult<MutexGuard<'_, CacheMeta>> {
+        self.meta
+            .lock()
+            .map_err(|_poisoned| PageCacheError::Poisoned { lock: "page cache metadata" })
+    }
+}
+
+/// Thread-safe shared handle to the page cache.
 ///
-/// Cloning the handle shares the same cache state through [`Rc`]. The handle
+/// Cloning the handle shares the same cache state through [`Arc`]. The handle
 /// itself does not represent a pin or a page borrow; it only provides access to
 /// cache operations. Use [`PinGuard`] to keep pages resident and use
 /// [`PageReadGuard`] or [`PageWriteGuard`] for temporary access to the page
 /// bytes.
 pub(crate) struct PageCache {
-    inner: Rc<PageCacheInner>,
+    inner: Arc<PageCacheInner>,
 }
 
 impl Clone for PageCache {
     fn clone(&self) -> Self {
-        Self { inner: Rc::clone(&self.inner) }
+        Self { inner: Arc::clone(&self.inner) }
     }
 }
 
@@ -119,7 +173,7 @@ impl PageCache {
     /// Creates a new page cache with a fixed number of preallocated frames.
     ///
     /// Returns an error when `frame_count` is zero.
-    pub(crate) fn new(runtime: Rc<StorageRuntime>, frame_count: usize) -> PageCacheResult<Self> {
+    pub(crate) fn new(runtime: Arc<StorageRuntime>, frame_count: usize) -> PageCacheResult<Self> {
         if frame_count == 0 {
             return Err(PageCacheError::InvalidFrameCount { frame_count });
         }
@@ -131,9 +185,9 @@ impl PageCache {
         frames.extend((0..frame_count).map(|_| Frame::empty()));
 
         Ok(Self {
-            inner: Rc::new(PageCacheInner {
+            inner: Arc::new(PageCacheInner {
                 runtime,
-                meta: RefCell::new(CacheMeta {
+                meta: Mutex::new(CacheMeta {
                     page_table: HashMap::new(),
                     replacement: ClockPolicy::new(frame_count),
                     tree_mutation_epochs: HashMap::new(),
@@ -144,11 +198,16 @@ impl PageCache {
     }
 
     /// Returns the mutation epoch shared by cursors over one B+-tree root.
-    pub(crate) fn tree_mutation_epoch(&self, root_page_id: PageId) -> Rc<Cell<u64>> {
-        let mut meta = self.inner.meta.borrow_mut();
-        Rc::clone(
-            meta.tree_mutation_epochs.entry(root_page_id).or_insert_with(|| Rc::new(Cell::new(0))),
-        )
+    pub(crate) fn tree_mutation_epoch(
+        &self,
+        root_page_id: PageId,
+    ) -> PageCacheResult<Arc<AtomicU64>> {
+        let mut meta = self.inner.lock_meta()?;
+        Ok(Arc::clone(
+            meta.tree_mutation_epochs
+                .entry(root_page_id)
+                .or_insert_with(|| Arc::new(AtomicU64::new(0))),
+        ))
     }
 
     /// Fetches an existing page into the cache and returns a pin guard.
@@ -156,48 +215,52 @@ impl PageCache {
     /// Cache hits update replacement state and increment pin count.
     /// Cache misses use CLOCK replacement and may evict a dirty page.
     pub(crate) fn fetch_page(&self, page_id: PageId) -> PageCacheResult<PinGuard> {
-        if let Some(frame_id) = self.resident_frame_id(page_id)? {
+        let mut meta = self.inner.lock_meta()?;
+        if let Some(frame_id) = self.resident_frame_id(&meta, page_id)? {
             let frame = &self.inner.frames[frame_id];
             let pin_count = frame
                 .pin_count
-                .get()
+                .load(Ordering::Acquire)
                 .checked_add(1)
                 .ok_or(PageCacheError::PinCountOverflow { page_id })?;
-            frame.pin_count.set(pin_count);
-            self.inner.meta.borrow_mut().replacement.record_access(frame_id);
-            return Ok(PinGuard::new(Rc::clone(&self.inner), frame_id, page_id));
+            frame.pin_count.store(pin_count, Ordering::Release);
+            meta.replacement.record_access(frame_id);
+            return Ok(PinGuard::new(Arc::clone(&self.inner), frame_id, page_id));
         }
 
-        let frame_id = self.select_victim_frame().ok_or(PageCacheError::NoEvictableFrame)?;
-        self.replace_frame(frame_id, page_id)?;
-        Ok(PinGuard::new(Rc::clone(&self.inner), frame_id, page_id))
+        let frame_id =
+            self.select_victim_frame(&mut meta).ok_or(PageCacheError::NoEvictableFrame)?;
+        self.replace_frame(&mut meta, frame_id, page_id)?;
+        Ok(PinGuard::new(Arc::clone(&self.inner), frame_id, page_id))
     }
 
     /// Allocates a new on-disk page and returns it pinned in the cache.
     ///
     /// A victim frame is selected before allocation so a full pinned cache
     /// returns `NoEvictableFrame` without growing the file.
-    pub(crate) fn new_page(&self) -> PageCacheResult<(PageId, PinGuard)> {
-        let frame_id = self.select_victim_frame().ok_or(PageCacheError::NoEvictableFrame)?;
-        let page_id = self.inner.runtime.new_page()?;
-        if let Err(err) = self.inner.runtime.record_page_alloc(page_id) {
-            return Err(PageCacheError::Transaction(Box::new(err)));
+    pub(crate) fn new_page(&self, txn_id: Option<TxnId>) -> PageCacheResult<(PageId, PinGuard)> {
+        let mut meta = self.inner.lock_meta()?;
+        let frame_id =
+            self.select_victim_frame(&mut meta).ok_or(PageCacheError::NoEvictableFrame)?;
+        let page_id = self.inner.runtime.new_page().map_err(runtime_error)?;
+        if let Err(err) = self.inner.runtime.record_page_alloc(txn_id, page_id) {
+            return Err(PageCacheError::Storage(Box::new(err)));
         }
-        self.replace_frame(frame_id, page_id)?;
-        Ok((page_id, PinGuard::new(Rc::clone(&self.inner), frame_id, page_id)))
+        self.replace_frame(&mut meta, frame_id, page_id)?;
+        Ok((page_id, PinGuard::new(Arc::clone(&self.inner), frame_id, page_id)))
     }
 
     /// Flushes one resident page if dirty.
     ///
     /// Non-resident pages are a no-op. Pinned pages return `PinnedPage`.
-    #[cfg(test)]
     pub(crate) fn flush_page(&self, page_id: PageId) -> PageCacheResult<()> {
-        let Some(frame_id) = self.resident_frame_id(page_id)? else {
+        let meta = self.inner.lock_meta()?;
+        let Some(frame_id) = self.resident_frame_id(&meta, page_id)? else {
             return Ok(());
         };
 
         let frame = &self.inner.frames[frame_id];
-        if frame.pin_count.get() > 0 {
+        if frame.pin_count.load(Ordering::Acquire) > 0 {
             return Err(PageCacheError::PinnedPage { page_id });
         }
 
@@ -208,10 +271,11 @@ impl PageCache {
     ///
     /// Returns `PinnedPage` if a dirty page is pinned.
     pub(crate) fn flush_all(&self) -> PageCacheResult<()> {
+        let _meta = self.inner.lock_meta()?;
         for (frame_id, frame) in self.inner.frames.iter().enumerate() {
-            let page_id = frame.page_id.get();
-            let pin_count = frame.pin_count.get();
-            let dirty = frame.dirty.get();
+            let page_id = frame.page_id();
+            let pin_count = frame.pin_count.load(Ordering::Acquire);
+            let dirty = frame.dirty.load(Ordering::Acquire);
 
             if !dirty {
                 continue;
@@ -231,8 +295,11 @@ impl PageCache {
         Ok(())
     }
 
-    fn resident_frame_id(&self, page_id: PageId) -> PageCacheResult<Option<FrameId>> {
-        let meta = self.inner.meta.borrow();
+    fn resident_frame_id(
+        &self,
+        meta: &CacheMeta,
+        page_id: PageId,
+    ) -> PageCacheResult<Option<FrameId>> {
         let Some(&frame_id) = meta.page_table.get(&page_id) else {
             return Ok(None);
         };
@@ -251,40 +318,38 @@ impl PageCache {
         Ok(())
     }
 
-    fn select_victim_frame(&self) -> Option<FrameId> {
+    fn select_victim_frame(&self, meta: &mut CacheMeta) -> Option<FrameId> {
         let frames = &self.inner.frames;
-        self.inner
-            .meta
-            .borrow_mut()
-            .replacement
-            .select_victim(|frame_id| frames[frame_id].pin_count.get() > 0)
+        meta.replacement
+            .select_victim(|frame_id| frames[frame_id].pin_count.load(Ordering::Acquire) > 0)
     }
 
     /// Replaces frame contents with `new_page_id`, flushing old dirty data first.
-    fn replace_frame(&self, frame_id: FrameId, new_page_id: PageId) -> PageCacheResult<()> {
+    fn replace_frame(
+        &self,
+        meta: &mut CacheMeta,
+        frame_id: FrameId,
+        new_page_id: PageId,
+    ) -> PageCacheResult<()> {
         self.flush_frame_if_dirty(frame_id)?;
 
         let frame = &self.inner.frames[frame_id];
-        let old_page_id = frame.page_id.get();
+        let old_page_id = frame.page_id();
 
         let mut data = [0u8; PAGE_SIZE];
-        self.inner.runtime.read_page(new_page_id, &mut data)?;
+        self.inner.runtime.read_page(new_page_id, &mut data).map_err(runtime_error)?;
 
         {
-            let mut frame_data = frame.data.try_borrow_mut().map_err(|_borrow_conflict| {
-                PageCacheError::PageMutableBorrowConflict {
-                    page_id: old_page_id.unwrap_or(new_page_id),
-                }
-            })?;
+            let mut frame_data =
+                try_write_page_data(&frame.data, old_page_id.unwrap_or(new_page_id))?;
             *frame_data = data;
         }
 
-        frame.page_id.set(Some(new_page_id));
-        frame.dirty.set(false);
-        frame.lsn.set(ZERO_LSN);
-        frame.pin_count.set(1);
+        frame.set_page_id(Some(new_page_id));
+        frame.dirty.store(false, Ordering::Release);
+        frame.lsn.store(ZERO_LSN, Ordering::Release);
+        frame.pin_count.store(1, Ordering::Release);
 
-        let mut meta = self.inner.meta.borrow_mut();
         if let Some(old_page_id) = old_page_id {
             meta.page_table.remove(&old_page_id);
         }
@@ -296,24 +361,21 @@ impl PageCache {
     /// Writes a dirty resident frame to disk and clears its dirty bit.
     fn flush_frame_if_dirty(&self, frame_id: FrameId) -> PageCacheResult<()> {
         let frame = &self.inner.frames[frame_id];
-        if !frame.dirty.get() {
+        if !frame.dirty.load(Ordering::Acquire) {
             return Ok(());
         }
 
-        let Some(page_id) = frame.page_id.get() else {
+        let Some(page_id) = frame.page_id() else {
             return Ok(());
         };
 
-        let page = frame
-            .data
-            .try_borrow()
-            .map_err(|_borrow_conflict| PageCacheError::PageImmutableBorrowConflict { page_id })?;
+        let page = try_read_page_data(&frame.data, page_id)?;
         self.inner
             .runtime
-            .flush_wal_through(frame.lsn.get())
-            .map_err(|err| PageCacheError::Transaction(Box::new(err)))?;
-        self.inner.runtime.write_page(page_id, &page)?;
-        frame.dirty.set(false);
+            .flush_wal_through(frame.lsn.load(Ordering::Acquire))
+            .map_err(|err| PageCacheError::Storage(Box::new(err)))?;
+        self.inner.runtime.write_page(page_id, &page).map_err(runtime_error)?;
+        frame.dirty.store(false, Ordering::Release);
         Ok(())
     }
 
@@ -325,13 +387,11 @@ impl PageCache {
             let pin = self.fetch_page(restore.page_id)?;
             let frame = &self.inner.frames[pin.frame_id];
             {
-                let mut data = frame.data.try_borrow_mut().map_err(|_borrow_conflict| {
-                    PageCacheError::PageMutableBorrowConflict { page_id: restore.page_id }
-                })?;
+                let mut data = try_write_page_data(&frame.data, restore.page_id)?;
                 *data = restore.image;
             }
-            frame.dirty.set(true);
-            frame.lsn.set(restore.wal_flush_lsn);
+            frame.dirty.store(true, Ordering::Release);
+            frame.lsn.store(restore.wal_flush_lsn, Ordering::Release);
         }
         Ok(())
     }
@@ -346,19 +406,19 @@ impl PageCache {
 ///
 /// Dropping the guard decrements the frame pin count.
 pub(crate) struct PinGuard {
-    page_cache: Rc<PageCacheInner>,
+    page_cache: Arc<PageCacheInner>,
     frame_id: FrameId,
     page_id: PageId,
 }
 
 impl PinGuard {
     /// Creates a new pin guard for a specific frame.
-    fn new(page_cache: Rc<PageCacheInner>, frame_id: FrameId, page_id: PageId) -> Self {
+    fn new(page_cache: Arc<PageCacheInner>, frame_id: FrameId, page_id: PageId) -> Self {
         Self { page_cache, frame_id, page_id }
     }
 
     /// Returns the page ID associated with this pin.
-    #[cfg(test)]
+    #[cfg(all(test, not(loom)))]
     pub(crate) fn page_id(&self) -> PageId {
         self.page_id
     }
@@ -369,9 +429,7 @@ impl PinGuard {
     /// fails while a write guard is active.
     pub(crate) fn read(&self) -> PageCacheResult<PageReadGuard<'_>> {
         let frame = &self.page_cache.frames[self.frame_id];
-        let page = frame.data.try_borrow().map_err(|_borrow_conflict| {
-            PageCacheError::PageImmutableBorrowConflict { page_id: self.page_id }
-        })?;
+        let page = try_read_page_data(&frame.data, self.page_id)?;
         Ok(PageReadGuard { page })
     }
 
@@ -380,21 +438,20 @@ impl PinGuard {
     /// Mutable access fails while any read or write guard is active for the
     /// same frame. Acquiring a write guard marks the frame dirty even if the
     /// caller later decides not to mutate the page bytes.
-    pub(crate) fn write(&self) -> PageCacheResult<PageWriteGuard<'_>> {
+    pub(crate) fn write(&self, txn_id: Option<TxnId>) -> PageCacheResult<PageWriteGuard<'_>> {
         let frame = &self.page_cache.frames[self.frame_id];
-        let page = frame.data.try_borrow_mut().map_err(|_borrow_conflict| {
-            PageCacheError::PageMutableBorrowConflict { page_id: self.page_id }
-        })?;
+        let page = try_write_page_data(&frame.data, self.page_id)?;
         let before = *page;
-        let was_dirty = frame.dirty.get();
-        frame.dirty.set(true);
+        let was_dirty = frame.dirty.load(Ordering::Acquire);
+        frame.dirty.store(true, Ordering::Release);
         Ok(PageWriteGuard {
             page,
             before,
             was_dirty,
-            runtime: Rc::clone(&self.page_cache.runtime),
+            runtime: Arc::clone(&self.page_cache.runtime),
             frame,
             page_id: self.page_id,
+            txn_id,
         })
     }
 }
@@ -402,10 +459,16 @@ impl PinGuard {
 impl Drop for PinGuard {
     /// Decrements the frame pin count when the guard leaves scope.
     fn drop(&mut self) {
+        // A poisoned cache is permanently fail-closed. Retaining this pin is
+        // safer than mutating cache state whose invariants may no longer hold.
+        let Ok(_meta) = self.page_cache.lock_meta() else {
+            return;
+        };
         let frame = &self.page_cache.frames[self.frame_id];
-        debug_assert!(frame.pin_count.get() > 0, "pin count underflow");
-        if frame.pin_count.get() > 0 {
-            frame.pin_count.set(frame.pin_count.get() - 1);
+        let pin_count = frame.pin_count.load(Ordering::Acquire);
+        debug_assert!(pin_count > 0, "pin count underflow");
+        if pin_count > 0 {
+            frame.pin_count.store(pin_count - 1, Ordering::Release);
         }
     }
 }
@@ -417,7 +480,7 @@ impl Drop for PinGuard {
 /// for the page to stay resident. Use this guard for raw byte inspection or to
 /// construct typed read-only page views.
 pub(crate) struct PageReadGuard<'a> {
-    page: Ref<'a, [u8; PAGE_SIZE]>,
+    page: RwLockReadGuard<'a, [u8; PAGE_SIZE]>,
 }
 
 impl PageReadGuard<'_> {
@@ -441,12 +504,13 @@ impl PageReadGuard<'_> {
 /// write guard may exist for a frame at a time, and no read guards may coexist
 /// with it. Creating a write guard marks the frame dirty immediately.
 pub(crate) struct PageWriteGuard<'a> {
-    page: RefMut<'a, [u8; PAGE_SIZE]>,
+    page: RwLockWriteGuard<'a, [u8; PAGE_SIZE]>,
     before: [u8; PAGE_SIZE],
     was_dirty: bool,
-    runtime: Rc<StorageRuntime>,
+    runtime: Arc<StorageRuntime>,
     frame: &'a Frame,
     page_id: PageId,
+    txn_id: Option<TxnId>,
 }
 
 impl PageWriteGuard<'_> {
@@ -472,36 +536,39 @@ impl PageWriteGuard<'_> {
 impl Drop for PageWriteGuard<'_> {
     fn drop(&mut self) {
         if *self.page == self.before {
-            self.frame.dirty.set(self.was_dirty);
+            self.frame.dirty.store(self.was_dirty, Ordering::Release);
             return;
         }
 
-        match self.runtime.record_page_update(self.page_id, &self.before, &self.page) {
+        match self.runtime.record_page_update(self.txn_id, self.page_id, &self.before, &self.page) {
             Ok(Some(update)) => {
                 *self.page = update.redo;
-                self.frame.lsn.set(update.lsn);
+                self.frame.lsn.store(update.lsn, Ordering::Release);
             }
             Ok(None) => {
-                self.frame.lsn.set(ZERO_LSN);
+                self.frame.lsn.store(ZERO_LSN, Ordering::Release);
             }
             Err(_) => {
                 *self.page = self.before;
-                self.frame.dirty.set(self.was_dirty);
-                self.runtime.record_transaction_failure();
+                self.frame.dirty.store(self.was_dirty, Ordering::Release);
+                if let Some(txn_id) = self.txn_id {
+                    let _ = self.runtime.record_transaction_failure(txn_id);
+                }
             }
         }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
+#[allow(clippy::unwrap_used)]
 mod tests {
-    use std::{path::Path, rc::Rc};
+    use std::{path::Path, sync::Arc, thread};
 
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::storage::disk_manager::DiskManager;
-    use crate::storage::log_manager::{OwnedLogRecordKind, read_log_record_kinds_for_test};
+    use crate::storage::disk_manager::{DiskManager, DiskManagerError};
+    use crate::storage::log_manager::{Lsn, OwnedLogRecordKind, read_log_record_kinds_for_test};
     use crate::storage::page;
     use crate::storage::page::format::PageKind;
     use crate::storage::page::{Leaf, Page, Write};
@@ -526,17 +593,17 @@ mod tests {
     }
 
     /// Creates a temporary database file and writes the provided pages to it.
-    fn runtime_for_disk(path: &Path, disk_manager: DiskManager) -> Rc<StorageRuntime> {
-        Rc::new(StorageRuntime::new(path.to_path_buf(), disk_manager).unwrap())
+    fn runtime_for_disk(path: &Path, disk_manager: DiskManager) -> Arc<StorageRuntime> {
+        Arc::new(StorageRuntime::new(path.to_path_buf(), disk_manager).unwrap())
     }
 
-    fn runtime_for_path(path: &Path) -> Rc<StorageRuntime> {
+    fn runtime_for_path(path: &Path) -> Arc<StorageRuntime> {
         let disk_manager = DiskManager::new(path).unwrap();
         runtime_for_disk(path, disk_manager)
     }
 
     /// Creates a temporary database file and writes the provided pages to it.
-    fn create_disk_with_pages(pages: &[[u8; PAGE_SIZE]]) -> (NamedTempFile, Rc<StorageRuntime>) {
+    fn create_disk_with_pages(pages: &[[u8; PAGE_SIZE]]) -> (NamedTempFile, Arc<StorageRuntime>) {
         let file = NamedTempFile::new().unwrap();
         let mut disk_manager = DiskManager::new(file.path()).unwrap();
         for page in pages {
@@ -571,10 +638,10 @@ mod tests {
 
         assert_eq!(cache.inner.frames.len(), 3);
         for frame in &cache.inner.frames {
-            assert_eq!(frame.page_id.get(), None);
-            assert!(!frame.dirty.get());
-            assert_eq!(frame.pin_count.get(), 0);
-            assert_eq!(*frame.data.borrow(), [0u8; PAGE_SIZE]);
+            assert_eq!(frame.page_id(), None);
+            assert!(!frame.dirty.load(Ordering::Acquire));
+            assert_eq!(frame.pin_count.load(Ordering::Acquire), 0);
+            assert_eq!(*frame.data.read().unwrap(), [0u8; PAGE_SIZE]);
         }
     }
 
@@ -589,8 +656,8 @@ mod tests {
         assert_eq!(guard.read().unwrap().page(), &page);
         drop(guard);
 
-        assert_eq!(cache.inner.frames[0].page_id.get(), Some(0));
-        assert_eq!(cache.inner.frames[0].pin_count.get(), 0);
+        assert_eq!(cache.inner.frames[0].page_id(), Some(0));
+        assert_eq!(cache.inner.frames[0].pin_count.load(Ordering::Acquire), 0);
     }
 
     #[test]
@@ -604,7 +671,7 @@ mod tests {
             let _guard = cache.fetch_page(0).unwrap();
         }
 
-        assert_eq!(cache.inner.frames[0].pin_count.get(), 0);
+        assert_eq!(cache.inner.frames[0].pin_count.load(Ordering::Acquire), 0);
     }
 
     #[test]
@@ -618,8 +685,8 @@ mod tests {
 
         assert_eq!(left.page_id(), 0);
         assert_eq!(right.page_id(), 1);
-        assert_eq!(cache.inner.frames[0].pin_count.get(), 1);
-        assert_eq!(cache.inner.frames[1].pin_count.get(), 1);
+        assert_eq!(cache.inner.frames[0].pin_count.load(Ordering::Acquire), 1);
+        assert_eq!(cache.inner.frames[1].pin_count.load(Ordering::Acquire), 1);
     }
 
     #[test]
@@ -666,8 +733,8 @@ mod tests {
         let guard0 = cache.fetch_page(0).unwrap();
         let guard1 = cache.fetch_page(1).unwrap();
 
-        let mut write0 = guard0.write().unwrap();
-        let mut write1 = guard1.write().unwrap();
+        let mut write0 = guard0.write(None).unwrap();
+        let mut write1 = guard1.write(None).unwrap();
 
         write0.page_mut()[0] = 42;
         write1.page_mut()[0] = 84;
@@ -682,10 +749,10 @@ mod tests {
         let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
-        let (_page_id, guard) = cache.new_page().unwrap();
+        let (_page_id, guard) = cache.new_page(None).unwrap();
 
         {
-            let mut write = guard.write().unwrap();
+            let mut write = guard.write(None).unwrap();
             let _ = Page::<Write<'_>, Leaf>::init(write.page_mut());
 
             assert_eq!(
@@ -710,15 +777,15 @@ mod tests {
             let guard = cache.fetch_page(0).unwrap();
             assert_eq!(guard.read().unwrap().page()[0], page[0]);
         }
-        assert!(!cache.inner.frames[0].dirty.get());
+        assert!(!cache.inner.frames[0].dirty.load(Ordering::Acquire));
 
         {
             let guard = cache.fetch_page(0).unwrap();
-            let mut page = guard.write().unwrap();
+            let mut page = guard.write(None).unwrap();
             page.page_mut()[0] = 99;
         }
 
-        assert!(cache.inner.frames[0].dirty.get());
+        assert!(cache.inner.frames[0].dirty.load(Ordering::Acquire));
     }
 
     #[test]
@@ -730,19 +797,19 @@ mod tests {
         let guard = cache.fetch_page(0).unwrap();
 
         {
-            let _write = guard.write().unwrap();
-            assert!(cache.inner.frames[0].dirty.get());
+            let _write = guard.write(None).unwrap();
+            assert!(cache.inner.frames[0].dirty.load(Ordering::Acquire));
         }
 
-        assert!(!cache.inner.frames[0].dirty.get());
+        assert!(!cache.inner.frames[0].dirty.load(Ordering::Acquire));
 
-        cache.inner.frames[0].dirty.set(true);
+        cache.inner.frames[0].dirty.store(true, Ordering::Release);
         {
-            let _write = guard.write().unwrap();
-            assert!(cache.inner.frames[0].dirty.get());
+            let _write = guard.write(None).unwrap();
+            assert!(cache.inner.frames[0].dirty.load(Ordering::Acquire));
         }
 
-        assert!(cache.inner.frames[0].dirty.get());
+        assert!(cache.inner.frames[0].dirty.load(Ordering::Acquire));
     }
 
     #[test]
@@ -753,7 +820,7 @@ mod tests {
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
         let guard = cache.fetch_page(0).unwrap();
-        let _write = guard.write().unwrap();
+        let _write = guard.write(None).unwrap();
 
         let result = guard.read();
         assert!(matches!(result, Err(PageCacheError::PageImmutableBorrowConflict { page_id: 0 })));
@@ -769,7 +836,7 @@ mod tests {
         let guard = cache.fetch_page(0).unwrap();
         let _read = guard.read().unwrap();
 
-        let result = guard.write();
+        let result = guard.write(None);
         assert!(matches!(result, Err(PageCacheError::PageMutableBorrowConflict { page_id: 0 })));
     }
 
@@ -781,10 +848,69 @@ mod tests {
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
         let guard = cache.fetch_page(0).unwrap();
-        let _first_write = guard.write().unwrap();
+        let _first_write = guard.write(None).unwrap();
 
-        let result = guard.write();
+        let result = guard.write(None);
         assert!(matches!(result, Err(PageCacheError::PageMutableBorrowConflict { page_id: 0 })));
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn poisoned_page_data_is_not_reported_as_a_borrow_conflict() {
+        let page = page_with_pattern(17);
+        let (_file, runtime) = create_disk_with_pages(&[page]);
+        let cache = PageCache::new(runtime, 1).unwrap();
+        let guard = cache.fetch_page(0).unwrap();
+
+        let inner = Arc::clone(&cache.inner);
+        let panicked = thread::spawn(move || {
+            let _page = inner.frames[0].data.write().unwrap();
+            panic!("poison page data");
+        })
+        .join();
+        assert!(panicked.is_err());
+
+        assert!(matches!(guard.read(), Err(PageCacheError::Poisoned { lock: "page data" })));
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn poisoned_metadata_prevents_further_cache_operations() {
+        let page = page_with_pattern(18);
+        let (_file, runtime) = create_disk_with_pages(&[page]);
+        let cache = PageCache::new(runtime, 1).unwrap();
+
+        let inner = Arc::clone(&cache.inner);
+        let panicked = thread::spawn(move || {
+            let _meta = inner.meta.lock().unwrap();
+            panic!("poison page cache metadata");
+        })
+        .join();
+        assert!(panicked.is_err());
+
+        assert!(matches!(
+            cache.fetch_page(0),
+            Err(PageCacheError::Poisoned { lock: "page cache metadata" })
+        ));
+    }
+
+    #[test]
+    fn rollback_restoration_installs_its_wal_dependency() {
+        let page = page_with_pattern(21);
+        let (_file, runtime) = create_disk_with_pages(&[page]);
+        let cache = PageCache::new(runtime, 1).unwrap();
+
+        cache
+            .restore_rollback_pages(vec![PageRestore {
+                page_id: 0,
+                image: page_with_pattern(22),
+                wal_flush_lsn: 9,
+            }])
+            .unwrap();
+
+        let frame = &cache.inner.frames[0];
+        assert_eq!(frame.lsn.load(Ordering::Acquire), 9);
+        assert!(frame.dirty.load(Ordering::Acquire));
     }
 
     #[test]
@@ -797,7 +923,7 @@ mod tests {
 
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[0] = 222;
+            guard.write(None).unwrap().page_mut()[0] = 222;
         }
 
         {
@@ -824,7 +950,7 @@ mod tests {
             let _guard = cache.fetch_page(2).unwrap();
         }
 
-        let page_table = &cache.inner.meta.borrow().page_table;
+        let page_table = &cache.inner.lock_meta().unwrap().page_table;
         assert!(!page_table.contains_key(&0));
         assert!(page_table.contains_key(&1));
         assert!(page_table.contains_key(&2));
@@ -846,8 +972,8 @@ mod tests {
         }
 
         assert_eq!(pinned.page_id(), 0);
-        assert_eq!(cache.inner.frames[0].page_id.get(), Some(0));
-        let page_table = &cache.inner.meta.borrow().page_table;
+        assert_eq!(cache.inner.frames[0].page_id(), Some(0));
+        let page_table = &cache.inner.lock_meta().unwrap().page_table;
         assert!(page_table.contains_key(&0));
         assert!(!page_table.contains_key(&1));
         assert!(page_table.contains_key(&2));
@@ -875,13 +1001,13 @@ mod tests {
 
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[0] = 177;
+            guard.write(None).unwrap().page_mut()[0] = 177;
         }
-        assert!(cache.inner.frames[0].dirty.get());
+        assert!(cache.inner.frames[0].dirty.load(Ordering::Acquire));
 
         cache.flush_page(0).unwrap();
 
-        assert!(!cache.inner.frames[0].dirty.get());
+        assert!(!cache.inner.frames[0].dirty.load(Ordering::Acquire));
         let flushed_page = read_disk_page(file.path(), 0);
         assert_eq!(flushed_page[0], 177);
     }
@@ -894,14 +1020,14 @@ mod tests {
 
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+            guard.write(None).unwrap().page_mut()[PAGE_SIZE - 1] = 177;
         }
 
         cache.flush_page(0).unwrap();
 
         let flushed_page = read_disk_page(file.path(), 0);
         assert_eq!(flushed_page[PAGE_SIZE - 1], 177);
-        assert!(!cache.inner.frames[0].dirty.get());
+        assert!(!cache.inner.frames[0].dirty.load(Ordering::Acquire));
     }
 
     #[test]
@@ -913,7 +1039,7 @@ mod tests {
 
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 222;
+            guard.write(None).unwrap().page_mut()[PAGE_SIZE - 1] = 222;
         }
 
         {
@@ -933,11 +1059,11 @@ mod tests {
 
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 10;
+            guard.write(None).unwrap().page_mut()[PAGE_SIZE - 1] = 10;
         }
         {
             let guard = cache.fetch_page(1).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 20;
+            guard.write(None).unwrap().page_mut()[PAGE_SIZE - 1] = 20;
         }
 
         cache.flush_all().unwrap();
@@ -947,28 +1073,28 @@ mod tests {
         assert_eq!(flushed_page0[PAGE_SIZE - 1], 10);
         assert_eq!(flushed_page1[PAGE_SIZE - 1], 20);
         for frame in &cache.inner.frames {
-            assert!(!frame.dirty.get());
+            assert!(!frame.dirty.load(Ordering::Acquire));
         }
     }
 
     #[test]
-    fn transactional_page_flush_appends_and_flushes_pending_wal_before_write() {
+    fn transactional_page_flush_makes_eager_wal_durable_before_write() {
         let page = formatted_page_with_lsn(15, ZERO_LSN);
         let (file, runtime) = create_disk_with_pages(&[page]);
-        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+        let cache = PageCache::new(Arc::clone(&runtime), 1).unwrap();
 
         let txn_id = runtime.begin_transaction().unwrap();
 
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+            guard.write(Some(txn_id)).unwrap().page_mut()[PAGE_SIZE - 1] = 177;
         }
 
         cache.flush_page(0).unwrap();
 
         let flushed_page = read_disk_page(file.path(), 0);
         assert_eq!(flushed_page[PAGE_SIZE - 1], 177);
-        assert!(!cache.inner.frames[0].dirty.get());
+        assert!(!cache.inner.frames[0].dirty.load(Ordering::Acquire));
         assert_eq!(
             read_log_record_kinds_for_test(file.path()),
             [
@@ -979,31 +1105,32 @@ mod tests {
     }
 
     #[test]
-    fn transactional_page_flush_after_repeated_update_appends_one_latest_page_update() {
+    fn transactional_page_flush_preserves_each_eager_page_update() {
         let page = formatted_page_with_lsn(15, ZERO_LSN);
         let (file, runtime) = create_disk_with_pages(&[page]);
-        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+        let cache = PageCache::new(Arc::clone(&runtime), 1).unwrap();
 
         let txn_id = runtime.begin_transaction().unwrap();
 
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+            guard.write(Some(txn_id)).unwrap().page_mut()[PAGE_SIZE - 1] = 177;
         }
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 222;
+            guard.write(Some(txn_id)).unwrap().page_mut()[PAGE_SIZE - 1] = 222;
         }
 
         cache.flush_page(0).unwrap();
 
         let flushed_page = read_disk_page(file.path(), 0);
         assert_eq!(flushed_page[PAGE_SIZE - 1], 222);
-        assert!(!cache.inner.frames[0].dirty.get());
+        assert!(!cache.inner.frames[0].dirty.load(Ordering::Acquire));
         assert_eq!(
             read_log_record_kinds_for_test(file.path()),
             [
                 (txn_id, OwnedLogRecordKind::Begin),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 0 }),
                 (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 0 }),
             ]
         );
@@ -1013,33 +1140,33 @@ mod tests {
     fn wal_flush_failure_prevents_transactional_page_write_and_leaves_frame_dirty() {
         let page = formatted_page_with_lsn(15, ZERO_LSN);
         let (file, runtime) = create_disk_with_pages(&[page]);
-        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+        let cache = PageCache::new(Arc::clone(&runtime), 1).unwrap();
 
-        runtime.begin_transaction().unwrap();
+        let txn_id = runtime.begin_transaction().unwrap();
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+            guard.write(Some(txn_id)).unwrap().page_mut()[PAGE_SIZE - 1] = 177;
         }
-        runtime.fail_next_wal_flush_for_test();
+        runtime.fail_next_wal_flush_for_test().unwrap();
 
         let result = cache.flush_page(0);
 
-        assert!(matches!(result, Err(PageCacheError::Transaction(_))));
+        assert!(matches!(result, Err(PageCacheError::Storage(_))));
         let page_on_disk = read_disk_page(file.path(), 0);
         assert_eq!(page_on_disk[PAGE_SIZE - 1], page[PAGE_SIZE - 1]);
-        assert!(cache.inner.frames[0].dirty.get());
+        assert!(cache.inner.frames[0].dirty.load(Ordering::Acquire));
     }
 
     #[test]
     fn rollback_without_forced_wal_flush_restores_page_and_logs_transaction_outcome() {
         let page = formatted_page_with_lsn(15, ZERO_LSN);
         let (file, runtime) = create_disk_with_pages(&[page]);
-        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+        let cache = PageCache::new(Arc::clone(&runtime), 1).unwrap();
 
         let txn_id = runtime.begin_transaction().unwrap();
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+            guard.write(Some(txn_id)).unwrap().page_mut()[PAGE_SIZE - 1] = 177;
         }
 
         let rollback = runtime.prepare_rollback_pages(txn_id).unwrap();
@@ -1051,7 +1178,11 @@ mod tests {
         assert_eq!(read_disk_page(file.path(), 0), page);
         assert_eq!(
             read_log_record_kinds_for_test(file.path()),
-            [(txn_id, OwnedLogRecordKind::Begin), (txn_id, OwnedLogRecordKind::Rollback),]
+            [
+                (txn_id, OwnedLogRecordKind::Begin),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 0 }),
+                (txn_id, OwnedLogRecordKind::Rollback),
+            ]
         );
     }
 
@@ -1059,12 +1190,12 @@ mod tests {
     fn rollback_after_steal_flush_restores_page_and_writes_rollback_record() {
         let page = formatted_page_with_lsn(15, ZERO_LSN);
         let (file, runtime) = create_disk_with_pages(&[page]);
-        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+        let cache = PageCache::new(Arc::clone(&runtime), 1).unwrap();
 
         let txn_id = runtime.begin_transaction().unwrap();
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 177;
+            guard.write(Some(txn_id)).unwrap().page_mut()[PAGE_SIZE - 1] = 177;
         }
         cache.flush_page(0).unwrap();
 
@@ -1086,23 +1217,23 @@ mod tests {
     }
 
     #[test]
-    fn prepared_rollback_keeps_pending_wal_available_for_cache_eviction() {
+    fn prepared_rollback_keeps_eager_wal_available_for_cache_eviction() {
         let pages = [
             formatted_page_with_lsn(10, ZERO_LSN),
             formatted_page_with_lsn(20, ZERO_LSN),
             formatted_page_with_lsn(30, ZERO_LSN),
         ];
         let (file, runtime) = create_disk_with_pages(&pages);
-        let cache = PageCache::new(Rc::clone(&runtime), 2).unwrap();
+        let cache = PageCache::new(Arc::clone(&runtime), 2).unwrap();
 
         let txn_id = runtime.begin_transaction().unwrap();
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 100;
+            guard.write(Some(txn_id)).unwrap().page_mut()[PAGE_SIZE - 1] = 100;
         }
         {
             let guard = cache.fetch_page(1).unwrap();
-            guard.write().unwrap().page_mut()[PAGE_SIZE - 1] = 110;
+            guard.write(Some(txn_id)).unwrap().page_mut()[PAGE_SIZE - 1] = 110;
         }
 
         let rollback = runtime.prepare_rollback_pages(txn_id).unwrap();
@@ -1121,6 +1252,7 @@ mod tests {
             [
                 (txn_id, OwnedLogRecordKind::Begin),
                 (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 0 }),
+                (txn_id, OwnedLogRecordKind::PageUpdate { page_id: 1 }),
                 (txn_id, OwnedLogRecordKind::Rollback),
             ]
         );
@@ -1130,19 +1262,19 @@ mod tests {
     fn wal_logging_failure_restores_page_bytes_and_dirty_state() {
         let page = formatted_page_with_lsn(17, ZERO_LSN);
         let (_file, runtime) = create_disk_with_pages(&[page]);
-        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+        let cache = PageCache::new(Arc::clone(&runtime), 1).unwrap();
 
         let txn_id = runtime.begin_transaction().unwrap();
-        runtime.force_next_lsn_exhausted_for_test();
+        runtime.force_next_lsn_exhausted_for_test().unwrap();
         let guard = cache.fetch_page(0).unwrap();
 
         {
-            let mut write = guard.write().unwrap();
+            let mut write = guard.write(Some(txn_id)).unwrap();
             write.page_mut()[PAGE_SIZE - 1] = 88;
         }
 
         assert_eq!(guard.read().unwrap().page(), &page);
-        assert!(!cache.inner.frames[0].dirty.get());
+        assert!(!cache.inner.frames[0].dirty.load(Ordering::Acquire));
         assert!(runtime.commit_transaction(txn_id).is_err());
     }
 
@@ -1152,19 +1284,25 @@ mod tests {
         let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
-        cache.inner.frames[0].page_id.set(Some(99));
-        *cache.inner.frames[0].data.borrow_mut() = page_with_pattern(15);
-        cache.inner.frames[0].dirty.set(true);
-        cache.inner.frames[0].pin_count.set(0);
-        cache.inner.meta.borrow_mut().page_table.insert(99, 0);
+        cache.inner.frames[0].set_page_id(Some(99));
+        *cache.inner.frames[0].data.write().unwrap() = page_with_pattern(15);
+        cache.inner.frames[0].dirty.store(true, Ordering::Release);
+        cache.inner.frames[0].pin_count.store(0, Ordering::Release);
+        cache.inner.lock_meta().unwrap().page_table.insert(99, 0);
 
         let result = cache.flush_page(99);
 
         assert!(matches!(
             result,
-            Err(PageCacheError::Disk(DiskManagerError::InvalidPageId { page_id: 99 }))
+            Err(PageCacheError::Storage(error))
+                if matches!(
+                    *error,
+                    StorageError::InvalidArgument(
+                        crate::core::error::InvalidArgumentError::InvalidPageId { page_id: 99 }
+                    )
+                )
         ));
-        assert!(cache.inner.frames[0].dirty.get());
+        assert!(cache.inner.frames[0].dirty.load(Ordering::Acquire));
     }
 
     #[test]
@@ -1174,7 +1312,7 @@ mod tests {
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
         let guard = cache.fetch_page(0).unwrap();
-        guard.write().unwrap().page_mut()[0] = 99;
+        guard.write(None).unwrap().page_mut()[0] = 99;
 
         let result = cache.flush_page(0);
         assert!(matches!(result, Err(PageCacheError::PinnedPage { page_id: 0 })));
@@ -1201,17 +1339,17 @@ mod tests {
 
         {
             let guard = cache.fetch_page(0).unwrap();
-            guard.write().unwrap().page_mut()[0] = 10;
+            guard.write(None).unwrap().page_mut()[0] = 10;
         }
         {
             let guard = cache.fetch_page(1).unwrap();
-            guard.write().unwrap().page_mut()[0] = 20;
+            guard.write(None).unwrap().page_mut()[0] = 20;
         }
 
         cache.flush_all().unwrap();
 
         for frame in &cache.inner.frames {
-            assert!(!frame.dirty.get());
+            assert!(!frame.dirty.load(Ordering::Acquire));
         }
 
         let page0 = read_disk_page(file.path(), 0);
@@ -1227,7 +1365,7 @@ mod tests {
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
         let guard = cache.fetch_page(0).unwrap();
-        guard.write().unwrap().page_mut()[0] = 99;
+        guard.write(None).unwrap().page_mut()[0] = 99;
 
         let result = cache.flush_all();
         assert!(matches!(result, Err(PageCacheError::PinnedPage { page_id: 0 })));
@@ -1243,9 +1381,9 @@ mod tests {
             let cache = PageCache::new(disk_manager, 1).unwrap();
             {
                 let guard = cache.fetch_page(0).unwrap();
-                guard.write().unwrap().page_mut()[0] = 144;
+                guard.write(None).unwrap().page_mut()[0] = 144;
             }
-            assert!(cache.inner.frames[0].dirty.get());
+            assert!(cache.inner.frames[0].dirty.load(Ordering::Acquire));
         }
 
         let page_on_disk = read_disk_page(file.path(), 0);
@@ -1258,7 +1396,7 @@ mod tests {
         let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
-        let (page_id, guard) = cache.new_page().unwrap();
+        let (page_id, guard) = cache.new_page(None).unwrap();
         assert_eq!(page_id, 0);
         assert_eq!(guard.read().unwrap().page(), &[0u8; PAGE_SIZE]);
     }
@@ -1269,11 +1407,11 @@ mod tests {
         let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
-        let (first_page_id, first_guard) = cache.new_page().unwrap();
+        let (first_page_id, first_guard) = cache.new_page(None).unwrap();
         assert_eq!(first_page_id, 0);
         drop(first_guard);
 
-        let (second_page_id, second_guard) = cache.new_page().unwrap();
+        let (second_page_id, second_guard) = cache.new_page(None).unwrap();
         assert_eq!(second_page_id, 1);
         drop(second_guard);
     }
@@ -1284,7 +1422,7 @@ mod tests {
         let runtime = runtime_for_path(file.path());
         let cache = PageCache::new(runtime, 1).unwrap();
 
-        let (page_id, guard) = cache.new_page().unwrap();
+        let (page_id, guard) = cache.new_page(None).unwrap();
         drop(guard);
 
         assert_eq!(page_id, 0);
@@ -1295,10 +1433,10 @@ mod tests {
     fn new_page_with_active_transaction_writes_page_alloc_wal_record() {
         let file = NamedTempFile::new().unwrap();
         let runtime = runtime_for_path(file.path());
-        let cache = PageCache::new(Rc::clone(&runtime), 1).unwrap();
+        let cache = PageCache::new(Arc::clone(&runtime), 1).unwrap();
 
         let txn_id = runtime.begin_transaction().unwrap();
-        let (page_id, guard) = cache.new_page().unwrap();
+        let (page_id, guard) = cache.new_page(Some(txn_id)).unwrap();
         drop(guard);
         runtime.commit_transaction(txn_id).unwrap();
 
@@ -1319,9 +1457,9 @@ mod tests {
         let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
-        cache.inner.frames[0].pin_count.set(1);
+        cache.inner.frames[0].pin_count.store(1, Ordering::Release);
 
-        let result = cache.new_page();
+        let result = cache.new_page(None);
         assert!(matches!(result, Err(PageCacheError::NoEvictableFrame)));
 
         let mut disk_manager = DiskManager::new(file.path()).unwrap();
@@ -1337,8 +1475,8 @@ mod tests {
 
         let page_id = {
             let cache = PageCache::new(disk_manager, 1).unwrap();
-            let (page_id, guard) = cache.new_page().unwrap();
-            let mut page = guard.write().unwrap();
+            let (page_id, guard) = cache.new_page(None).unwrap();
+            let mut page = guard.write(None).unwrap();
             page.page_mut()[0] = 61;
             page.page_mut()[PAGE_SIZE - 1] = 142;
             drop(page);
@@ -1361,7 +1499,7 @@ mod tests {
         let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
-        cache.inner.meta.borrow_mut().page_table.insert(7, 99);
+        cache.inner.lock_meta().unwrap().page_table.insert(7, 99);
 
         let result = cache.fetch_page(7);
         assert!(matches!(
@@ -1376,7 +1514,7 @@ mod tests {
         let disk_manager = runtime_for_path(file.path());
         let cache = PageCache::new(disk_manager, 1).unwrap();
 
-        cache.inner.meta.borrow_mut().page_table.insert(8, 100);
+        cache.inner.lock_meta().unwrap().page_table.insert(8, 100);
 
         let result = cache.flush_page(8);
         assert!(matches!(
@@ -1387,5 +1525,206 @@ mod tests {
                 frame_count: 1
             })
         ));
+    }
+}
+
+#[cfg(all(test, loom))]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod loom_tests {
+    use loom::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering as LoomOrdering},
+    };
+    use tempfile::NamedTempFile;
+
+    use super::*;
+    use crate::{
+        loom_support::{check_model, thread},
+        storage::{disk_manager::DiskManager, storage_runtime::StorageRuntime},
+    };
+
+    fn cache_with_pages(patterns: &[u8], frame_count: usize) -> (NamedTempFile, PageCache) {
+        let file = NamedTempFile::new().unwrap();
+        let mut disk = DiskManager::new(file.path()).unwrap();
+        for (page_id, pattern) in patterns.iter().copied().enumerate() {
+            assert_eq!(disk.new_page().unwrap(), page_id as PageId);
+            disk.write_page(page_id as PageId, &[pattern; PAGE_SIZE]).unwrap();
+        }
+        let runtime = Arc::new(StorageRuntime::new(file.path().to_path_buf(), disk).unwrap());
+        (file, PageCache::new(runtime, frame_count).unwrap())
+    }
+
+    fn assert_guard_matches_frame(guard: &PinGuard, pattern: u8) {
+        let _meta = guard.page_cache.lock_meta().unwrap();
+        let frame = &guard.page_cache.frames[guard.frame_id];
+        assert_eq!(frame.page_id(), Some(guard.page_id));
+        assert!(frame.pin_count.load(Ordering::Acquire) > 0);
+        assert_eq!(guard.read().unwrap().page()[0], pattern);
+    }
+
+    fn assert_cache_consistent(cache: &PageCache) {
+        let meta = cache.inner.lock_meta().unwrap();
+        for (page_id, frame_id) in &meta.page_table {
+            assert!(*frame_id < cache.inner.frames.len());
+            assert_eq!(cache.inner.frames[*frame_id].page_id(), Some(*page_id));
+        }
+        for (frame_id, frame) in cache.inner.frames.iter().enumerate() {
+            assert_eq!(frame.pin_count.load(Ordering::Acquire), 0);
+            if let Some(page_id) = frame.page_id() {
+                assert_eq!(meta.page_table.get(&page_id), Some(&frame_id));
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_hits_keep_each_live_pin_counted() {
+        check_model(|| {
+            let (_file, cache) = cache_with_pages(&[17], 1);
+            drop(cache.fetch_page(0).unwrap());
+
+            let first_cache = cache.clone();
+            let first = thread::spawn(move || {
+                let guard = first_cache.fetch_page(0).unwrap();
+                thread::yield_now();
+                assert_guard_matches_frame(&guard, 17);
+                drop(guard);
+            });
+            let second_cache = cache.clone();
+            let second = thread::spawn(move || {
+                let guard = second_cache.fetch_page(0).unwrap();
+                thread::yield_now();
+                assert_guard_matches_frame(&guard, 17);
+                drop(guard);
+            });
+
+            first.join().unwrap();
+            second.join().unwrap();
+            assert_cache_consistent(&cache);
+        });
+    }
+
+    #[test]
+    fn concurrent_misses_for_one_page_install_one_resident_frame() {
+        check_model(|| {
+            let (_file, cache) = cache_with_pages(&[29], 2);
+
+            let first_cache = cache.clone();
+            let first = thread::spawn(move || {
+                let guard = first_cache.fetch_page(0).unwrap();
+                thread::yield_now();
+                assert_guard_matches_frame(&guard, 29);
+            });
+            let second_cache = cache.clone();
+            let second = thread::spawn(move || {
+                let guard = second_cache.fetch_page(0).unwrap();
+                thread::yield_now();
+                assert_guard_matches_frame(&guard, 29);
+            });
+
+            first.join().unwrap();
+            second.join().unwrap();
+            assert_eq!(
+                cache.inner.frames.iter().filter(|frame| frame.page_id() == Some(0)).count(),
+                1
+            );
+            assert_cache_consistent(&cache);
+        });
+    }
+
+    #[test]
+    fn cache_hit_racing_with_eviction_never_retargets_a_live_guard() {
+        check_model(|| {
+            let (_file, cache) = cache_with_pages(&[41, 73], 1);
+            drop(cache.fetch_page(0).unwrap());
+            let successes = Arc::new(AtomicUsize::new(0));
+
+            let first_cache = cache.clone();
+            let first_successes = Arc::clone(&successes);
+            let first = thread::spawn(move || {
+                if let Ok(guard) = first_cache.fetch_page(0) {
+                    first_successes.fetch_add(1, LoomOrdering::Relaxed);
+                    thread::yield_now();
+                    assert_guard_matches_frame(&guard, 41);
+                }
+            });
+            let second_cache = cache.clone();
+            let second_successes = Arc::clone(&successes);
+            let second = thread::spawn(move || {
+                if let Ok(guard) = second_cache.fetch_page(1) {
+                    second_successes.fetch_add(1, LoomOrdering::Relaxed);
+                    thread::yield_now();
+                    assert_guard_matches_frame(&guard, 73);
+                }
+            });
+
+            first.join().unwrap();
+            second.join().unwrap();
+            assert!(successes.load(LoomOrdering::Relaxed) >= 1);
+            assert_cache_consistent(&cache);
+        });
+    }
+
+    #[test]
+    fn flush_racing_with_write_does_not_lose_the_dirty_generation() {
+        check_model(|| {
+            let (file, cache) = cache_with_pages(&[113], 1);
+            drop(cache.fetch_page(0).unwrap());
+
+            let writer_cache = cache.clone();
+            let writer = thread::spawn(move || {
+                let guard = writer_cache.fetch_page(0).unwrap();
+                let mut page = guard.write(None).unwrap();
+                page.page_mut()[0] = 127;
+                thread::yield_now();
+            });
+            let flush_cache = cache.clone();
+            let flush = thread::spawn(move || flush_cache.flush_all());
+
+            writer.join().unwrap();
+            let flush_result = flush.join().unwrap();
+            assert!(
+                flush_result.is_ok()
+                    || matches!(flush_result, Err(PageCacheError::PinnedPage { page_id: 0 }))
+            );
+
+            cache.flush_all().unwrap();
+            let mut disk = DiskManager::new(file.path()).unwrap();
+            let mut page = [0; PAGE_SIZE];
+            disk.read_page(0, &mut page).unwrap();
+            assert_eq!(page[0], 127);
+            assert!(!cache.inner.frames[0].dirty.load(Ordering::Acquire));
+        });
+    }
+
+    #[test]
+    fn concurrent_misses_do_not_share_one_victim_frame() {
+        check_model(|| {
+            let (_file, cache) = cache_with_pages(&[89, 101], 1);
+            let successes = Arc::new(AtomicUsize::new(0));
+
+            let first_cache = cache.clone();
+            let first_successes = Arc::clone(&successes);
+            let first = thread::spawn(move || {
+                if let Ok(guard) = first_cache.fetch_page(0) {
+                    first_successes.fetch_add(1, LoomOrdering::Relaxed);
+                    thread::yield_now();
+                    assert_guard_matches_frame(&guard, 89);
+                }
+            });
+            let second_cache = cache.clone();
+            let second_successes = Arc::clone(&successes);
+            let second = thread::spawn(move || {
+                if let Ok(guard) = second_cache.fetch_page(1) {
+                    second_successes.fetch_add(1, LoomOrdering::Relaxed);
+                    thread::yield_now();
+                    assert_guard_matches_frame(&guard, 101);
+                }
+            });
+
+            first.join().unwrap();
+            second.join().unwrap();
+            assert!(successes.load(LoomOrdering::Relaxed) >= 1);
+            assert_cache_consistent(&cache);
+        });
     }
 }

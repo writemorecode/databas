@@ -201,7 +201,7 @@ where
     }
 
     /// Returns the statically known encoded kind of this page.
-    #[cfg(test)]
+    #[cfg(all(test, not(loom)))]
     pub(crate) fn kind(&self) -> format::PageKind {
         page_kind::<N>()
     }

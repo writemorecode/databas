@@ -1,12 +1,13 @@
-//! Strictly sequential Databas TCP server.
+//! Concurrent Databas TCP server.
 //!
-//! The server accepts one connection, serves all requests on that connection
-//! synchronously, and only then accepts the next connection. It does not spawn
-//! worker threads and does not pipeline queries.
+//! Each accepted connection owns a session on a worker thread. Transactions
+//! coordinate through shared storage and table leases.
 
 use std::{
     io,
     net::{TcpListener, TcpStream},
+    sync::Arc,
+    thread,
 };
 
 use thiserror::Error;
@@ -41,7 +42,7 @@ pub enum ServerError {
 /// A single-database, single-connection-at-a-time TCP server.
 pub struct Server {
     listener: TcpListener,
-    database: Database,
+    database: Arc<Database>,
     database_name: String,
 }
 
@@ -62,24 +63,30 @@ impl Server {
     ) -> Result<Self, ServerError> {
         let database_name = database_name.into();
         validate_database_name(&database_name)?;
-        Ok(Self { listener, database, database_name })
+        Ok(Self { listener, database: Arc::new(database), database_name })
     }
 
-    /// Accepts and serves connections forever, one at a time.
+    /// Accepts connections forever and serves each on a worker thread.
     ///
     /// Connection-level I/O and protocol errors close only that connection.
-    /// The next connection is not accepted until the current connection has
-    /// closed and the database has been flushed.
     ///
     /// # Errors
     ///
     /// Returns if accepting a connection or flushing the database fails.
     pub fn serve(self) -> Result<(), ServerError> {
         loop {
-            self.serve_one()?;
+            let (mut stream, _) = self.listener.accept()?;
+            let database = Arc::clone(&self.database);
+            let database_name = self.database_name.clone();
+            thread::spawn(move || {
+                let _ = stream.set_nodelay(true);
+                let _ = handle_connection(&mut stream, &database, &database_name);
+                let _ = database.flush();
+            });
         }
     }
 
+    #[cfg(test)]
     fn serve_one(&self) -> Result<(), ServerError> {
         let (mut stream, _) = self.listener.accept()?;
         let _ = stream.set_nodelay(true);
@@ -279,6 +286,7 @@ fn storage_error_code(error: &StorageError) -> ErrorCode {
         StorageError::Constraint(_) => ErrorCode::ConstraintViolation,
         StorageError::InvalidArgument(_) => ErrorCode::InvalidArgument,
         StorageError::LimitExceeded(_) => ErrorCode::LimitExceeded,
+        StorageError::Lock(_) => ErrorCode::ExecutionError,
         StorageError::Internal(_) => ErrorCode::InternalError,
     }
 }

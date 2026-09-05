@@ -11,6 +11,8 @@ pub enum InternalError {
     InvariantViolation(#[source] InvariantViolation),
     #[error("allocation failed: {0}")]
     AllocationFailed(#[source] TryReserveError),
+    #[error("synchronization lock poisoned: {lock}")]
+    SynchronizationPoisoned { lock: &'static str },
 }
 
 /// Internal state that should be unreachable through a valid operation.

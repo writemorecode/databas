@@ -4,10 +4,12 @@
 //! only with raw byte keys and raw byte values stored in `RawLeaf` pages
 //! and separator byte keys stored in `RawInterior` pages.
 
-use std::{borrow::Cow, cell::Cell, cmp::Ordering, rc::Rc};
+use std::{borrow::Cow, cmp::Ordering};
+
+use crate::sync::{Arc, AtomicU64, Ordering as AtomicOrdering};
 
 use crate::core::{
-    PAGE_SIZE, PageId,
+    PAGE_SIZE, PageId, TxnId,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
 };
 use crate::storage::{
@@ -34,17 +36,44 @@ mod root;
 mod search;
 mod split;
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, loom))]
+#[allow(clippy::unwrap_used)]
+mod loom_tests {
+    use super::search::advance_mutation_epoch;
+    use crate::{
+        loom_support::{check_model, thread},
+        sync::{Arc, AtomicU64, Ordering},
+    };
+
+    #[test]
+    fn concurrent_mutations_each_advance_the_shared_epoch() {
+        check_model(|| {
+            let epoch = Arc::new(AtomicU64::new(0));
+
+            let first_epoch = Arc::clone(&epoch);
+            let first = thread::spawn(move || advance_mutation_epoch(&first_epoch));
+            let second_epoch = Arc::clone(&epoch);
+            let second = thread::spawn(move || advance_mutation_epoch(&second_epoch));
+
+            first.join().unwrap();
+            second.join().unwrap();
+            assert_eq!(epoch.load(Ordering::Acquire), 2);
+        });
+    }
+}
+
+#[cfg(all(test, not(loom)))]
 pub use record::OwnedRecord;
 pub use record::Record;
 pub(crate) use root::{initialize_empty_root, validate_tree_page_formats};
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 use record::RecordStorage;
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 use root::read_page_kind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,8 +98,9 @@ pub enum CursorState {
 #[derive(Clone)]
 pub struct TreeCursor {
     page_cache: PageCache,
-    root_page_id: Rc<Cell<PageId>>,
-    mutation_epoch: Rc<Cell<u64>>,
+    root_page_id: Arc<AtomicU64>,
+    mutation_epoch: Arc<AtomicU64>,
+    txn_id: Option<TxnId>,
     state: CursorState,
 }
 
