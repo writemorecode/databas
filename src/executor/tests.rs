@@ -1,16 +1,18 @@
-use std::fmt::Write as _;
+use std::{fmt::Write as _, thread, time::Duration};
 
 use tempfile::tempdir;
 
 use super::*;
 use crate::{
     core::{
-        ColumnSchema, DataType, OwnedTableRecord, PAGE_SIZE, TableKey, Tuple, TupleSchema,
+        ColumnSchema, DataType, Database, LockError, OwnedTableRecord, PAGE_SIZE, TableId,
+        TableKey, Tuple, TupleSchema,
         access::CatalogRead,
         error::{ConstraintError, InternalError, InvariantViolation, StorageError},
+        test_utils::{TestTransaction, create_index, create_table},
     },
     error::DatabaseError,
-    planner::{BoundColumn, PlannedExpression, Planner},
+    planner::{BoundColumn, PlannedExpression, Planner, PlannerError},
     relational::cursor::encode_index_entry_key,
     session::{Session, SessionError},
     sql_parser::parser::Parser,
@@ -70,6 +72,27 @@ fn execute_sql_with_session<'a>(
     session.execute_sql(sql)
 }
 
+fn wait_until_transaction_waits_for(database: &Database, txn_id: u64, table_id: TableId) {
+    for _ in 0..10_000 {
+        if database.transaction_is_waiting_for_test(txn_id, table_id).unwrap() {
+            return;
+        }
+        thread::sleep(Duration::from_micros(10));
+    }
+    panic!("transaction {txn_id} did not wait for table {table_id:?}");
+}
+
+fn integer_rows(output: ExecutionOutput) -> Vec<i64> {
+    collect_rows(output)
+        .unwrap()
+        .into_iter()
+        .map(|row| match values(&row).as_slice() {
+            [Value::Integer(value)] => i64::from(*value),
+            values => panic!("expected one integer column, got {values:?}"),
+        })
+        .collect()
+}
+
 fn execute_script(database: &Database, sql: &str) {
     let items = Parser::new(sql).collect::<Result<Vec<_>, _>>().unwrap();
     let mut session = Session::new(database);
@@ -77,6 +100,17 @@ fn execute_script(database: &Database, sql: &str) {
     for item in items {
         session.execute_item(item).unwrap();
     }
+}
+
+fn executor_transaction<'db>(
+    database: &'db Database,
+    table_names: &[&str],
+) -> TestTransaction<'db> {
+    let table_ids = table_names
+        .iter()
+        .map(|name| database.table_schema_by_name(name).unwrap().table_id.into())
+        .collect::<Vec<_>>();
+    TestTransaction::begin(database, &table_ids).unwrap()
 }
 
 fn is_null_value_error(error: ExecutorError, expected_column: &str) -> bool {
@@ -264,7 +298,8 @@ fn single_column_expression_reads_bound_ordinal() {
 fn project_evaluates_multiple_expressions_in_order() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Project {
         input: Box::new(PhysicalPlan::Values {
             rows: vec![vec![
@@ -293,7 +328,8 @@ fn project_evaluates_multiple_expressions_in_order() {
 fn filter_keeps_only_rows_with_true_predicate() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Filter {
         input: Box::new(PhysicalPlan::Values {
             rows: vec![
@@ -317,22 +353,23 @@ fn filter_keeps_only_rows_with_true_predicate() {
 }
 
 #[test]
-fn full_table_scan_yields_borrowed_rows_that_can_be_materialized() {
+fn full_table_scan_materializes_owned_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(
         &database,
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
     )
     .unwrap();
     let table = database.table_schema_by_name("users").unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &["users"]);
+    let mut executor = Executor::in_transaction(&transaction);
 
     let rows =
         collect_rows(executor.execute(PhysicalPlan::FullTableScan { table }).unwrap()).unwrap();
 
-    assert!(matches!(rows[0], ExecutorRow::Borrowed(_)));
+    assert!(matches!(rows[0], ExecutorRow::Owned(_)));
     assert_eq!(
         values(&rows[0]),
         vec![Value::Integer(1), Value::String("Ada".to_owned()), Value::Boolean(true)]
@@ -343,17 +380,18 @@ fn full_table_scan_yields_borrowed_rows_that_can_be_materialized() {
 }
 
 #[test]
-fn filter_over_table_scan_preserves_borrowed_rows() {
+fn filter_over_table_scan_materializes_owned_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(
         &database,
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
     )
     .unwrap();
     let table = database.table_schema_by_name("users").unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &["users"]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Filter {
         input: Box::new(PhysicalPlan::FullTableScan { table }),
         predicate: PlannedExpression::Column(bound("active", 2, DataType::Boolean)),
@@ -362,7 +400,7 @@ fn filter_over_table_scan_preserves_borrowed_rows() {
     let rows = collect_rows(executor.execute(plan).unwrap()).unwrap();
 
     assert_eq!(rows.len(), 1);
-    assert!(matches!(rows[0], ExecutorRow::Borrowed(_)));
+    assert!(matches!(rows[0], ExecutorRow::Owned(_)));
     assert_eq!(rows[0].table_key(), 1);
 }
 
@@ -370,11 +408,12 @@ fn filter_over_table_scan_preserves_borrowed_rows() {
 fn project_over_table_scan_returns_owned_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
     let table = database.table_schema_by_name("users").unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &["users"]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Project {
         input: Box::new(PhysicalPlan::FullTableScan { table }),
         expressions: vec![PlannedExpression::Column(bound("name", 1, DataType::Text))],
@@ -391,7 +430,8 @@ fn project_over_table_scan_returns_owned_rows() {
 fn filter_rejects_non_boolean_predicate() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Filter {
         input: Box::new(PhysicalPlan::Values {
             rows: vec![vec![PlannedExpression::Literal(Value::Integer(1))]],
@@ -409,7 +449,8 @@ fn filter_rejects_non_boolean_predicate() {
 fn limit_does_not_evaluate_rows_beyond_limit() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Limit {
         input: Box::new(PhysicalPlan::Values {
             rows: vec![
@@ -434,7 +475,8 @@ fn limit_does_not_evaluate_rows_beyond_limit() {
 fn limit_larger_than_child_rows_returns_all_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Limit {
         input: Box::new(PhysicalPlan::Values {
             rows: vec![
@@ -456,7 +498,8 @@ fn limit_larger_than_child_rows_returns_all_rows() {
 fn limit_rejects_non_row_child() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Limit {
         input: Box::new(PhysicalPlan::CreateTable {
             name: "users".to_owned(),
@@ -475,7 +518,8 @@ fn limit_rejects_non_row_child() {
 fn offset_reports_errors_from_skipped_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Offset {
         input: Box::new(PhysicalPlan::Filter {
             input: Box::new(PhysicalPlan::Values {
@@ -499,7 +543,8 @@ fn offset_reports_errors_from_skipped_rows() {
 fn offset_larger_than_child_rows_returns_no_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Offset {
         input: Box::new(PhysicalPlan::Values {
             rows: vec![
@@ -519,7 +564,8 @@ fn offset_larger_than_child_rows_returns_no_rows() {
 fn offset_rejects_non_row_child() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Offset {
         input: Box::new(PhysicalPlan::CreateTable {
             name: "users".to_owned(),
@@ -538,7 +584,8 @@ fn offset_rejects_non_row_child() {
 fn filter_propagates_child_row_errors() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Filter {
         input: Box::new(PhysicalPlan::Filter {
             input: Box::new(PhysicalPlan::Values {
@@ -559,7 +606,8 @@ fn filter_propagates_child_row_errors() {
 fn project_propagates_child_row_errors() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Project {
         input: Box::new(PhysicalPlan::Filter {
             input: Box::new(PhysicalPlan::Values {
@@ -580,7 +628,8 @@ fn project_propagates_child_row_errors() {
 fn row_operator_rejects_non_row_child() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Project {
         input: Box::new(PhysicalPlan::CreateTable {
             name: "users".to_owned(),
@@ -599,7 +648,8 @@ fn row_operator_rejects_non_row_child() {
 fn sort_returns_unsupported_error_instead_of_panicking() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
     let plan = PhysicalPlan::Sort {
         input: Box::new(PhysicalPlan::Values { rows: Vec::new() }),
         terms: Vec::new(),
@@ -689,7 +739,7 @@ fn invalid_type_combinations_return_executor_errors() {
 fn select_with_projection_and_filter_executes_end_to_end() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     let mut users = database.table_cursor_by_name("users").unwrap();
     users
         .insert(
@@ -718,7 +768,8 @@ fn select_with_projection_and_filter_executes_end_to_end() {
 
     let statement = Parser::new("SELECT name FROM users WHERE id == 1;").stmt().unwrap();
     let plan = Planner::new(&database).plan_statement(&statement).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &["users"]);
+    let mut executor = Executor::in_transaction(&transaction);
 
     let rows = collect_rows(executor.execute(plan.physical).unwrap()).unwrap();
 
@@ -731,7 +782,7 @@ fn select_with_projection_and_filter_executes_end_to_end() {
 fn select_with_primary_key_range_returns_only_matching_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, &insert_many_users_sql(25)).unwrap();
 
     let output =
@@ -749,7 +800,7 @@ fn select_with_primary_key_range_returns_only_matching_rows() {
 fn select_with_secondary_index_equality_returns_matching_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
     execute_sql(
         &database,
@@ -773,7 +824,7 @@ fn select_with_secondary_index_equality_returns_matching_rows() {
 fn select_with_secondary_index_equality_applies_residual_filter() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
     execute_sql(
         &database,
@@ -797,7 +848,7 @@ fn select_with_secondary_index_equality_applies_residual_filter() {
 fn select_with_text_index_range_returns_matching_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
     execute_sql(
         &database,
@@ -826,7 +877,7 @@ fn select_with_text_index_range_returns_matching_rows() {
 fn select_with_text_index_exclusive_range_excludes_boundary_values() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
     execute_sql(
         &database,
@@ -848,7 +899,7 @@ fn select_with_text_index_exclusive_range_excludes_boundary_values() {
 fn select_with_text_index_range_does_not_skip_short_matching_values() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
     execute_sql(
         &database,
@@ -871,7 +922,7 @@ fn select_with_text_index_range_does_not_skip_short_matching_values() {
 fn explain_select_returns_explain_output() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
 
     let output =
@@ -884,7 +935,7 @@ fn explain_select_returns_explain_output() {
 fn insert_values_uses_primary_keys_and_persists_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
 
     let statement = Parser::new(
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
@@ -892,7 +943,8 @@ fn insert_values_uses_primary_keys_and_persists_rows() {
     .stmt()
     .unwrap();
     let plan = Planner::new(&database).plan_statement(&statement).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &["users"]);
+    let mut executor = Executor::in_transaction(&transaction);
 
     let output = executor.execute(plan.physical).unwrap();
 
@@ -915,14 +967,15 @@ fn insert_values_uses_primary_keys_and_persists_rows() {
 fn insert_values_rejects_omitted_non_nullable_columns() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
 
     let plan = insert_values_plan(
         &database,
         vec![bound("id", 0, DataType::Integer), bound("name", 1, DataType::Text)],
         vec![vec![Value::Integer(1), Value::String("Ada".to_owned())]],
     );
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &["users"]);
+    let mut executor = Executor::in_transaction(&transaction);
 
     assert!(executor.execute(plan).is_err_and(|error| is_null_value_error(error, "active")));
 }
@@ -931,14 +984,15 @@ fn insert_values_rejects_omitted_non_nullable_columns() {
 fn insert_values_rejects_values_with_wrong_type() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
 
     let statement =
         Parser::new("INSERT INTO users (id, name, active) VALUES ('one', 'Ada', TRUE);")
             .stmt()
             .unwrap();
     let plan = Planner::new(&database).plan_statement(&statement).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &["users"]);
+    let mut executor = Executor::in_transaction(&transaction);
 
     assert!(executor.execute(plan.physical).is_err_and(|error| is_type_mismatch_error(
         error,
@@ -952,7 +1006,7 @@ fn insert_values_rejects_values_with_wrong_type() {
 fn insert_values_rejects_null_for_non_nullable_columns() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
 
     let plan = insert_values_plan(
         &database,
@@ -963,7 +1017,8 @@ fn insert_values_rejects_null_for_non_nullable_columns() {
         ],
         vec![vec![Value::Integer(1), Value::Null, Value::Boolean(true)]],
     );
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &["users"]);
+    let mut executor = Executor::in_transaction(&transaction);
 
     assert!(executor.execute(plan).is_err_and(|error| is_null_value_error(error, "name")));
 }
@@ -972,8 +1027,9 @@ fn insert_values_rejects_null_for_non_nullable_columns() {
 fn failed_insert_does_not_write_partial_row() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
-    let mut executor = Executor::new(&database);
+    create_table(&database, "users", users_schema()).unwrap();
+    let transaction = executor_transaction(&database, &["users"]);
+    let mut executor = Executor::in_transaction(&transaction);
 
     let valid = insert_values_plan(
         &database,
@@ -1012,7 +1068,7 @@ fn failed_insert_does_not_write_partial_row() {
 fn failed_multi_row_insert_rolls_back_rows_already_inserted_in_statement() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
 
     let result = execute_sql(
         &database,
@@ -1033,8 +1089,8 @@ fn failed_multi_row_insert_in_explicit_transaction_rolls_back_statement_before_c
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     database.flush().unwrap();
 
     let mut session = Session::new(&database);
@@ -1077,7 +1133,7 @@ fn failed_multi_row_insert_in_explicit_transaction_rolls_back_statement_before_c
 fn savepoint_rollback_error_takes_precedence_over_executor_error() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     let mut session = Session::new(&database);
 
     execute_sql_with_session(&mut session, "BEGIN;").unwrap();
@@ -1099,7 +1155,7 @@ fn savepoint_rollback_error_takes_precedence_over_executor_error() {
 fn wal_logging_failure_during_explicit_statement_is_reported_immediately() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     let mut session = Session::new(&database);
 
     execute_sql_with_session(&mut session, "BEGIN;").unwrap();
@@ -1112,7 +1168,7 @@ fn wal_logging_failure_during_explicit_statement_is_reported_immediately() {
     assert!(matches!(
         result,
         Err(DatabaseError::Storage(StorageError::Internal(InternalError::InvariantViolation(
-            InvariantViolation::TransactionPoisoned { txn_id: 1 }
+            InvariantViolation::TransactionPoisoned { txn_id: 2 }
         ))))
     ));
 }
@@ -1121,14 +1177,15 @@ fn wal_logging_failure_during_explicit_statement_is_reported_immediately() {
 fn create_index_backfills_existing_table_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     let insert = Parser::new(
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
     )
     .stmt()
     .unwrap();
     let insert_plan = Planner::new(&database).plan_statement(&insert).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &["users"]);
+    let mut executor = Executor::in_transaction(&transaction);
     executor.execute(insert_plan.physical).unwrap();
 
     let create_index = Parser::new("CREATE INDEX idx_users_name ON users (name);").stmt().unwrap();
@@ -1146,10 +1203,11 @@ fn create_index_backfills_existing_table_rows() {
 fn insert_values_updates_existing_secondary_indexes() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     let create_index = Parser::new("CREATE INDEX idx_users_name ON users (name);").stmt().unwrap();
     let create_index_plan = Planner::new(&database).plan_statement(&create_index).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &["users"]);
+    let mut executor = Executor::in_transaction(&transaction);
     executor.execute(create_index_plan.physical).unwrap();
 
     let insert = Parser::new("INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
@@ -1170,7 +1228,7 @@ fn secondary_indexes_allow_duplicate_values_and_persist_entries() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
 
     execute_sql(
@@ -1191,7 +1249,7 @@ fn secondary_indexes_allow_duplicate_values_and_persist_entries() {
 fn delete_all_rows_returns_count_and_empties_table() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(
         &database,
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
@@ -1209,7 +1267,7 @@ fn delete_all_rows_returns_count_and_empties_table() {
 fn delete_streams_across_leaf_merges_without_skipping_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, &insert_many_large_users_sql(40, 300)).unwrap();
 
     let output = execute_sql(&database, "DELETE FROM users;").unwrap();
@@ -1225,7 +1283,7 @@ fn delete_streams_across_leaf_merges_without_skipping_rows() {
 fn delete_where_removes_only_matching_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(
         &database,
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
@@ -1243,7 +1301,7 @@ fn delete_where_removes_only_matching_rows() {
 fn delete_where_primary_key_range_removes_only_matching_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, &insert_many_users_sql(25)).unwrap();
 
     let output = execute_sql(&database, "DELETE FROM users WHERE 10 <= id AND id < 20;").unwrap();
@@ -1259,7 +1317,7 @@ fn delete_where_primary_key_range_removes_only_matching_rows() {
 fn delete_without_matches_returns_zero_rows_affected() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
 
@@ -1273,7 +1331,7 @@ fn delete_without_matches_returns_zero_rows_affected() {
 fn delete_removes_secondary_index_entries() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
     execute_sql(
         &database,
@@ -1294,7 +1352,7 @@ fn delete_removes_secondary_index_entries() {
 fn delete_where_indexed_predicate_removes_all_matching_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
     execute_sql(
         &database,
@@ -1317,7 +1375,7 @@ fn delete_where_indexed_predicate_removes_all_matching_rows() {
 fn delete_with_non_boolean_where_does_not_delete_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
 
@@ -1336,7 +1394,7 @@ fn delete_with_non_boolean_where_does_not_delete_rows() {
 fn update_all_rows_returns_count_and_replaces_values() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(
         &database,
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
@@ -1355,7 +1413,7 @@ fn update_all_rows_returns_count_and_replaces_values() {
 fn update_streams_across_leaf_splits_without_revisiting_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, &insert_many_large_users_sql(40, 40)).unwrap();
     let updated_name = "y".repeat(500);
 
@@ -1372,7 +1430,7 @@ fn update_streams_across_leaf_splits_without_revisiting_rows() {
 fn update_where_replaces_only_matching_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(
         &database,
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', FALSE);",
@@ -1396,7 +1454,7 @@ fn update_where_replaces_only_matching_rows() {
 fn update_where_primary_key_range_replaces_only_matching_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, &insert_many_users_sql(25)).unwrap();
 
     let output =
@@ -1414,7 +1472,7 @@ fn update_where_primary_key_range_replaces_only_matching_rows() {
 fn update_without_matches_returns_zero_rows_affected() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
 
@@ -1428,7 +1486,7 @@ fn update_without_matches_returns_zero_rows_affected() {
 fn update_assignment_expression_reads_original_row_values() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
 
@@ -1446,7 +1504,7 @@ fn update_assignment_expression_reads_original_row_values() {
 fn update_rejects_primary_key_assignment() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
 
@@ -1462,7 +1520,7 @@ fn update_rejects_primary_key_assignment() {
 fn update_rejects_wrong_type_without_changing_row() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
 
@@ -1478,7 +1536,7 @@ fn update_rejects_wrong_type_without_changing_row() {
 fn update_with_non_boolean_where_does_not_change_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
 
@@ -1497,7 +1555,7 @@ fn update_with_non_boolean_where_does_not_change_rows() {
 fn update_refreshes_secondary_index_entries() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
     execute_sql(
         &database,
@@ -1518,7 +1576,7 @@ fn update_refreshes_secondary_index_entries() {
 fn update_where_indexed_predicate_updates_all_matching_rows() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
     execute_sql(
         &database,
@@ -1557,27 +1615,27 @@ fn update_where_indexed_predicate_updates_all_matching_rows() {
 fn update_indexed_range_changes_each_matching_row_once() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database
-        .create_table(
-            "scores",
-            TupleSchema {
-                columns: vec![
-                    ColumnSchema {
-                        name: "id".to_owned(),
-                        data_type: DataType::Integer,
-                        nullable: false,
-                        primary_key: true,
-                    },
-                    ColumnSchema {
-                        name: "score".to_owned(),
-                        data_type: DataType::Integer,
-                        nullable: false,
-                        primary_key: false,
-                    },
-                ],
-            },
-        )
-        .unwrap();
+    create_table(
+        &database,
+        "scores",
+        TupleSchema {
+            columns: vec![
+                ColumnSchema {
+                    name: "id".to_owned(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    primary_key: true,
+                },
+                ColumnSchema {
+                    name: "score".to_owned(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    primary_key: false,
+                },
+            ],
+        },
+    )
+    .unwrap();
     execute_sql(&database, "CREATE INDEX idx_scores_score ON scores (score);").unwrap();
     execute_sql(
         &database,
@@ -1611,7 +1669,7 @@ fn update_indexed_range_changes_each_matching_row_once() {
 fn failed_multi_row_update_rolls_back_rows_already_updated_in_statement() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(
         &database,
         "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Grace', TRUE);",
@@ -1632,7 +1690,7 @@ fn failed_multi_row_update_rolls_back_rows_already_updated_in_statement() {
 fn explicit_transaction_rollback_restores_updated_rows_and_indexes() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
@@ -1652,6 +1710,132 @@ fn explicit_transaction_rollback_restores_updated_rows_and_indexes() {
     assert_user_row(&database, 1, "Ada");
     assert_name_index_entry(&database, "Ada", 1);
     assert_name_index_absent(&database, "Linus");
+}
+
+#[test]
+fn concurrent_explicit_transactions_are_admitted() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    let mut first = Session::new(&database);
+    let mut second = Session::new(&database);
+
+    execute_sql_with_session(&mut first, "BEGIN;").unwrap();
+    execute_sql_with_session(&mut second, "BEGIN;").unwrap();
+    execute_sql_with_session(&mut second, "ROLLBACK;").unwrap();
+    execute_sql_with_session(&mut first, "ROLLBACK;").unwrap();
+}
+
+#[test]
+fn same_table_waiter_after_commit_observes_committed_row() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY);").unwrap();
+    let table_id = TableId::from(database.table_schema_by_name("users").unwrap().table_id);
+    let mut writer = Session::new(&database);
+
+    execute_sql_with_session(&mut writer, "BEGIN;").unwrap();
+    let writer_txn = writer.active_transaction_id_for_test().unwrap();
+    execute_sql_with_session(&mut writer, "INSERT INTO users (id) VALUES (1);").unwrap();
+
+    let observed = thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            execute_sql(&database, "SELECT id FROM users;")
+                .map(integer_rows)
+                .map_err(|error| error.to_string())
+        });
+        wait_until_transaction_waits_for(&database, writer_txn + 1, table_id);
+
+        execute_sql_with_session(&mut writer, "COMMIT;").unwrap();
+        reader.join().unwrap()
+    });
+
+    assert_eq!(observed.unwrap(), vec![1]);
+}
+
+#[test]
+fn same_table_waiter_observes_rollback_restoration() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY);").unwrap();
+    let table_id = TableId::from(database.table_schema_by_name("users").unwrap().table_id);
+    let mut writer = Session::new(&database);
+
+    execute_sql_with_session(&mut writer, "BEGIN;").unwrap();
+    let writer_txn = writer.active_transaction_id_for_test().unwrap();
+    execute_sql_with_session(&mut writer, "INSERT INTO users (id) VALUES (1);").unwrap();
+
+    let observed = thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            let output = execute_sql(&database, "SELECT id FROM users;").unwrap();
+            integer_rows(output)
+        });
+        wait_until_transaction_waits_for(&database, writer_txn + 1, table_id);
+
+        execute_sql_with_session(&mut writer, "ROLLBACK;").unwrap();
+        reader.join().unwrap()
+    });
+
+    assert!(observed.is_empty());
+}
+
+#[test]
+fn session_deadlock_victim_rolls_back_and_releases_earlier_locks() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    execute_sql(&database, "CREATE TABLE alpha (id INT PRIMARY KEY);").unwrap();
+    execute_sql(&database, "CREATE TABLE beta (id INT PRIMARY KEY);").unwrap();
+    let beta_id = TableId::from(database.table_schema_by_name("beta").unwrap().table_id);
+    let mut first = Session::new(&database);
+    let mut second = Session::new(&database);
+
+    execute_sql_with_session(&mut first, "BEGIN;").unwrap();
+    execute_sql_with_session(&mut second, "BEGIN;").unwrap();
+    let first_txn = first.active_transaction_id_for_test().unwrap();
+    execute_sql_with_session(&mut first, "INSERT INTO alpha (id) VALUES (1);").unwrap();
+    execute_sql_with_session(&mut second, "INSERT INTO beta (id) VALUES (2);").unwrap();
+
+    thread::scope(|scope| {
+        let winner = scope.spawn(move || {
+            execute_sql_with_session(&mut first, "INSERT INTO beta (id) VALUES (3);")
+                .map_err(|error| error.to_string())?;
+            execute_sql_with_session(&mut first, "ROLLBACK;").map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        });
+        wait_until_transaction_waits_for(&database, first_txn, beta_id);
+
+        assert!(matches!(
+            execute_sql_with_session(&mut second, "INSERT INTO alpha (id) VALUES (4);"),
+            Err(DatabaseError::Storage(StorageError::Lock(LockError::Deadlock { .. })))
+        ));
+        assert_eq!(second.active_transaction_id_for_test(), None);
+        winner.join().unwrap().unwrap();
+    });
+
+    assert!(integer_rows(execute_sql(&database, "SELECT id FROM alpha;").unwrap()).is_empty());
+    assert!(integer_rows(execute_sql(&database, "SELECT id FROM beta;").unwrap()).is_empty());
+}
+
+#[test]
+fn planner_observes_uncommitted_ddl_before_admission_rejects_execution() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    let mut ddl = Session::new(&database);
+
+    execute_sql_with_session(&mut ddl, "BEGIN;").unwrap();
+    execute_sql_with_session(&mut ddl, "CREATE TABLE staged (id INT PRIMARY KEY);").unwrap();
+
+    // Reaching lock admission rather than returning TableNotFound proves that
+    // planning observed the uncommitted catalog row.
+    assert!(matches!(
+        execute_sql(&database, "SELECT id FROM staged;"),
+        Err(DatabaseError::Storage(StorageError::Lock(LockError::DdlBusy { .. })))
+    ));
+
+    execute_sql_with_session(&mut ddl, "ROLLBACK;").unwrap();
+    assert!(matches!(
+        execute_sql(&database, "SELECT id FROM staged;"),
+        Err(DatabaseError::Planner(PlannerError::TableNotFound { .. }))
+    ));
 }
 
 #[test]
@@ -1714,7 +1898,7 @@ ROLLBACK;
 fn explicit_transaction_rollback_restores_deleted_rows_and_indexes() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
     execute_sql(
         &database,
@@ -1887,7 +2071,7 @@ fn nested_begin_errors_without_ending_outer_transaction() {
 fn dropping_session_with_active_transaction_rolls_back_and_releases_database_handle() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
 
     {
         let mut session = Session::new(&database);
@@ -1938,7 +2122,7 @@ fn committed_create_index_backfill_recovers_from_wal_after_crash_without_databas
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     database.flush().unwrap();
 
     execute_sql(
@@ -1962,7 +2146,7 @@ fn committed_large_insert_with_btree_splits_recovers_from_wal_after_crash() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     database.flush().unwrap();
 
     execute_sql(&database, &insert_many_users_sql(500)).unwrap();
@@ -1981,7 +2165,7 @@ fn committed_overflow_insert_recovers_from_wal_after_crash() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     database.flush().unwrap();
     let large_name = "x".repeat(PAGE_SIZE * 3);
     let insert = format!("INSERT INTO users (id, name, active) VALUES (1, '{large_name}', TRUE);");
@@ -2005,8 +2189,8 @@ fn failed_indexed_multi_row_insert_rolls_back_after_reopen() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     database.flush().unwrap();
 
     let result = execute_sql(
@@ -2034,16 +2218,16 @@ fn uncommitted_flushed_insert_is_undone_during_recovery() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     database.flush().unwrap();
     let txn_id = database.begin_transaction().unwrap();
     let table = database.table_schema_by_name("users").unwrap();
-    let transaction = database.transaction(txn_id);
-    let access = ExecutionDatabase::Transaction(&transaction);
+    let leases = database.acquire_table_leases(txn_id, &[table.table_id.into()]).unwrap();
+    let transaction = database.transaction(txn_id, leases);
 
     execute_insert_values(
-        &access,
+        &transaction,
         table,
         vec![
             bound("id", 0, DataType::Integer),
@@ -2087,7 +2271,7 @@ fn committed_insert_recovers_from_wal_after_crash_without_database_flush() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     database.flush().unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
@@ -2109,8 +2293,8 @@ fn committed_delete_recovers_from_wal_after_crash() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     database.flush().unwrap();
     execute_sql(
         &database,
@@ -2134,8 +2318,8 @@ fn committed_update_recovers_from_wal_after_crash() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     database.flush().unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
@@ -2161,8 +2345,8 @@ fn uncommitted_flushed_delete_is_undone_during_recovery() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     database.flush().unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
@@ -2187,8 +2371,8 @@ fn uncommitted_flushed_update_is_undone_during_recovery() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     database.flush().unwrap();
     execute_sql(&database, "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")
         .unwrap();
@@ -2216,7 +2400,8 @@ fn select_without_from_executes_through_one_row_and_project() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let statement = Parser::new("SELECT 1 + 2;").stmt().unwrap();
     let plan = Planner::new(&database).plan_statement(&statement).unwrap();
-    let mut executor = Executor::new(&database);
+    let transaction = executor_transaction(&database, &[]);
+    let mut executor = Executor::in_transaction(&transaction);
 
     let rows = collect_rows(executor.execute(plan.physical).unwrap()).unwrap();
 

@@ -317,7 +317,7 @@ impl TreeCursor {
         next_page_id: Option<PageId>,
     ) -> StorageResult<()> {
         let pin = self.page_cache.fetch_page(page_id)?;
-        let mut guard = pin.write()?;
+        let mut guard = pin.write(self.txn_id)?;
         let mut leaf = RawLeaf::<Write<'_>>::initialize(guard.page_mut());
         leaf.set_prev_page_id(prev_page_id);
         leaf.set_next_page_id(next_page_id);
@@ -379,7 +379,7 @@ impl TreeCursor {
         }
 
         let pin = self.page_cache.fetch_page(page_id)?;
-        let mut guard = pin.write()?;
+        let mut guard = pin.write(self.txn_id)?;
         *guard.page_mut() = page_image;
         Ok(())
     }
@@ -442,7 +442,7 @@ impl TreeCursor {
         prev_page_id: Option<PageId>,
     ) -> StorageResult<()> {
         let pin = self.page_cache.fetch_page(page_id)?;
-        let mut guard = pin.write()?;
+        let mut guard = pin.write(self.txn_id)?;
         let mut leaf = guard.open_mut::<Leaf>()?;
         leaf.set_prev_page_id(prev_page_id);
         Ok(())
@@ -455,7 +455,7 @@ impl TreeCursor {
         prev_page_id: Option<PageId>,
     ) -> StorageResult<()> {
         let pin = self.page_cache.fetch_page(page_id)?;
-        let mut guard = pin.write()?;
+        let mut guard = pin.write(self.txn_id)?;
         let mut interior = guard.open_mut::<Interior>()?;
         interior.set_prev_page_id(prev_page_id);
         Ok(())
@@ -662,7 +662,7 @@ impl TreeCursor {
         children: &[ChildEntry],
     ) -> StorageResult<PendingSplit> {
         let (prev_page_id, next_page_id) = self.read_interior_page_links(page_id)?;
-        let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
+        let (right_page_id, right_page_guard) = self.page_cache.new_page(self.txn_id)?;
         drop(right_page_guard);
 
         let split_index = Self::choose_interior_fitting_split(children)

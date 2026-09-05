@@ -64,7 +64,7 @@ impl TreeCursor {
         };
 
         if has_capacity {
-            let mut interior_guard = interior_page_guard.write()?;
+            let mut interior_guard = interior_page_guard.write(self.txn_id)?;
             let mut interior_page = interior_guard.open_mut::<Interior>()?;
             let inserted_slot_index = self.insert_interior_payload_at(
                 &mut interior_page,
@@ -237,12 +237,12 @@ impl TreeCursor {
         Ok(cells)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(loom)))]
     pub(super) fn leaf_cell_storage_is_borrowed_for_test(cell: &LeafSplitCell<'_>) -> (bool, bool) {
         (matches!(cell.key, Cow::Borrowed(_)), matches!(cell.value, Cow::Borrowed(_)))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(loom)))]
     pub(super) fn leaf_cell_storage_is_owned_for_test(cell: &LeafSplitCell<'_>) -> (bool, bool) {
         (matches!(cell.key, Cow::Owned(_)), matches!(cell.value, Cow::Owned(_)))
     }
@@ -260,7 +260,7 @@ impl TreeCursor {
         let split_index = Self::choose_leaf_split_index(cells)?;
         let (left_cells, right_cells) = cells.split_at(split_index);
 
-        let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
+        let (right_page_id, right_page_guard) = self.page_cache.new_page(self.txn_id)?;
         drop(right_page_guard);
 
         let mut left_page_image = [0; PAGE_SIZE];
@@ -286,8 +286,8 @@ impl TreeCursor {
 
         {
             let right_page_guard = self.page_cache.fetch_page(right_page_id)?;
-            let mut leaf_guard = leaf_pin_guard.write()?;
-            let mut right_guard = right_page_guard.write()?;
+            let mut leaf_guard = leaf_pin_guard.write(self.txn_id)?;
+            let mut right_guard = right_page_guard.write(self.txn_id)?;
             *leaf_guard.page_mut() = left_page_image;
             *right_guard.page_mut() = right_page_image;
         }
@@ -295,7 +295,7 @@ impl TreeCursor {
 
         if let Some(next_page_id) = next_page_id {
             let next_page_guard = self.page_cache.fetch_page(next_page_id)?;
-            let mut next_guard = next_page_guard.write()?;
+            let mut next_guard = next_page_guard.write(self.txn_id)?;
             let mut next_page = next_guard.open_mut::<Leaf>()?;
             next_page.set_prev_page_id(Some(right_page_id));
         }
@@ -410,7 +410,7 @@ impl TreeCursor {
             ChildEntry { page_id: incoming_right_page_id, max_key: original_max_key },
         );
 
-        let (right_page_id, right_page_guard) = self.page_cache.new_page()?;
+        let (right_page_id, right_page_guard) = self.page_cache.new_page(self.txn_id)?;
         drop(right_page_guard);
 
         let split_index = Self::choose_interior_fitting_split(&children)
@@ -437,7 +437,7 @@ impl TreeCursor {
 
         if let Some(next_page_id) = next_page_id {
             let next_page_guard = self.page_cache.fetch_page(next_page_id)?;
-            let mut next_guard = next_page_guard.write()?;
+            let mut next_guard = next_page_guard.write(self.txn_id)?;
             let mut next_page = next_guard.open_mut::<Interior>()?;
             next_page.set_prev_page_id(Some(right_page_id));
         }
@@ -463,14 +463,14 @@ impl TreeCursor {
             *root_guard.page()
         };
 
-        let (left_page_id, left_page_pin) = self.page_cache.new_page()?;
+        let (left_page_id, left_page_pin) = self.page_cache.new_page(self.txn_id)?;
         {
-            let mut left_guard = left_page_pin.write()?;
+            let mut left_guard = left_page_pin.write(self.txn_id)?;
             *left_guard.page_mut() = root_snapshot;
         }
         self.relink_copied_root_left_child(left_page_id, pending.right_page_id)?;
 
-        let mut root_guard = root_pin.write()?;
+        let mut root_guard = root_pin.write(self.txn_id)?;
         let mut root_page = RawInterior::<Write<'_>>::initialize_with_rightmost(
             root_guard.page_mut(),
             pending.right_page_id,
@@ -486,7 +486,7 @@ impl TreeCursor {
         right_page_id: PageId,
     ) -> StorageResult<()> {
         let left_pin = self.page_cache.fetch_page(left_page_id)?;
-        let mut left_guard = left_pin.write()?;
+        let mut left_guard = left_pin.write(self.txn_id)?;
         match read_page_kind(left_guard.page(), left_page_id)? {
             PageKind::RawLeaf => {
                 {

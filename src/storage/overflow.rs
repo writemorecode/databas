@@ -1,6 +1,6 @@
 //! Overflow-page chain helpers for large B+-tree cell payloads.
 
-use crate::core::{PAGE_SIZE, PageId, error::StorageResult};
+use crate::core::{PAGE_SIZE, PageId, TxnId, error::StorageResult};
 use crate::storage::{
     page::format::{self, OVERFLOW_NEXT_PAGE_ID_SIZE},
     page_cache::PageCache,
@@ -13,7 +13,11 @@ fn write_next_page_id(page: &mut [u8; PAGE_SIZE], next_page_id: Option<PageId>) 
 }
 
 /// Writes `payload` into a newly allocated overflow chain.
-pub(crate) fn write_chain(page_cache: &PageCache, payload: &[u8]) -> StorageResult<Option<PageId>> {
+pub(crate) fn write_chain(
+    page_cache: &PageCache,
+    txn_id: Option<TxnId>,
+    payload: &[u8],
+) -> StorageResult<Option<PageId>> {
     if payload.is_empty() {
         return Ok(None);
     }
@@ -22,9 +26,9 @@ pub(crate) fn write_chain(page_cache: &PageCache, payload: &[u8]) -> StorageResu
     let mut previous_page_id = None;
 
     for chunk in payload.chunks(OVERFLOW_PAYLOAD_SIZE) {
-        let (page_id, pin) = page_cache.new_page()?;
+        let (page_id, pin) = page_cache.new_page(txn_id)?;
         {
-            let mut page = pin.write()?;
+            let mut page = pin.write(txn_id)?;
             page.page_mut().fill(0);
             write_next_page_id(page.page_mut(), None);
             page.page_mut()[OVERFLOW_NEXT_PAGE_ID_SIZE..OVERFLOW_NEXT_PAGE_ID_SIZE + chunk.len()]
@@ -38,7 +42,7 @@ pub(crate) fn write_chain(page_cache: &PageCache, payload: &[u8]) -> StorageResu
 
         if let Some(previous_page_id) = previous_page_id {
             let previous_pin = page_cache.fetch_page(previous_page_id)?;
-            let mut previous_page = previous_pin.write()?;
+            let mut previous_page = previous_pin.write(txn_id)?;
             write_next_page_id(previous_page.page_mut(), Some(page_id));
         }
 

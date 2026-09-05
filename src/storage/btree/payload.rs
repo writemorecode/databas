@@ -24,6 +24,7 @@ fn read_overflow_next_page_id(page: &[u8; PAGE_SIZE]) -> Option<PageId> {
 
 pub(super) fn write_overflow_chain_from_slices(
     page_cache: &PageCache,
+    txn_id: Option<TxnId>,
     mut first: &[u8],
     mut second: &[u8],
 ) -> StorageResult<Option<PageId>> {
@@ -34,9 +35,9 @@ pub(super) fn write_overflow_chain_from_slices(
     let mut first_page_id = None;
     let mut previous_page_id = None;
     while !first.is_empty() || !second.is_empty() {
-        let (page_id, pin) = page_cache.new_page()?;
+        let (page_id, pin) = page_cache.new_page(txn_id)?;
         {
-            let mut page = pin.write()?;
+            let mut page = pin.write(txn_id)?;
             page.page_mut().fill(0);
             page::format::write_optional_u64(page.page_mut(), 0, None);
 
@@ -60,7 +61,7 @@ pub(super) fn write_overflow_chain_from_slices(
         }
         if let Some(previous_page_id) = previous_page_id {
             let previous_pin = page_cache.fetch_page(previous_page_id)?;
-            let mut previous_page = previous_pin.write()?;
+            let mut previous_page = previous_pin.write(txn_id)?;
             page::format::write_optional_u64(previous_page.page_mut(), 0, Some(page_id));
         }
         previous_page_id = Some(page_id);

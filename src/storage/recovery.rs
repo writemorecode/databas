@@ -204,6 +204,59 @@ mod tests {
     }
 
     #[test]
+    fn recovery_tracks_interleaved_frames_by_transaction_id() {
+        let file = NamedTempFile::new().unwrap();
+        let first_before = formatted_page(1, ZERO_LSN);
+        let first_after = formatted_page(2, 2);
+        let second_before = formatted_page(3, ZERO_LSN);
+        let second_after = formatted_page(4, 4);
+        {
+            let mut disk = DiskManager::new(file.path()).unwrap();
+            disk.ensure_page_exists(1).unwrap();
+            disk.write_page(0, &first_after).unwrap();
+            disk.write_page(1, &second_after).unwrap();
+        }
+
+        append_transaction(
+            file.path(),
+            1,
+            &[
+                LogRecord { txn_id: 1, kind: LogRecordKind::Begin },
+                LogRecord {
+                    txn_id: 1,
+                    kind: LogRecordKind::PageUpdate {
+                        page_id: 0,
+                        redo_data: &first_after,
+                        undo_data: &first_before,
+                    },
+                },
+            ],
+        );
+        append_transaction(
+            file.path(),
+            2,
+            &[
+                LogRecord { txn_id: 2, kind: LogRecordKind::Begin },
+                LogRecord {
+                    txn_id: 2,
+                    kind: LogRecordKind::PageUpdate {
+                        page_id: 1,
+                        redo_data: &second_after,
+                        undo_data: &second_before,
+                    },
+                },
+            ],
+        );
+        append_transaction(file.path(), 1, &[LogRecord { txn_id: 1, kind: LogRecordKind::Commit }]);
+
+        let mut disk = DiskManager::new(file.path()).unwrap();
+        recover_from_wal(file.path(), &mut disk).unwrap();
+
+        assert_eq!(read_disk_page(file.path(), 0), first_after);
+        assert_eq!(read_disk_page(file.path(), 1), second_before);
+    }
+
+    #[test]
     fn recovery_replays_committed_update_when_page_lsn_is_current() {
         let file = NamedTempFile::new().unwrap();
         let before = formatted_page(1, ZERO_LSN);

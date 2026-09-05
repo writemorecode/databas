@@ -1,5 +1,6 @@
 use crate::core::{
-    IndexSchema, OwnedTableRecord, TableKey, TableRecord, TableSchema, Tuple, TupleView, Value,
+    IndexSchema, OwnedTableRecord, TableKey, TableRecord, TableSchema, Tuple, TupleView, TxnId,
+    Value,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
 };
 use crate::relational::{catalog_manager::CatalogManager, cursor::encode_index_entry_key};
@@ -13,19 +14,20 @@ pub(crate) fn create_index(
 ) -> StorageResult<IndexSchema> {
     let table = catalog.table_schema_by_name(table_name)?;
     let index = catalog.create_index(name, table_name, columns)?;
-    backfill_index(catalog, &table, &index)?;
+    backfill_index(catalog, None, &table, &index)?;
     Ok(index)
 }
 
 pub(crate) fn insert_index_entries(
     catalog: &CatalogManager,
+    txn_id: Option<TxnId>,
     table: &TableSchema,
     record: &OwnedTableRecord,
 ) -> StorageResult<()> {
     for index in catalog.index_schemas_for_table(table)? {
         let key = index_key_from_record(table, &index, record)?;
         let key = encode_index_entry_key(&key, record.table_key);
-        let mut index_cursor = catalog.index_cursor_by_name(&index.name)?;
+        let mut index_cursor = index_cursor(catalog, txn_id, &index.name)?;
         index_cursor.insert(&key, record.table_key)?;
     }
     Ok(())
@@ -33,13 +35,14 @@ pub(crate) fn insert_index_entries(
 
 pub(crate) fn delete_index_entries(
     catalog: &CatalogManager,
+    txn_id: Option<TxnId>,
     table: &TableSchema,
     record: &OwnedTableRecord,
 ) -> StorageResult<()> {
     for index in catalog.index_schemas_for_table(table)? {
         let key = index_key_from_record(table, &index, record)?;
         let key = encode_index_entry_key(&key, record.table_key);
-        let mut index_cursor = catalog.index_cursor_by_name(&index.name)?;
+        let mut index_cursor = index_cursor(catalog, txn_id, &index.name)?;
         index_cursor.delete(&key)?;
     }
     Ok(())
@@ -47,11 +50,12 @@ pub(crate) fn delete_index_entries(
 
 fn backfill_index(
     catalog: &CatalogManager,
+    txn_id: Option<TxnId>,
     table: &TableSchema,
     index: &IndexSchema,
 ) -> StorageResult<()> {
     let mut table_cursor = catalog.table_cursor_by_name(&table.name)?;
-    let mut index_cursor = catalog.index_cursor_by_name(&index.name)?;
+    let mut index_cursor = index_cursor(catalog, txn_id, &index.name)?;
     while let Some(record) = table_cursor.next_record()? {
         let key = index_key_from_table_record(table, index, &record)?;
         let table_key = record.table_key();
@@ -59,6 +63,17 @@ fn backfill_index(
         index_cursor.insert(&key, table_key)?;
     }
     Ok(())
+}
+
+fn index_cursor(
+    catalog: &CatalogManager,
+    txn_id: Option<TxnId>,
+    name: &str,
+) -> StorageResult<crate::relational::cursor::IndexCursor> {
+    match txn_id {
+        Some(txn_id) => catalog.transaction_index_cursor_by_name(txn_id, name),
+        None => catalog.index_cursor_by_name(name),
+    }
 }
 
 /// Compatibility wrapper retained only for focused module tests during the

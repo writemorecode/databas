@@ -13,8 +13,7 @@
 
 use crate::{
     core::{
-        Database, IndexKeyRange, IndexSchema, OwnedTableRecord, TableKey, TableKeyRange,
-        TableRecord as BorrowedTableRecord, TableSchema, Transaction, Tuple, TupleSchema, Value,
+        OwnedTableRecord, TableKey, TableRecord as BorrowedTableRecord, Transaction, Tuple, Value,
         error::{StorageError, StorageResult},
     },
     planner::PhysicalPlan,
@@ -211,21 +210,28 @@ impl std::fmt::Display for ExecutorRow {
     }
 }
 
-/// Lazy stream of records produced by a row-returning plan.
-///
-/// Individual rows can fail while the stream is being consumed, for example if
-/// a later scanned page cannot be read or a downstream expression fails for a
-/// specific record.
-pub type RowStream = Box<dyn Iterator<Item = ExecutorResult<ExecutorRow>>>;
+/// Internal iterator used while an execution operator is being drained.
+pub(crate) type RowStream = Box<dyn Iterator<Item = ExecutorResult<ExecutorRow>>>;
+
+fn collect_rows(
+    rows: impl Iterator<Item = ExecutorResult<ExecutorRow>>,
+) -> Vec<ExecutorResult<ExecutorRow>> {
+    rows.map(|row| {
+        row.and_then(|row| {
+            row.into_owned_record().map(ExecutorRow::Owned).map_err(ExecutorError::from)
+        })
+    })
+    .collect()
+}
 
 /// Result of executing one physical plan.
 pub enum ExecutionOutput {
     /// Textual physical plan produced by `EXPLAIN`.
     Explain(String),
-    /// A lazy stream of result rows.
+    /// Fully materialized result rows owned by the completed execution.
     Rows {
-        /// Result rows yielded on demand.
-        rows: RowStream,
+        /// Rows drained before the statement transaction is finalized.
+        rows: Vec<ExecutorResult<ExecutorRow>>,
     },
     /// Number of table rows changed by a data-modification statement.
     RowsAffected(u64),
@@ -241,10 +247,10 @@ impl ExecutionOutput {
     /// Row operators call this when they expect their child plan to produce
     /// rows. Non-row outputs become [`ExecutorError::ExpectedRows`] tagged with
     /// the requesting operator name.
-    pub fn into_rows(self, operator: &'static str) -> ExecutorResult<RowStream> {
+    pub(crate) fn into_rows(self, operator: &'static str) -> ExecutorResult<RowStream> {
         match self {
             Self::Explain(_) => Err(ExecutorError::ExpectedRows { operator }),
-            Self::Rows { rows } => Ok(rows),
+            Self::Rows { rows } => Ok(Box::new(rows.into_iter())),
             Self::RowsAffected(_) | Self::SchemaAffected | Self::CommandOk => {
                 Err(ExecutorError::ExpectedRows { operator })
             }
@@ -278,118 +284,18 @@ impl std::fmt::Display for ExecutionOutput {
     }
 }
 
-/// Executes physical query plans through a relational access gateway.
+/// Executes physical query plans through a transaction-scoped relational gateway.
 ///
-/// The executor owns no transaction state; the caller supplies either a
-/// transaction-scoped gateway or, temporarily during migration, a database
-/// handle for non-transactional reads.
-pub struct Executor<'db> {
-    database: ExecutionDatabase<'db>,
+/// The executor owns no transaction state; the caller supplies an active
+/// transaction with the leases required by the plan.
+pub struct Executor<'txn, 'db> {
+    transaction: &'txn Transaction<'db>,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum ExecutionDatabase<'db> {
-    Unscoped(&'db Database),
-    Transaction(&'db Transaction<'db>),
-}
-
-impl ExecutionDatabase<'_> {
-    fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
-        match self {
-            Self::Unscoped(database) => database.create_table(name, row),
-            Self::Transaction(transaction) => transaction.create_table(name, row),
-        }
-    }
-
-    fn create_index(
-        &self,
-        name: &str,
-        table: &str,
-        columns: &[&str],
-    ) -> StorageResult<IndexSchema> {
-        match self {
-            Self::Unscoped(database) => database.create_index(name, table, columns),
-            Self::Transaction(transaction) => transaction.create_index(name, table, columns),
-        }
-    }
-
-    fn scan_table(
-        &self,
-        table: &TableSchema,
-    ) -> StorageResult<crate::relational::record_manager::TableScan> {
-        match self {
-            Self::Unscoped(database) => database.scan_table(table),
-            Self::Transaction(transaction) => transaction.scan_table(table),
-        }
-    }
-
-    fn scan_table_range(
-        &self,
-        table: &TableSchema,
-        range: TableKeyRange,
-    ) -> StorageResult<crate::relational::record_manager::TableScan> {
-        match self {
-            Self::Unscoped(database) => database.scan_table_range(table, range),
-            Self::Transaction(transaction) => transaction.scan_table_range(table, range),
-        }
-    }
-
-    fn scan_index(
-        &self,
-        table: &TableSchema,
-        index: &IndexSchema,
-        range: IndexKeyRange,
-    ) -> StorageResult<crate::relational::record_manager::IndexScan> {
-        match self {
-            Self::Unscoped(database) => database.scan_index(table, index, range),
-            Self::Transaction(transaction) => transaction.scan_index(table, index, range),
-        }
-    }
-
-    fn insert_table_row(
-        &self,
-        table: &TableSchema,
-        values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord> {
-        match self {
-            Self::Unscoped(database) => database.insert_table_row(table, values),
-            Self::Transaction(transaction) => transaction.insert_table_row(table, values),
-        }
-    }
-
-    fn delete_table_row(
-        &self,
-        table: &TableSchema,
-        record: &OwnedTableRecord,
-    ) -> StorageResult<()> {
-        match self {
-            Self::Unscoped(database) => database.delete_table_row(table, record),
-            Self::Transaction(transaction) => transaction.delete_table_row(table, record),
-        }
-    }
-
-    fn update_table_row(
-        &self,
-        table: &TableSchema,
-        record: &OwnedTableRecord,
-        values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord> {
-        match self {
-            Self::Unscoped(database) => database.update_table_row(table, record, values),
-            Self::Transaction(transaction) => transaction.update_table_row(table, record, values),
-        }
-    }
-}
-
-impl<'db> Executor<'db> {
-    /// Creates an executor for legacy unscoped reads and focused executor tests.
-    pub(crate) fn new(database: &'db Database) -> Self {
-        Self { database: ExecutionDatabase::Unscoped(database) }
-    }
-
+impl<'txn, 'db> Executor<'txn, 'db> {
     /// Creates an executor scoped to an active transaction.
-    pub(crate) fn in_transaction(transaction: &'db Transaction<'db>) -> Self {
-        Self { database: ExecutionDatabase::Transaction(transaction) }
+    pub(crate) fn in_transaction(transaction: &'txn Transaction<'db>) -> Self {
+        Self { transaction }
     }
 
     /// Executes a physical plan and returns its output.
@@ -402,22 +308,22 @@ impl<'db> Executor<'db> {
         match plan {
             PhysicalPlan::Explain { input } => Ok(ExecutionOutput::Explain(input.to_string())),
             PhysicalPlan::CreateTable { name, schema } => {
-                self.database.create_table(&name, schema)?;
+                self.transaction.create_table(&name, schema)?;
                 Ok(ExecutionOutput::SchemaAffected)
             }
             PhysicalPlan::CreateIndex { name, table, columns } => {
                 let column_names: Vec<&str> = columns.iter().map(|col| col.name.as_str()).collect();
-                self.database.create_index(&name, &table.name, &column_names)?;
+                self.transaction.create_index(&name, &table.name, &column_names)?;
                 Ok(ExecutionOutput::SchemaAffected)
             }
             PhysicalPlan::Values { rows } => execute_values(rows),
             PhysicalPlan::InsertValues { table, columns, values } => {
-                execute_insert_values(&self.database, table, columns, values)
+                execute_insert_values(self.transaction, table, columns, values)
             }
             PhysicalPlan::Update { table, assignments, input } => {
                 let output_inner = self.execute(*input)?;
                 execute_update(
-                    &self.database,
+                    self.transaction,
                     table,
                     assignments,
                     output_inner.into_rows("UPDATE")?,
@@ -425,31 +331,31 @@ impl<'db> Executor<'db> {
             }
             PhysicalPlan::Delete { table, input } => {
                 let output_inner = self.execute(*input)?;
-                execute_delete(&self.database, table, output_inner.into_rows("DELETE")?)
+                execute_delete(self.transaction, table, output_inner.into_rows("DELETE")?)
             }
             PhysicalPlan::OneRow => Ok(ExecutionOutput::Rows {
-                rows: Box::new(std::iter::once_with(|| empty_record(0))),
+                rows: collect_rows(std::iter::once_with(|| empty_record(0))),
             }),
             PhysicalPlan::FullTableScan { table } => {
                 let rows = self
-                    .database
+                    .transaction
                     .scan_table(&table)?
                     .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
-                Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
+                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
             PhysicalPlan::PrimaryKeyRangeScan { table, range } => {
                 let rows = self
-                    .database
+                    .transaction
                     .scan_table_range(&table, range)?
                     .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
-                Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
+                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
             PhysicalPlan::SecondaryIndexScan { scan } => {
                 let rows = self
-                    .database
+                    .transaction
                     .scan_index(&scan.table, &scan.index, scan.key_range)?
                     .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
-                Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
+                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
             PhysicalPlan::Filter { input, predicate } => {
                 let output_inner = self.execute(*input)?;
@@ -467,7 +373,7 @@ impl<'db> Executor<'db> {
                     }
                     Err(error) => Some(Err(error)),
                 });
-                Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
+                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
             PhysicalPlan::Sort { input: _, terms: _ } => {
                 // TODO: Change tuple serialization format to allow value comparison from raw byte slices
@@ -478,7 +384,7 @@ impl<'db> Executor<'db> {
                 let rows = output_inner
                     .into_rows("PROJECT")?
                     .map(move |row| row.and_then(|row| evaluate_expressions(&expressions, &row)));
-                Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
+                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
 
             PhysicalPlan::Offset { input, offset } => {
@@ -486,14 +392,14 @@ impl<'db> Executor<'db> {
                 // TODO: Make `offset` a usize value.
                 let offset = offset as usize;
                 let rows = offset_rows(output_inner.into_rows("OFFSET")?, offset);
-                Ok(ExecutionOutput::Rows { rows })
+                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
             PhysicalPlan::Limit { input, limit } => {
                 let output_inner = self.execute(*input)?;
                 // TODO: Make `limit` a usize value.
                 let limit = limit as usize;
-                let rows = Box::new(output_inner.into_rows("LIMIT")?.take(limit));
-                Ok(ExecutionOutput::Rows { rows })
+                let rows = output_inner.into_rows("LIMIT")?.take(limit);
+                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
         }
     }

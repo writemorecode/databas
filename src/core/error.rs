@@ -3,7 +3,7 @@
 use std::collections::TryReserveError;
 use thiserror::Error;
 
-use crate::core::PageId;
+use crate::core::{PageId, lock_manager::LockError};
 
 mod corruption;
 mod internal;
@@ -24,6 +24,8 @@ pub enum StorageError {
     InvalidArgument(#[source] InvalidArgumentError),
     #[error("limit exceeded: {0}")]
     LimitExceeded(#[source] LimitExceededError),
+    #[error("lock error: {0}")]
+    Lock(#[from] LockError),
     #[error("internal error: {0}")]
     Internal(#[source] InternalError),
 }

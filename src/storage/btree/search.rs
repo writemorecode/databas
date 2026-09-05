@@ -2,6 +2,10 @@ use super::payload::{compare_key_prefix, compare_overflow_key};
 use super::root::{expect_page_kind, read_page_kind};
 use super::*;
 
+pub(super) fn advance_mutation_epoch(epoch: &AtomicU64) {
+    epoch.fetch_add(1, AtomicOrdering::Release);
+}
+
 /// Outcome of trying to position a scan within or beyond one leaf page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LeafSeek {
@@ -15,29 +19,36 @@ enum LeafSeek {
 
 impl TreeCursor {
     /// Creates a cursor anchored at `root_page_id` in page-level state.
-    pub(crate) fn new(page_cache: PageCache, root_page_id: PageId) -> Self {
-        let mutation_epoch = page_cache.tree_mutation_epoch(root_page_id);
-        Self {
+    pub(crate) fn new(page_cache: PageCache, root_page_id: PageId) -> StorageResult<Self> {
+        let mutation_epoch = page_cache.tree_mutation_epoch(root_page_id)?;
+        Ok(Self {
             page_cache,
-            root_page_id: Rc::new(Cell::new(root_page_id)),
+            root_page_id: Arc::new(AtomicU64::new(root_page_id)),
             mutation_epoch,
+            txn_id: None,
             state: CursorState::Page { page_id: root_page_id },
-        }
+        })
+    }
+
+    /// Associates subsequent mutations with an explicit transaction.
+    pub(crate) fn for_transaction(mut self, txn_id: TxnId) -> Self {
+        self.txn_id = Some(txn_id);
+        self
     }
 
     /// Returns the root page id that anchors this tree.
     pub fn root_page_id(&self) -> PageId {
-        self.root_page_id.get()
+        self.root_page_id.load(AtomicOrdering::Acquire)
     }
 
     /// Returns the current mutation epoch shared by cursors over this tree.
     pub(crate) fn mutation_epoch(&self) -> u64 {
-        self.mutation_epoch.get()
+        self.mutation_epoch.load(AtomicOrdering::Acquire)
     }
 
     /// Invalidates physical positions held by other cursors over this tree.
     pub(super) fn mark_tree_mutated(&self) {
-        self.mutation_epoch.set(self.mutation_epoch.get().wrapping_add(1));
+        advance_mutation_epoch(&self.mutation_epoch);
     }
 
     /// Returns the cursor's current logical state.

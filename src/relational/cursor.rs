@@ -292,12 +292,14 @@ impl IndexCursor {
 
     /// Looks up an index entry by key without eagerly copying page-resident bytes.
     #[cfg(test)]
+    #[cfg_attr(all(test, loom), allow(dead_code))]
     pub fn get_entry(&mut self, key: &[u8]) -> StorageResult<Option<IndexEntry>> {
         self.inner.get(key)?.map(IndexEntry::try_from).transpose()
     }
 
     /// Replaces the table key stored for an existing index `key`.
     #[cfg(test)]
+    #[cfg_attr(all(test, loom), allow(dead_code))]
     pub fn update(&mut self, key: &[u8], table_key: TableKey) -> StorageResult<()> {
         self.inner.update(key, &encode_index_table_key(table_key))
     }
@@ -402,9 +404,10 @@ impl TryFrom<Record> for IndexEntry {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
+#[allow(clippy::unwrap_used)]
 mod tests {
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     use tempfile::NamedTempFile;
 
@@ -422,20 +425,20 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let disk_manager = DiskManager::new(file.path()).unwrap();
         let runtime =
-            Rc::new(StorageRuntime::new(file.path().to_path_buf(), disk_manager).unwrap());
+            Arc::new(StorageRuntime::new(file.path().to_path_buf(), disk_manager).unwrap());
         PageCache::new(runtime, cache_frames).unwrap()
     }
 
     fn temp_table_cursor(cache_frames: usize) -> TableCursor {
         let page_cache = temp_page_cache(cache_frames);
-        let root_page_id = initialize_empty_root(&page_cache).unwrap();
-        TableCursor::new(TreeCursor::new(page_cache, root_page_id))
+        let root_page_id = initialize_empty_root(&page_cache, None).unwrap();
+        TableCursor::new(TreeCursor::new(page_cache, root_page_id).unwrap())
     }
 
     fn temp_index_cursor(cache_frames: usize) -> IndexCursor {
         let page_cache = temp_page_cache(cache_frames);
-        let root_page_id = initialize_empty_root(&page_cache).unwrap();
-        IndexCursor::new(TreeCursor::new(page_cache, root_page_id))
+        let root_page_id = initialize_empty_root(&page_cache, None).unwrap();
+        IndexCursor::new(TreeCursor::new(page_cache, root_page_id).unwrap())
     }
 
     #[test]
