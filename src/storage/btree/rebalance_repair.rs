@@ -28,7 +28,7 @@ impl TreeCursor {
             *child_page.page()
         };
 
-        let mut root_guard = pin.write()?;
+        let mut root_guard = pin.write(self.txn_id)?;
         *root_guard.page_mut() = child_snapshot;
         drop(root_guard);
 
@@ -39,7 +39,7 @@ impl TreeCursor {
 
     fn clear_root_sibling_links(&self, root_page_id: PageId) -> StorageResult<()> {
         let pin = self.page_cache.fetch_page(root_page_id)?;
-        let mut guard = pin.write()?;
+        let mut guard = pin.write(self.txn_id)?;
         match read_page_kind(guard.page(), root_page_id)? {
             PageKind::RawLeaf => {
                 let mut leaf = guard.open_mut::<Leaf>()?;

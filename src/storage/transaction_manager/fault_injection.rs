@@ -2,7 +2,7 @@ use std::ops::{Deref, DerefMut};
 
 use crate::core::error::StorageResult;
 
-use super::{PageRestore, TransactionManager, TransactionSavepoint};
+use super::{LogManager, PageRestore, TransactionManager, TransactionSavepoint};
 
 /// Transaction-manager decorator that injects one-shot rollback failures.
 #[derive(Debug)]
@@ -22,12 +22,13 @@ impl FaultInjectingTransactionManager {
 
     pub(crate) fn rollback_to_savepoint(
         &mut self,
+        log: &mut LogManager,
         savepoint: TransactionSavepoint,
     ) -> StorageResult<Vec<PageRestore>> {
         if std::mem::take(&mut self.fail_next_savepoint_rollback) {
-            self.inner.force_next_lsn_exhausted_for_test();
+            log.force_next_lsn_exhausted_for_test();
         }
-        self.inner.rollback_to_savepoint(savepoint)
+        self.inner.rollback_to_savepoint(log, savepoint)
     }
 }
 

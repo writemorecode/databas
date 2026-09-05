@@ -36,6 +36,7 @@ impl TreeCursor {
                 Some(
                     write_overflow_chain_from_slices(
                         &self.page_cache,
+                        self.txn_id,
                         &key[MAX_INLINE_OVERFLOW_PAYLOAD_BYTES..],
                         value,
                     )?
@@ -49,13 +50,14 @@ impl TreeCursor {
                 inline_payload[key.len()..MAX_INLINE_OVERFLOW_PAYLOAD_BYTES]
                     .copy_from_slice(&value[..value_prefix_len]);
                 Some(
-                    overflow::write_chain(&self.page_cache, &value[value_prefix_len..])?
-                        .ok_or_else(|| {
-                            cell_corruption(
-                                self.root_page_id(),
-                                CorruptionKind::CellLengthOutOfBounds,
-                            )
-                        })?,
+                    overflow::write_chain(
+                        &self.page_cache,
+                        self.txn_id,
+                        &value[value_prefix_len..],
+                    )?
+                    .ok_or_else(|| {
+                        cell_corruption(self.root_page_id(), CorruptionKind::CellLengthOutOfBounds)
+                    })?,
                 )
             }
         } else {
@@ -116,6 +118,7 @@ impl TreeCursor {
                     Some(
                         overflow::write_chain(
                             &self.page_cache,
+                            self.txn_id,
                             &key[MAX_INLINE_OVERFLOW_PAYLOAD_BYTES..],
                         )?
                         .ok_or_else(|| {
@@ -168,7 +171,7 @@ impl TreeCursor {
         if has_capacity {
             let inserted_new_leaf_max;
             {
-                let mut leaf_guard = leaf_pin_guard.write()?;
+                let mut leaf_guard = leaf_pin_guard.write(self.txn_id)?;
                 let mut page = leaf_guard.open_mut::<Leaf>()?;
                 let slot_index = self.insert_leaf_payload_at(&mut page, slot_index, key, value)?;
                 self.mark_tree_mutated();
@@ -207,7 +210,7 @@ impl TreeCursor {
 
         if has_capacity {
             {
-                let mut leaf_guard = leaf_pin_guard.write()?;
+                let mut leaf_guard = leaf_pin_guard.write(self.txn_id)?;
                 let mut page = leaf_guard.open_mut::<Leaf>()?;
                 let slot_index = self.update_leaf_payload_at(&mut page, slot_index, key, value)?;
                 self.mark_tree_mutated();
@@ -230,7 +233,7 @@ impl TreeCursor {
         let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
         {
             let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
-            let mut leaf_guard = leaf_pin_guard.write()?;
+            let mut leaf_guard = leaf_pin_guard.write(self.txn_id)?;
             let mut page = leaf_guard.open_mut::<Leaf>()?;
             page.delete(key)?;
             self.mark_tree_mutated();

@@ -2,7 +2,10 @@ use tempfile::tempdir;
 
 use super::*;
 use crate::{
-    core::{ColumnSchema, DataType},
+    core::{
+        ColumnSchema, DataType,
+        test_utils::{create_index, create_table},
+    },
     sql_parser::parser::Parser,
 };
 
@@ -39,7 +42,7 @@ fn database_with_users() -> (tempfile::TempDir, Database) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
     let database = Database::create(&path).unwrap();
-    database.create_table("users", users_schema()).unwrap();
+    create_table(&database, "users", users_schema()).unwrap();
     (dir, database)
 }
 
@@ -252,7 +255,7 @@ fn update_where_binds_filter_and_assignment_column_refs() {
 #[test]
 fn update_where_secondary_index_predicate_uses_full_table_scan() {
     let (_dir, database) = database_with_users();
-    database.create_index("idx_users_age", "users", &["age"]).unwrap();
+    create_index(&database, "idx_users_age", "users", &["age"]).unwrap();
     let planner = Planner::new(&database);
     let statement = parse("UPDATE users SET age = age + 1 WHERE age < 3;");
 
@@ -346,7 +349,7 @@ fn delete_where_binds_column_refs_in_filter() {
 #[test]
 fn delete_where_secondary_index_predicate_uses_full_table_scan() {
     let (_dir, database) = database_with_users();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     let planner = Planner::new(&database);
     let statement = parse("DELETE FROM users WHERE name == 'Ada';");
 
@@ -550,7 +553,7 @@ fn select_non_leading_primary_key_range_stays_full_table_scan() {
 #[test]
 fn select_secondary_index_integer_column_range_uses_index_scan() {
     let (_dir, database) = database_with_users();
-    database.create_index("idx_users_age", "users", &["age"]).unwrap();
+    create_index(&database, "idx_users_age", "users", &["age"]).unwrap();
     let planner = Planner::new(&database);
     let statement = parse("SELECT name FROM users WHERE 18 <= age AND age < 65;");
 
@@ -578,7 +581,7 @@ fn select_secondary_index_integer_column_range_uses_index_scan() {
 #[test]
 fn select_secondary_index_equality_uses_index_scan_with_residual_filter() {
     let (_dir, database) = database_with_users();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     let planner = Planner::new(&database);
     let statement = parse("SELECT name FROM users WHERE name == 'Ada';");
 
@@ -616,7 +619,7 @@ fn select_secondary_index_equality_uses_index_scan_with_residual_filter() {
 #[test]
 fn primary_key_scan_wins_over_secondary_index_scan() {
     let (_dir, database) = database_with_users();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     let planner = Planner::new(&database);
     let statement = parse("SELECT name FROM users WHERE id == 1 AND name == 'Ada';");
 
@@ -643,7 +646,7 @@ fn primary_key_scan_wins_over_secondary_index_scan() {
 #[test]
 fn select_text_secondary_index_range_stays_full_table_scan() {
     let (_dir, database) = database_with_users();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     let planner = Planner::new(&database);
     let statement = parse("SELECT name FROM users WHERE name >= 'Amy' AND name <= 'Charlotte';");
 
@@ -663,7 +666,7 @@ fn select_text_secondary_index_range_stays_full_table_scan() {
 #[test]
 fn select_reversed_text_secondary_index_range_stays_full_table_scan() {
     let (_dir, database) = database_with_users();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     let planner = Planner::new(&database);
     let statement = parse("SELECT name FROM users WHERE 'Amy' < name AND 'Charlotte' >= name;");
 
@@ -683,7 +686,7 @@ fn select_reversed_text_secondary_index_range_stays_full_table_scan() {
 #[test]
 fn secondary_index_selection_skips_text_range_conjuncts() {
     let (_dir, database) = database_with_users();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     let planner = Planner::new(&database);
     let statement = parse("SELECT name FROM users WHERE age == 7 AND name >= 'Amy';");
 
@@ -703,8 +706,8 @@ fn secondary_index_selection_skips_text_range_conjuncts() {
 #[test]
 fn leftmost_usable_secondary_index_predicate_wins() {
     let (_dir, database) = database_with_users();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
-    database.create_index("idx_users_age", "users", &["age"]).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
+    create_index(&database, "idx_users_age", "users", &["age"]).unwrap();
     let planner = Planner::new(&database);
     let statement = parse("SELECT name FROM users WHERE age == 7 AND name == 'Ada';");
 
@@ -733,8 +736,8 @@ fn leftmost_usable_secondary_index_predicate_wins() {
 #[test]
 fn earliest_created_exact_secondary_index_wins_for_same_column() {
     let (_dir, database) = database_with_users();
-    database.create_index("idx_users_name_first", "users", &["name"]).unwrap();
-    database.create_index("idx_users_name_second", "users", &["name"]).unwrap();
+    create_index(&database, "idx_users_name_first", "users", &["name"]).unwrap();
+    create_index(&database, "idx_users_name_second", "users", &["name"]).unwrap();
     let planner = Planner::new(&database);
     let statement = parse("SELECT name FROM users WHERE name == 'Ada';");
 
@@ -755,7 +758,7 @@ fn earliest_created_exact_secondary_index_wins_for_same_column() {
 #[test]
 fn unindexed_equality_stays_full_table_scan() {
     let (_dir, database) = database_with_users();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     let planner = Planner::new(&database);
     let statement = parse("SELECT name FROM users WHERE age == 7;");
 
@@ -849,7 +852,7 @@ fn explain_update_wraps_planned_update() {
 #[test]
 fn explain_delete_wraps_planned_delete() {
     let (_dir, database) = database_with_users();
-    database.create_index("idx_users_name", "users", &["name"]).unwrap();
+    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
     let planner = Planner::new(&database);
     let statement = parse("EXPLAIN DELETE FROM users WHERE name == 'Ada';");
 

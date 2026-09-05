@@ -1,12 +1,10 @@
 use crate::{
-    core::{OwnedTableRecord, TableKey, TableSchema, Tuple, TupleView, Value},
+    core::{OwnedTableRecord, TableKey, TableSchema, Transaction, Tuple, TupleView, Value},
     planner::{BoundColumn, PlannedExpression, UpdateAssignment},
     sql_parser::parser::op::Op,
 };
 
-use super::{
-    ExecutionDatabase, ExecutionOutput, ExecutorError, ExecutorResult, ExecutorRow, RowStream,
-};
+use super::{ExecutionOutput, ExecutorError, ExecutorResult, ExecutorRow, RowStream, collect_rows};
 
 /// Evaluates one planned scalar expression against a record.
 ///
@@ -31,7 +29,7 @@ pub(super) fn execute_values(rows: Vec<Vec<PlannedExpression>>) -> ExecutorResul
         let input = empty_record(table_key)?;
         evaluate_expressions(&expressions, &input)
     });
-    Ok(ExecutionOutput::Rows { rows: Box::new(rows) })
+    Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
 }
 
 /// Skips rows from a child stream while still surfacing skipped-row errors.
@@ -60,7 +58,7 @@ pub(super) fn offset_rows(mut rows: RowStream, mut remaining: usize) -> RowStrea
 /// Each value row is evaluated, expanded into the target table layout, and then
 /// handed to storage for validation and insertion.
 pub(super) fn execute_insert_values(
-    records: &ExecutionDatabase<'_>,
+    transaction: &Transaction<'_>,
     table: TableSchema,
     columns: Vec<BoundColumn>,
     values: Vec<Vec<PlannedExpression>>,
@@ -92,7 +90,7 @@ pub(super) fn execute_insert_values(
             }
             Ok(row_values)
         })?;
-        records.insert_table_row(&table, row_values)?;
+        transaction.insert_table_row(&table, row_values)?;
         affected += 1;
     }
 
@@ -101,7 +99,7 @@ pub(super) fn execute_insert_values(
 
 /// Executes an `UPDATE` plan by consuming and mutating one target row at a time.
 pub(super) fn execute_update(
-    records: &ExecutionDatabase<'_>,
+    transaction: &Transaction<'_>,
     table: TableSchema,
     assignments: Vec<UpdateAssignment>,
     target_rows: RowStream,
@@ -128,7 +126,7 @@ pub(super) fn execute_update(
             *slot = value;
         }
 
-        records.update_table_row(&table, &owned_row, values)?;
+        transaction.update_table_row(&table, &owned_row, values)?;
         affected += 1;
     }
 
@@ -137,7 +135,7 @@ pub(super) fn execute_update(
 
 /// Executes a `DELETE` plan by consuming and deleting one target row at a time.
 pub(super) fn execute_delete(
-    records: &ExecutionDatabase<'_>,
+    transaction: &Transaction<'_>,
     table: TableSchema,
     target_rows: RowStream,
 ) -> ExecutorResult<ExecutionOutput> {
@@ -146,7 +144,7 @@ pub(super) fn execute_delete(
     for row in target_rows {
         let owned_row = row?.into_owned_record()?;
 
-        records.delete_table_row(&table, &owned_row)?;
+        transaction.delete_table_row(&table, &owned_row)?;
         affected += 1;
     }
 

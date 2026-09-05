@@ -33,8 +33,7 @@ impl From<DiskManagerError> for StorageError {
 impl From<PageCacheError> for StorageError {
     fn from(error: PageCacheError) -> Self {
         match error {
-            PageCacheError::Disk(error) => error.into(),
-            PageCacheError::Transaction(error) => *error,
+            PageCacheError::Storage(error) => *error,
             PageCacheError::NoEvictableFrame => {
                 Self::LimitExceeded(LimitExceededError::CacheCapacityExhausted)
             }
@@ -60,6 +59,9 @@ impl From<PageCacheError> for StorageError {
             }
             PageCacheError::PinCountOverflow { page_id } => {
                 invariant(InvariantViolation::PagePinCountOverflow { page_id })
+            }
+            PageCacheError::Poisoned { lock } => {
+                Self::Internal(InternalError::SynchronizationPoisoned { lock })
             }
         }
     }
