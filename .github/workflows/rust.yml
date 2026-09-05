@@ -35,6 +35,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --no-deps --all-targets --all-features
 
+      - name: Clippy (Loom configuration)
+        run: RUSTFLAGS="--cfg loom" cargo clippy --no-deps --lib --tests
+
       - name: Documentation
         run: cargo doc --no-deps --all-features
 
@@ -61,7 +64,10 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Test
-        run: cargo nextest run --all-features
+        run: cargo nextest run
+
+      - name: Loom tests
+        run: RUSTFLAGS="--cfg loom" cargo test --lib loom_tests -- --test-threads=1
 
       - name: Documentation tests
-        run: cargo test --doc --all-features
+        run: cargo test --doc
