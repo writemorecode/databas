@@ -16,7 +16,7 @@ use crate::{
         OwnedTableRecord, TableKey, TableRecord as BorrowedTableRecord, Transaction, Tuple, Value,
         error::{StorageError, StorageResult},
     },
-    planner::PhysicalPlan,
+    planner::{PhysicalPlan, PhysicalPlanNode},
     sql_parser::parser::op::Op,
 };
 
@@ -304,24 +304,43 @@ impl<'txn, 'db> Executor<'txn, 'db> {
     /// The underlying scan, filter, projection, limit, or offset work is then
     /// performed as the caller consumes that stream. DDL and insert operators
     /// perform their side effects before returning.
-    pub fn execute(&mut self, plan: PhysicalPlan) -> ExecutorResult<ExecutionOutput> {
-        match plan {
-            PhysicalPlan::Explain { input } => Ok(ExecutionOutput::Explain(input.to_string())),
-            PhysicalPlan::CreateTable { name, schema } => {
+    pub fn execute(&mut self, plan: impl Into<PhysicalPlan>) -> ExecutorResult<ExecutionOutput> {
+        let plan = plan.into();
+        if let PhysicalPlanNode::Explain { input } = plan.root() {
+            return Ok(ExecutionOutput::Explain(plan.display_node(*input).to_string()));
+        }
+        let (nodes, root) = plan.into_parts();
+        let mut nodes = nodes.into_iter().map(Some).collect::<Vec<_>>();
+        self.execute_node(&mut nodes, root)
+    }
+
+    fn execute_node(
+        &mut self,
+        nodes: &mut [Option<PhysicalPlanNode>],
+        node_index: usize,
+    ) -> ExecutorResult<ExecutionOutput> {
+        let Some(node) = nodes.get_mut(node_index).and_then(Option::take) else {
+            return Err(ExecutorError::UnsupportedOperator { operator: "INVALID PLAN" });
+        };
+        match node {
+            PhysicalPlanNode::Explain { .. } => {
+                Err(ExecutorError::UnsupportedOperator { operator: "NESTED EXPLAIN" })
+            }
+            PhysicalPlanNode::CreateTable { name, schema } => {
                 self.transaction.create_table(&name, schema)?;
                 Ok(ExecutionOutput::SchemaAffected)
             }
-            PhysicalPlan::CreateIndex { name, table, columns } => {
+            PhysicalPlanNode::CreateIndex { name, table, columns } => {
                 let column_names: Vec<&str> = columns.iter().map(|col| col.name.as_str()).collect();
                 self.transaction.create_index(&name, &table.name, &column_names)?;
                 Ok(ExecutionOutput::SchemaAffected)
             }
-            PhysicalPlan::Values { rows } => execute_values(rows),
-            PhysicalPlan::InsertValues { table, columns, values } => {
+            PhysicalPlanNode::Values { rows } => execute_values(rows),
+            PhysicalPlanNode::InsertValues { table, columns, values } => {
                 execute_insert_values(self.transaction, table, columns, values)
             }
-            PhysicalPlan::Update { table, assignments, input } => {
-                let output_inner = self.execute(*input)?;
+            PhysicalPlanNode::Update { table, assignments, input } => {
+                let output_inner = self.execute_node(nodes, input)?;
                 execute_update(
                     self.transaction,
                     table,
@@ -329,36 +348,36 @@ impl<'txn, 'db> Executor<'txn, 'db> {
                     output_inner.into_rows("UPDATE")?,
                 )
             }
-            PhysicalPlan::Delete { table, input } => {
-                let output_inner = self.execute(*input)?;
+            PhysicalPlanNode::Delete { table, input } => {
+                let output_inner = self.execute_node(nodes, input)?;
                 execute_delete(self.transaction, table, output_inner.into_rows("DELETE")?)
             }
-            PhysicalPlan::OneRow => Ok(ExecutionOutput::Rows {
+            PhysicalPlanNode::OneRow => Ok(ExecutionOutput::Rows {
                 rows: collect_rows(std::iter::once_with(|| empty_record(0))),
             }),
-            PhysicalPlan::FullTableScan { table } => {
+            PhysicalPlanNode::FullTableScan { table } => {
                 let rows = self
                     .transaction
                     .scan_table(&table)?
                     .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
                 Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
-            PhysicalPlan::PrimaryKeyRangeScan { table, range } => {
+            PhysicalPlanNode::PrimaryKeyRangeScan { table, range } => {
                 let rows = self
                     .transaction
                     .scan_table_range(&table, range)?
                     .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
                 Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
-            PhysicalPlan::SecondaryIndexScan { scan } => {
+            PhysicalPlanNode::SecondaryIndexScan { scan } => {
                 let rows = self
                     .transaction
                     .scan_index(&scan.table, &scan.index, scan.key_range)?
                     .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
                 Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
-            PhysicalPlan::Filter { input, predicate } => {
-                let output_inner = self.execute(*input)?;
+            PhysicalPlanNode::Filter { input, predicate } => {
+                let output_inner = self.execute_node(nodes, input)?;
                 let rows = output_inner.into_rows("FILTER")?.filter_map(move |row| match row {
                     Ok(row) => {
                         let result = EvaluationContext::with_record(&row, |context| {
@@ -375,27 +394,27 @@ impl<'txn, 'db> Executor<'txn, 'db> {
                 });
                 Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
-            PhysicalPlan::Sort { input: _, terms: _ } => {
+            PhysicalPlanNode::Sort { input: _, terms: _ } => {
                 // TODO: Change tuple serialization format to allow value comparison from raw byte slices
                 Err(ExecutorError::UnsupportedOperator { operator: "SORT" })
             }
-            PhysicalPlan::Project { input, expressions } => {
-                let output_inner = self.execute(*input)?;
+            PhysicalPlanNode::Project { input, expressions } => {
+                let output_inner = self.execute_node(nodes, input)?;
                 let rows = output_inner
                     .into_rows("PROJECT")?
                     .map(move |row| row.and_then(|row| evaluate_expressions(&expressions, &row)));
                 Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
 
-            PhysicalPlan::Offset { input, offset } => {
-                let output_inner = self.execute(*input)?;
+            PhysicalPlanNode::Offset { input, offset } => {
+                let output_inner = self.execute_node(nodes, input)?;
                 // TODO: Make `offset` a usize value.
                 let offset = offset as usize;
                 let rows = offset_rows(output_inner.into_rows("OFFSET")?, offset);
                 Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
-            PhysicalPlan::Limit { input, limit } => {
-                let output_inner = self.execute(*input)?;
+            PhysicalPlanNode::Limit { input, limit } => {
+                let output_inner = self.execute_node(nodes, input)?;
                 // TODO: Make `limit` a usize value.
                 let limit = limit as usize;
                 let rows = output_inner.into_rows("LIMIT")?.take(limit);

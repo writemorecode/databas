@@ -227,119 +227,111 @@ impl<'db> Planner<'db> {
     }
 
     fn physical_plan(&self, logical: LogicalPlan) -> PlannerResult<PhysicalPlan> {
-        self.physical_plan_with_secondary_indexes(logical, true)
+        let mut nodes = Vec::new();
+        let root = self.build_physical_plan(logical, true, &mut nodes)?;
+        Ok(PhysicalPlan::from_parts(nodes, root))
     }
 
-    fn physical_plan_with_secondary_indexes(
+    fn build_physical_plan(
         &self,
         logical: LogicalPlan,
         allow_secondary_index_scans: bool,
-    ) -> PlannerResult<PhysicalPlan> {
-        match logical {
-            LogicalPlan::Explain { input } => Ok(PhysicalPlan::Explain {
-                input: Box::new(
-                    self.physical_plan_with_secondary_indexes(*input, allow_secondary_index_scans)?,
-                ),
-            }),
+        nodes: &mut Vec<PhysicalPlanNode>,
+    ) -> PlannerResult<usize> {
+        let node = match logical {
+            LogicalPlan::Explain { input } => PhysicalPlanNode::Explain {
+                input: self.build_physical_plan(*input, allow_secondary_index_scans, nodes)?,
+            },
             LogicalPlan::CreateTable { name, schema } => {
-                Ok(PhysicalPlan::CreateTable { name, schema })
+                PhysicalPlanNode::CreateTable { name, schema }
             }
             LogicalPlan::CreateIndex { name, table, columns } => {
-                Ok(PhysicalPlan::CreateIndex { name, table, columns })
+                PhysicalPlanNode::CreateIndex { name, table, columns }
             }
-            LogicalPlan::Values { rows } => Ok(PhysicalPlan::Values { rows }),
+            LogicalPlan::Values { rows } => PhysicalPlanNode::Values { rows },
             LogicalPlan::Insert { table, columns, input } => match *input {
                 LogicalPlan::Values { rows } => {
-                    Ok(PhysicalPlan::InsertValues { table, columns, values: rows })
+                    PhysicalPlanNode::InsertValues { table, columns, values: rows }
                 }
-                _ => Err(PlannerError::InvalidInsertInput),
+                _ => return Err(PlannerError::InvalidInsertInput),
             },
-            LogicalPlan::Update { table, assignments, input } => Ok(PhysicalPlan::Update {
+            LogicalPlan::Update { table, assignments, input } => PhysicalPlanNode::Update {
                 table,
                 assignments,
-                input: Box::new(self.physical_plan_with_secondary_indexes(*input, false)?),
-            }),
-            LogicalPlan::Delete { table, input } => Ok(PhysicalPlan::Delete {
+                input: self.build_physical_plan(*input, false, nodes)?,
+            },
+            LogicalPlan::Delete { table, input } => PhysicalPlanNode::Delete {
                 table,
-                input: Box::new(self.physical_plan_with_secondary_indexes(*input, false)?),
-            }),
-            LogicalPlan::OneRow => Ok(PhysicalPlan::OneRow),
-            LogicalPlan::TableScan { table } => Ok(PhysicalPlan::FullTableScan { table }),
+                input: self.build_physical_plan(*input, false, nodes)?,
+            },
+            LogicalPlan::OneRow => PhysicalPlanNode::OneRow,
+            LogicalPlan::TableScan { table } => PhysicalPlanNode::FullTableScan { table },
             LogicalPlan::Filter { input, predicate } => match *input {
                 LogicalPlan::TableScan { table } => {
                     match primary_key_range_predicate(&table, &predicate) {
                         Some(range_predicate) => {
-                            let scan = PhysicalPlan::PrimaryKeyRangeScan {
-                                table,
-                                range: range_predicate.range,
-                            };
+                            let scan = push_physical_node(
+                                nodes,
+                                PhysicalPlanNode::PrimaryKeyRangeScan {
+                                    table,
+                                    range: range_predicate.range,
+                                },
+                            );
                             match range_predicate.residual {
-                                Some(residual) => Ok(PhysicalPlan::Filter {
-                                    input: Box::new(scan),
-                                    predicate: residual,
-                                }),
-                                None => Ok(scan),
+                                Some(predicate) => {
+                                    PhysicalPlanNode::Filter { input: scan, predicate }
+                                }
+                                None => return Ok(scan),
                             }
                         }
                         None if allow_secondary_index_scans => {
-                            match self.secondary_index_predicate(&table, &predicate)? {
-                                Some(index_predicate) => Ok(PhysicalPlan::Filter {
-                                    input: Box::new(PhysicalPlan::SecondaryIndexScan {
-                                        scan: Box::new(SecondaryIndexScanPlan {
-                                            table,
-                                            index: index_predicate.index,
-                                            column: index_predicate.column,
-                                            value_range: index_predicate.value_range,
-                                            key_range: index_predicate.key_range,
-                                        }),
+                            let scan = match self.secondary_index_predicate(&table, &predicate)? {
+                                Some(index_predicate) => PhysicalPlanNode::SecondaryIndexScan {
+                                    scan: Box::new(SecondaryIndexScanPlan {
+                                        table,
+                                        index: index_predicate.index,
+                                        column: index_predicate.column,
+                                        value_range: index_predicate.value_range,
+                                        key_range: index_predicate.key_range,
                                     }),
-                                    predicate,
-                                }),
-                                None => Ok(PhysicalPlan::Filter {
-                                    input: Box::new(PhysicalPlan::FullTableScan { table }),
-                                    predicate,
-                                }),
-                            }
+                                },
+                                None => PhysicalPlanNode::FullTableScan { table },
+                            };
+                            let input = push_physical_node(nodes, scan);
+                            PhysicalPlanNode::Filter { input, predicate }
                         }
-                        None => Ok(PhysicalPlan::Filter {
-                            input: Box::new(PhysicalPlan::FullTableScan { table }),
-                            predicate,
-                        }),
+                        None => {
+                            let input = push_physical_node(
+                                nodes,
+                                PhysicalPlanNode::FullTableScan { table },
+                            );
+                            PhysicalPlanNode::Filter { input, predicate }
+                        }
                     }
                 }
-                input => Ok(PhysicalPlan::Filter {
-                    input: Box::new(self.physical_plan_with_secondary_indexes(
-                        input,
-                        allow_secondary_index_scans,
-                    )?),
+                input => PhysicalPlanNode::Filter {
+                    input: self.build_physical_plan(input, allow_secondary_index_scans, nodes)?,
                     predicate,
-                }),
+                },
             },
-            LogicalPlan::Sort { input, terms } => Ok(PhysicalPlan::Sort {
-                input: Box::new(
-                    self.physical_plan_with_secondary_indexes(*input, allow_secondary_index_scans)?,
-                ),
+            LogicalPlan::Sort { input, terms } => PhysicalPlanNode::Sort {
+                input: self.build_physical_plan(*input, allow_secondary_index_scans, nodes)?,
                 terms,
-            }),
-            LogicalPlan::Project { input, expressions } => Ok(PhysicalPlan::Project {
-                input: Box::new(
-                    self.physical_plan_with_secondary_indexes(*input, allow_secondary_index_scans)?,
-                ),
+            },
+            LogicalPlan::Project { input, expressions } => PhysicalPlanNode::Project {
+                input: self.build_physical_plan(*input, allow_secondary_index_scans, nodes)?,
                 expressions,
-            }),
-            LogicalPlan::Offset { input, offset } => Ok(PhysicalPlan::Offset {
-                input: Box::new(
-                    self.physical_plan_with_secondary_indexes(*input, allow_secondary_index_scans)?,
-                ),
+            },
+            LogicalPlan::Offset { input, offset } => PhysicalPlanNode::Offset {
+                input: self.build_physical_plan(*input, allow_secondary_index_scans, nodes)?,
                 offset,
-            }),
-            LogicalPlan::Limit { input, limit } => Ok(PhysicalPlan::Limit {
-                input: Box::new(
-                    self.physical_plan_with_secondary_indexes(*input, allow_secondary_index_scans)?,
-                ),
+            },
+            LogicalPlan::Limit { input, limit } => PhysicalPlanNode::Limit {
+                input: self.build_physical_plan(*input, allow_secondary_index_scans, nodes)?,
                 limit,
-            }),
-        }
+            },
+        };
+        Ok(push_physical_node(nodes, node))
     }
 
     fn secondary_index_predicate(
@@ -907,4 +899,10 @@ fn unsupported_expr(expression: &Expression<'_>) -> PlannerError {
         Expression::Wildcard => PlannerError::UnsupportedWildcardPosition,
         _ => PlannerError::UnsupportedExpression { expression: expression.to_string() },
     }
+}
+
+fn push_physical_node(nodes: &mut Vec<PhysicalPlanNode>, node: PhysicalPlanNode) -> usize {
+    let index = nodes.len();
+    nodes.push(node);
+    index
 }

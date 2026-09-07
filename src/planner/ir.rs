@@ -77,25 +77,77 @@ pub enum LogicalPlan {
     Limit { input: Box<LogicalPlan>, limit: u32 },
 }
 
-/// Executable operator tree selected by the planner.
+/// Executable physical plan stored in a contiguous arena.
 ///
-/// Physical plans mirror the executor's available operators. They are still
-/// declarative data, but table access and mutation shapes have been made
-/// concrete enough for execution:
-///
-/// - table scans become full scans, primary-key range scans, or secondary-index
-///   scans;
-/// - `INSERT ... VALUES` becomes [`PhysicalPlan::InsertValues`]; and
-/// - row-shaping operators such as filters, projections, limits, offsets, and
-///   sorts keep their input subtrees.
-///
-/// [`fmt::Display`] renders this tree in the same shape returned by `EXPLAIN`.
+/// Nodes refer to their inputs by index, avoiding one allocation and
+/// deallocation per operator. The root is always the last node added.
 #[derive(Debug, Clone, PartialEq)]
-pub enum PhysicalPlan {
+pub struct PhysicalPlan {
+    nodes: Vec<PhysicalPlanNode>,
+    root: usize,
+}
+
+impl PhysicalPlan {
+    /// Creates a plan containing a single root node.
+    pub fn new(root: PhysicalPlanNode) -> Self {
+        Self { nodes: vec![root], root: 0 }
+    }
+
+    /// Adds a node and makes it the plan root, returning its index.
+    pub fn push(&mut self, node: PhysicalPlanNode) -> usize {
+        let index = self.nodes.len();
+        self.nodes.push(node);
+        self.root = index;
+        index
+    }
+
+    /// Returns the root node.
+    pub fn root(&self) -> &PhysicalPlanNode {
+        &self.nodes[self.root]
+    }
+
+    /// Returns a node by arena index.
+    pub fn node(&self, index: usize) -> &PhysicalPlanNode {
+        &self.nodes[index]
+    }
+
+    /// Iterates over all nodes in arena order.
+    pub fn iter(&self) -> impl Iterator<Item = &PhysicalPlanNode> {
+        self.nodes.iter()
+    }
+
+    pub(crate) fn from_parts(nodes: Vec<PhysicalPlanNode>, root: usize) -> Self {
+        debug_assert!(root < nodes.len());
+        Self { nodes, root }
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<PhysicalPlanNode>, usize) {
+        (self.nodes, self.root)
+    }
+
+    pub(crate) fn display_node(&self, index: usize) -> impl fmt::Display + '_ {
+        PhysicalPlanDisplay { plan: self, root: index }
+    }
+}
+
+struct PhysicalPlanDisplay<'a> {
+    plan: &'a PhysicalPlan,
+    root: usize,
+}
+
+impl fmt::Display for PhysicalPlanDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_physical_plan(self.plan, self.root, f, "", true, true)
+    }
+}
+
+/// One operator in a [`PhysicalPlan`] arena.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PhysicalPlanNode {
     /// Return the formatted input plan without executing it.
     Explain {
         /// Plan to describe.
-        input: Box<PhysicalPlan>,
+        input: usize,
     },
     /// Execute a catalog table creation.
     CreateTable {
@@ -134,14 +186,14 @@ pub enum PhysicalPlan {
         /// Bound column assignments.
         assignments: Vec<UpdateAssignment>,
         /// Row-producing operator that yields target table records.
-        input: Box<PhysicalPlan>,
+        input: usize,
     },
     /// Delete rows from a table selected by an input operator.
     Delete {
         /// Target table.
         table: TableSchema,
         /// Row-producing operator that yields target table records.
-        input: Box<PhysicalPlan>,
+        input: usize,
     },
     /// Produce exactly one empty row.
     ///
@@ -157,7 +209,7 @@ pub enum PhysicalPlan {
     /// The planner emits this for compatible comparisons against the first
     /// integer primary-key column. If only part of the `WHERE` predicate can be
     /// expressed as a key range, the range scan is wrapped in a
-    /// [`PhysicalPlan::Filter`] for the residual expression.
+    /// [`PhysicalPlanNode::Filter`] for the residual expression.
     PrimaryKeyRangeScan {
         /// Table to scan.
         table: TableSchema,
@@ -168,7 +220,7 @@ pub enum PhysicalPlan {
     ///
     /// This is selected for predicates on a compatible single-column secondary
     /// index. The scan produces candidate table rows; the original predicate is
-    /// still applied by a surrounding [`PhysicalPlan::Filter`] so the executor
+    /// still applied by a surrounding [`PhysicalPlanNode::Filter`] so the executor
     /// preserves SQL semantics when the access range is only an approximation.
     SecondaryIndexScan {
         /// Scan metadata and key bounds.
@@ -177,35 +229,35 @@ pub enum PhysicalPlan {
     /// Filter rows from an input physical operator.
     Filter {
         /// Input operator.
-        input: Box<PhysicalPlan>,
+        input: usize,
         /// Predicate evaluated for each input row.
         predicate: PlannedExpression,
     },
     /// Sort rows from an input physical operator.
     Sort {
         /// Input operator.
-        input: Box<PhysicalPlan>,
+        input: usize,
         /// Sort keys in priority order.
         terms: Vec<SortTerm>,
     },
     /// Evaluate expressions for each input row.
     Project {
         /// Input operator.
-        input: Box<PhysicalPlan>,
+        input: usize,
         /// Output expressions in result-column order.
         expressions: Vec<PlannedExpression>,
     },
     /// Skip input rows before producing output.
     Offset {
         /// Input operator.
-        input: Box<PhysicalPlan>,
+        input: usize,
         /// Number of rows to skip.
         offset: u32,
     },
     /// Stop after producing a bounded number of rows.
     Limit {
         /// Input operator.
-        input: Box<PhysicalPlan>,
+        input: usize,
         /// Maximum number of rows to emit.
         limit: u32,
     },
@@ -231,93 +283,99 @@ pub struct SecondaryIndexScanPlan {
     pub key_range: IndexKeyRange,
 }
 
+impl PartialEq<PhysicalPlanNode> for PhysicalPlan {
+    fn eq(&self, other: &PhysicalPlanNode) -> bool {
+        self.nodes.len() == 1 && self.root() == other
+    }
+}
+
+impl PartialEq<PhysicalPlan> for PhysicalPlanNode {
+    fn eq(&self, other: &PhysicalPlan) -> bool {
+        other == self
+    }
+}
+
 impl fmt::Display for PhysicalPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        format_physical_plan(self, f, "", true, true)
+        format_physical_plan(self, self.root, f, "", true, true)
     }
 }
 
 fn format_physical_plan(
     plan: &PhysicalPlan,
+    node_index: usize,
     f: &mut fmt::Formatter<'_>,
     prefix: &str,
     is_last: bool,
     is_root: bool,
 ) -> fmt::Result {
+    let node = plan.node(node_index);
     if !is_root {
         write!(f, "\n{}{} ", prefix, if is_last { "`-" } else { "|-" })?;
     }
-    write!(f, "{}", physical_plan_label(plan))?;
+    write!(f, "{}", physical_plan_label(node))?;
 
-    if let Some(input) = physical_plan_input(plan) {
+    if let Some(input) = physical_plan_input(node) {
         let child_prefix = if is_root {
             String::new()
         } else {
             format!("{}{}", prefix, if is_last { "   " } else { "|  " })
         };
-        format_physical_plan(input, f, &child_prefix, true, false)?;
+        format_physical_plan(plan, input, f, &child_prefix, true, false)?;
     }
-
     Ok(())
 }
 
-fn physical_plan_input(plan: &PhysicalPlan) -> Option<&PhysicalPlan> {
+fn physical_plan_input(plan: &PhysicalPlanNode) -> Option<usize> {
     match plan {
-        PhysicalPlan::Explain { input }
-        | PhysicalPlan::Update { input, .. }
-        | PhysicalPlan::Delete { input, .. }
-        | PhysicalPlan::Filter { input, .. }
-        | PhysicalPlan::Sort { input, .. }
-        | PhysicalPlan::Project { input, .. }
-        | PhysicalPlan::Offset { input, .. }
-        | PhysicalPlan::Limit { input, .. } => Some(input),
-        PhysicalPlan::CreateTable { .. }
-        | PhysicalPlan::CreateIndex { .. }
-        | PhysicalPlan::Values { .. }
-        | PhysicalPlan::InsertValues { .. }
-        | PhysicalPlan::OneRow
-        | PhysicalPlan::FullTableScan { .. }
-        | PhysicalPlan::PrimaryKeyRangeScan { .. }
-        | PhysicalPlan::SecondaryIndexScan { .. } => None,
+        PhysicalPlanNode::Explain { input }
+        | PhysicalPlanNode::Update { input, .. }
+        | PhysicalPlanNode::Delete { input, .. }
+        | PhysicalPlanNode::Filter { input, .. }
+        | PhysicalPlanNode::Sort { input, .. }
+        | PhysicalPlanNode::Project { input, .. }
+        | PhysicalPlanNode::Offset { input, .. }
+        | PhysicalPlanNode::Limit { input, .. } => Some(*input),
+        _ => None,
     }
 }
 
-fn physical_plan_label(plan: &PhysicalPlan) -> String {
+fn physical_plan_label(plan: &PhysicalPlanNode) -> String {
     match plan {
-        PhysicalPlan::Explain { .. } => "Explain".to_owned(),
-        PhysicalPlan::CreateTable { name, .. } => format!("CreateTable table={name}"),
-        PhysicalPlan::CreateIndex { name, table, columns } => format!(
+        PhysicalPlanNode::Explain { .. } => "Explain".to_owned(),
+        PhysicalPlanNode::CreateTable { name, .. } => format!("CreateTable table={name}"),
+        PhysicalPlanNode::CreateIndex { name, table, columns } => format!(
             "CreateIndex index={name} table={} columns=[{}]",
             table.name,
             display_list(columns)
         ),
-        PhysicalPlan::Values { rows } => format!("Values rows={}", rows.len()),
-        PhysicalPlan::InsertValues { table, columns, values } => format!(
+        PhysicalPlanNode::Values { rows } => format!("Values rows={}", rows.len()),
+        PhysicalPlanNode::InsertValues { table, columns, values } => format!(
             "InsertValues table={} columns=[{}] rows={}",
             table.name,
             display_list(columns),
             values.len()
         ),
-        PhysicalPlan::Update { table, assignments, .. } => {
+        PhysicalPlanNode::Update { table, assignments, .. } => {
             format!("Update table={} assignments=[{}]", table.name, display_list(assignments))
         }
-        PhysicalPlan::Delete { table, .. } => format!("Delete table={}", table.name),
-        PhysicalPlan::OneRow => "OneRow".to_owned(),
-        PhysicalPlan::FullTableScan { table } => format!("FullTableScan table={}", table.name),
-        PhysicalPlan::PrimaryKeyRangeScan { table, range } => {
+        PhysicalPlanNode::Delete { table, .. } => format!("Delete table={}", table.name),
+        PhysicalPlanNode::OneRow => "OneRow".to_owned(),
+        PhysicalPlanNode::FullTableScan { table } => format!("FullTableScan table={}", table.name),
+        PhysicalPlanNode::PrimaryKeyRangeScan { table, range } => {
             format!("PrimaryKeyRangeScan table={} range=[{}]", table.name, range)
         }
-        PhysicalPlan::SecondaryIndexScan { scan } => format!(
+        PhysicalPlanNode::SecondaryIndexScan { scan } => format!(
             "SecondaryIndexScan table={} index={} column={} range=[{}]",
             scan.table.name, scan.index.name, scan.column, scan.value_range
         ),
-        PhysicalPlan::Filter { predicate, .. } => format!("Filter predicate={predicate}"),
-        PhysicalPlan::Sort { terms, .. } => format!("Sort terms=[{}]", display_list(terms)),
-        PhysicalPlan::Project { expressions, .. } => {
+        PhysicalPlanNode::Filter { predicate, .. } => format!("Filter predicate={predicate}"),
+        PhysicalPlanNode::Sort { terms, .. } => format!("Sort terms=[{}]", display_list(terms)),
+        PhysicalPlanNode::Project { expressions, .. } => {
             format!("Project expressions=[{}]", display_list(expressions))
         }
-        PhysicalPlan::Offset { offset, .. } => format!("Offset offset={offset}"),
-        PhysicalPlan::Limit { limit, .. } => format!("Limit limit={limit}"),
+        PhysicalPlanNode::Offset { offset, .. } => format!("Offset offset={offset}"),
+        PhysicalPlanNode::Limit { limit, .. } => format!("Limit limit={limit}"),
     }
 }
 

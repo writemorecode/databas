@@ -141,7 +141,7 @@ fn create_table_produces_logical_and_physical_create_table_plans() {
     );
     assert_eq!(
         plan.physical,
-        PhysicalPlan::CreateTable { name: "users".to_owned(), schema: expected_schema }
+        PhysicalPlanNode::CreateTable { name: "users".to_owned(), schema: expected_schema }
     );
 }
 
@@ -167,7 +167,7 @@ fn create_index_binds_table_and_index_columns() {
     );
     assert_eq!(
         plan.physical,
-        PhysicalPlan::CreateIndex {
+        PhysicalPlanNode::CreateIndex {
             name: "idx_users_name_age".to_owned(),
             table: catalog.table_schema_by_name("users").unwrap(),
             columns: expected_columns,
@@ -207,7 +207,7 @@ fn insert_binds_table_columns_and_values() {
         }
     );
 
-    let PhysicalPlan::InsertValues { table, columns, values } = &plan.physical else {
+    let PhysicalPlanNode::InsertValues { table, columns, values } = plan.physical.root() else {
         panic!("expected physical insert values plan: {plan:?}");
     };
     assert_eq!(table.name, "users");
@@ -238,13 +238,13 @@ fn update_all_plans_full_table_scan_under_update() {
     );
     assert!(matches!(input.as_ref(), LogicalPlan::TableScan { table } if table.name == "users"));
 
-    let PhysicalPlan::Update { table, assignments, input } = &plan.physical else {
+    let PhysicalPlanNode::Update { table, assignments, input } = plan.physical.root() else {
         panic!("expected physical update plan: {plan:?}");
     };
     assert_eq!(table.name, "users");
     assert_eq!(assignments.len(), 1);
     assert!(
-        matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        matches!(plan.physical.node(*input), PhysicalPlanNode::FullTableScan { table } if table.name == "users")
     );
 }
 
@@ -289,12 +289,12 @@ fn update_where_binds_filter_and_assignment_column_refs() {
         }
     );
 
-    let PhysicalPlan::Update { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Update { input, .. } = plan.physical.root() else {
         panic!("expected physical update plan: {plan:?}");
     };
     assert!(matches!(
-        input.as_ref(),
-        PhysicalPlan::PrimaryKeyRangeScan {
+        plan.physical.node(*input),
+        PhysicalPlanNode::PrimaryKeyRangeScan {
             range: TableKeyRange {
                 lower: Some(TableKeyBound::Inclusive(1)),
                 upper: Some(TableKeyBound::Inclusive(1)),
@@ -313,14 +313,14 @@ fn update_where_secondary_index_predicate_uses_full_table_scan() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Update { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Update { input, .. } = plan.physical.root() else {
         panic!("expected physical update plan: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, .. } = plan.physical.node(*input) else {
         panic!("expected filter below update: {plan:?}");
     };
     assert!(
-        matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        matches!(plan.physical.node(*input), PhysicalPlanNode::FullTableScan { table } if table.name == "users")
     );
 }
 
@@ -350,12 +350,12 @@ fn delete_all_plans_full_table_scan_under_delete() {
     assert_eq!(table.name, "users");
     assert!(matches!(input.as_ref(), LogicalPlan::TableScan { table } if table.name == "users"));
 
-    let PhysicalPlan::Delete { table, input } = &plan.physical else {
+    let PhysicalPlanNode::Delete { table, input } = plan.physical.root() else {
         panic!("expected physical delete plan: {plan:?}");
     };
     assert_eq!(table.name, "users");
     assert!(
-        matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        matches!(plan.physical.node(*input), PhysicalPlanNode::FullTableScan { table } if table.name == "users")
     );
 }
 
@@ -383,12 +383,12 @@ fn delete_where_binds_column_refs_in_filter() {
         }
     );
 
-    let PhysicalPlan::Delete { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Delete { input, .. } = plan.physical.root() else {
         panic!("expected physical delete plan: {plan:?}");
     };
     assert!(matches!(
-        input.as_ref(),
-        PhysicalPlan::PrimaryKeyRangeScan {
+        plan.physical.node(*input),
+        PhysicalPlanNode::PrimaryKeyRangeScan {
             range: TableKeyRange {
                 lower: Some(TableKeyBound::Inclusive(1)),
                 upper: Some(TableKeyBound::Inclusive(1)),
@@ -407,14 +407,14 @@ fn delete_where_secondary_index_predicate_uses_full_table_scan() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Delete { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Delete { input, .. } = plan.physical.root() else {
         panic!("expected physical delete plan: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, .. } = plan.physical.node(*input) else {
         panic!("expected filter below delete: {plan:?}");
     };
     assert!(
-        matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        matches!(plan.physical.node(*input), PhysicalPlanNode::FullTableScan { table } if table.name == "users")
     );
 }
 
@@ -426,7 +426,7 @@ fn select_star_projects_all_columns_over_full_table_scan() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, expressions } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, expressions } = plan.physical.root() else {
         panic!("expected physical project plan: {plan:?}");
     };
     assert_eq!(
@@ -440,7 +440,7 @@ fn select_star_projects_all_columns_over_full_table_scan() {
         ["id", "name", "age"]
     );
     assert!(
-        matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        matches!(plan.physical.node(*input), PhysicalPlanNode::FullTableScan { table } if table.name == "users")
     );
 }
 
@@ -482,10 +482,10 @@ fn select_primary_key_range_uses_range_scan() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::PrimaryKeyRangeScan { table, range } = input.as_ref() else {
+    let PhysicalPlanNode::PrimaryKeyRangeScan { table, range } = plan.physical.node(*input) else {
         panic!("expected primary key range scan under project: {plan:?}");
     };
     assert_eq!(table.name, "users");
@@ -506,10 +506,10 @@ fn select_primary_key_equality_uses_single_key_range_scan() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::PrimaryKeyRangeScan { range, .. } = input.as_ref() else {
+    let PhysicalPlanNode::PrimaryKeyRangeScan { range, .. } = plan.physical.node(*input) else {
         panic!("expected primary key range scan under project: {plan:?}");
     };
     assert_eq!(
@@ -529,10 +529,10 @@ fn select_primary_key_range_with_residual_filter_uses_range_scan() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, predicate } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, predicate } = plan.physical.node(*input) else {
         panic!("expected residual filter under project: {plan:?}");
     };
     assert_eq!(
@@ -543,7 +543,7 @@ fn select_primary_key_range_with_residual_filter_uses_range_scan() {
             right: Box::new(PlannedExpression::Literal(Value::Integer(7))),
         }
     );
-    let PhysicalPlan::PrimaryKeyRangeScan { range, .. } = input.as_ref() else {
+    let PhysicalPlanNode::PrimaryKeyRangeScan { range, .. } = plan.physical.node(*input) else {
         panic!("expected primary key range scan under residual filter: {plan:?}");
     };
     assert_eq!(*range, TableKeyRange { lower: None, upper: Some(TableKeyBound::Exclusive(10)) });
@@ -557,10 +557,10 @@ fn select_multiple_primary_key_bounds_with_residual_filter_uses_combined_range_s
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, predicate } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, predicate } = plan.physical.node(*input) else {
         panic!("expected residual filter under project: {plan:?}");
     };
     assert_eq!(
@@ -571,7 +571,7 @@ fn select_multiple_primary_key_bounds_with_residual_filter_uses_combined_range_s
             right: Box::new(PlannedExpression::Literal(Value::Integer(7))),
         }
     );
-    let PhysicalPlan::PrimaryKeyRangeScan { range, .. } = input.as_ref() else {
+    let PhysicalPlanNode::PrimaryKeyRangeScan { range, .. } = plan.physical.node(*input) else {
         panic!("expected primary key range scan under residual filter: {plan:?}");
     };
     assert_eq!(
@@ -591,14 +591,14 @@ fn select_non_leading_primary_key_range_stays_full_table_scan() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, .. } = plan.physical.node(*input) else {
         panic!("expected filter under project: {plan:?}");
     };
     assert!(
-        matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        matches!(plan.physical.node(*input), PhysicalPlanNode::FullTableScan { table } if table.name == "users")
     );
 }
 
@@ -611,13 +611,13 @@ fn select_secondary_index_integer_column_range_uses_index_scan() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, .. } = plan.physical.node(*input) else {
         panic!("expected filter under project: {plan:?}");
     };
-    let PhysicalPlan::SecondaryIndexScan { scan } = input.as_ref() else {
+    let PhysicalPlanNode::SecondaryIndexScan { scan } = plan.physical.node(*input) else {
         panic!("expected secondary index scan under residual filter: {plan:?}");
     };
     assert_eq!(scan.index.name, "idx_users_age");
@@ -639,10 +639,10 @@ fn select_secondary_index_equality_uses_index_scan_with_residual_filter() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, predicate } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, predicate } = plan.physical.node(*input) else {
         panic!("expected residual filter under project: {plan:?}");
     };
     assert_eq!(
@@ -653,7 +653,7 @@ fn select_secondary_index_equality_uses_index_scan_with_residual_filter() {
             right: Box::new(PlannedExpression::Literal(Value::String("Ada".to_owned()))),
         }
     );
-    let PhysicalPlan::SecondaryIndexScan { scan } = input.as_ref() else {
+    let PhysicalPlanNode::SecondaryIndexScan { scan } = plan.physical.node(*input) else {
         panic!("expected secondary index scan under residual filter: {plan:?}");
     };
     assert_eq!(scan.table.name, "users");
@@ -677,15 +677,15 @@ fn primary_key_scan_wins_over_secondary_index_scan() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, .. } = plan.physical.node(*input) else {
         panic!("expected residual filter under project: {plan:?}");
     };
     assert!(matches!(
-        input.as_ref(),
-        PhysicalPlan::PrimaryKeyRangeScan {
+        plan.physical.node(*input),
+        PhysicalPlanNode::PrimaryKeyRangeScan {
             range: TableKeyRange {
                 lower: Some(TableKeyBound::Inclusive(1)),
                 upper: Some(TableKeyBound::Inclusive(1)),
@@ -704,14 +704,14 @@ fn select_text_secondary_index_range_stays_full_table_scan() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, .. } = plan.physical.node(*input) else {
         panic!("expected residual filter under project: {plan:?}");
     };
     assert!(
-        matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        matches!(plan.physical.node(*input), PhysicalPlanNode::FullTableScan { table } if table.name == "users")
     );
 }
 
@@ -724,14 +724,14 @@ fn select_reversed_text_secondary_index_range_stays_full_table_scan() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, .. } = plan.physical.node(*input) else {
         panic!("expected residual filter under project: {plan:?}");
     };
     assert!(
-        matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        matches!(plan.physical.node(*input), PhysicalPlanNode::FullTableScan { table } if table.name == "users")
     );
 }
 
@@ -744,14 +744,14 @@ fn secondary_index_selection_skips_text_range_conjuncts() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, .. } = plan.physical.node(*input) else {
         panic!("expected residual filter under project: {plan:?}");
     };
     assert!(
-        matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        matches!(plan.physical.node(*input), PhysicalPlanNode::FullTableScan { table } if table.name == "users")
     );
 }
 
@@ -765,13 +765,13 @@ fn leftmost_usable_secondary_index_predicate_wins() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, .. } = plan.physical.node(*input) else {
         panic!("expected residual filter under project: {plan:?}");
     };
-    let PhysicalPlan::SecondaryIndexScan { scan } = input.as_ref() else {
+    let PhysicalPlanNode::SecondaryIndexScan { scan } = plan.physical.node(*input) else {
         panic!("expected secondary index scan under residual filter: {plan:?}");
     };
     assert_eq!(scan.index.name, "idx_users_age");
@@ -795,13 +795,13 @@ fn earliest_created_exact_secondary_index_wins_for_same_column() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, .. } = plan.physical.node(*input) else {
         panic!("expected residual filter under project: {plan:?}");
     };
-    let PhysicalPlan::SecondaryIndexScan { scan } = input.as_ref() else {
+    let PhysicalPlanNode::SecondaryIndexScan { scan } = plan.physical.node(*input) else {
         panic!("expected secondary index scan under residual filter: {plan:?}");
     };
     assert_eq!(scan.index.name, "idx_users_name_first");
@@ -816,14 +816,14 @@ fn unindexed_equality_stays_full_table_scan() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Project { input, .. } = &plan.physical else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.root() else {
         panic!("expected project root: {plan:?}");
     };
-    let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, .. } = plan.physical.node(*input) else {
         panic!("expected filter under project: {plan:?}");
     };
     assert!(
-        matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        matches!(plan.physical.node(*input), PhysicalPlanNode::FullTableScan { table } if table.name == "users")
     );
 }
 
@@ -840,10 +840,10 @@ fn explain_select_wraps_planned_select() {
     };
     assert!(matches!(input.as_ref(), LogicalPlan::Project { .. }));
 
-    let PhysicalPlan::Explain { input } = &plan.physical else {
+    let PhysicalPlanNode::Explain { input } = plan.physical.root() else {
         panic!("expected physical explain plan: {plan:?}");
     };
-    let PhysicalPlan::Project { input, expressions } = input.as_ref() else {
+    let PhysicalPlanNode::Project { input, expressions } = plan.physical.node(*input) else {
         panic!("expected explained select project plan: {plan:?}");
     };
     assert_eq!(
@@ -851,8 +851,8 @@ fn explain_select_wraps_planned_select() {
         &[PlannedExpression::Column(bound("users", "name", 1, DataType::Text))]
     );
     assert!(matches!(
-        input.as_ref(),
-        PhysicalPlan::PrimaryKeyRangeScan {
+        plan.physical.node(*input),
+        PhysicalPlanNode::PrimaryKeyRangeScan {
             range: TableKeyRange {
                 lower: Some(TableKeyBound::Inclusive(1)),
                 upper: Some(TableKeyBound::Inclusive(1)),
@@ -875,10 +875,10 @@ fn explain_update_wraps_planned_update() {
     };
     assert!(matches!(input.as_ref(), LogicalPlan::Update { table, .. } if table.name == "users"));
 
-    let PhysicalPlan::Explain { input } = &plan.physical else {
+    let PhysicalPlanNode::Explain { input } = plan.physical.root() else {
         panic!("expected physical explain plan: {plan:?}");
     };
-    let PhysicalPlan::Update { table, assignments, input } = input.as_ref() else {
+    let PhysicalPlanNode::Update { table, assignments, input } = plan.physical.node(*input) else {
         panic!("expected explained update plan: {plan:?}");
     };
     assert_eq!(table.name, "users");
@@ -890,8 +890,8 @@ fn explain_update_wraps_planned_update() {
         }]
     );
     assert!(matches!(
-        input.as_ref(),
-        PhysicalPlan::PrimaryKeyRangeScan {
+        plan.physical.node(*input),
+        PhysicalPlanNode::PrimaryKeyRangeScan {
             range: TableKeyRange {
                 lower: Some(TableKeyBound::Inclusive(1)),
                 upper: Some(TableKeyBound::Inclusive(1)),
@@ -915,19 +915,19 @@ fn explain_delete_wraps_planned_delete() {
     };
     assert!(matches!(input.as_ref(), LogicalPlan::Delete { table, .. } if table.name == "users"));
 
-    let PhysicalPlan::Explain { input } = &plan.physical else {
+    let PhysicalPlanNode::Explain { input } = plan.physical.root() else {
         panic!("expected physical explain plan: {plan:?}");
     };
-    let PhysicalPlan::Delete { table, input } = input.as_ref() else {
+    let PhysicalPlanNode::Delete { table, input } = plan.physical.node(*input) else {
         panic!("expected explained delete plan: {plan:?}");
     };
     assert_eq!(table.name, "users");
-    let PhysicalPlan::Filter { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Filter { input, .. } = plan.physical.node(*input) else {
         panic!("expected residual filter over full table scan: {plan:?}");
     };
     assert!(matches!(
-        input.as_ref(),
-        PhysicalPlan::FullTableScan { table } if table.name == "users"
+        plan.physical.node(*input),
+        PhysicalPlanNode::FullTableScan { table } if table.name == "users"
     ));
 }
 
@@ -939,18 +939,18 @@ fn select_order_limit_offset_preserves_operator_order() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let PhysicalPlan::Limit { input, limit } = &plan.physical else {
+    let PhysicalPlanNode::Limit { input, limit } = plan.physical.root() else {
         panic!("expected limit root: {plan:?}");
     };
     assert_eq!(*limit, 10);
-    let PhysicalPlan::Offset { input, offset } = input.as_ref() else {
+    let PhysicalPlanNode::Offset { input, offset } = plan.physical.node(*input) else {
         panic!("expected offset under limit: {plan:?}");
     };
     assert_eq!(*offset, 5);
-    let PhysicalPlan::Project { input, .. } = input.as_ref() else {
+    let PhysicalPlanNode::Project { input, .. } = plan.physical.node(*input) else {
         panic!("expected project under offset: {plan:?}");
     };
-    let PhysicalPlan::Sort { input, terms } = input.as_ref() else {
+    let PhysicalPlanNode::Sort { input, terms } = plan.physical.node(*input) else {
         panic!("expected sort under project: {plan:?}");
     };
     assert_eq!(
@@ -958,7 +958,7 @@ fn select_order_limit_offset_preserves_operator_order() {
         &[SortTerm { column: bound("users", "id", 0, DataType::Integer), direction: None }]
     );
     assert!(
-        matches!(input.as_ref(), PhysicalPlan::FullTableScan { table } if table.name == "users")
+        matches!(plan.physical.node(*input), PhysicalPlanNode::FullTableScan { table } if table.name == "users")
     );
 }
 
