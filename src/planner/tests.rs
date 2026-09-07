@@ -1,11 +1,6 @@
-use tempfile::tempdir;
-
 use super::*;
 use crate::{
-    core::{
-        ColumnSchema, DataType,
-        test_utils::{create_index, create_table},
-    },
+    core::{CatalogId, ColumnSchema, DataType, IndexColumnSchema},
     sql_parser::parser::Parser,
 };
 
@@ -38,34 +33,92 @@ fn users_schema() -> TupleSchema {
     }
 }
 
-fn database_with_users() -> (tempfile::TempDir, Database) {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("test.db");
-    let database = Database::create(&path).unwrap();
-    create_table(&database, "users", users_schema()).unwrap();
-    (dir, database)
+#[derive(Default)]
+struct MemoryCatalog {
+    tables: Vec<TableSchema>,
+    indexes: Vec<IndexSchema>,
 }
 
-struct EmptyCatalog;
+impl MemoryCatalog {
+    fn next_object_id(&self) -> CatalogId {
+        self.tables
+            .iter()
+            .map(|table| table.table_id)
+            .chain(self.indexes.iter().map(|index| index.index_id))
+            .max()
+            .unwrap_or(3)
+            + 1
+    }
 
-impl CatalogRead for EmptyCatalog {
-    fn table_schema_by_name(&self, name: &str) -> Result<TableSchema, StorageError> {
-        Err(StorageError::InvalidArgument(InvalidArgumentError::TableNotFound {
+    fn add_table(&mut self, name: &str, row: TupleSchema) {
+        let table_id = self.next_object_id();
+        self.tables.push(TableSchema {
+            table_id,
             name: name.to_owned(),
-        }))
+            // Planning carries root IDs as metadata but never accesses their pages.
+            root_page_id: table_id.try_into().unwrap(),
+            row,
+        });
+    }
+
+    fn add_index(&mut self, name: &str, table_name: &str, columns: &[&str]) {
+        let table = self.table_schema_by_name(table_name).unwrap();
+        let index_id = self.next_object_id();
+        let columns = columns
+            .iter()
+            .map(|name| {
+                let (source_column_ordinal, column) = table
+                    .row
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .find(|(_, column)| column.name == *name)
+                    .expect("fixture index column must exist");
+                IndexColumnSchema { source_column_ordinal, column: column.clone() }
+            })
+            .collect();
+        self.indexes.push(IndexSchema {
+            index_id,
+            name: name.to_owned(),
+            table_id: table.table_id,
+            root_page_id: index_id.try_into().unwrap(),
+            unique: false,
+            columns,
+        });
+    }
+}
+
+impl CatalogRead for MemoryCatalog {
+    fn table_schema_by_name(&self, name: &str) -> Result<TableSchema, StorageError> {
+        self.tables.iter().find(|table| table.name == name).cloned().ok_or_else(|| {
+            StorageError::InvalidArgument(InvalidArgumentError::TableNotFound {
+                name: name.to_owned(),
+            })
+        })
     }
 
     fn index_schemas_for_table(
         &self,
-        _table: &TableSchema,
+        table: &TableSchema,
     ) -> Result<Vec<IndexSchema>, StorageError> {
-        Ok(Vec::new())
+        let mut indexes: Vec<_> =
+            self.indexes.iter().filter(|index| index.table_id == table.table_id).cloned().collect();
+        // Match the production catalog's creation-order tie breaking.
+        indexes.sort_by_key(|index| index.index_id);
+        Ok(indexes)
     }
+}
+
+fn catalog_with_users() -> MemoryCatalog {
+    let mut catalog = MemoryCatalog::default();
+    catalog.add_table("users", users_schema());
+    catalog
 }
 
 #[test]
 fn planner_accepts_lightweight_schema_access() {
-    let planner = Planner::with_schema(&EmptyCatalog);
+    let catalog = MemoryCatalog::default();
+    let planner = Planner::with_schema(&catalog);
 
     assert!(matches!(
         planner.plan_statement(&parse("SELECT * FROM missing;")),
@@ -75,9 +128,8 @@ fn planner_accepts_lightweight_schema_access() {
 
 #[test]
 fn create_table_produces_logical_and_physical_create_table_plans() {
-    let dir = tempdir().unwrap();
-    let database = Database::create(dir.path().join("test.db")).unwrap();
-    let planner = Planner::new(&database);
+    let catalog = MemoryCatalog::default();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT NULLABLE);");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -95,8 +147,8 @@ fn create_table_produces_logical_and_physical_create_table_plans() {
 
 #[test]
 fn create_index_binds_table_and_index_columns() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("CREATE INDEX idx_users_name_age ON users (name, age);");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -109,7 +161,7 @@ fn create_index_binds_table_and_index_columns() {
         plan.logical,
         LogicalPlan::CreateIndex {
             name: "idx_users_name_age".to_owned(),
-            table: database.table_schema_by_name("users").unwrap(),
+            table: catalog.table_schema_by_name("users").unwrap(),
             columns: expected_columns.clone(),
         }
     );
@@ -117,7 +169,7 @@ fn create_index_binds_table_and_index_columns() {
         plan.physical,
         PhysicalPlan::CreateIndex {
             name: "idx_users_name_age".to_owned(),
-            table: database.table_schema_by_name("users").unwrap(),
+            table: catalog.table_schema_by_name("users").unwrap(),
             columns: expected_columns,
         }
     );
@@ -125,8 +177,8 @@ fn create_index_binds_table_and_index_columns() {
 
 #[test]
 fn insert_binds_table_columns_and_values() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 'Grace');");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -168,8 +220,8 @@ fn insert_binds_table_columns_and_values() {
 
 #[test]
 fn update_all_plans_full_table_scan_under_update() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("UPDATE users SET name = 'Ada';");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -198,8 +250,8 @@ fn update_all_plans_full_table_scan_under_update() {
 
 #[test]
 fn update_where_binds_filter_and_assignment_column_refs() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("UPDATE users SET age = age + 1 WHERE id == 1;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -254,9 +306,9 @@ fn update_where_binds_filter_and_assignment_column_refs() {
 
 #[test]
 fn update_where_secondary_index_predicate_uses_full_table_scan() {
-    let (_dir, database) = database_with_users();
-    create_index(&database, "idx_users_age", "users", &["age"]).unwrap();
-    let planner = Planner::new(&database);
+    let mut catalog = catalog_with_users();
+    catalog.add_index("idx_users_age", "users", &["age"]);
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("UPDATE users SET age = age + 1 WHERE age < 3;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -274,8 +326,8 @@ fn update_where_secondary_index_predicate_uses_full_table_scan() {
 
 #[test]
 fn update_rejects_duplicate_assignment_columns() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("UPDATE users SET name = 'Ada', name = 'Grace';");
 
     assert!(matches!(
@@ -286,8 +338,8 @@ fn update_rejects_duplicate_assignment_columns() {
 
 #[test]
 fn delete_all_plans_full_table_scan_under_delete() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("DELETE FROM users;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -309,8 +361,8 @@ fn delete_all_plans_full_table_scan_under_delete() {
 
 #[test]
 fn delete_where_binds_column_refs_in_filter() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("DELETE FROM users WHERE id == 1;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -348,9 +400,9 @@ fn delete_where_binds_column_refs_in_filter() {
 
 #[test]
 fn delete_where_secondary_index_predicate_uses_full_table_scan() {
-    let (_dir, database) = database_with_users();
-    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
-    let planner = Planner::new(&database);
+    let mut catalog = catalog_with_users();
+    catalog.add_index("idx_users_name", "users", &["name"]);
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("DELETE FROM users WHERE name == 'Ada';");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -368,8 +420,8 @@ fn delete_where_secondary_index_predicate_uses_full_table_scan() {
 
 #[test]
 fn select_star_projects_all_columns_over_full_table_scan() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT * FROM users;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -394,8 +446,8 @@ fn select_star_projects_all_columns_over_full_table_scan() {
 
 #[test]
 fn select_where_binds_column_refs_in_filter_and_projection() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE id == 1;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -424,8 +476,8 @@ fn select_where_binds_column_refs_in_filter_and_projection() {
 
 #[test]
 fn select_primary_key_range_uses_range_scan() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE 10 <= id AND id < 20;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -448,8 +500,8 @@ fn select_primary_key_range_uses_range_scan() {
 
 #[test]
 fn select_primary_key_equality_uses_single_key_range_scan() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE id == 10;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -471,8 +523,8 @@ fn select_primary_key_equality_uses_single_key_range_scan() {
 
 #[test]
 fn select_primary_key_range_with_residual_filter_uses_range_scan() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE id < 10 AND age == 7;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -499,8 +551,8 @@ fn select_primary_key_range_with_residual_filter_uses_range_scan() {
 
 #[test]
 fn select_multiple_primary_key_bounds_with_residual_filter_uses_combined_range_scan() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE 1 <= id AND id <= 10 AND age == 7;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -533,8 +585,8 @@ fn select_multiple_primary_key_bounds_with_residual_filter_uses_combined_range_s
 
 #[test]
 fn select_non_leading_primary_key_range_stays_full_table_scan() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE age == 7 AND id < 10;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -552,9 +604,9 @@ fn select_non_leading_primary_key_range_stays_full_table_scan() {
 
 #[test]
 fn select_secondary_index_integer_column_range_uses_index_scan() {
-    let (_dir, database) = database_with_users();
-    create_index(&database, "idx_users_age", "users", &["age"]).unwrap();
-    let planner = Planner::new(&database);
+    let mut catalog = catalog_with_users();
+    catalog.add_index("idx_users_age", "users", &["age"]);
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE 18 <= age AND age < 65;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -580,9 +632,9 @@ fn select_secondary_index_integer_column_range_uses_index_scan() {
 
 #[test]
 fn select_secondary_index_equality_uses_index_scan_with_residual_filter() {
-    let (_dir, database) = database_with_users();
-    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
-    let planner = Planner::new(&database);
+    let mut catalog = catalog_with_users();
+    catalog.add_index("idx_users_name", "users", &["name"]);
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE name == 'Ada';");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -618,9 +670,9 @@ fn select_secondary_index_equality_uses_index_scan_with_residual_filter() {
 
 #[test]
 fn primary_key_scan_wins_over_secondary_index_scan() {
-    let (_dir, database) = database_with_users();
-    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
-    let planner = Planner::new(&database);
+    let mut catalog = catalog_with_users();
+    catalog.add_index("idx_users_name", "users", &["name"]);
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE id == 1 AND name == 'Ada';");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -645,9 +697,9 @@ fn primary_key_scan_wins_over_secondary_index_scan() {
 
 #[test]
 fn select_text_secondary_index_range_stays_full_table_scan() {
-    let (_dir, database) = database_with_users();
-    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
-    let planner = Planner::new(&database);
+    let mut catalog = catalog_with_users();
+    catalog.add_index("idx_users_name", "users", &["name"]);
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE name >= 'Amy' AND name <= 'Charlotte';");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -665,9 +717,9 @@ fn select_text_secondary_index_range_stays_full_table_scan() {
 
 #[test]
 fn select_reversed_text_secondary_index_range_stays_full_table_scan() {
-    let (_dir, database) = database_with_users();
-    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
-    let planner = Planner::new(&database);
+    let mut catalog = catalog_with_users();
+    catalog.add_index("idx_users_name", "users", &["name"]);
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE 'Amy' < name AND 'Charlotte' >= name;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -685,9 +737,9 @@ fn select_reversed_text_secondary_index_range_stays_full_table_scan() {
 
 #[test]
 fn secondary_index_selection_skips_text_range_conjuncts() {
-    let (_dir, database) = database_with_users();
-    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
-    let planner = Planner::new(&database);
+    let mut catalog = catalog_with_users();
+    catalog.add_index("idx_users_name", "users", &["name"]);
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE age == 7 AND name >= 'Amy';");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -705,10 +757,10 @@ fn secondary_index_selection_skips_text_range_conjuncts() {
 
 #[test]
 fn leftmost_usable_secondary_index_predicate_wins() {
-    let (_dir, database) = database_with_users();
-    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
-    create_index(&database, "idx_users_age", "users", &["age"]).unwrap();
-    let planner = Planner::new(&database);
+    let mut catalog = catalog_with_users();
+    catalog.add_index("idx_users_name", "users", &["name"]);
+    catalog.add_index("idx_users_age", "users", &["age"]);
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE age == 7 AND name == 'Ada';");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -735,10 +787,10 @@ fn leftmost_usable_secondary_index_predicate_wins() {
 
 #[test]
 fn earliest_created_exact_secondary_index_wins_for_same_column() {
-    let (_dir, database) = database_with_users();
-    create_index(&database, "idx_users_name_first", "users", &["name"]).unwrap();
-    create_index(&database, "idx_users_name_second", "users", &["name"]).unwrap();
-    let planner = Planner::new(&database);
+    let mut catalog = catalog_with_users();
+    catalog.add_index("idx_users_name_first", "users", &["name"]);
+    catalog.add_index("idx_users_name_second", "users", &["name"]);
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE name == 'Ada';");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -757,9 +809,9 @@ fn earliest_created_exact_secondary_index_wins_for_same_column() {
 
 #[test]
 fn unindexed_equality_stays_full_table_scan() {
-    let (_dir, database) = database_with_users();
-    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
-    let planner = Planner::new(&database);
+    let mut catalog = catalog_with_users();
+    catalog.add_index("idx_users_name", "users", &["name"]);
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users WHERE age == 7;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -777,8 +829,8 @@ fn unindexed_equality_stays_full_table_scan() {
 
 #[test]
 fn explain_select_wraps_planned_select() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("EXPLAIN SELECT name FROM users WHERE id == 1;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -812,8 +864,8 @@ fn explain_select_wraps_planned_select() {
 
 #[test]
 fn explain_update_wraps_planned_update() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("EXPLAIN UPDATE users SET name = 'Ada' WHERE id == 1;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -851,9 +903,9 @@ fn explain_update_wraps_planned_update() {
 
 #[test]
 fn explain_delete_wraps_planned_delete() {
-    let (_dir, database) = database_with_users();
-    create_index(&database, "idx_users_name", "users", &["name"]).unwrap();
-    let planner = Planner::new(&database);
+    let mut catalog = catalog_with_users();
+    catalog.add_index("idx_users_name", "users", &["name"]);
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("EXPLAIN DELETE FROM users WHERE name == 'Ada';");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -881,8 +933,8 @@ fn explain_delete_wraps_planned_delete() {
 
 #[test]
 fn select_order_limit_offset_preserves_operator_order() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
     let statement = parse("SELECT name FROM users ORDER BY id LIMIT 10 OFFSET 5;");
 
     let plan = planner.plan_statement(&statement).unwrap();
@@ -912,8 +964,8 @@ fn select_order_limit_offset_preserves_operator_order() {
 
 #[test]
 fn reports_semantic_planning_errors() {
-    let (_dir, database) = database_with_users();
-    let planner = Planner::new(&database);
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
 
     assert!(matches!(
         planner.plan_statement(&parse("SELECT * FROM missing;")),
