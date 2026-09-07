@@ -16,7 +16,7 @@ use crate::{
     },
     error::DatabaseError,
     executor::{ExecutionOutput, Executor},
-    planner::{PhysicalPlan, Planner},
+    planner::{PhysicalPlan, PhysicalPlanNode, Planner},
     sql_parser::parser::{Command, Parser, SqlItem, stmt::Statement},
 };
 
@@ -242,34 +242,25 @@ fn statement_transaction_mode(statement: &Statement<'_>) -> StatementTransaction
 
 fn plan_table_ids(plan: &PhysicalPlan) -> Vec<crate::core::TableId> {
     let mut table_ids = Vec::new();
-    collect_plan_table_ids(plan, &mut table_ids);
+    for node in plan.iter() {
+        match node {
+            PhysicalPlanNode::CreateIndex { table, .. }
+            | PhysicalPlanNode::InsertValues { table, .. }
+            | PhysicalPlanNode::Update { table, .. }
+            | PhysicalPlanNode::Delete { table, .. }
+            | PhysicalPlanNode::FullTableScan { table }
+            | PhysicalPlanNode::PrimaryKeyRangeScan { table, .. } => {
+                table_ids.push(table.table_id.into());
+            }
+            PhysicalPlanNode::SecondaryIndexScan { scan } => {
+                table_ids.push(scan.table.table_id.into());
+            }
+            _ => {}
+        }
+    }
     table_ids.sort_unstable();
     table_ids.dedup();
     table_ids
-}
-
-fn collect_plan_table_ids(plan: &PhysicalPlan, table_ids: &mut Vec<crate::core::TableId>) {
-    match plan {
-        PhysicalPlan::CreateIndex { table, .. }
-        | PhysicalPlan::InsertValues { table, .. }
-        | PhysicalPlan::Update { table, .. }
-        | PhysicalPlan::Delete { table, .. }
-        | PhysicalPlan::FullTableScan { table }
-        | PhysicalPlan::PrimaryKeyRangeScan { table, .. } => table_ids.push(table.table_id.into()),
-        PhysicalPlan::SecondaryIndexScan { scan } => table_ids.push(scan.table.table_id.into()),
-        _ => {}
-    }
-    match plan {
-        PhysicalPlan::Explain { input }
-        | PhysicalPlan::Update { input, .. }
-        | PhysicalPlan::Delete { input, .. }
-        | PhysicalPlan::Filter { input, .. }
-        | PhysicalPlan::Sort { input, .. }
-        | PhysicalPlan::Project { input, .. }
-        | PhysicalPlan::Offset { input, .. }
-        | PhysicalPlan::Limit { input, .. } => collect_plan_table_ids(input, table_ids),
-        _ => {}
-    }
 }
 
 fn is_no_active_transaction(error: &StorageError) -> bool {

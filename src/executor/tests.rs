@@ -6,17 +6,96 @@ use super::*;
 use crate::{
     core::{
         ColumnSchema, DataType, Database, LockError, OwnedTableRecord, PAGE_SIZE, TableId,
-        TableKey, Tuple, TupleSchema,
+        TableKey, TableSchema, Tuple, TupleSchema,
         access::CatalogRead,
         error::{ConstraintError, InternalError, InvariantViolation, StorageError},
         test_utils::{TestTransaction, create_index, create_table},
     },
     error::DatabaseError,
-    planner::{BoundColumn, PlannedExpression, Planner, PlannerError},
+    planner::{BoundColumn, PlannedExpression, Planner, PlannerError, SortTerm},
     relational::cursor::encode_index_entry_key,
     session::{Session, SessionError},
     sql_parser::parser::Parser,
 };
+
+#[derive(Debug)]
+enum TestPhysicalPlan {
+    CreateTable {
+        name: String,
+        schema: TupleSchema,
+    },
+    Values {
+        rows: Vec<Vec<PlannedExpression>>,
+    },
+    InsertValues {
+        table: TableSchema,
+        columns: Vec<BoundColumn>,
+        values: Vec<Vec<PlannedExpression>>,
+    },
+    FullTableScan {
+        table: TableSchema,
+    },
+    Filter {
+        input: Box<TestPhysicalPlan>,
+        predicate: PlannedExpression,
+    },
+    Sort {
+        input: Box<TestPhysicalPlan>,
+        terms: Vec<SortTerm>,
+    },
+    Project {
+        input: Box<TestPhysicalPlan>,
+        expressions: Vec<PlannedExpression>,
+    },
+    Offset {
+        input: Box<TestPhysicalPlan>,
+        offset: u32,
+    },
+    Limit {
+        input: Box<TestPhysicalPlan>,
+        limit: u32,
+    },
+}
+
+impl From<TestPhysicalPlan> for crate::planner::PhysicalPlan {
+    fn from(plan: TestPhysicalPlan) -> Self {
+        fn build(plan: TestPhysicalPlan, nodes: &mut Vec<PhysicalPlanNode>) -> usize {
+            let node = match plan {
+                TestPhysicalPlan::CreateTable { name, schema } => {
+                    PhysicalPlanNode::CreateTable { name, schema }
+                }
+                TestPhysicalPlan::Values { rows } => PhysicalPlanNode::Values { rows },
+                TestPhysicalPlan::InsertValues { table, columns, values } => {
+                    PhysicalPlanNode::InsertValues { table, columns, values }
+                }
+                TestPhysicalPlan::FullTableScan { table } => {
+                    PhysicalPlanNode::FullTableScan { table }
+                }
+                TestPhysicalPlan::Filter { input, predicate } => {
+                    PhysicalPlanNode::Filter { input: build(*input, nodes), predicate }
+                }
+                TestPhysicalPlan::Sort { input, terms } => {
+                    PhysicalPlanNode::Sort { input: build(*input, nodes), terms }
+                }
+                TestPhysicalPlan::Project { input, expressions } => {
+                    PhysicalPlanNode::Project { input: build(*input, nodes), expressions }
+                }
+                TestPhysicalPlan::Offset { input, offset } => {
+                    PhysicalPlanNode::Offset { input: build(*input, nodes), offset }
+                }
+                TestPhysicalPlan::Limit { input, limit } => {
+                    PhysicalPlanNode::Limit { input: build(*input, nodes), limit }
+                }
+            };
+            let index = nodes.len();
+            nodes.push(node);
+            index
+        }
+        let mut nodes = Vec::new();
+        let root = build(plan, &mut nodes);
+        crate::planner::PhysicalPlan::from_parts(nodes, root)
+    }
+}
 
 fn record(table_key: TableKey, values: Vec<Value>) -> ExecutorRow {
     record_from_values(table_key, values).unwrap()
@@ -162,8 +241,8 @@ fn insert_values_plan(
     database: &Database,
     columns: Vec<BoundColumn>,
     rows: Vec<Vec<Value>>,
-) -> PhysicalPlan {
-    PhysicalPlan::InsertValues {
+) -> TestPhysicalPlan {
+    TestPhysicalPlan::InsertValues {
         table: database.table_schema_by_name("users").unwrap(),
         columns,
         values: rows
@@ -300,8 +379,8 @@ fn project_evaluates_multiple_expressions_in_order() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Project {
-        input: Box::new(PhysicalPlan::Values {
+    let plan = TestPhysicalPlan::Project {
+        input: Box::new(TestPhysicalPlan::Values {
             rows: vec![vec![
                 PlannedExpression::Literal(Value::Integer(4)),
                 PlannedExpression::Literal(Value::Integer(5)),
@@ -330,8 +409,8 @@ fn filter_keeps_only_rows_with_true_predicate() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Filter {
-        input: Box::new(PhysicalPlan::Values {
+    let plan = TestPhysicalPlan::Filter {
+        input: Box::new(TestPhysicalPlan::Values {
             rows: vec![
                 vec![
                     PlannedExpression::Literal(Value::Integer(1)),
@@ -367,7 +446,7 @@ fn full_table_scan_materializes_owned_rows() {
     let mut executor = Executor::in_transaction(&transaction);
 
     let rows =
-        collect_rows(executor.execute(PhysicalPlan::FullTableScan { table }).unwrap()).unwrap();
+        collect_rows(executor.execute(TestPhysicalPlan::FullTableScan { table }).unwrap()).unwrap();
 
     assert!(matches!(rows[0], ExecutorRow::Owned(_)));
     assert_eq!(
@@ -392,8 +471,8 @@ fn filter_over_table_scan_materializes_owned_rows() {
     let table = database.table_schema_by_name("users").unwrap();
     let transaction = executor_transaction(&database, &["users"]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Filter {
-        input: Box::new(PhysicalPlan::FullTableScan { table }),
+    let plan = TestPhysicalPlan::Filter {
+        input: Box::new(TestPhysicalPlan::FullTableScan { table }),
         predicate: PlannedExpression::Column(bound("active", 2, DataType::Boolean)),
     };
 
@@ -414,8 +493,8 @@ fn project_over_table_scan_returns_owned_rows() {
     let table = database.table_schema_by_name("users").unwrap();
     let transaction = executor_transaction(&database, &["users"]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Project {
-        input: Box::new(PhysicalPlan::FullTableScan { table }),
+    let plan = TestPhysicalPlan::Project {
+        input: Box::new(TestPhysicalPlan::FullTableScan { table }),
         expressions: vec![PlannedExpression::Column(bound("name", 1, DataType::Text))],
     };
 
@@ -432,8 +511,8 @@ fn filter_rejects_non_boolean_predicate() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Filter {
-        input: Box::new(PhysicalPlan::Values {
+    let plan = TestPhysicalPlan::Filter {
+        input: Box::new(TestPhysicalPlan::Values {
             rows: vec![vec![PlannedExpression::Literal(Value::Integer(1))]],
         }),
         predicate: PlannedExpression::Column(bound("id", 0, DataType::Integer)),
@@ -451,8 +530,8 @@ fn limit_does_not_evaluate_rows_beyond_limit() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Limit {
-        input: Box::new(PhysicalPlan::Values {
+    let plan = TestPhysicalPlan::Limit {
+        input: Box::new(TestPhysicalPlan::Values {
             rows: vec![
                 vec![PlannedExpression::Literal(Value::Integer(1))],
                 vec![PlannedExpression::Binary {
@@ -477,8 +556,8 @@ fn limit_larger_than_child_rows_returns_all_rows() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Limit {
-        input: Box::new(PhysicalPlan::Values {
+    let plan = TestPhysicalPlan::Limit {
+        input: Box::new(TestPhysicalPlan::Values {
             rows: vec![
                 vec![PlannedExpression::Literal(Value::Integer(1))],
                 vec![PlannedExpression::Literal(Value::Integer(2))],
@@ -500,8 +579,8 @@ fn limit_rejects_non_row_child() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Limit {
-        input: Box::new(PhysicalPlan::CreateTable {
+    let plan = TestPhysicalPlan::Limit {
+        input: Box::new(TestPhysicalPlan::CreateTable {
             name: "users".to_owned(),
             schema: users_schema(),
         }),
@@ -520,9 +599,9 @@ fn offset_reports_errors_from_skipped_rows() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Offset {
-        input: Box::new(PhysicalPlan::Filter {
-            input: Box::new(PhysicalPlan::Values {
+    let plan = TestPhysicalPlan::Offset {
+        input: Box::new(TestPhysicalPlan::Filter {
+            input: Box::new(TestPhysicalPlan::Values {
                 rows: vec![
                     vec![PlannedExpression::Literal(Value::Integer(1))],
                     vec![PlannedExpression::Literal(Value::Integer(2))],
@@ -545,8 +624,8 @@ fn offset_larger_than_child_rows_returns_no_rows() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Offset {
-        input: Box::new(PhysicalPlan::Values {
+    let plan = TestPhysicalPlan::Offset {
+        input: Box::new(TestPhysicalPlan::Values {
             rows: vec![
                 vec![PlannedExpression::Literal(Value::Integer(1))],
                 vec![PlannedExpression::Literal(Value::Integer(2))],
@@ -566,8 +645,8 @@ fn offset_rejects_non_row_child() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Offset {
-        input: Box::new(PhysicalPlan::CreateTable {
+    let plan = TestPhysicalPlan::Offset {
+        input: Box::new(TestPhysicalPlan::CreateTable {
             name: "users".to_owned(),
             schema: users_schema(),
         }),
@@ -586,9 +665,9 @@ fn filter_propagates_child_row_errors() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Filter {
-        input: Box::new(PhysicalPlan::Filter {
-            input: Box::new(PhysicalPlan::Values {
+    let plan = TestPhysicalPlan::Filter {
+        input: Box::new(TestPhysicalPlan::Filter {
+            input: Box::new(TestPhysicalPlan::Values {
                 rows: vec![vec![PlannedExpression::Literal(Value::Integer(1))]],
             }),
             predicate: PlannedExpression::Column(bound("id", 0, DataType::Integer)),
@@ -608,9 +687,9 @@ fn project_propagates_child_row_errors() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Project {
-        input: Box::new(PhysicalPlan::Filter {
-            input: Box::new(PhysicalPlan::Values {
+    let plan = TestPhysicalPlan::Project {
+        input: Box::new(TestPhysicalPlan::Filter {
+            input: Box::new(TestPhysicalPlan::Values {
                 rows: vec![vec![PlannedExpression::Literal(Value::Integer(1))]],
             }),
             predicate: PlannedExpression::Column(bound("id", 0, DataType::Integer)),
@@ -630,8 +709,8 @@ fn row_operator_rejects_non_row_child() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Project {
-        input: Box::new(PhysicalPlan::CreateTable {
+    let plan = TestPhysicalPlan::Project {
+        input: Box::new(TestPhysicalPlan::CreateTable {
             name: "users".to_owned(),
             schema: users_schema(),
         }),
@@ -650,8 +729,8 @@ fn sort_returns_unsupported_error_instead_of_panicking() {
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let transaction = executor_transaction(&database, &[]);
     let mut executor = Executor::in_transaction(&transaction);
-    let plan = PhysicalPlan::Sort {
-        input: Box::new(PhysicalPlan::Values { rows: Vec::new() }),
+    let plan = TestPhysicalPlan::Sort {
+        input: Box::new(TestPhysicalPlan::Values { rows: Vec::new() }),
         terms: Vec::new(),
     };
 
