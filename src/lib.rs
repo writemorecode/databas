@@ -13,3 +13,4 @@ pub mod session;
 pub mod sql_parser;
 pub(crate) mod storage;
 pub(crate) mod sync;
+pub mod thread_pool;

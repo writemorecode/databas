@@ -343,6 +343,8 @@ struct GraphState {
     waits_for: WaitForGraph,
     /// Sole DDL transaction preventing ordinary transaction admission.
     ddl_owner: Option<TxnId>,
+    /// Fatal shutdown permanently disables admission and lock acquisition.
+    stopped: bool,
 }
 
 /// Shared implementation behind cloneable manager handles.
@@ -391,6 +393,27 @@ impl LockManager {
         Self::default()
     }
 
+    /// Permanently stops admission and wakes all queued lock requests.
+    pub(crate) fn stop(&self) -> Result<(), LockError> {
+        let waiting = {
+            let mut graph = self.lock_graph()?;
+            graph.stopped = true;
+            graph
+                .transactions
+                .iter()
+                .filter_map(|(&id, state)| state.waiting_for.map(|_| id))
+                .collect::<Vec<_>>()
+        };
+        // Never acquire a queue latch while holding the graph latch.
+        for id in waiting {
+            match self.cancel_waiting(id) {
+                Ok(_) | Err(LockError::TransactionNotActive { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
     /// Registers `txn_id` in its growing phase.
     ///
     /// # Errors
@@ -399,6 +422,9 @@ impl LockManager {
     /// [`LockError::DdlBusy`] while the database-wide DDL gate is held.
     pub fn begin_transaction(&self, txn_id: TxnId) -> Result<(), LockError> {
         let mut graph = self.lock_graph()?;
+        if graph.stopped {
+            return Err(LockError::Canceled { txn_id });
+        }
         if graph.transactions.contains_key(&txn_id) {
             return Err(LockError::TransactionAlreadyActive { txn_id });
         }
@@ -422,6 +448,9 @@ impl LockManager {
     /// [`LockError::DdlBusy`] when any transaction is active.
     pub fn begin_ddl_transaction(&self, txn_id: TxnId) -> Result<(), LockError> {
         let mut graph = self.lock_graph()?;
+        if graph.stopped {
+            return Err(LockError::Canceled { txn_id });
+        }
         if graph.transactions.contains_key(&txn_id) {
             return Err(LockError::TransactionAlreadyActive { txn_id });
         }
@@ -441,6 +470,9 @@ impl LockManager {
     /// or [`LockError::DdlBusy`] unless it is the sole active transaction.
     pub fn acquire_ddl_gate(&self, txn_id: TxnId) -> Result<(), LockError> {
         let mut graph = self.lock_graph()?;
+        if graph.stopped {
+            return Err(LockError::Canceled { txn_id });
+        }
         if !graph.transactions.contains_key(&txn_id) {
             return Err(LockError::TransactionNotActive { txn_id });
         }
@@ -538,6 +570,9 @@ impl LockManager {
     ) -> Result<AcquireDecision, LockError> {
         let LockRequest { txn_id, table_id } = request;
         let mut graph = self.lock_graph()?;
+        if graph.stopped {
+            return Err(LockError::Canceled { txn_id });
+        }
         let transaction = active_growing_transaction(&mut graph, txn_id)?;
 
         if queue.owner == Some(txn_id) {
@@ -1052,6 +1087,27 @@ mod tests {
             thread::sleep(Duration::from_micros(10));
         }
         panic!("transaction did not enter its wait queue");
+    }
+
+    #[test]
+    fn stop_wakes_waiters_and_rejects_new_requests() {
+        let manager = manager_with_transactions(&[1, 2]);
+        manager.acquire(1, 7).unwrap();
+        let waiting = Arc::clone(&manager);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || tx.send(waiting.acquire(2, 7)).unwrap());
+        wait_until_waiting(&manager, 2);
+        manager.stop().unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err(LockError::Canceled { txn_id: 2 })
+        );
+        assert_eq!(manager.acquire(1, 8), Err(LockError::Canceled { txn_id: 1 }));
+        assert_eq!(manager.begin_transaction(3), Err(LockError::Canceled { txn_id: 3 }));
+        assert_eq!(manager.begin_ddl_transaction(3), Err(LockError::Canceled { txn_id: 3 }));
+        rollback(&manager, 1);
+        rollback(&manager, 2);
+        worker.join().unwrap();
     }
 
     #[test]
