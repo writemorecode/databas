@@ -44,6 +44,22 @@ impl<'db> Session<'db> {
         Self { database, active_txn: None }
     }
 
+    /// Closes this session, rolling back any open explicit transaction.
+    ///
+    /// Unlike the best-effort `Drop` fallback, this reports cleanup failures.
+    /// A failed rollback is not silently retried during destruction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if rollback cannot complete. Server callers
+    /// must treat a failed cleanup as fatal rather than reuse the database.
+    pub fn close(mut self) -> Result<(), StorageError> {
+        if let Some(txn_id) = self.active_txn.take() {
+            self.database.rollback_transaction(txn_id)?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn active_transaction_id_for_test(&self) -> Option<u64> {
         self.active_txn

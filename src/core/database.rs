@@ -85,6 +85,11 @@ impl Database {
         self.storage.unlock_for_crash_for_test().unwrap();
     }
 
+    /// Disables new lock requests and cancels pending waits after a fatal error.
+    pub(crate) fn stop(&self) -> StorageResult<()> {
+        self.locks.stop().map_err(Into::into)
+    }
+
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
         self.begin_statement_transaction(StatementTransactionMode::Ordinary)
     }
