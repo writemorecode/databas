@@ -12,16 +12,24 @@ use crate::{
 use crate::planner::{BoundColumn, IndexValueBound, IndexValueRange, PlannedExpression};
 
 #[derive(Debug, Clone, PartialEq)]
+/// A primary-key scan range and an optional predicate that must be evaluated afterward.
 pub(super) struct RangePredicate {
+    /// The table-key range that can be applied during the scan.
     pub(super) range: TableKeyRange,
+    /// The part of the predicate that could not be represented by `range`.
     pub(super) residual: Option<PlannedExpression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// A secondary-index scan range and the index column it constrains.
 pub(super) struct IndexPredicate {
+    /// The secondary index selected for the scan.
     pub(super) index: IndexSchema,
+    /// The bound table column represented by the index.
     pub(super) column: BoundColumn,
+    /// The range of logical values accepted by the predicate.
     pub(super) value_range: IndexValueRange,
+    /// The encoded index-key range used to seek and scan the index.
     pub(super) key_range: IndexKeyRange,
 }
 
@@ -100,22 +108,35 @@ fn flatten_conjuncts<'a>(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The comparison operators supported when deriving an index range.
 enum IndexComparisonKind {
+    /// Matches values equal to the comparison value.
     Equals,
+    /// Matches values greater than the comparison value.
     GreaterThan,
+    /// Matches values greater than or equal to the comparison value.
     GreaterThanOrEqual,
+    /// Matches values less than the comparison value.
     LessThan,
+    /// Matches values less than or equal to the comparison value.
     LessThanOrEqual,
 }
 
+/// A normalized comparison between an indexed column and a literal value.
 struct IndexComparison<'a> {
+    /// The indexed column being compared.
     column: BoundColumn,
+    /// The literal value used by the comparison.
     value: &'a Value,
+    /// The normalized comparison operator.
     kind: IndexComparisonKind,
 }
 
+/// An index and column that can satisfy one predicate conjunct.
 struct SecondaryIndexCandidate {
+    /// The matching single-column secondary index.
     index: IndexSchema,
+    /// The indexed column constrained by the conjunct.
     column: BoundColumn,
 }
 
