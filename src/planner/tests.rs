@@ -140,8 +140,8 @@ fn create_table_produces_logical_and_physical_create_table_plans() {
 
     let expected_schema = users_schema();
     assert_eq!(
-        plan.logical,
-        LogicalPlan::CreateTable { name: "users".to_owned(), schema: expected_schema.clone() }
+        plan.logical.root(),
+        &LogicalPlanNode::CreateTable { name: "users".to_owned(), schema: expected_schema.clone() }
     );
     assert_eq!(
         plan.physical,
@@ -162,8 +162,8 @@ fn create_index_binds_table_and_index_columns() {
         bound("users", "age", 2, DataType::Integer),
     ];
     assert_eq!(
-        plan.logical,
-        LogicalPlan::CreateIndex {
+        plan.logical.root(),
+        &LogicalPlanNode::CreateIndex {
             name: "idx_users_name_age".to_owned(),
             table: catalog.table_schema_by_name("users").unwrap(),
             columns: expected_columns.clone(),
@@ -187,7 +187,7 @@ fn insert_binds_table_columns_and_values() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let LogicalPlan::Insert { table, columns, input } = &plan.logical else {
+    let LogicalPlanNode::Insert { table, columns, input } = plan.logical.root() else {
         panic!("expected logical insert plan: {plan:?}");
     };
     assert_eq!(table.name, "users");
@@ -196,8 +196,8 @@ fn insert_binds_table_columns_and_values() {
         ["id", "name"]
     );
     assert_eq!(
-        input.as_ref(),
-        &LogicalPlan::Values {
+        plan.logical.node(*input),
+        &LogicalPlanNode::Values {
             rows: vec![
                 vec![
                     PlannedExpression::Literal(Value::Integer(1)),
@@ -230,7 +230,7 @@ fn update_all_plans_full_table_scan_under_update() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let LogicalPlan::Update { table, assignments, input } = &plan.logical else {
+    let LogicalPlanNode::Update { table, assignments, input } = plan.logical.root() else {
         panic!("expected logical update plan: {plan:?}");
     };
     assert_eq!(table.name, "users");
@@ -240,7 +240,9 @@ fn update_all_plans_full_table_scan_under_update() {
         assignments[0].expression,
         PlannedExpression::Literal(Value::String("Ada".to_owned()))
     );
-    assert!(matches!(input.as_ref(), LogicalPlan::TableScan { table } if table.name == "users"));
+    assert!(
+        matches!(plan.logical.node(*input), LogicalPlanNode::TableScan { table } if table.name == "users")
+    );
 
     let PhysicalPlanNode::Update { table, assignments, input } = plan.physical.root() else {
         panic!("expected physical update plan: {plan:?}");
@@ -260,7 +262,7 @@ fn update_where_binds_filter_and_assignment_column_refs() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let LogicalPlan::Update { assignments, input, .. } = &plan.logical else {
+    let LogicalPlanNode::Update { assignments, input, .. } = plan.logical.root() else {
         panic!("expected logical update plan: {plan:?}");
     };
     assert_eq!(
@@ -280,10 +282,12 @@ fn update_where_binds_filter_and_assignment_column_refs() {
         }]
     );
 
-    let LogicalPlan::Filter { input, predicate } = input.as_ref() else {
+    let LogicalPlanNode::Filter { input, predicate } = plan.logical.node(*input) else {
         panic!("expected filter below update: {plan:?}");
     };
-    assert!(matches!(input.as_ref(), LogicalPlan::TableScan { table } if table.name == "users"));
+    assert!(
+        matches!(plan.logical.node(*input), LogicalPlanNode::TableScan { table } if table.name == "users")
+    );
     assert_eq!(
         predicate,
         &PlannedExpression::Binary {
@@ -348,11 +352,13 @@ fn delete_all_plans_full_table_scan_under_delete() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let LogicalPlan::Delete { table, input } = &plan.logical else {
+    let LogicalPlanNode::Delete { table, input } = plan.logical.root() else {
         panic!("expected logical delete plan: {plan:?}");
     };
     assert_eq!(table.name, "users");
-    assert!(matches!(input.as_ref(), LogicalPlan::TableScan { table } if table.name == "users"));
+    assert!(
+        matches!(plan.logical.node(*input), LogicalPlanNode::TableScan { table } if table.name == "users")
+    );
 
     let PhysicalPlanNode::Delete { table, input } = plan.physical.root() else {
         panic!("expected physical delete plan: {plan:?}");
@@ -371,13 +377,15 @@ fn delete_where_binds_column_refs_in_filter() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let LogicalPlan::Delete { input, .. } = &plan.logical else {
+    let LogicalPlanNode::Delete { input, .. } = plan.logical.root() else {
         panic!("expected logical delete plan: {plan:?}");
     };
-    let LogicalPlan::Filter { input, predicate } = input.as_ref() else {
+    let LogicalPlanNode::Filter { input, predicate } = plan.logical.node(*input) else {
         panic!("expected filter below delete: {plan:?}");
     };
-    assert!(matches!(input.as_ref(), LogicalPlan::TableScan { table } if table.name == "users"));
+    assert!(
+        matches!(plan.logical.node(*input), LogicalPlanNode::TableScan { table } if table.name == "users")
+    );
     assert_eq!(
         predicate,
         &PlannedExpression::Binary {
@@ -456,7 +464,7 @@ fn select_where_binds_column_refs_in_filter_and_projection() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let LogicalPlan::Project { input, expressions } = &plan.logical else {
+    let LogicalPlanNode::Project { input, expressions } = plan.logical.root() else {
         panic!("expected logical project plan: {plan:?}");
     };
     assert_eq!(
@@ -464,10 +472,12 @@ fn select_where_binds_column_refs_in_filter_and_projection() {
         &[PlannedExpression::Column(bound("users", "name", 1, DataType::Text))]
     );
 
-    let LogicalPlan::Filter { input, predicate } = input.as_ref() else {
+    let LogicalPlanNode::Filter { input, predicate } = plan.logical.node(*input) else {
         panic!("expected filter below project: {plan:?}");
     };
-    assert!(matches!(input.as_ref(), LogicalPlan::TableScan { table } if table.name == "users"));
+    assert!(
+        matches!(plan.logical.node(*input), LogicalPlanNode::TableScan { table } if table.name == "users")
+    );
     assert_eq!(
         predicate,
         &PlannedExpression::Binary {
@@ -839,10 +849,10 @@ fn explain_select_wraps_planned_select() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let LogicalPlan::Explain { input } = &plan.logical else {
+    let LogicalPlanNode::Explain { input } = plan.logical.root() else {
         panic!("expected logical explain plan: {plan:?}");
     };
-    assert!(matches!(input.as_ref(), LogicalPlan::Project { .. }));
+    assert!(matches!(plan.logical.node(*input), LogicalPlanNode::Project { .. }));
 
     let PhysicalPlanNode::Explain { input } = plan.physical.root() else {
         panic!("expected physical explain plan: {plan:?}");
@@ -874,10 +884,12 @@ fn explain_update_wraps_planned_update() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let LogicalPlan::Explain { input } = &plan.logical else {
+    let LogicalPlanNode::Explain { input } = plan.logical.root() else {
         panic!("expected logical explain plan: {plan:?}");
     };
-    assert!(matches!(input.as_ref(), LogicalPlan::Update { table, .. } if table.name == "users"));
+    assert!(
+        matches!(plan.logical.node(*input), LogicalPlanNode::Update { table, .. } if table.name == "users")
+    );
 
     let PhysicalPlanNode::Explain { input } = plan.physical.root() else {
         panic!("expected physical explain plan: {plan:?}");
@@ -914,10 +926,12 @@ fn explain_delete_wraps_planned_delete() {
 
     let plan = planner.plan_statement(&statement).unwrap();
 
-    let LogicalPlan::Explain { input } = &plan.logical else {
+    let LogicalPlanNode::Explain { input } = plan.logical.root() else {
         panic!("expected logical explain plan: {plan:?}");
     };
-    assert!(matches!(input.as_ref(), LogicalPlan::Delete { table, .. } if table.name == "users"));
+    assert!(
+        matches!(plan.logical.node(*input), LogicalPlanNode::Delete { table, .. } if table.name == "users")
+    );
 
     let PhysicalPlanNode::Explain { input } = plan.physical.root() else {
         panic!("expected physical explain plan: {plan:?}");

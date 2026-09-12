@@ -39,7 +39,7 @@ mod planning;
 
 pub use error::{PlannerError, PlannerResult};
 pub use expression::{BoundColumn, PlannedExpression, SortTerm, UpdateAssignment};
-pub use logical::LogicalPlan;
+pub use logical::{LogicalPlan, LogicalPlanNode};
 pub use physical::{
     IndexValueBound, IndexValueRange, PhysicalPlan, PhysicalPlanNode, SecondaryIndexScanPlan,
 };

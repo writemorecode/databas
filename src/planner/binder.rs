@@ -21,8 +21,8 @@ use crate::{
 };
 
 use super::{
-    BoundColumn, LogicalPlan, PlannedExpression, PlannerError, PlannerResult, SortTerm,
-    UpdateAssignment,
+    BoundColumn, LogicalPlan, LogicalPlanNode, PlannedExpression, PlannerError, PlannerResult,
+    SortTerm, UpdateAssignment,
 };
 
 /// Binds parsed SQL syntax to catalog metadata and builds a logical plan.
@@ -36,46 +36,64 @@ impl<'catalog> Binder<'catalog> {
     }
 
     pub(super) fn bind(&self, statement: &Statement<'_>) -> PlannerResult<LogicalPlan> {
-        self.logical_plan_statement(statement)
+        let mut nodes = Vec::new();
+        let root = self.bind_statement(statement, &mut nodes)?;
+        Ok(LogicalPlan::from_parts(nodes, root))
     }
 
-    fn logical_plan_statement(&self, statement: &Statement<'_>) -> PlannerResult<LogicalPlan> {
+    fn bind_statement(
+        &self,
+        statement: &Statement<'_>,
+        nodes: &mut Vec<LogicalPlanNode>,
+    ) -> PlannerResult<usize> {
         match statement {
-            Statement::Explain(statement) => self.plan_explain(statement),
-            Statement::CreateTable(query) => self.plan_create_table(query),
-            Statement::CreateIndex(query) => self.plan_create_index(query),
-            Statement::Insert(query) => self.plan_insert(query),
-            Statement::Update(query) => self.plan_update(query),
-            Statement::Delete(query) => self.plan_delete(query),
-            Statement::Select(query) => self.plan_select(query),
+            Statement::Explain(statement) => self.plan_explain(statement, nodes),
+            Statement::CreateTable(query) => self.plan_create_table(query, nodes),
+            Statement::CreateIndex(query) => self.plan_create_index(query, nodes),
+            Statement::Insert(query) => self.plan_insert(query, nodes),
+            Statement::Update(query) => self.plan_update(query, nodes),
+            Statement::Delete(query) => self.plan_delete(query, nodes),
+            Statement::Select(query) => self.plan_select(query, nodes),
         }
     }
 
-    fn plan_explain(&self, statement: &Statement<'_>) -> PlannerResult<LogicalPlan> {
-        match statement {
-            Statement::Select(query) => {
-                Ok(LogicalPlan::Explain { input: Box::new(self.plan_select(query)?) })
-            }
-            Statement::Update(query) => {
-                Ok(LogicalPlan::Explain { input: Box::new(self.plan_update(query)?) })
-            }
-            Statement::Delete(query) => {
-                Ok(LogicalPlan::Explain { input: Box::new(self.plan_delete(query)?) })
-            }
+    fn plan_explain(
+        &self,
+        statement: &Statement<'_>,
+        nodes: &mut Vec<LogicalPlanNode>,
+    ) -> PlannerResult<usize> {
+        let input = match statement {
+            Statement::Select(query) => self.plan_select(query, nodes)?,
+            Statement::Update(query) => self.plan_update(query, nodes)?,
+            Statement::Delete(query) => self.plan_delete(query, nodes)?,
             statement => {
-                Err(PlannerError::UnsupportedStatement { statement: statement.to_string() })
+                return Err(PlannerError::UnsupportedStatement {
+                    statement: statement.to_string(),
+                });
             }
-        }
+        };
+        Ok(push_logical_node(nodes, LogicalPlanNode::Explain { input }))
     }
 
-    fn plan_create_table(&self, query: &CreateTableQuery<'_>) -> PlannerResult<LogicalPlan> {
-        Ok(LogicalPlan::CreateTable {
-            name: query.table_name.to_owned(),
-            schema: TupleSchema::from_create_table_query(query),
-        })
+    fn plan_create_table(
+        &self,
+        query: &CreateTableQuery<'_>,
+        nodes: &mut Vec<LogicalPlanNode>,
+    ) -> PlannerResult<usize> {
+        Ok(push_logical_node(
+            nodes,
+            LogicalPlanNode::CreateTable {
+                name: query.table_name.to_owned(),
+                schema: TupleSchema::from_create_table_query(query),
+            },
+        ))
     }
 
-    fn plan_create_index(&self, query: &CreateIndexQuery<'_>) -> PlannerResult<LogicalPlan> {
+    fn plan_create_index(
+        &self,
+        query: &CreateIndexQuery<'_>,
+        nodes: &mut Vec<LogicalPlanNode>,
+    ) -> PlannerResult<usize> {
         let table = self.table_schema(query.table_name)?;
         let mut seen = HashSet::new();
         let mut columns = Vec::new();
@@ -87,10 +105,17 @@ impl<'catalog> Binder<'catalog> {
             columns.push(bind_column(&table, column)?);
         }
 
-        Ok(LogicalPlan::CreateIndex { name: query.index_name.to_owned(), table, columns })
+        Ok(push_logical_node(
+            nodes,
+            LogicalPlanNode::CreateIndex { name: query.index_name.to_owned(), table, columns },
+        ))
     }
 
-    fn plan_insert(&self, query: &InsertQuery<'_>) -> PlannerResult<LogicalPlan> {
+    fn plan_insert(
+        &self,
+        query: &InsertQuery<'_>,
+        nodes: &mut Vec<LogicalPlanNode>,
+    ) -> PlannerResult<usize> {
         let table = self.table_schema(query.table)?;
         let mut seen = HashSet::new();
         let mut columns = Vec::new();
@@ -118,24 +143,32 @@ impl<'catalog> Binder<'catalog> {
             );
         }
 
-        Ok(LogicalPlan::Insert { table, columns, input: Box::new(LogicalPlan::Values { rows }) })
+        let input = push_logical_node(nodes, LogicalPlanNode::Values { rows });
+        Ok(push_logical_node(nodes, LogicalPlanNode::Insert { table, columns, input }))
     }
 
-    fn plan_delete(&self, query: &DeleteQuery<'_>) -> PlannerResult<LogicalPlan> {
+    fn plan_delete(
+        &self,
+        query: &DeleteQuery<'_>,
+        nodes: &mut Vec<LogicalPlanNode>,
+    ) -> PlannerResult<usize> {
         let table = self.table_schema(query.table)?;
-        let mut input = LogicalPlan::TableScan { table: table.clone() };
+        let mut input =
+            push_logical_node(nodes, LogicalPlanNode::TableScan { table: table.clone() });
 
         if let Some(predicate) = &query.where_clause {
-            input = LogicalPlan::Filter {
-                input: Box::new(input),
-                predicate: self.bind_expression(predicate, Some(&table))?,
-            };
+            let predicate = self.bind_expression(predicate, Some(&table))?;
+            input = push_logical_node(nodes, LogicalPlanNode::Filter { input, predicate });
         }
 
-        Ok(LogicalPlan::Delete { table, input: Box::new(input) })
+        Ok(push_logical_node(nodes, LogicalPlanNode::Delete { table, input }))
     }
 
-    fn plan_update(&self, query: &UpdateQuery<'_>) -> PlannerResult<LogicalPlan> {
+    fn plan_update(
+        &self,
+        query: &UpdateQuery<'_>,
+        nodes: &mut Vec<LogicalPlanNode>,
+    ) -> PlannerResult<usize> {
         let table = self.table_schema(query.table)?;
         let mut seen = HashSet::new();
         let mut assignments = Vec::new();
@@ -156,29 +189,32 @@ impl<'catalog> Binder<'catalog> {
             });
         }
 
-        let mut input = LogicalPlan::TableScan { table: table.clone() };
+        let mut input =
+            push_logical_node(nodes, LogicalPlanNode::TableScan { table: table.clone() });
         if let Some(predicate) = &query.where_clause {
-            input = LogicalPlan::Filter {
-                input: Box::new(input),
-                predicate: self.bind_expression(predicate, Some(&table))?,
-            };
+            let predicate = self.bind_expression(predicate, Some(&table))?;
+            input = push_logical_node(nodes, LogicalPlanNode::Filter { input, predicate });
         }
 
-        Ok(LogicalPlan::Update { table, assignments, input: Box::new(input) })
+        Ok(push_logical_node(nodes, LogicalPlanNode::Update { table, assignments, input }))
     }
 
-    fn plan_select(&self, query: &SelectQuery<'_>) -> PlannerResult<LogicalPlan> {
+    fn plan_select(
+        &self,
+        query: &SelectQuery<'_>,
+        nodes: &mut Vec<LogicalPlanNode>,
+    ) -> PlannerResult<usize> {
         let table = query.table.map(|name| self.table_schema(name)).transpose()?;
-        let mut plan = match &table {
-            Some(table) => LogicalPlan::TableScan { table: table.clone() },
-            None => LogicalPlan::OneRow,
+        let mut input = match &table {
+            Some(table) => {
+                push_logical_node(nodes, LogicalPlanNode::TableScan { table: table.clone() })
+            }
+            None => push_logical_node(nodes, LogicalPlanNode::OneRow),
         };
 
         if let Some(predicate) = &query.where_clause {
-            plan = LogicalPlan::Filter {
-                input: Box::new(plan),
-                predicate: self.bind_expression(predicate, table.as_ref())?,
-            };
+            let predicate = self.bind_expression(predicate, table.as_ref())?;
+            input = push_logical_node(nodes, LogicalPlanNode::Filter { input, predicate });
         }
 
         if let Some(order_by) = &query.order_by {
@@ -195,21 +231,21 @@ impl<'catalog> Binder<'catalog> {
                     })
                 })
                 .collect::<PlannerResult<Vec<_>>>()?;
-            plan = LogicalPlan::Sort { input: Box::new(plan), terms };
+            input = push_logical_node(nodes, LogicalPlanNode::Sort { input, terms });
         }
 
         let expressions = self.bind_projection(&query.columns.0, table.as_ref())?;
-        plan = LogicalPlan::Project { input: Box::new(plan), expressions };
+        input = push_logical_node(nodes, LogicalPlanNode::Project { input, expressions });
 
         if let Some(offset) = query.offset {
-            plan = LogicalPlan::Offset { input: Box::new(plan), offset };
+            input = push_logical_node(nodes, LogicalPlanNode::Offset { input, offset });
         }
 
         if let Some(limit) = query.limit {
-            plan = LogicalPlan::Limit { input: Box::new(plan), limit };
+            input = push_logical_node(nodes, LogicalPlanNode::Limit { input, limit });
         }
 
-        Ok(plan)
+        Ok(input)
     }
 
     fn bind_projection(
@@ -267,6 +303,12 @@ impl<'catalog> Binder<'catalog> {
             other => PlannerError::Storage(other),
         })
     }
+}
+
+fn push_logical_node(nodes: &mut Vec<LogicalPlanNode>, node: LogicalPlanNode) -> usize {
+    let index = nodes.len();
+    nodes.push(node);
+    index
 }
 
 fn bind_column(table: &TableSchema, column: &str) -> PlannerResult<BoundColumn> {

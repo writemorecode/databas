@@ -76,6 +76,10 @@ impl fmt::Display for PhysicalPlanDisplay<'_> {
 }
 
 /// One operator in a [`PhysicalPlan`] arena.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "physical operators are stored inline in the plan arena by design"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalPlanNode {
     /// Return the formatted input plan without executing it.
@@ -158,7 +162,7 @@ pub enum PhysicalPlanNode {
     /// preserves SQL semantics when the access range is only an approximation.
     SecondaryIndexScan {
         /// Scan metadata and key bounds.
-        scan: Box<SecondaryIndexScanPlan>,
+        scan: SecondaryIndexScanPlan,
     },
     /// Filter rows from an input physical operator.
     Filter {

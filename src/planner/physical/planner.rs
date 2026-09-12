@@ -6,7 +6,9 @@ use super::{
     PhysicalPlan, PhysicalPlanNode, SecondaryIndexScanPlan,
     access_path::{IndexPredicate, primary_key_range_predicate, secondary_index_predicate},
 };
-use crate::planner::{LogicalPlan, PlannedExpression, PlannerError, PlannerResult};
+use crate::planner::{
+    LogicalPlan, LogicalPlanNode, PlannedExpression, PlannerError, PlannerResult,
+};
 
 /// Selects executable operators and access paths for a logical plan.
 pub(in crate::planner) struct PhysicalPlanner<'catalog> {
@@ -19,115 +21,167 @@ impl<'catalog> PhysicalPlanner<'catalog> {
     }
 
     pub(in crate::planner) fn plan(&self, logical: LogicalPlan) -> PlannerResult<PhysicalPlan> {
-        self.physical_plan(logical)
-    }
-
-    fn physical_plan(&self, logical: LogicalPlan) -> PlannerResult<PhysicalPlan> {
-        let mut nodes = Vec::new();
-        let root = self.build_physical_plan(logical, true, &mut nodes)?;
-        Ok(PhysicalPlan::from_parts(nodes, root))
+        let (logical_nodes, logical_root) = logical.into_parts();
+        let mut logical_nodes = logical_nodes.into_iter().map(Some).collect::<Vec<_>>();
+        let mut physical_nodes = Vec::new();
+        let root =
+            self.build_physical_plan(&mut logical_nodes, logical_root, true, &mut physical_nodes)?;
+        Ok(PhysicalPlan::from_parts(physical_nodes, root))
     }
 
     fn build_physical_plan(
         &self,
-        logical: LogicalPlan,
+        logical_nodes: &mut [Option<LogicalPlanNode>],
+        logical_node_index: usize,
         allow_secondary_index_scans: bool,
-        nodes: &mut Vec<PhysicalPlanNode>,
+        physical_nodes: &mut Vec<PhysicalPlanNode>,
+    ) -> PlannerResult<usize> {
+        let logical = take_logical_node(logical_nodes, logical_node_index)?;
+        self.build_physical_node(
+            logical_nodes,
+            logical,
+            allow_secondary_index_scans,
+            physical_nodes,
+        )
+    }
+
+    fn build_physical_node(
+        &self,
+        logical_nodes: &mut [Option<LogicalPlanNode>],
+        logical: LogicalPlanNode,
+        allow_secondary_index_scans: bool,
+        physical_nodes: &mut Vec<PhysicalPlanNode>,
     ) -> PlannerResult<usize> {
         let node = match logical {
-            LogicalPlan::Explain { input } => PhysicalPlanNode::Explain {
-                input: self.build_physical_plan(*input, allow_secondary_index_scans, nodes)?,
+            LogicalPlanNode::Explain { input } => PhysicalPlanNode::Explain {
+                input: self.build_physical_plan(
+                    logical_nodes,
+                    input,
+                    allow_secondary_index_scans,
+                    physical_nodes,
+                )?,
             },
-            LogicalPlan::CreateTable { name, schema } => {
+            LogicalPlanNode::CreateTable { name, schema } => {
                 PhysicalPlanNode::CreateTable { name, schema }
             }
-            LogicalPlan::CreateIndex { name, table, columns } => {
+            LogicalPlanNode::CreateIndex { name, table, columns } => {
                 PhysicalPlanNode::CreateIndex { name, table, columns }
             }
-            LogicalPlan::Values { rows } => PhysicalPlanNode::Values { rows },
-            LogicalPlan::Insert { table, columns, input } => match *input {
-                LogicalPlan::Values { rows } => {
-                    PhysicalPlanNode::InsertValues { table, columns, values: rows }
+            LogicalPlanNode::Values { rows } => PhysicalPlanNode::Values { rows },
+            LogicalPlanNode::Insert { table, columns, input } => {
+                match take_logical_node(logical_nodes, input)? {
+                    LogicalPlanNode::Values { rows } => {
+                        PhysicalPlanNode::InsertValues { table, columns, values: rows }
+                    }
+                    _ => return Err(PlannerError::InvalidInsertInput),
                 }
-                _ => return Err(PlannerError::InvalidInsertInput),
-            },
-            LogicalPlan::Update { table, assignments, input } => PhysicalPlanNode::Update {
+            }
+            LogicalPlanNode::Update { table, assignments, input } => PhysicalPlanNode::Update {
                 table,
                 assignments,
-                input: self.build_physical_plan(*input, false, nodes)?,
+                input: self.build_physical_plan(logical_nodes, input, false, physical_nodes)?,
             },
-            LogicalPlan::Delete { table, input } => PhysicalPlanNode::Delete {
+            LogicalPlanNode::Delete { table, input } => PhysicalPlanNode::Delete {
                 table,
-                input: self.build_physical_plan(*input, false, nodes)?,
+                input: self.build_physical_plan(logical_nodes, input, false, physical_nodes)?,
             },
-            LogicalPlan::OneRow => PhysicalPlanNode::OneRow,
-            LogicalPlan::TableScan { table } => PhysicalPlanNode::FullTableScan { table },
-            LogicalPlan::Filter { input, predicate } => match *input {
-                LogicalPlan::TableScan { table } => {
-                    match primary_key_range_predicate(&table, &predicate) {
-                        Some(range_predicate) => {
-                            let scan = push_physical_node(
-                                nodes,
-                                PhysicalPlanNode::PrimaryKeyRangeScan {
-                                    table,
-                                    range: range_predicate.range,
-                                },
-                            );
-                            match range_predicate.residual {
-                                Some(predicate) => {
-                                    PhysicalPlanNode::Filter { input: scan, predicate }
+            LogicalPlanNode::OneRow => PhysicalPlanNode::OneRow,
+            LogicalPlanNode::TableScan { table } => PhysicalPlanNode::FullTableScan { table },
+            LogicalPlanNode::Filter { input, predicate } => {
+                match take_logical_node(logical_nodes, input)? {
+                    LogicalPlanNode::TableScan { table } => {
+                        match primary_key_range_predicate(&table, &predicate) {
+                            Some(range_predicate) => {
+                                let scan = push_physical_node(
+                                    physical_nodes,
+                                    PhysicalPlanNode::PrimaryKeyRangeScan {
+                                        table,
+                                        range: range_predicate.range,
+                                    },
+                                );
+                                match range_predicate.residual {
+                                    Some(predicate) => {
+                                        PhysicalPlanNode::Filter { input: scan, predicate }
+                                    }
+                                    None => return Ok(scan),
                                 }
-                                None => return Ok(scan),
+                            }
+                            None if allow_secondary_index_scans => {
+                                let scan = match self
+                                    .secondary_index_predicate(&table, &predicate)?
+                                {
+                                    Some(index_predicate) => PhysicalPlanNode::SecondaryIndexScan {
+                                        scan: SecondaryIndexScanPlan {
+                                            table,
+                                            index: index_predicate.index,
+                                            column: index_predicate.column,
+                                            value_range: index_predicate.value_range,
+                                            key_range: index_predicate.key_range,
+                                        },
+                                    },
+                                    None => PhysicalPlanNode::FullTableScan { table },
+                                };
+                                let input = push_physical_node(physical_nodes, scan);
+                                PhysicalPlanNode::Filter { input, predicate }
+                            }
+                            None => {
+                                let input = push_physical_node(
+                                    physical_nodes,
+                                    PhysicalPlanNode::FullTableScan { table },
+                                );
+                                PhysicalPlanNode::Filter { input, predicate }
                             }
                         }
-                        None if allow_secondary_index_scans => {
-                            let scan = match self.secondary_index_predicate(&table, &predicate)? {
-                                Some(index_predicate) => PhysicalPlanNode::SecondaryIndexScan {
-                                    scan: Box::new(SecondaryIndexScanPlan {
-                                        table,
-                                        index: index_predicate.index,
-                                        column: index_predicate.column,
-                                        value_range: index_predicate.value_range,
-                                        key_range: index_predicate.key_range,
-                                    }),
-                                },
-                                None => PhysicalPlanNode::FullTableScan { table },
-                            };
-                            let input = push_physical_node(nodes, scan);
-                            PhysicalPlanNode::Filter { input, predicate }
-                        }
-                        None => {
-                            let input = push_physical_node(
-                                nodes,
-                                PhysicalPlanNode::FullTableScan { table },
-                            );
-                            PhysicalPlanNode::Filter { input, predicate }
-                        }
                     }
+                    input => PhysicalPlanNode::Filter {
+                        input: self.build_physical_node(
+                            logical_nodes,
+                            input,
+                            allow_secondary_index_scans,
+                            physical_nodes,
+                        )?,
+                        predicate,
+                    },
                 }
-                input => PhysicalPlanNode::Filter {
-                    input: self.build_physical_plan(input, allow_secondary_index_scans, nodes)?,
-                    predicate,
-                },
-            },
-            LogicalPlan::Sort { input, terms } => PhysicalPlanNode::Sort {
-                input: self.build_physical_plan(*input, allow_secondary_index_scans, nodes)?,
+            }
+            LogicalPlanNode::Sort { input, terms } => PhysicalPlanNode::Sort {
+                input: self.build_physical_plan(
+                    logical_nodes,
+                    input,
+                    allow_secondary_index_scans,
+                    physical_nodes,
+                )?,
                 terms,
             },
-            LogicalPlan::Project { input, expressions } => PhysicalPlanNode::Project {
-                input: self.build_physical_plan(*input, allow_secondary_index_scans, nodes)?,
+            LogicalPlanNode::Project { input, expressions } => PhysicalPlanNode::Project {
+                input: self.build_physical_plan(
+                    logical_nodes,
+                    input,
+                    allow_secondary_index_scans,
+                    physical_nodes,
+                )?,
                 expressions,
             },
-            LogicalPlan::Offset { input, offset } => PhysicalPlanNode::Offset {
-                input: self.build_physical_plan(*input, allow_secondary_index_scans, nodes)?,
+            LogicalPlanNode::Offset { input, offset } => PhysicalPlanNode::Offset {
+                input: self.build_physical_plan(
+                    logical_nodes,
+                    input,
+                    allow_secondary_index_scans,
+                    physical_nodes,
+                )?,
                 offset,
             },
-            LogicalPlan::Limit { input, limit } => PhysicalPlanNode::Limit {
-                input: self.build_physical_plan(*input, allow_secondary_index_scans, nodes)?,
+            LogicalPlanNode::Limit { input, limit } => PhysicalPlanNode::Limit {
+                input: self.build_physical_plan(
+                    logical_nodes,
+                    input,
+                    allow_secondary_index_scans,
+                    physical_nodes,
+                )?,
                 limit,
             },
         };
-        Ok(push_physical_node(nodes, node))
+        Ok(push_physical_node(physical_nodes, node))
     }
 
     fn secondary_index_predicate(
@@ -138,6 +192,13 @@ impl<'catalog> PhysicalPlanner<'catalog> {
         let indexes = self.catalog.index_schemas_for_table(table)?;
         Ok(secondary_index_predicate(table, predicate, &indexes))
     }
+}
+
+fn take_logical_node(
+    nodes: &mut [Option<LogicalPlanNode>],
+    index: usize,
+) -> PlannerResult<LogicalPlanNode> {
+    nodes.get_mut(index).and_then(Option::take).ok_or(PlannerError::InvalidLogicalPlan)
 }
 
 fn push_physical_node(nodes: &mut Vec<PhysicalPlanNode>, node: PhysicalPlanNode) -> usize {

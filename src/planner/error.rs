@@ -49,6 +49,9 @@ pub enum PlannerError {
     /// A wildcard projection was used without a table to expand against.
     #[error("wildcard projection requires a FROM table")]
     WildcardRequiresTable,
+    /// Physical planning found an invalid or reused logical node reference.
+    #[error("invalid logical plan")]
+    InvalidLogicalPlan,
     /// Physical planning found an insert input shape it cannot execute.
     #[error("invalid insert input: expected VALUES")]
     InvalidInsertInput,
