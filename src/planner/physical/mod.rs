@@ -1,81 +1,15 @@
+//! Executable plan representation and physical operator selection.
+
 use std::fmt;
 
-use thiserror::Error;
+use crate::core::{IndexKeyRange, IndexSchema, TableKeyRange, TableSchema, TupleSchema, Value};
 
-use super::*;
+use super::{BoundColumn, PlannedExpression, SortTerm, UpdateAssignment};
 
-pub type PlannerResult<T> = Result<T, PlannerError>;
+mod access_path;
+mod planner;
 
-/// Complete planning result for one SQL statement.
-///
-/// A plan keeps both representations because they answer different questions:
-/// the logical plan is the catalog-bound statement shape, while the physical
-/// plan is the exact operator tree consumed by the executor. Tests often assert
-/// both to verify that binding and access-path selection agree.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Plan {
-    /// Catalog-bound statement representation before physical operator
-    /// selection.
-    pub logical: LogicalPlan,
-    /// Executable operator tree selected from the logical plan.
-    pub physical: PhysicalPlan,
-}
-
-/// Catalog-bound relational representation of a parsed SQL statement.
-///
-/// Logical plans are still independent of any concrete scan strategy. A
-/// [`LogicalPlan::TableScan`] means "rows from this table"; deciding whether
-/// those rows come from a full scan, primary-key range, or secondary index is a
-/// physical-planning concern.
-///
-/// Every table or column reference in this enum is already bound to catalog
-/// metadata. Children are boxed so select, update, and delete statements can be
-/// represented as recursive operator trees.
-#[derive(Debug, Clone, PartialEq)]
-pub enum LogicalPlan {
-    /// Return the physical plan for an input statement without executing it.
-    Explain { input: Box<LogicalPlan> },
-    /// Create a table with the provided tuple schema.
-    CreateTable { name: String, schema: TupleSchema },
-    /// Create a secondary index over bound columns from an existing table.
-    CreateIndex { name: String, table: TableSchema, columns: Vec<BoundColumn> },
-    /// Literal rows, usually produced by an `INSERT ... VALUES` statement.
-    ///
-    /// The current planner accepts only literal expressions in insert values, so
-    /// this node is side-effect free and independent of table input.
-    Values { rows: Vec<Vec<PlannedExpression>> },
-    /// Insert rows from an input plan into bound table columns.
-    ///
-    /// The input is currently expected to be [`LogicalPlan::Values`] during
-    /// physical planning.
-    Insert { table: TableSchema, columns: Vec<BoundColumn>, input: Box<LogicalPlan> },
-    /// Update rows in a table selected by an input plan.
-    ///
-    /// Assignment targets are bound and checked for duplicate names before this
-    /// node is built. Primary-key columns are rejected here because changing
-    /// them would require moving table records.
-    Update { table: TableSchema, assignments: Vec<UpdateAssignment>, input: Box<LogicalPlan> },
-    /// Delete rows from a table selected by an input plan.
-    Delete { table: TableSchema, input: Box<LogicalPlan> },
-    /// Synthetic single-row input used for projection-only selects without a
-    /// `FROM` clause.
-    OneRow,
-    /// Read every row from a catalog table.
-    TableScan { table: TableSchema },
-    /// Keep only rows for which the predicate evaluates truthfully.
-    ///
-    /// Physical planning may use part of this predicate to choose a narrower
-    /// table access path. Any remaining predicate is preserved as a filter.
-    Filter { input: Box<LogicalPlan>, predicate: PlannedExpression },
-    /// Order input rows by one or more columns.
-    Sort { input: Box<LogicalPlan>, terms: Vec<SortTerm> },
-    /// Produce output expressions from each input row.
-    Project { input: Box<LogicalPlan>, expressions: Vec<PlannedExpression> },
-    /// Skip the first `offset` input rows.
-    Offset { input: Box<LogicalPlan>, offset: u32 },
-    /// Emit at most `limit` input rows.
-    Limit { input: Box<LogicalPlan>, limit: u32 },
-}
+pub(super) use planner::PhysicalPlanner;
 
 /// Executable physical plan stored in a contiguous arena.
 ///
@@ -383,61 +317,11 @@ fn display_list<T: fmt::Display>(values: &[T]) -> String {
     values.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
 }
 
-/// Expression after literal conversion and column binding.
-///
-/// Planned expressions are the scalar language shared by filters, projections,
-/// update assignments, and insert values. Identifiers have already been
-/// resolved into [`BoundColumn`] values, and parser literals have already been
-/// converted into storage [`Value`]s.
-///
-/// The planner does not type-check every operator combination. It records the
-/// bound expression tree and leaves value-dependent type errors, such as adding
-/// incompatible values or evaluating a non-boolean predicate, to execution.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PlannedExpression {
-    /// Constant storage value.
-    Literal(Value),
-    /// Reference to a bound table column.
-    Column(BoundColumn),
-    /// Unary operator applied to a planned expression.
-    Unary { op: Op, expr: Box<PlannedExpression> },
-    /// Binary operator applied to two planned expressions.
-    Binary { left: Box<PlannedExpression>, op: Op, right: Box<PlannedExpression> },
-}
-
-impl fmt::Display for PlannedExpression {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PlannedExpression::Literal(value) => write!(f, "{value}"),
-            PlannedExpression::Column(column) => write!(f, "{column}"),
-            PlannedExpression::Unary { op, expr } => write!(f, "{op}{expr}"),
-            PlannedExpression::Binary { left, op, right } => write!(f, "({left} {op} {right})"),
-        }
-    }
-}
-
-/// Catalog column reference resolved during planning.
-///
-/// A bound column is deliberately redundant: it stores display names for
-/// diagnostics and plan formatting, plus the row ordinal and data type needed by
-/// the executor. `ordinal` is the zero-based position of the column in the table
-/// row schema.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoundColumn {
-    /// Name of the table that owns this column.
-    pub table: String,
-    /// Column name.
-    pub name: String,
-    /// Zero-based column position in the table row.
-    pub ordinal: usize,
-    /// Storage type recorded for the column.
-    pub data_type: DataType,
-}
-
 /// Inclusive or exclusive display bound for a secondary-index scan value.
 ///
 /// These bounds are used for formatted plans and tests. The storage-facing byte
-/// bounds live in [`IndexKeyBound`] values inside [`SecondaryIndexScanPlan`].
+/// bounds live in [`crate::core::IndexKeyBound`] values inside
+/// [`SecondaryIndexScanPlan`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum IndexValueBound {
     /// The scan includes this value.
@@ -476,103 +360,4 @@ impl fmt::Display for IndexValueRange {
             (Some(lower), Some(upper)) => write!(f, "lower={lower} upper={upper}"),
         }
     }
-}
-
-impl fmt::Display for BoundColumn {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}", self.table, self.name)
-    }
-}
-
-/// One bound column assignment from an `UPDATE ... SET` clause.
-///
-/// The target column has already been checked for existence, duplicate
-/// assignment, and primary-key immutability. The expression is evaluated against
-/// the original row when the update executes.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UpdateAssignment {
-    /// Target column to overwrite.
-    pub column: BoundColumn,
-    /// Expression evaluated against the original row.
-    pub expression: PlannedExpression,
-}
-
-impl fmt::Display for UpdateAssignment {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} = {}", self.column, self.expression)
-    }
-}
-
-/// One bound column and optional direction from an `ORDER BY` clause.
-///
-/// Only simple column sort keys are represented today. A missing direction
-/// means SQL omitted `ASC` or `DESC`; consumers should treat that as their
-/// default ascending order.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SortTerm {
-    /// Column used as the sort key.
-    pub column: BoundColumn,
-    /// Direction specified by SQL, or `None` when the query omitted one.
-    pub direction: Option<Ordering>,
-}
-
-impl fmt::Display for SortTerm {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.column)?;
-        if let Some(direction) = &self.direction {
-            write!(f, " {direction}")?;
-        }
-        Ok(())
-    }
-}
-
-/// Errors that can occur while converting parsed SQL into a plan.
-///
-/// Planner errors are limited to catalog binding, statement-shape validation,
-/// unsupported syntax, and catalog access failures. Runtime errors that depend
-/// on row contents are reported by the executor or storage layer instead.
-#[derive(Debug, Error)]
-pub enum PlannerError {
-    /// A statement referenced a table that does not exist in the catalog.
-    #[error("table not found: {name}")]
-    TableNotFound { name: String },
-    /// A statement referenced a column that is not present in the bound table.
-    #[error("column {column} not found")]
-    ColumnNotFound { column: String },
-    /// An `INSERT` column list named the same column more than once.
-    #[error("duplicate insert column: {column}")]
-    DuplicateInsertColumn { column: String },
-    /// An `UPDATE` assignment list named the same column more than once.
-    #[error("duplicate update column: {column}")]
-    DuplicateUpdateColumn { column: String },
-    /// A `CREATE INDEX` column list named the same column more than once.
-    #[error("duplicate index column: {column}")]
-    DuplicateIndexColumn { column: String },
-    /// An `UPDATE` attempted to modify a primary-key column.
-    #[error("cannot update primary key column: {column}")]
-    PrimaryKeyUpdate { column: String },
-    /// A values row does not provide exactly one value for each target column.
-    #[error("insert row has {values} values for {columns} columns")]
-    InsertColumnValueCount { columns: usize, values: usize },
-    /// The parser accepted a statement kind the planner cannot lower.
-    #[error("unsupported statement: {statement}")]
-    UnsupportedStatement { statement: String },
-    /// The planner cannot lower this expression in the current context.
-    #[error("unsupported expression: {expression}")]
-    UnsupportedExpression { expression: String },
-    /// Aggregate functions are parsed but not yet planned.
-    #[error("unsupported aggregate function: {function}")]
-    UnsupportedAggregate { function: String },
-    /// A wildcard appeared outside the projection list.
-    #[error("wildcard is only supported in SELECT projection")]
-    UnsupportedWildcardPosition,
-    /// A wildcard projection was used without a table to expand against.
-    #[error("wildcard projection requires a FROM table")]
-    WildcardRequiresTable,
-    /// Physical planning found an insert input shape it cannot execute.
-    #[error("invalid insert input: expected VALUES")]
-    InvalidInsertInput,
-    /// Storage or catalog access failed while planning.
-    #[error("storage error: {0}")]
-    Storage(#[from] StorageError),
 }
