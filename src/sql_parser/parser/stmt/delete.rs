@@ -67,7 +67,7 @@ mod tests {
         let expected = DeleteQuery {
             table: "users",
             where_clause: Some(Expression::BinaryOp((
-                Box::new(Expression::Identifier("id")),
+                Box::new(Expression::column("id")),
                 Op::EqualsEquals,
                 Box::new(Expression::from(1)),
             ))),

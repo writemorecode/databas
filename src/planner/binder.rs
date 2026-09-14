@@ -11,7 +11,7 @@ use crate::{
     sql_parser::{
         NumberKind,
         parser::{
-            expr::{Expression, Literal},
+            expr::{ColumnReference, Expression, Literal},
             stmt::{
                 Statement, create_index::CreateIndexQuery, create_table::CreateTableQuery,
                 delete::DeleteQuery, insert::InsertQuery, select::SelectQuery, update::UpdateQuery,
@@ -222,11 +222,8 @@ impl<'catalog> Binder<'catalog> {
                 .terms
                 .iter()
                 .map(|term| {
-                    let table = table.as_ref().ok_or_else(|| PlannerError::ColumnNotFound {
-                        column: term.column.to_owned(),
-                    })?;
                     Ok(SortTerm {
-                        column: bind_column(table, term.column)?,
+                        column: bind_column_reference(table.as_ref(), &term.column)?,
                         direction: term.order.clone(),
                     })
                 })
@@ -251,18 +248,20 @@ impl<'catalog> Binder<'catalog> {
     fn bind_projection(
         &self,
         expressions: &[Expression<'_>],
-        table: Option<&TableSchema>,
+        source_table: Option<&TableSchema>,
     ) -> PlannerResult<Vec<PlannedExpression>> {
         let mut bound = Vec::new();
         for expression in expressions {
             match expression {
                 Expression::Wildcard => {
-                    let table = table.ok_or(PlannerError::WildcardRequiresTable)?;
-                    bound.extend(table.row.columns.iter().enumerate().map(|(ordinal, column)| {
-                        PlannedExpression::Column(bound_column(table, ordinal, column))
-                    }));
+                    let source_table = source_table.ok_or(PlannerError::WildcardRequiresTable)?;
+                    bound.extend(source_table.row.columns.iter().enumerate().map(
+                        |(ordinal, column)| {
+                            PlannedExpression::Column(bound_column(source_table, ordinal, column))
+                        },
+                    ));
                 }
-                _ => bound.push(self.bind_expression(expression, table)?),
+                _ => bound.push(self.bind_expression(expression, source_table)?),
             }
         }
         Ok(bound)
@@ -271,22 +270,21 @@ impl<'catalog> Binder<'catalog> {
     fn bind_expression(
         &self,
         expression: &Expression<'_>,
-        table: Option<&TableSchema>,
+        source_table: Option<&TableSchema>,
     ) -> PlannerResult<PlannedExpression> {
         match expression {
             Expression::Literal(literal) => Ok(PlannedExpression::Literal(Value::from(literal))),
-            Expression::Identifier(column) => match table {
-                Some(table) => bind_column(table, column).map(PlannedExpression::Column),
-                None => Err(PlannerError::ColumnNotFound { column: (*column).to_owned() }),
-            },
+            Expression::ColumnReference(reference) => {
+                bind_column_reference(source_table, reference).map(PlannedExpression::Column)
+            }
             Expression::UnaryOp((op, expr)) => Ok(PlannedExpression::Unary {
                 op: *op,
-                expr: Box::new(self.bind_expression(expr, table)?),
+                expr: Box::new(self.bind_expression(expr, source_table)?),
             }),
             Expression::BinaryOp((left, op, right)) => Ok(PlannedExpression::Binary {
-                left: Box::new(self.bind_expression(left, table)?),
+                left: Box::new(self.bind_expression(left, source_table)?),
                 op: *op,
-                right: Box::new(self.bind_expression(right, table)?),
+                right: Box::new(self.bind_expression(right, source_table)?),
             }),
             Expression::Wildcard => Err(PlannerError::UnsupportedWildcardPosition),
             Expression::AggregateFunction(aggregate) => {
@@ -309,6 +307,24 @@ fn push_logical_node(nodes: &mut Vec<LogicalPlanNode>, node: LogicalPlanNode) ->
     let index = nodes.len();
     nodes.push(node);
     index
+}
+
+fn bind_column_reference(
+    source_table: Option<&TableSchema>,
+    reference: &ColumnReference<'_>,
+) -> PlannerResult<BoundColumn> {
+    let Some(source_table) = source_table else {
+        return match reference.table {
+            Some(table) => Err(PlannerError::TableNotInScope { table: table.to_owned() }),
+            None => Err(PlannerError::ColumnNotFound { column: reference.column.to_owned() }),
+        };
+    };
+    if let Some(qualifier) = reference.table
+        && qualifier != source_table.name
+    {
+        return Err(PlannerError::TableNotInScope { table: qualifier.to_owned() });
+    }
+    bind_column(source_table, reference.column)
 }
 
 fn bind_column(table: &TableSchema, column: &str) -> PlannerResult<BoundColumn> {

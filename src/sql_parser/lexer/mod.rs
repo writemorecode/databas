@@ -130,6 +130,7 @@ impl<'a> Iterator for Lexer<'a> {
             '*' => return tok(TokenKind::Asterisk),
             '/' => return tok(TokenKind::Slash),
             ',' => return tok(TokenKind::Comma),
+            '.' => return tok(TokenKind::Dot),
             ';' => return tok(TokenKind::Semicolon),
 
             c => {

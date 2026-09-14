@@ -26,10 +26,16 @@ pub struct AggregateFunction<'a> {
     pub expr: Box<Expression<'a>>,
 }
 
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub struct ColumnReference<'a> {
+    pub table: Option<&'a str>,
+    pub column: &'a str,
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Expression<'a> {
     Literal(Literal<'a>),
-    Identifier(&'a str),
+    ColumnReference(ColumnReference<'a>),
     UnaryOp((Op, Box<Expression<'a>>)),
     BinaryOp((Box<Expression<'a>>, Op, Box<Expression<'a>>)),
     Wildcard,
@@ -66,7 +72,15 @@ enum ChildSide {
     Right,
 }
 
-impl Expression<'_> {
+impl<'a> Expression<'a> {
+    pub const fn column(column: &'a str) -> Self {
+        Self::ColumnReference(ColumnReference { table: None, column })
+    }
+
+    pub const fn qualified_column(table: &'a str, column: &'a str) -> Self {
+        Self::ColumnReference(ColumnReference { table: Some(table), column })
+    }
+
     fn fmt_with_parent_op(
         &self,
         f: &mut std::fmt::Formatter<'_>,
@@ -89,7 +103,10 @@ impl Expression<'_> {
 
         match self {
             Expression::Literal(literal) => write!(f, "{}", literal),
-            Expression::Identifier(ident) => write!(f, "{}", ident),
+            Expression::ColumnReference(reference) => match reference.table {
+                Some(table) => write!(f, "{}.{}", table, reference.column),
+                None => write!(f, "{}", reference.column),
+            },
             Expression::UnaryOp((op, expr)) => {
                 write!(f, "{}", op)?;
                 if matches!(**expr, Expression::BinaryOp(_)) {
@@ -155,6 +172,14 @@ mod tests {
     };
 
     #[test]
+    fn parses_and_displays_qualified_column_reference() {
+        let expression = Parser::new("users.email").expr().unwrap();
+
+        assert_eq!(expression, Expression::qualified_column("users", "email"));
+        assert_eq!(expression.to_string(), "users.email");
+    }
+
+    #[test]
     fn test_all_aggregate_functions() {
         let sql = "SELECT COUNT(*), SUM(price), AVG(price), STDDEV(price), MAX(price), MIN(price) FROM products;";
         let mut parser = Parser::new(sql);
@@ -169,23 +194,23 @@ mod tests {
                 }),
                 Expression::AggregateFunction(AggregateFunction {
                     kind: AggregateFunctionKind::Sum,
-                    expr: Box::new(Expression::Identifier("price")),
+                    expr: Box::new(Expression::column("price")),
                 }),
                 Expression::AggregateFunction(AggregateFunction {
                     kind: AggregateFunctionKind::Avg,
-                    expr: Box::new(Expression::Identifier("price")),
+                    expr: Box::new(Expression::column("price")),
                 }),
                 Expression::AggregateFunction(AggregateFunction {
                     kind: AggregateFunctionKind::StdDev,
-                    expr: Box::new(Expression::Identifier("price")),
+                    expr: Box::new(Expression::column("price")),
                 }),
                 Expression::AggregateFunction(AggregateFunction {
                     kind: AggregateFunctionKind::Max,
-                    expr: Box::new(Expression::Identifier("price")),
+                    expr: Box::new(Expression::column("price")),
                 }),
                 Expression::AggregateFunction(AggregateFunction {
                     kind: AggregateFunctionKind::Min,
-                    expr: Box::new(Expression::Identifier("price")),
+                    expr: Box::new(Expression::column("price")),
                 }),
             ]),
             where_clause: None,
@@ -198,7 +223,7 @@ mod tests {
         // Test that the struct format works correctly
         let test_agg = AggregateFunction {
             kind: AggregateFunctionKind::Sum,
-            expr: Box::new(Expression::Identifier("price")),
+            expr: Box::new(Expression::column("price")),
         };
         assert_eq!(format!("{}", test_agg), "SUM(price)");
     }
@@ -207,10 +232,10 @@ mod tests {
     fn aggregate_functions_display_with_their_argument() {
         let cases = [
             (AggregateFunctionKind::Count, Expression::Wildcard, "COUNT(*)"),
-            (AggregateFunctionKind::Avg, Expression::Identifier("salary"), "AVG(salary)"),
-            (AggregateFunctionKind::Max, Expression::Identifier("salary"), "MAX(salary)"),
-            (AggregateFunctionKind::Min, Expression::Identifier("salary"), "MIN(salary)"),
-            (AggregateFunctionKind::StdDev, Expression::Identifier("salary"), "STDDEV(salary)"),
+            (AggregateFunctionKind::Avg, Expression::column("salary"), "AVG(salary)"),
+            (AggregateFunctionKind::Max, Expression::column("salary"), "MAX(salary)"),
+            (AggregateFunctionKind::Min, Expression::column("salary"), "MIN(salary)"),
+            (AggregateFunctionKind::StdDev, Expression::column("salary"), "STDDEV(salary)"),
         ];
 
         for (kind, expr, expected) in cases {

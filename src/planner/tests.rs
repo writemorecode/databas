@@ -489,6 +489,42 @@ fn select_where_binds_column_refs_in_filter_and_projection() {
 }
 
 #[test]
+fn select_binds_qualified_columns_in_projection_and_filter() {
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
+    let statement = parse("SELECT users.name FROM users WHERE users.id == 1;");
+
+    let plan = planner.plan_statement(&statement).unwrap();
+
+    let LogicalPlanNode::Project { input, expressions } = plan.logical.root() else {
+        panic!("expected logical project plan: {plan:?}");
+    };
+    assert_eq!(
+        expressions,
+        &[PlannedExpression::Column(bound("users", "name", 1, DataType::Text))]
+    );
+    assert!(matches!(
+        plan.logical.node(*input),
+        LogicalPlanNode::Filter {
+            predicate: PlannedExpression::Binary { left, .. },
+            ..
+        } if **left == PlannedExpression::Column(bound("users", "id", 0, DataType::Integer))
+    ));
+}
+
+#[test]
+fn select_rejects_qualified_column_for_table_outside_scope() {
+    let catalog = catalog_with_users();
+    let planner = Planner::with_schema(&catalog);
+    let statement = parse("SELECT user.name FROM users;");
+
+    assert!(matches!(
+        planner.plan_statement(&statement),
+        Err(PlannerError::TableNotInScope { table }) if table == "user"
+    ));
+}
+
+#[test]
 fn select_primary_key_range_uses_range_scan() {
     let catalog = catalog_with_users();
     let planner = Planner::with_schema(&catalog);
