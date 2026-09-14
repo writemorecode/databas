@@ -35,7 +35,10 @@ pub enum Keyword {
     Explain,
     Select,
     From,
+    As,
     Where,
+    Inner,
+    Join,
     Order,
     By,
     Asc,
@@ -85,7 +88,10 @@ impl Display for Keyword {
             Keyword::Explain => write!(f, "EXPLAIN"),
             Keyword::Select => write!(f, "SELECT"),
             Keyword::From => write!(f, "FROM"),
+            Keyword::As => write!(f, "AS"),
             Keyword::Where => write!(f, "WHERE"),
+            Keyword::Inner => write!(f, "INNER"),
+            Keyword::Join => write!(f, "JOIN"),
             Keyword::Order => write!(f, "ORDER"),
             Keyword::By => write!(f, "BY"),
             Keyword::Asc => write!(f, "ASC"),
@@ -164,6 +170,7 @@ impl<'a> From<&'a str> for TokenKind<'a> {
 
 fn keyword_from_str(value: &str) -> Option<Keyword> {
     match value.len() {
+        2 if value.eq_ignore_ascii_case("AS") => Some(Keyword::As),
         2 if value.eq_ignore_ascii_case("BY") => Some(Keyword::By),
         2 if value.eq_ignore_ascii_case("ON") => Some(Keyword::On),
         2 if value.eq_ignore_ascii_case("OR") => Some(Keyword::Or),
@@ -179,6 +186,8 @@ fn keyword_from_str(value: &str) -> Option<Keyword> {
         3 if value.eq_ignore_ascii_case("SUM") => Some(Keyword::Aggregate(Aggregate::Sum)),
         4 if value.eq_ignore_ascii_case("DESC") => Some(Keyword::Desc),
         4 if value.eq_ignore_ascii_case("FROM") => Some(Keyword::From),
+        5 if value.eq_ignore_ascii_case("INNER") => Some(Keyword::Inner),
+        4 if value.eq_ignore_ascii_case("JOIN") => Some(Keyword::Join),
         4 if value.eq_ignore_ascii_case("INTO") => Some(Keyword::Into),
         4 if value.eq_ignore_ascii_case("TEXT") => Some(Keyword::Text),
         4 if value.eq_ignore_ascii_case("TRUE") => Some(Keyword::True),
