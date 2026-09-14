@@ -27,6 +27,37 @@ impl Display for Ordering {
     }
 }
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum JoinType {
+    Inner,
+}
+
+impl Display for JoinType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JoinType::Inner => write!(f, "INNER"),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Join<'a> {
+    pub join_type: JoinType,
+    pub table: &'a str,
+    pub alias: Option<&'a str>,
+    pub condition: Box<Expression<'a>>,
+}
+
+impl Display for Join<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} JOIN {}", self.join_type, self.table)?;
+        if let Some(alias) = self.alias {
+            write!(f, " AS {}", alias)?;
+        }
+        write!(f, " ON {}", self.condition)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct OrderByTerm<'a> {
     pub column: ColumnReference<'a>,
@@ -90,10 +121,11 @@ impl Display for OrderBy<'_> {
         write!(f, "{terms}")
     }
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct SelectQuery<'a> {
     pub columns: ExpressionList<'a>,
     pub table: Option<&'a str>,
+    pub joins: Vec<Join<'a>>,
     pub where_clause: Option<Expression<'a>>,
     pub order_by: Option<OrderBy<'a>>,
     pub limit: Option<u32>,
@@ -106,6 +138,9 @@ impl Display for SelectQuery<'_> {
 
         if let Some(table) = self.table {
             write!(f, " FROM {}", table)?;
+            for join in &self.joins {
+                write!(f, " {}", join)?;
+            }
         }
         if let Some(ref where_clause) = self.where_clause {
             write!(f, " WHERE {}", where_clause)?;
@@ -146,6 +181,8 @@ impl<'a> Parser<'a> {
             None
         };
 
+        let joins = if table.is_some() { self.parse_joins()? } else { Vec::new() };
+
         let where_clause =
             if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Where), .. })) =
                 self.lexer.peek()
@@ -183,7 +220,43 @@ impl<'a> Parser<'a> {
             err => err,
         })?;
 
-        Ok(SelectQuery { columns, table, where_clause, order_by, limit, offset })
+        Ok(SelectQuery { columns, table, joins, where_clause, order_by, limit, offset })
+    }
+
+    fn parse_joins(&mut self) -> Result<Vec<Join<'a>>, SQLError<'a>> {
+        let mut joins = Vec::new();
+
+        loop {
+            let join_type = match self.lexer.peek() {
+                Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Join), .. })) => {
+                    self.lexer.next();
+                    JoinType::Inner
+                }
+                Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Inner), .. })) => {
+                    self.lexer.next();
+                    self.lexer.expect_token(TokenKind::Keyword(Keyword::Join))?;
+                    JoinType::Inner
+                }
+                _ => break,
+            };
+
+            let table = self.parse_identifier()?;
+            let alias = if let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::As), .. })) =
+                self.lexer.peek()
+            {
+                self.lexer.next();
+                Some(self.parse_identifier()?)
+            } else {
+                None
+            };
+            self.lexer.expect_token(TokenKind::Keyword(Keyword::On))?;
+
+            let condition = self.expr_bp(0)?;
+
+            joins.push(Join { join_type, table, alias, condition: Box::new(condition) });
+        }
+
+        Ok(joins)
     }
 }
 
@@ -207,6 +280,7 @@ mod tests {
                 Expression::column("ghi"),
             ]),
             table: None,
+            joins: vec![],
             where_clause: None,
             order_by: None,
             limit: None,
@@ -227,6 +301,7 @@ mod tests {
                 Expression::column("ghi"),
             ]),
             table: Some("big_table"),
+            joins: vec![],
             where_clause: None,
             order_by: None,
             limit: None,
@@ -247,6 +322,7 @@ mod tests {
                 Expression::column("ghi"),
             ]),
             table: Some("some_table"),
+            joins: vec![],
             where_clause: Some(Expression::BinaryOp((
                 Box::new(Expression::column("abc")),
                 Op::LessThan,
@@ -261,12 +337,55 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_select_query_with_multiple_joins() {
+        let s = "SELECT users.id, orders.total, products.name FROM users JOIN orders ON users.id == orders.user_id INNER JOIN products ON orders.product_id == products.id;";
+        let mut parser = Parser::new(s);
+        let expected_query = SelectQuery {
+            columns: ExpressionList(vec![
+                Expression::qualified_column("users", "id"),
+                Expression::qualified_column("orders", "total"),
+                Expression::qualified_column("products", "name"),
+            ]),
+            table: Some("users"),
+            joins: vec![
+                Join {
+                    join_type: JoinType::Inner,
+                    table: "orders",
+                    alias: None,
+                    condition: Box::new(Expression::BinaryOp((
+                        Box::new(Expression::qualified_column("users", "id")),
+                        Op::EqualsEquals,
+                        Box::new(Expression::qualified_column("orders", "user_id")),
+                    ))),
+                },
+                Join {
+                    join_type: JoinType::Inner,
+                    table: "products",
+                    alias: None,
+                    condition: Box::new(Expression::BinaryOp((
+                        Box::new(Expression::qualified_column("orders", "product_id")),
+                        Op::EqualsEquals,
+                        Box::new(Expression::qualified_column("products", "id")),
+                    ))),
+                },
+            ],
+            where_clause: None,
+            order_by: None,
+            limit: None,
+            offset: None,
+        };
+
+        assert_eq!(Ok(Select(expected_query)), parser.stmt());
+    }
+
+    #[test]
     fn test_parse_select_query_without_from() {
         let s = "SELECT 3 WHERE 1;";
         let mut parser = Parser::new(s);
         let expected_query = SelectQuery {
             columns: ExpressionList(vec![Expression::from(3)]),
             table: None,
+            joins: vec![],
             where_clause: Some(Expression::from(1)),
             order_by: None,
             limit: None,
@@ -301,6 +420,7 @@ mod tests {
         let expected_query = SelectQuery {
             columns: ExpressionList(vec![Expression::column("foo")]),
             table: Some("bar"),
+            joins: vec![],
             where_clause: Some(Expression::column("baz")),
             order_by: Some(OrderBy {
                 terms: vec![
@@ -325,6 +445,7 @@ mod tests {
         let expected_query = SelectQuery {
             columns: ExpressionList(vec![Expression::column("foo")]),
             table: Some("bar"),
+            joins: vec![],
             where_clause: Some(Expression::column("baz")),
             order_by: Some(OrderBy {
                 terms: vec![OrderByTerm {
@@ -353,6 +474,7 @@ mod tests {
         let expected_query = SelectQuery {
             columns: ExpressionList(vec![Expression::column("foo")]),
             table: Some("bar"),
+            joins: vec![],
             where_clause: None,
             order_by: None,
             limit: Some(5),
@@ -366,6 +488,7 @@ mod tests {
         let expected_query = SelectQuery {
             columns: ExpressionList(vec![Expression::column("foo")]),
             table: Some("bar"),
+            joins: vec![],
             where_clause: Some(Expression::column("baz")),
             order_by: Some(OrderBy {
                 terms: vec![OrderByTerm {
@@ -392,6 +515,7 @@ mod tests {
         let expected_query = SelectQuery {
             columns: ExpressionList(vec![Expression::column("foo")]),
             table: Some("bar"),
+            joins: vec![],
             where_clause: None,
             order_by: None,
             limit: None,
@@ -405,6 +529,7 @@ mod tests {
         let expected_query = SelectQuery {
             columns: ExpressionList(vec![Expression::column("foo")]),
             table: Some("bar"),
+            joins: vec![],
             where_clause: None,
             order_by: None,
             limit: Some(10),

@@ -187,6 +187,7 @@ mod tests {
 
         let expected_query = Statement::Select(SelectQuery {
             table: Some("products"),
+            joins: vec![],
             columns: ExpressionList(vec![
                 Expression::AggregateFunction(AggregateFunction {
                     kind: AggregateFunctionKind::Count,
