@@ -25,6 +25,7 @@ pub enum TokenKind<'a> {
     GreaterThanOrEqual,
     Asterisk,
     Comma,
+    Dot,
     Semicolon,
     Slash,
 }
@@ -148,6 +149,7 @@ impl Display for TokenKind<'_> {
             TokenKind::GreaterThanOrEqual => write!(f, "GTEQ"),
             TokenKind::Asterisk => write!(f, "ASTERISK"),
             TokenKind::Comma => write!(f, "COMMA"),
+            TokenKind::Dot => write!(f, "DOT"),
             TokenKind::Semicolon => write!(f, "SEMICOLON"),
             TokenKind::Slash => write!(f, "SLASH"),
         }

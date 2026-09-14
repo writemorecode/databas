@@ -16,6 +16,9 @@ pub enum PlannerError {
     /// A statement referenced a table that does not exist in the catalog.
     #[error("table not found: {name}")]
     TableNotFound { name: String },
+    /// A qualified column referenced a table that is not an input to the expression.
+    #[error("table not in scope: {table}")]
+    TableNotInScope { table: String },
     /// A statement referenced a column that is not present in the bound table.
     #[error("column {column} not found")]
     ColumnNotFound { column: String },

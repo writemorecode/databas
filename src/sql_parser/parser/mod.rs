@@ -4,7 +4,7 @@ pub mod stmt;
 
 use std::fmt::Display;
 
-use expr::{AggregateFunction, AggregateFunctionKind, Expression, Literal};
+use expr::{AggregateFunction, AggregateFunctionKind, ColumnReference, Expression, Literal};
 use op::Op;
 use stmt::Statement;
 use stmt::lists::{ExpressionList, IdentifierList};
@@ -144,6 +144,18 @@ impl<'a> Parser<'a> {
             })?
     }
 
+    fn parse_column_reference(
+        &mut self,
+        table_or_column: &'a str,
+    ) -> Result<ColumnReference<'a>, SQLError<'a>> {
+        if let Some(Ok(Token { kind: TokenKind::Dot, .. })) = self.lexer.peek() {
+            self.lexer.next();
+            Ok(ColumnReference { table: Some(table_or_column), column: self.parse_identifier()? })
+        } else {
+            Ok(ColumnReference { table: None, column: table_or_column })
+        }
+    }
+
     pub fn item(&mut self) -> Result<SqlItem<'a>, SQLError<'a>> {
         let token = self
             .lexer
@@ -239,7 +251,9 @@ impl<'a> Parser<'a> {
             TokenKind::Number(num) => Expression::Literal(Literal::Number(num)),
             TokenKind::Keyword(Keyword::True) => Expression::Literal(Literal::Boolean(true)),
             TokenKind::Keyword(Keyword::False) => Expression::Literal(Literal::Boolean(false)),
-            TokenKind::Identifier(id) => Expression::Identifier(id),
+            TokenKind::Identifier(id) => {
+                Expression::ColumnReference(self.parse_column_reference(id)?)
+            }
             TokenKind::Asterisk => Expression::Wildcard,
             TokenKind::LeftParen => {
                 let lhs = self.expr_bp(0).map_err(|error| match error.kind {
@@ -377,9 +391,9 @@ mod parser_tests {
         let s = "not (a AND (b != c))";
         let parser = Parser::new(s);
         let expected = {
-            let a = Box::new(Expression::Identifier("a"));
-            let b = Box::new(Expression::Identifier("b"));
-            let c = Box::new(Expression::Identifier("c"));
+            let a = Box::new(Expression::column("a"));
+            let b = Box::new(Expression::column("b"));
+            let c = Box::new(Expression::column("c"));
             let d = Box::new(Expression::BinaryOp((b, Op::NotEquals, c)));
             let e = Box::new(Expression::BinaryOp((a, Op::And, d)));
             Expression::UnaryOp((Op::Not, e))

@@ -6,7 +6,11 @@ use crate::sql_parser::{
         token::Token,
         token_kind::{Keyword, TokenKind},
     },
-    parser::{Parser, expr::Expression, stmt::lists::ExpressionList},
+    parser::{
+        Parser,
+        expr::{ColumnReference, Expression},
+        stmt::lists::ExpressionList,
+    },
 };
 #[derive(Debug, PartialEq, Clone)]
 pub enum Ordering {
@@ -25,13 +29,16 @@ impl Display for Ordering {
 
 #[derive(Debug, PartialEq)]
 pub struct OrderByTerm<'a> {
-    pub column: &'a str,
+    pub column: ColumnReference<'a>,
     pub order: Option<Ordering>,
 }
 
 impl Display for OrderByTerm<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.column)?;
+        if let Some(table) = self.column.table {
+            write!(f, "{}.", table)?;
+        }
+        write!(f, "{}", self.column.column)?;
 
         if let Some(ref order) = self.order {
             write!(f, " {}", order)?;
@@ -60,6 +67,7 @@ impl<'a> Parser<'a> {
 
     fn parse_order_by_term(&mut self) -> Result<OrderByTerm<'a>, SQLError<'a>> {
         let column = self.parse_identifier()?;
+        let column = self.parse_column_reference(column)?;
         let order = match self.lexer.peek() {
             Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Asc), .. })) => {
                 self.lexer.next();
@@ -194,9 +202,9 @@ mod tests {
         let mut parser = Parser::new(s);
         let expected_query = SelectQuery {
             columns: ExpressionList(vec![
-                Expression::Identifier("abc"),
-                Expression::Identifier("def"),
-                Expression::Identifier("ghi"),
+                Expression::column("abc"),
+                Expression::column("def"),
+                Expression::column("ghi"),
             ]),
             table: None,
             where_clause: None,
@@ -214,9 +222,9 @@ mod tests {
         let mut parser = Parser::new(s);
         let expected_query = SelectQuery {
             columns: ExpressionList(vec![
-                Expression::Identifier("abc"),
-                Expression::Identifier("def"),
-                Expression::Identifier("ghi"),
+                Expression::column("abc"),
+                Expression::column("def"),
+                Expression::column("ghi"),
             ]),
             table: Some("big_table"),
             where_clause: None,
@@ -234,15 +242,15 @@ mod tests {
         let mut parser = Parser::new(s);
         let expected_query = SelectQuery {
             columns: ExpressionList(vec![
-                Expression::Identifier("abc"),
-                Expression::Identifier("def"),
-                Expression::Identifier("ghi"),
+                Expression::column("abc"),
+                Expression::column("def"),
+                Expression::column("ghi"),
             ]),
             table: Some("some_table"),
             where_clause: Some(Expression::BinaryOp((
-                Box::new(Expression::Identifier("abc")),
+                Box::new(Expression::column("abc")),
                 Op::LessThan,
-                Box::new(Expression::Identifier("def")),
+                Box::new(Expression::column("def")),
             ))),
             order_by: None,
             limit: None,
@@ -291,13 +299,19 @@ mod tests {
         let s = "SELECT foo FROM bar WHERE baz ORDER BY qax, quux DESC;";
         let mut parser = Parser::new(s);
         let expected_query = SelectQuery {
-            columns: ExpressionList(vec![Expression::Identifier("foo")]),
+            columns: ExpressionList(vec![Expression::column("foo")]),
             table: Some("bar"),
-            where_clause: Some(Expression::Identifier("baz")),
+            where_clause: Some(Expression::column("baz")),
             order_by: Some(OrderBy {
                 terms: vec![
-                    OrderByTerm { column: "qax", order: None },
-                    OrderByTerm { column: "quux", order: Some(Ordering::Descending) },
+                    OrderByTerm {
+                        column: ColumnReference { table: None, column: "qax" },
+                        order: None,
+                    },
+                    OrderByTerm {
+                        column: ColumnReference { table: None, column: "quux" },
+                        order: Some(Ordering::Descending),
+                    },
                 ],
             }),
             limit: None,
@@ -309,11 +323,14 @@ mod tests {
         let s = "SELECT foo FROM bar WHERE baz ORDER BY qax ASC;";
         let mut parser = Parser::new(s);
         let expected_query = SelectQuery {
-            columns: ExpressionList(vec![Expression::Identifier("foo")]),
+            columns: ExpressionList(vec![Expression::column("foo")]),
             table: Some("bar"),
-            where_clause: Some(Expression::Identifier("baz")),
+            where_clause: Some(Expression::column("baz")),
             order_by: Some(OrderBy {
-                terms: vec![OrderByTerm { column: "qax", order: Some(Ordering::Ascending) }],
+                terms: vec![OrderByTerm {
+                    column: ColumnReference { table: None, column: "qax" },
+                    order: Some(Ordering::Ascending),
+                }],
             }),
             limit: None,
             offset: None,
@@ -334,7 +351,7 @@ mod tests {
         let s = "SELECT foo FROM bar LIMIT 5;";
         let mut parser = Parser::new(s);
         let expected_query = SelectQuery {
-            columns: ExpressionList(vec![Expression::Identifier("foo")]),
+            columns: ExpressionList(vec![Expression::column("foo")]),
             table: Some("bar"),
             where_clause: None,
             order_by: None,
@@ -347,10 +364,15 @@ mod tests {
         let s = "SELECT foo FROM bar WHERE baz ORDER BY qux LIMIT 10;";
         let mut parser = Parser::new(s);
         let expected_query = SelectQuery {
-            columns: ExpressionList(vec![Expression::Identifier("foo")]),
+            columns: ExpressionList(vec![Expression::column("foo")]),
             table: Some("bar"),
-            where_clause: Some(Expression::Identifier("baz")),
-            order_by: Some(OrderBy { terms: vec![OrderByTerm { column: "qux", order: None }] }),
+            where_clause: Some(Expression::column("baz")),
+            order_by: Some(OrderBy {
+                terms: vec![OrderByTerm {
+                    column: ColumnReference { table: None, column: "qux" },
+                    order: None,
+                }],
+            }),
             limit: Some(10),
             offset: None,
         };
@@ -368,7 +390,7 @@ mod tests {
         let s = "SELECT foo FROM bar OFFSET 5;";
         let mut parser = Parser::new(s);
         let expected_query = SelectQuery {
-            columns: ExpressionList(vec![Expression::Identifier("foo")]),
+            columns: ExpressionList(vec![Expression::column("foo")]),
             table: Some("bar"),
             where_clause: None,
             order_by: None,
@@ -381,7 +403,7 @@ mod tests {
         let s = "SELECT foo FROM bar LIMIT 10 OFFSET 5;";
         let mut parser = Parser::new(s);
         let expected_query = SelectQuery {
-            columns: ExpressionList(vec![Expression::Identifier("foo")]),
+            columns: ExpressionList(vec![Expression::column("foo")]),
             table: Some("bar"),
             where_clause: None,
             order_by: None,
