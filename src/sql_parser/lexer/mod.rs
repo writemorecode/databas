@@ -125,12 +125,12 @@ impl<'a> Iterator for Lexer<'a> {
             '=' => Started::MaybeEqualsOp(MaybeEquals::Equals),
             '(' => return tok(TokenKind::LeftParen),
             ')' => return tok(TokenKind::RightParen),
+            '.' => return tok(TokenKind::Dot),
             '+' => return tok(TokenKind::Plus),
             '-' => return tok(TokenKind::Minus),
             '*' => return tok(TokenKind::Asterisk),
             '/' => return tok(TokenKind::Slash),
             ',' => return tok(TokenKind::Comma),
-            '.' => return tok(TokenKind::Dot),
             ';' => return tok(TokenKind::Semicolon),
 
             c => {
