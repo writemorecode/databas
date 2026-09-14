@@ -282,6 +282,8 @@ impl<'a> Parser<'a> {
                         | TokenKind::Keyword(
                             Keyword::From
                                 | Keyword::Where
+                                | Keyword::Join
+                                | Keyword::Inner
                                 | Keyword::Order
                                 | Keyword::Desc
                                 | Keyword::Asc

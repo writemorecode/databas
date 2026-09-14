@@ -89,6 +89,41 @@ fn select_query() -> BoxedStrategy<String> {
         .boxed()
 }
 
+fn join_query() -> BoxedStrategy<String> {
+    (
+        prop::collection::vec(expression(true), 1..=4),
+        identifier(),
+        prop::collection::vec(
+            (
+                any::<bool>(),
+                identifier(),
+                prop::option::of(identifier()),
+                identifier(),
+                identifier(),
+            ),
+            1..=3,
+        ),
+        prop::option::of(expression(false)),
+    )
+        .prop_map(|(columns, source_table, joins, predicate)| {
+            let mut sql = format!("SELECT {} FROM {source_table}", columns.join(", "));
+            for (explicit_inner, table, alias, left_column, right_column) in joins {
+                let join_keyword = if explicit_inner { " INNER JOIN" } else { " JOIN" };
+                let qualifier = alias.unwrap_or(table);
+                sql.push_str(&format!(
+                    "{join_keyword} {table}{} ON {source_table}.{left_column} == {qualifier}.{right_column}",
+                    alias.map(|alias| format!(" AS {alias}")).unwrap_or_default()
+                ));
+            }
+            if let Some(predicate) = predicate {
+                sql.push_str(&format!(" WHERE {predicate}"));
+            }
+            sql.push(';');
+            sql
+        })
+        .boxed()
+}
+
 fn delete_query() -> BoxedStrategy<String> {
     (identifier(), prop::option::of(expression(false)))
         .prop_map(|(table, predicate)| match predicate {
@@ -155,6 +190,7 @@ fn statement() -> BoxedStrategy<String> {
     prop_oneof![
         insert_query(),
         select_query(),
+        join_query(),
         create_table_query(),
         create_index_query(),
         select_query().prop_map(|sql| format!("EXPLAIN {sql}")),
@@ -213,6 +249,11 @@ proptest! {
 
     #[test]
     fn select_queries_round_trip_through_display(sql in select_query()) {
+        assert_round_trips(&sql);
+    }
+
+    #[test]
+    fn join_queries_round_trip_through_display(sql in join_query()) {
         assert_round_trips(&sql);
     }
 
