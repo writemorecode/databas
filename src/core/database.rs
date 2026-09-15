@@ -4,7 +4,7 @@ use crate::core::{
     IndexSchema, TableId, TableSchema,
     access::CatalogRead,
     error::StorageResult,
-    lock_manager::{LockManager, TableLease},
+    lock_manager::{LockManager, LockMode, TableLease},
 };
 use crate::relational::catalog_manager::CatalogManager;
 #[cfg(test)]
@@ -117,11 +117,13 @@ impl Database {
     pub(crate) fn acquire_table_leases(
         &self,
         txn_id: TxnId,
-        table_ids: &[TableId],
+        table_locks: &[(TableId, LockMode)],
     ) -> StorageResult<Vec<TableLease>> {
-        table_ids
+        table_locks
             .iter()
-            .map(|table_id| self.locks.acquire(txn_id, *table_id).map_err(Into::into))
+            .map(|&(table_id, mode)| {
+                self.locks.acquire_mode(txn_id, table_id, mode).map_err(Into::into)
+            })
             .collect()
     }
 

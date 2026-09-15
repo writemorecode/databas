@@ -1,7 +1,7 @@
-//! Transaction-owned, exclusive table locks.
+//! Transaction-owned shared (read) and exclusive (write) table locks.
 //!
 //! [`LockManager`] implements strict two-phase locking at table granularity.
-//! There is one lock mode, so reads and writes of the same table serialize. A
+//! Shared locks coexist; exclusive locks conflict with other holders. A
 //! lock covers the table tree and all of its secondary indexes; index IDs are
 //! therefore not lock resources.
 //!
@@ -19,7 +19,8 @@
 //!
 //! Contended requests wait in a per-table FIFO queue. Queue ownership and waiter
 //! order are protected by the same mutex, and release performs a direct handoff
-//! before waking waiters. The wait-for graph models the FIFO predecessor chain.
+//! before waking waiters. Adjacent readers are granted together. The wait-for
+//! graph models incompatible holders and earlier incompatible FIFO requests.
 //! A request that closes a cycle is rejected with [`LockError::Deadlock`] and
 //! its transaction enters [`TransactionPhase::Aborting`].
 //!
@@ -66,6 +67,25 @@ impl TableId {
 impl From<CatalogId> for TableId {
     fn from(value: CatalogId) -> Self {
         Self::new(value)
+    }
+}
+
+/// Access permitted by a table lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockMode {
+    /// Allows concurrent readers, but excludes other transactions' writers.
+    Shared,
+    /// Excludes all other transactions' readers and writers.
+    Exclusive,
+}
+
+impl LockMode {
+    fn permits(self, requested: Self) -> bool {
+        self == Self::Exclusive || requested == Self::Shared
+    }
+
+    fn conflicts(self, other: Self) -> bool {
+        self == Self::Exclusive || other == Self::Exclusive
     }
 }
 
@@ -145,6 +165,14 @@ pub enum LockError {
         /// Table the caller attempted to access.
         table_id: TableId,
     },
+    /// A shared capability cannot authorize a write.
+    #[error("{held:?} lease does not authorize {requested:?} access")]
+    InsufficientLockMode {
+        /// Mode carried by the lease.
+        held: LockMode,
+        /// Mode required by the operation.
+        requested: LockMode,
+    },
     /// DDL cannot be admitted while another transaction is active.
     #[error("DDL transaction {txn_id} cannot run while another transaction is active")]
     DdlBusy {
@@ -173,6 +201,7 @@ pub enum LockError {
 pub struct TableLease {
     txn_id: TxnId,
     table_id: TableId,
+    mode: LockMode,
 }
 
 impl TableLease {
@@ -186,7 +215,12 @@ impl TableLease {
         self.table_id
     }
 
-    /// Verifies that this lease authorizes `txn_id` to access `table_id`.
+    /// Returns the access mode authorized by this capability.
+    pub const fn mode(&self) -> LockMode {
+        self.mode
+    }
+
+    /// Verifies exclusive access, preserving the write-capable legacy contract.
     ///
     /// This capability check avoids a time-of-check/time-of-use race from
     /// consulting manager state with a boolean `is_locked` operation.
@@ -194,14 +228,31 @@ impl TableLease {
     /// # Errors
     ///
     /// Returns [`LockError::LeaseMismatch`] if either identifier differs from
-    /// the capability's owner and resource.
+    /// the capability's owner and resource, or [`LockError::InsufficientLockMode`]
+    /// if this is a shared lease.
     pub fn authorize(&self, txn_id: TxnId, table_id: impl Into<TableId>) -> Result<(), LockError> {
+        self.authorize_mode(txn_id, table_id, LockMode::Exclusive)
+    }
+
+    /// Verifies the transaction, table, and required access mode.
+    ///
+    /// # Errors
+    /// Returns [`LockError::LeaseMismatch`] for different identifiers or
+    /// [`LockError::InsufficientLockMode`] when a shared lease is used to write.
+    pub fn authorize_mode(
+        &self,
+        txn_id: TxnId,
+        table_id: impl Into<TableId>,
+        mode: LockMode,
+    ) -> Result<(), LockError> {
         let table_id = table_id.into();
-        if self.txn_id == txn_id && self.table_id == table_id {
-            Ok(())
-        } else {
-            Err(LockError::LeaseMismatch { txn_id, table_id })
+        if self.txn_id != txn_id || self.table_id != table_id {
+            return Err(LockError::LeaseMismatch { txn_id, table_id });
         }
+        if !self.mode.permits(mode) {
+            return Err(LockError::InsufficientLockMode { held: self.mode, requested: mode });
+        }
+        Ok(())
     }
 }
 
@@ -210,8 +261,34 @@ impl TableLease {
 struct QueueState {
     /// Transaction currently holding the exclusive resource.
     owner: Option<TxnId>,
-    /// Blocking transactions in arrival order.
-    waiters: VecDeque<TxnId>,
+    /// Transactions currently holding shared locks.
+    readers: BTreeSet<TxnId>,
+    /// Blocking requests in arrival order, including upgrades.
+    waiters: VecDeque<LockRequest>,
+}
+
+impl QueueState {
+    fn holds(&self, txn_id: TxnId, mode: LockMode) -> bool {
+        self.owner == Some(txn_id) || (mode == LockMode::Shared && self.readers.contains(&txn_id))
+    }
+
+    fn compatible(&self, request: LockRequest) -> bool {
+        self.owner.is_none_or(|owner| owner == request.txn_id)
+            && (request.mode == LockMode::Shared
+                || self.readers.iter().all(|reader| *reader == request.txn_id))
+    }
+
+    fn grant(&mut self, request: LockRequest) {
+        match request.mode {
+            LockMode::Shared => {
+                self.readers.insert(request.txn_id);
+            }
+            LockMode::Exclusive => {
+                self.readers.remove(&request.txn_id);
+                self.owner = Some(request.txn_id);
+            }
+        }
+    }
 }
 
 /// Shared synchronization state for one table resource.
@@ -239,6 +316,7 @@ enum AcquireDecision {
 struct LockRequest {
     txn_id: TxnId,
     table_id: TableId,
+    mode: LockMode,
 }
 
 /// A table queue paired with its currently held state guard.
@@ -276,27 +354,16 @@ impl Default for TransactionState {
 
 /// Directed wait-for graph used for transaction deadlock detection.
 ///
-/// Every vertex has at most one outgoing edge because a transaction may have
-/// at most one blocking request. An edge points from a waiter to its FIFO
-/// predecessor.
+/// A request can depend on multiple readers and earlier incompatible waiters.
+/// Upgrades exclude their own shared ownership from the dependency set.
 #[derive(Debug, Default)]
 struct WaitForGraph {
-    edges: HashMap<TxnId, TxnId>,
+    edges: HashMap<TxnId, BTreeSet<TxnId>>,
 }
 
 impl WaitForGraph {
-    /// Returns the transaction that `txn_id` is waiting for.
-    fn predecessor(&self, txn_id: TxnId) -> Option<TxnId> {
-        self.edges.get(&txn_id).copied()
-    }
-
-    /// Adds or replaces the outgoing edge from `waiter` to `predecessor`.
-    fn insert(&mut self, waiter: TxnId, predecessor: TxnId) {
-        self.edges.insert(waiter, predecessor);
-    }
-
-    /// Removes and returns the outgoing edge from `txn_id`.
-    fn remove(&mut self, txn_id: TxnId) -> Option<TxnId> {
+    /// Removes and returns the outgoing dependencies from `txn_id`.
+    fn remove(&mut self, txn_id: TxnId) -> Option<BTreeSet<TxnId>> {
         self.edges.remove(&txn_id)
     }
 
@@ -314,21 +381,21 @@ impl WaitForGraph {
 
     /// Returns whether following edges from `start` reaches `start`.
     fn edge_closes_cycle(&self, start: TxnId) -> bool {
-        let mut current = self.predecessor(start);
+        let mut pending = self.edges.get(&start).into_iter().flatten().copied().collect::<Vec<_>>();
         let mut visited = HashSet::new();
-        while let Some(txn_id) = current {
+        while let Some(txn_id) = pending.pop() {
             if txn_id == start {
                 return true;
             }
-            if !visited.insert(txn_id) {
-                return false;
+            if visited.insert(txn_id) {
+                pending.extend(self.edges.get(&txn_id).into_iter().flatten().copied());
             }
-            current = self.predecessor(txn_id);
         }
         false
     }
 
     /// Returns whether any transaction participates in a cycle.
+    #[cfg(all(test, not(loom)))]
     fn has_cycle(&self) -> bool {
         self.edges.keys().copied().any(|start| self.edge_closes_cycle(start))
     }
@@ -359,7 +426,7 @@ struct LockManagerInner {
     enqueue_signal: Mutex<Option<loom::sync::mpsc::Sender<()>>>,
 }
 
-/// Thread-safe manager for FIFO, exclusive table locks.
+/// Thread-safe manager for FIFO shared and exclusive table locks.
 ///
 /// Clones refer to the same queues and transaction registry. The manager does
 /// not perform WAL or rollback work itself; callers explicitly bracket storage
@@ -540,14 +607,46 @@ impl LockManager {
         txn_id: TxnId,
         table_id: impl Into<TableId>,
     ) -> Result<TableLease, LockError> {
-        let request = LockRequest { txn_id, table_id: table_id.into() };
+        self.acquire_mode(txn_id, table_id, LockMode::Exclusive)
+    }
+
+    /// Acquires a shared table lock. See [`Self::acquire_mode`] for waiting and errors.
+    pub fn acquire_shared(
+        &self,
+        txn_id: TxnId,
+        table_id: impl Into<TableId>,
+    ) -> Result<TableLease, LockError> {
+        self.acquire_mode(txn_id, table_id, LockMode::Shared)
+    }
+
+    /// Acquires the requested mode without allowing new readers to bypass writers.
+    ///
+    /// Existing sufficient ownership is reused. Shared-to-exclusive upgrades
+    /// retain the shared lock while waiting in FIFO order; competing upgrades
+    /// can deadlock and the closing request must roll back. No downgrade occurs.
+    /// Returned capabilities authorize the requested mode only.
+    ///
+    /// # Blocking
+    /// Like [`Self::acquire`], this waits until granted or canceled. Do not hold
+    /// storage latches while acquiring locks.
+    ///
+    /// # Errors
+    /// Returns the same lifecycle, cancellation, and deadlock errors as
+    /// [`Self::acquire`]. A deadlock victim retains all previously held locks.
+    pub fn acquire_mode(
+        &self,
+        txn_id: TxnId,
+        table_id: impl Into<TableId>,
+        mode: LockMode,
+    ) -> Result<TableLease, LockError> {
+        let request = LockRequest { txn_id, table_id: table_id.into(), mode };
         let queue = self.queue(request.table_id)?;
         let mut locked_queue =
             LockedQueue { queue: &queue, state: lock(&queue.state, "table queue")? };
 
         match self.prepare_acquire(request, &mut locked_queue.state)? {
             AcquireDecision::Granted => {
-                Ok(TableLease { txn_id: request.txn_id, table_id: request.table_id })
+                Ok(TableLease { txn_id: request.txn_id, table_id: request.table_id, mode })
             }
             AcquireDecision::Wait => self.wait_for_acquire(request, locked_queue),
             AcquireDecision::Deadlock => {
@@ -568,34 +667,33 @@ impl LockManager {
         request: LockRequest,
         queue: &mut QueueState,
     ) -> Result<AcquireDecision, LockError> {
-        let LockRequest { txn_id, table_id } = request;
+        let LockRequest { txn_id, table_id, mode } = request;
         let mut graph = self.lock_graph()?;
         if graph.stopped {
             return Err(LockError::Canceled { txn_id });
         }
         let transaction = active_growing_transaction(&mut graph, txn_id)?;
 
-        if queue.owner == Some(txn_id) {
+        if queue.holds(txn_id, mode) {
             if !transaction.locks.contains(&table_id) {
                 return Err(invariant("queue owner is absent from its transaction lock set"));
             }
             return Ok(AcquireDecision::Granted);
         }
-        if transaction.waiting_for.is_some() {
+        if transaction.waiting_for.is_some() || transaction.request_canceled {
             return Err(LockError::OutstandingRequest { txn_id });
         }
-        if queue.waiters.contains(&txn_id) {
+        if queue.waiters.iter().any(|waiter| waiter.txn_id == txn_id) {
             return Err(invariant("transaction occurs twice in a table wait queue"));
         }
-        if queue.owner.is_none() && queue.waiters.is_empty() {
-            queue.owner = Some(txn_id);
+        if queue.compatible(request) && queue.waiters.is_empty() {
+            queue.grant(request);
             transaction.locks.insert(table_id);
             return Ok(AcquireDecision::Granted);
         }
 
-        let predecessor = queue_predecessor(queue, &graph.waits_for)?;
-        queue.waiters.push_back(txn_id);
-        graph.waits_for.insert(txn_id, predecessor);
+        queue.waiters.push_back(request);
+        refresh_dependencies(queue, &mut graph.waits_for);
         let transaction = graph
             .transactions
             .get_mut(&txn_id)
@@ -652,15 +750,19 @@ impl LockManager {
                 }
                 return Err(LockError::Canceled { txn_id: request.txn_id });
             }
-            if locked_queue.state.owner == Some(request.txn_id) {
+            if locked_queue.state.holds(request.txn_id, request.mode) {
                 validate_handoff(transaction, request)?;
-                return Ok(TableLease { txn_id: request.txn_id, table_id: request.table_id });
+                return Ok(TableLease {
+                    txn_id: request.txn_id,
+                    table_id: request.table_id,
+                    mode: request.mode,
+                });
             }
             if transaction.phase != TransactionPhase::Growing {
                 return Err(LockError::Canceled { txn_id: request.txn_id });
             }
             if transaction.waiting_for != Some(request.table_id)
-                || !locked_queue.state.waiters.contains(&request.txn_id)
+                || !locked_queue.state.waiters.iter().any(|waiter| waiter.txn_id == request.txn_id)
             {
                 return Err(invariant("woken transaction is neither owner nor waiter"));
             }
@@ -705,8 +807,7 @@ impl LockManager {
         let queue = self.queue(table_id)?;
         let mut queue_state = lock(&queue.state, "table queue")?;
         let mut graph = self.lock_graph()?;
-        let removed =
-            remove_waiter(&mut queue_state, &mut graph, LockRequest { txn_id, table_id })?;
+        let removed = remove_waiter(&mut queue_state, &mut graph, txn_id, table_id)?;
         drop(graph);
         drop(queue_state);
         if removed {
@@ -830,8 +931,7 @@ impl LockManager {
             let queue = self.queue(table_id)?;
             let mut queue_state = lock(&queue.state, "table queue")?;
             let mut graph = self.lock_graph()?;
-            let removed =
-                remove_waiter(&mut queue_state, &mut graph, LockRequest { txn_id, table_id })?;
+            let removed = remove_waiter(&mut queue_state, &mut graph, txn_id, table_id)?;
             drop(graph);
             drop(queue_state);
             if removed {
@@ -851,7 +951,7 @@ impl LockManager {
         let mut queue_state = lock(&queue.state, "table queue")?;
         let mut graph = self.lock_graph()?;
 
-        if queue_state.owner != Some(txn_id) {
+        if !queue_state.holds(txn_id, LockMode::Shared) {
             return Err(invariant("transaction attempted to release a table owned by another"));
         }
         let transaction = graph
@@ -861,23 +961,11 @@ impl LockManager {
         if !transaction.locks.remove(&table_id) {
             return Err(invariant("released table was absent from transaction lock set"));
         }
-        queue_state.owner = None;
-
-        if let Some(next_owner) = queue_state.waiters.pop_front() {
-            queue_state.owner = Some(next_owner);
-            if graph.waits_for.remove(next_owner).is_none() {
-                return Err(invariant("queue-front waiter had no wait-for edge"));
-            }
-            let next = graph
-                .transactions
-                .get_mut(&next_owner)
-                .ok_or_else(|| invariant("queue-front waiter is not an active transaction"))?;
-            if next.waiting_for != Some(table_id) {
-                return Err(invariant("queue-front waiter references a different table"));
-            }
-            next.waiting_for = None;
-            next.locks.insert(table_id);
+        if queue_state.owner == Some(txn_id) {
+            queue_state.owner = None;
         }
+        queue_state.readers.remove(&txn_id);
+        grant_waiters(&mut queue_state, &mut graph)?;
 
         drop(graph);
         drop(queue_state);
@@ -923,19 +1011,19 @@ impl LockManager {
         let mut waiting = HashSet::new();
         for (table_id, queue) in queues.iter() {
             let queue = queue.state.lock().unwrap();
-            if !queue.waiters.is_empty() {
-                assert!(queue.owner.is_some());
+            assert!(queue.owner.is_none() || queue.readers.is_empty());
+            if let Some(front) = queue.waiters.front() {
+                assert!(!queue.compatible(*front));
             }
-            let mut predecessor = queue.owner;
+            let mut expected = WaitForGraph::default();
+            refresh_dependencies(&queue, &mut expected);
             for waiter in &queue.waiters {
-                assert!(waiting.insert(*waiter));
-                assert_eq!(graph.waits_for.predecessor(*waiter), predecessor);
-                assert_eq!(graph.transactions[waiter].waiting_for, Some(*table_id));
-                predecessor = Some(*waiter);
+                assert!(waiting.insert(waiter.txn_id));
+                assert_eq!(graph.waits_for.edges[&waiter.txn_id], expected.edges[&waiter.txn_id]);
+                assert_eq!(graph.transactions[&waiter.txn_id].waiting_for, Some(*table_id));
             }
-            if let Some(owner) = queue.owner {
-                assert!(graph.transactions[&owner].locks.contains(table_id));
-                assert!(!queue.waiters.contains(&owner));
+            for owner in queue.owner.iter().chain(queue.readers.iter()) {
+                assert!(graph.transactions[owner].locks.contains(table_id));
             }
         }
         for (txn_id, transaction) in &graph.transactions {
@@ -945,20 +1033,50 @@ impl LockManager {
     }
 }
 
-/// Returns the predecessor for a new FIFO waiter after validating queue state.
-fn queue_predecessor(queue: &QueueState, waits_for: &WaitForGraph) -> Result<TxnId, LockError> {
-    if queue.owner.is_none() {
-        return Err(invariant("a table has waiters but no owner"));
+/// Rebuilds this queue's dependencies under the queue and graph latches.
+fn refresh_dependencies(queue: &QueueState, waits_for: &mut WaitForGraph) {
+    for (index, request) in queue.waiters.iter().enumerate() {
+        let mut blockers = BTreeSet::new();
+        blockers.extend(queue.owner);
+        if request.mode == LockMode::Exclusive {
+            blockers.extend(&queue.readers);
+        }
+        blockers.remove(&request.txn_id);
+        blockers.extend(
+            queue
+                .waiters
+                .iter()
+                .take(index)
+                .filter(|earlier| request.mode.conflicts(earlier.mode))
+                .map(|earlier| earlier.txn_id),
+        );
+        waits_for.edges.insert(request.txn_id, blockers);
     }
-    if waits_for.has_cycle() {
-        return Err(invariant("wait-for graph was cyclic before adding a request"));
+}
+
+/// Hands ownership to the compatible FIFO prefix, including ready upgrades.
+fn grant_waiters(queue: &mut QueueState, graph: &mut GraphState) -> Result<(), LockError> {
+    while let Some(request) = queue.waiters.front().copied() {
+        if !queue.compatible(request) {
+            break;
+        }
+        queue.waiters.pop_front();
+        queue.grant(request);
+        if graph.waits_for.remove(request.txn_id).is_none() {
+            return Err(invariant("queue-front waiter had no wait-for edges"));
+        }
+        let next = graph
+            .transactions
+            .get_mut(&request.txn_id)
+            .ok_or_else(|| invariant("queue-front waiter is not an active transaction"))?;
+        if next.waiting_for != Some(request.table_id) {
+            return Err(invariant("queue-front waiter references a different table"));
+        }
+        next.waiting_for = None;
+        next.locks.insert(request.table_id);
     }
-    queue
-        .waiters
-        .back()
-        .copied()
-        .or(queue.owner)
-        .ok_or_else(|| invariant("queued request has no predecessor"))
+    refresh_dependencies(queue, &mut graph.waits_for);
+    Ok(())
 }
 
 /// Removes a newly appended request that closed a cycle and marks its victim.
@@ -967,7 +1085,7 @@ fn remove_deadlock_request(
     graph: &mut GraphState,
     txn_id: TxnId,
 ) -> Result<(), LockError> {
-    if queue.waiters.pop_back() != Some(txn_id) {
+    if queue.waiters.pop_back().map(|request| request.txn_id) != Some(txn_id) {
         return Err(invariant("new deadlock victim was not the queue tail"));
     }
     graph.waits_for.remove(txn_id);
@@ -1002,7 +1120,7 @@ fn active_growing_transaction(
     Ok(transaction)
 }
 
-/// Removes a waiter and repairs the FIFO predecessor edge of its successor.
+/// Removes a waiter, grants newly unblocked requests, and repairs dependencies.
 ///
 /// The caller must hold this table's queue latch followed by the graph latch.
 /// Returning `false` means direct handoff won the race and the transaction now
@@ -1010,20 +1128,14 @@ fn active_growing_transaction(
 fn remove_waiter(
     queue: &mut QueueState,
     graph: &mut GraphState,
-    request: LockRequest,
+    txn_id: TxnId,
+    table_id: TableId,
 ) -> Result<bool, LockError> {
-    let LockRequest { txn_id, table_id } = request;
-    let Some(index) = queue.waiters.iter().position(|waiter| *waiter == txn_id) else {
+    let Some(index) = queue.waiters.iter().position(|waiter| waiter.txn_id == txn_id) else {
         // Ownership handoff won the race.  The lock remains transaction-owned.
         return Ok(false);
     };
-    let predecessor = if index == 0 { queue.owner } else { queue.waiters.get(index - 1).copied() }
-        .ok_or_else(|| invariant("removed waiter had no predecessor"))?;
-
     queue.waiters.remove(index);
-    if let Some(successor) = queue.waiters.get(index).copied() {
-        graph.waits_for.insert(successor, predecessor);
-    }
     if graph.waits_for.remove(txn_id).is_none() {
         return Err(invariant("removed waiter had no wait-for edge"));
     }
@@ -1034,6 +1146,7 @@ fn remove_waiter(
     }
     transaction.waiting_for = None;
     transaction.request_canceled = true;
+    grant_waiters(queue, graph)?;
     Ok(true)
 }
 
@@ -1087,6 +1200,185 @@ mod tests {
             thread::sleep(Duration::from_micros(10));
         }
         panic!("transaction did not enter its wait queue");
+    }
+
+    #[test]
+    fn shared_leases_coexist_and_cannot_authorize_writes() {
+        let manager = manager_with_transactions(&[1, 2]);
+        let lease = manager.acquire_shared(1, 7).unwrap();
+        assert_eq!(lease.mode(), LockMode::Shared);
+        assert!(lease.authorize_mode(1, 7, LockMode::Shared).is_ok());
+        assert_eq!(
+            lease.authorize(1, 7),
+            Err(LockError::InsufficientLockMode {
+                held: LockMode::Shared,
+                requested: LockMode::Exclusive,
+            })
+        );
+        assert!(matches!(
+            lease.authorize_mode(2, 7, LockMode::Shared),
+            Err(LockError::LeaseMismatch { .. })
+        ));
+        manager.acquire_shared(1, 7).unwrap();
+        manager.acquire_shared(2, 7).unwrap();
+        manager.assert_invariants();
+        rollback(&manager, 1);
+        rollback(&manager, 2);
+    }
+
+    #[test]
+    fn writer_waits_for_every_reader_and_durable_finalization() {
+        let manager = manager_with_transactions(&[1, 2, 3]);
+        manager.acquire_shared(1, 7).unwrap();
+        manager.acquire_shared(2, 7).unwrap();
+        let child = Arc::clone(&manager);
+        let writer = thread::spawn(move || child.acquire(3, 7));
+        wait_until_waiting(&manager, 3);
+        rollback(&manager, 1);
+        manager.begin_commit(2).unwrap();
+        assert!(manager.transaction_is_waiting_for(3, TableId::new(7)).unwrap());
+        manager.finish_transaction(2).unwrap();
+        assert_eq!(writer.join().unwrap().unwrap().mode(), LockMode::Exclusive);
+        rollback(&manager, 3);
+        manager.assert_invariants();
+    }
+
+    #[test]
+    fn fifo_handoff_batches_readers_without_bypassing_writers() {
+        let manager = manager_with_transactions(&[1, 2, 3, 4, 5]);
+        manager.acquire(1, 7).unwrap();
+        let mut workers = HashMap::new();
+        for (txn_id, mode) in [
+            (2, LockMode::Shared),
+            (3, LockMode::Shared),
+            (4, LockMode::Exclusive),
+            (5, LockMode::Shared),
+        ] {
+            let child = Arc::clone(&manager);
+            workers.insert(txn_id, thread::spawn(move || child.acquire_mode(txn_id, 7, mode)));
+            wait_until_waiting(&manager, txn_id);
+        }
+        rollback(&manager, 1);
+        for id in [2, 3] {
+            assert!(workers.remove(&id).unwrap().join().unwrap().is_ok());
+        }
+        assert!(manager.transaction_is_waiting_for(4, TableId::new(7)).unwrap());
+        assert!(manager.transaction_is_waiting_for(5, TableId::new(7)).unwrap());
+        rollback(&manager, 2);
+        assert!(manager.transaction_is_waiting_for(4, TableId::new(7)).unwrap());
+        rollback(&manager, 3);
+        assert!(workers.remove(&4).unwrap().join().unwrap().is_ok());
+        assert!(manager.transaction_is_waiting_for(5, TableId::new(7)).unwrap());
+        rollback(&manager, 4);
+        assert!(workers.remove(&5).unwrap().join().unwrap().is_ok());
+        rollback(&manager, 5);
+        manager.assert_invariants();
+    }
+
+    #[test]
+    fn canceling_writer_unblocks_readers_without_releasing_current_readers() {
+        let manager = manager_with_transactions(&[1, 2, 3]);
+        manager.acquire_shared(1, 7).unwrap();
+        let child = Arc::clone(&manager);
+        let writer = thread::spawn(move || child.acquire(2, 7));
+        wait_until_waiting(&manager, 2);
+        let child = Arc::clone(&manager);
+        let reader = thread::spawn(move || child.acquire_shared(3, 7));
+        wait_until_waiting(&manager, 3);
+        assert!(manager.cancel_waiting(2).unwrap());
+        assert_eq!(writer.join().unwrap(), Err(LockError::Canceled { txn_id: 2 }));
+        assert!(reader.join().unwrap().is_ok());
+        manager.assert_invariants();
+        for id in 1..=3 {
+            rollback(&manager, id);
+        }
+    }
+
+    #[test]
+    fn sole_reader_upgrades_and_shared_reacquisition_does_not_downgrade() {
+        let manager = manager_with_transactions(&[1, 2]);
+        let read = manager.acquire_shared(1, 7).unwrap();
+        let write = manager.acquire(1, 7).unwrap();
+        assert!(write.authorize_mode(1, 7, LockMode::Shared).is_ok());
+        assert!(write.authorize(1, 7).is_ok());
+        assert!(read.authorize(1, 7).is_err()); // Old capability is not promoted.
+        manager.acquire_shared(1, 7).unwrap();
+        let child = Arc::clone(&manager);
+        let reader = thread::spawn(move || child.acquire_shared(2, 7));
+        wait_until_waiting(&manager, 2);
+        rollback(&manager, 1);
+        assert!(reader.join().unwrap().is_ok());
+        rollback(&manager, 2);
+        manager.assert_invariants();
+    }
+
+    #[test]
+    fn competing_upgrades_detect_deadlock_and_retain_victims_shared_lock() {
+        let manager = manager_with_transactions(&[1, 2]);
+        manager.acquire_shared(1, 7).unwrap();
+        manager.acquire_shared(2, 7).unwrap();
+        let child = Arc::clone(&manager);
+        let upgrade = thread::spawn(move || child.acquire(1, 7));
+        wait_until_waiting(&manager, 1);
+        assert_eq!(manager.acquire(2, 7), Err(LockError::Deadlock { txn_id: 2 }));
+        assert!(manager.transaction_is_waiting_for(1, TableId::new(7)).unwrap());
+        rollback(&manager, 2);
+        assert_eq!(upgrade.join().unwrap().unwrap().mode(), LockMode::Exclusive);
+        rollback(&manager, 1);
+        manager.assert_invariants();
+    }
+
+    #[test]
+    fn upgrade_behind_writer_detects_fifo_cycle() {
+        let manager = manager_with_transactions(&[1, 2]);
+        manager.acquire_shared(1, 7).unwrap();
+        let child = Arc::clone(&manager);
+        let writer = thread::spawn(move || child.acquire(2, 7));
+        wait_until_waiting(&manager, 2);
+        assert_eq!(manager.acquire(1, 7), Err(LockError::Deadlock { txn_id: 1 }));
+        rollback(&manager, 1);
+        assert!(writer.join().unwrap().is_ok());
+        rollback(&manager, 2);
+        manager.assert_invariants();
+    }
+
+    #[test]
+    fn canceling_upgrade_retains_shared_ownership() {
+        let manager = manager_with_transactions(&[1, 2, 3]);
+        manager.acquire_shared(1, 7).unwrap();
+        manager.acquire_shared(2, 7).unwrap();
+        let child = Arc::clone(&manager);
+        let upgrade = thread::spawn(move || child.acquire(1, 7));
+        wait_until_waiting(&manager, 1);
+        assert!(manager.cancel_waiting(1).unwrap());
+        assert_eq!(upgrade.join().unwrap(), Err(LockError::Canceled { txn_id: 1 }));
+        rollback(&manager, 2);
+        let child = Arc::clone(&manager);
+        let writer = thread::spawn(move || child.acquire(3, 7));
+        wait_until_waiting(&manager, 3);
+        rollback(&manager, 1);
+        assert!(writer.join().unwrap().is_ok());
+        rollback(&manager, 3);
+        manager.assert_invariants();
+    }
+
+    #[test]
+    fn deadlock_detection_traverses_every_shared_holder() {
+        let manager = manager_with_transactions(&[1, 2, 3]);
+        manager.acquire_shared(1, 7).unwrap();
+        manager.acquire_shared(2, 7).unwrap();
+        manager.acquire(3, 8).unwrap();
+        let child = Arc::clone(&manager);
+        let writer = thread::spawn(move || child.acquire(3, 7));
+        wait_until_waiting(&manager, 3);
+        // Holder 1 has no outgoing edge; the cycle goes through holder 2.
+        assert_eq!(manager.acquire_shared(2, 8), Err(LockError::Deadlock { txn_id: 2 }));
+        rollback(&manager, 2);
+        assert!(manager.transaction_is_waiting_for(3, TableId::new(7)).unwrap());
+        rollback(&manager, 1);
+        assert!(writer.join().unwrap().is_ok());
+        rollback(&manager, 3);
+        manager.assert_invariants();
     }
 
     #[test]
@@ -1281,11 +1573,9 @@ mod tests {
         wait_until_waiting(&manager, 2); // 2 -> 1
         let m3 = Arc::clone(&manager);
         let t3 = thread::spawn(move || m3.acquire(3, 10));
-        wait_until_waiting(&manager, 3); // 3 -> 2, not directly 3 -> 1
+        wait_until_waiting(&manager, 3); // 3 depends on both 1 and earlier waiter 2.
 
-        // The complete cycle is 1 -> 3 -> 2 -> 1.  It exists only when the
-        // FIFO predecessor edge is modeled rather than linking every waiter
-        // directly to the table owner.
+        // FIFO dependencies are retained alongside incompatible-holder edges.
         assert_eq!(manager.acquire(1, 20), Err(LockError::Deadlock { txn_id: 1 }));
         rollback(&manager, 1);
         assert!(t2.join().unwrap().is_ok());
@@ -1307,9 +1597,9 @@ mod tests {
         }
 
         assert!(manager.cancel_waiting(3).unwrap());
-        assert_eq!(manager.inner.graph.lock().unwrap().waits_for.predecessor(4), Some(2));
+        assert_eq!(manager.inner.graph.lock().unwrap().waits_for.edges[&4], BTreeSet::from([1, 2]));
         assert!(manager.cancel_waiting(2).unwrap());
-        assert_eq!(manager.inner.graph.lock().unwrap().waits_for.predecessor(4), Some(1));
+        assert_eq!(manager.inner.graph.lock().unwrap().waits_for.edges[&4], BTreeSet::from([1]));
         assert!(matches!(
             threads.remove(&2).unwrap().join().unwrap(),
             Err(LockError::Canceled { txn_id: 2 })
@@ -1346,14 +1636,7 @@ mod tests {
         let mut queue_state = queue.state.lock().unwrap();
         let mut graph = manager.inner.graph.lock().unwrap();
         graph.transactions.get_mut(&2).unwrap().phase = TransactionPhase::Aborting;
-        assert!(
-            remove_waiter(
-                &mut queue_state,
-                &mut graph,
-                LockRequest { txn_id: 2, table_id: TableId::new(7) },
-            )
-            .unwrap()
-        );
+        assert!(remove_waiter(&mut queue_state, &mut graph, 2, TableId::new(7),).unwrap());
         drop(graph);
 
         manager.finish_transaction(2).unwrap();
@@ -1466,8 +1749,66 @@ mod loom_tests {
         for queue in queues.values() {
             let state = queue.state.lock().unwrap();
             assert_eq!(state.owner, None);
+            assert!(state.readers.is_empty());
             assert!(state.waiters.is_empty());
         }
+    }
+
+    #[test]
+    fn last_reader_release_hands_off_to_writer() {
+        check_model(|| {
+            let manager = LockManager::new();
+            for id in 1..=3 {
+                manager.begin_transaction(id).unwrap();
+            }
+            manager.acquire_shared(1, 7).unwrap();
+            manager.acquire_shared(2, 7).unwrap();
+            let enqueued = manager.signal_next_enqueue().unwrap();
+            let child = manager.clone();
+            let writer = thread::spawn(move || {
+                child.acquire(3, 7).unwrap();
+                rollback(&child, 3);
+            });
+            enqueued.recv().unwrap();
+            let child = manager.clone();
+            let first = thread::spawn(move || rollback(&child, 1));
+            rollback(&manager, 2);
+            first.join().unwrap();
+            writer.join().unwrap();
+            assert_quiescent(&manager);
+        });
+    }
+
+    #[test]
+    fn upgrade_cancellation_racing_last_other_reader_release_preserves_ownership() {
+        check_model(|| {
+            let manager = LockManager::new();
+            manager.begin_transaction(1).unwrap();
+            manager.begin_transaction(2).unwrap();
+            manager.acquire_shared(1, 7).unwrap();
+            manager.acquire_shared(2, 7).unwrap();
+            let enqueued = manager.signal_next_enqueue().unwrap();
+            let child = manager.clone();
+            let upgrade = thread::spawn(move || child.acquire(1, 7));
+            enqueued.recv().unwrap();
+            let child = manager.clone();
+            let release = thread::spawn(move || rollback(&child, 2));
+            let canceled = manager.cancel_waiting(1).unwrap();
+            release.join().unwrap();
+            let result = upgrade.join().unwrap();
+            if canceled {
+                assert_eq!(result, Err(LockError::Canceled { txn_id: 1 }));
+            } else {
+                assert_eq!(result.unwrap().mode(), LockMode::Exclusive);
+            }
+            let queue = manager.queue(TableId::new(7)).unwrap();
+            let state = queue.state.lock().unwrap();
+            assert!(state.holds(1, LockMode::Shared));
+            assert_eq!(state.holds(1, LockMode::Exclusive), !canceled);
+            drop(state);
+            rollback(&manager, 1);
+            assert_quiescent(&manager);
+        });
     }
 
     #[test]
