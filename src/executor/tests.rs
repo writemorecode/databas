@@ -5,8 +5,8 @@ use tempfile::tempdir;
 use super::*;
 use crate::{
     core::{
-        ColumnSchema, DataType, Database, LockError, OwnedTableRecord, PAGE_SIZE, TableId,
-        TableKey, TableSchema, Tuple, TupleSchema,
+        ColumnSchema, DataType, Database, LockError, LockMode, OwnedTableRecord, PAGE_SIZE,
+        TableId, TableKey, TableSchema, Tuple, TupleSchema,
         access::CatalogRead,
         error::{ConstraintError, InternalError, InvariantViolation, StorageError},
         test_utils::{TestTransaction, create_index, create_table},
@@ -1805,6 +1805,149 @@ fn concurrent_explicit_transactions_are_admitted() {
 }
 
 #[test]
+fn select_scans_share_table_locks_in_implicit_and_explicit_transactions() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+    execute_sql(&database, "CREATE INDEX idx_users_name ON users (name);").unwrap();
+    execute_sql(&database, "INSERT INTO users (id, name) VALUES (1, 'Ada');").unwrap();
+
+    for sql in [
+        "SELECT id FROM users;",
+        "SELECT id FROM users WHERE id == 1;",
+        "SELECT id FROM users WHERE name == 'Ada';",
+    ] {
+        for explicit in [false, true] {
+            let mut first = Session::new(&database);
+            first.execute_sql("BEGIN;").unwrap();
+            assert_eq!(integer_rows(first.execute_sql(sql).unwrap()), vec![1]);
+            thread::scope(|scope| {
+                let (send, receive) = std::sync::mpsc::channel();
+                let database = &database;
+                let reader = scope.spawn(move || {
+                    let mut second = Session::new(database);
+                    if explicit {
+                        second.execute_sql("BEGIN;").unwrap();
+                    }
+                    let rows = integer_rows(second.execute_sql(sql).unwrap());
+                    send.send(rows).unwrap();
+                    if explicit {
+                        second.execute_sql("COMMIT;").unwrap();
+                    }
+                });
+                let result = receive.recv_timeout(Duration::from_secs(2));
+                // Always release before joining, even if shared acquisition regresses.
+                first.execute_sql("ROLLBACK;").unwrap();
+                reader.join().unwrap();
+                assert_eq!(result.unwrap(), vec![1]);
+            });
+        }
+    }
+}
+
+#[test]
+fn mutations_upgrade_shared_locks_and_subsequent_select_does_not_downgrade() {
+    for (mutation, expected) in [
+        ("INSERT INTO users (id, value) VALUES (2, 2);", vec![1, 2]),
+        ("UPDATE users SET value = 2 WHERE id == 1;", vec![1]),
+        ("DELETE FROM users WHERE id == 1;", vec![]),
+    ] {
+        let dir = tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+        execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY, value INT);").unwrap();
+        execute_sql(&database, "INSERT INTO users (id, value) VALUES (1, 1);").unwrap();
+        let table_id = database.table_schema_by_name("users").unwrap().table_id.into();
+        let mut writer = Session::new(&database);
+        let mut other = Session::new(&database);
+        writer.execute_sql("BEGIN;").unwrap();
+        other.execute_sql("BEGIN;").unwrap();
+        let writer_id = writer.active_transaction_id_for_test().unwrap();
+        let reader_id = other.active_transaction_id_for_test().unwrap() + 1;
+        writer.execute_sql("SELECT id FROM users;").unwrap();
+        other.execute_sql("SELECT id FROM users;").unwrap();
+
+        thread::scope(|scope| {
+            let (ready_send, ready_receive) = std::sync::mpsc::channel();
+            let (finish_send, finish_receive) = std::sync::mpsc::channel();
+            let worker = scope.spawn(move || {
+                writer.execute_sql(mutation).unwrap();
+                writer.execute_sql("SELECT id FROM users;").unwrap();
+                ready_send.send(()).unwrap();
+                finish_receive.recv().unwrap();
+                writer.execute_sql("COMMIT;").unwrap();
+            });
+            wait_until_transaction_waits_for(&database, writer_id, table_id);
+            other.execute_sql("COMMIT;").unwrap();
+            ready_receive.recv_timeout(Duration::from_secs(2)).unwrap();
+            let reader = scope
+                .spawn(|| integer_rows(execute_sql(&database, "SELECT id FROM users;").unwrap()));
+            wait_until_transaction_waits_for(&database, reader_id, table_id);
+            finish_send.send(()).unwrap();
+            worker.join().unwrap();
+            assert_eq!(reader.join().unwrap(), expected);
+        });
+    }
+}
+
+#[test]
+fn session_upgrade_deadlock_rolls_back_victim_and_unblocks_writer() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY, value INT);").unwrap();
+    execute_sql(&database, "INSERT INTO users (id, value) VALUES (1, 1);").unwrap();
+    let table_id = database.table_schema_by_name("users").unwrap().table_id.into();
+    let mut first = Session::new(&database);
+    let mut second = Session::new(&database);
+    first.execute_sql("BEGIN;").unwrap();
+    second.execute_sql("BEGIN;").unwrap();
+    first.execute_sql("SELECT id FROM users;").unwrap();
+    second.execute_sql("SELECT id FROM users;").unwrap();
+    let first_id = first.active_transaction_id_for_test().unwrap();
+    thread::scope(|scope| {
+        let winner = scope.spawn(move || {
+            first.execute_sql("UPDATE users SET value = 2 WHERE id == 1;").unwrap();
+            first.execute_sql("COMMIT;").unwrap();
+        });
+        wait_until_transaction_waits_for(&database, first_id, table_id);
+        assert!(matches!(
+            second.execute_sql("DELETE FROM users WHERE id == 1;"),
+            Err(DatabaseError::Storage(StorageError::Lock(LockError::Deadlock { .. })))
+        ));
+        assert_eq!(second.active_transaction_id_for_test(), None);
+        winner.join().unwrap();
+    });
+    assert_eq!(integer_rows(execute_sql(&database, "SELECT value FROM users;").unwrap()), vec![2]);
+}
+
+#[test]
+fn shared_transaction_gateway_rejects_row_mutations() {
+    let dir = tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY);").unwrap();
+    execute_sql(&database, "INSERT INTO users (id) VALUES (1);").unwrap();
+    let table = database.table_schema_by_name("users").unwrap();
+    let txn_id = database.begin_transaction().unwrap();
+    let leases = database
+        .acquire_table_leases(txn_id, &[(table.table_id.into(), LockMode::Shared)])
+        .unwrap();
+    let transaction = database.transaction(txn_id, leases);
+    let record = OwnedTableRecord {
+        table_key: 1,
+        record: Tuple::new(vec![Value::Integer(1)]).to_bytes().unwrap().into(),
+    };
+    assert!(transaction.scan_table(&table).is_ok());
+    for result in [
+        transaction.insert_table_row(&table, vec![Value::Integer(2)]).map(|_| ()),
+        transaction.update_table_row(&table, &record, vec![Value::Integer(2)]).map(|_| ()),
+        transaction.delete_table_row(&table, &record),
+    ] {
+        assert!(matches!(result, Err(StorageError::Lock(_))));
+    }
+    database.rollback_transaction(txn_id).unwrap();
+    assert_eq!(integer_rows(execute_sql(&database, "SELECT id FROM users;").unwrap()), vec![1]);
+}
+
+#[test]
 fn same_table_waiter_after_commit_observes_committed_row() {
     let dir = tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
@@ -2302,7 +2445,9 @@ fn uncommitted_flushed_insert_is_undone_during_recovery() {
     database.flush().unwrap();
     let txn_id = database.begin_transaction().unwrap();
     let table = database.table_schema_by_name("users").unwrap();
-    let leases = database.acquire_table_leases(txn_id, &[table.table_id.into()]).unwrap();
+    let leases = database
+        .acquire_table_leases(txn_id, &[(table.table_id.into(), LockMode::Exclusive)])
+        .unwrap();
     let transaction = database.transaction(txn_id, leases);
 
     execute_insert_values(

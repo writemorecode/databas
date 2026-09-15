@@ -1,7 +1,7 @@
 use std::ops::Deref;
 
 use crate::core::{
-    Database, IndexSchema, StorageResult, TableId, TableSchema, Transaction, TupleSchema,
+    Database, IndexSchema, LockMode, StorageResult, TableId, TableSchema, Transaction, TupleSchema,
     database::StatementTransactionMode,
 };
 
@@ -53,7 +53,8 @@ pub(crate) struct TestTransaction<'db> {
 impl<'db> TestTransaction<'db> {
     pub(crate) fn begin(database: &'db Database, table_ids: &[TableId]) -> StorageResult<Self> {
         let txn_id = database.begin_transaction()?;
-        let leases = match database.acquire_table_leases(txn_id, table_ids) {
+        let table_locks = table_ids.iter().map(|&id| (id, LockMode::Exclusive)).collect::<Vec<_>>();
+        let leases = match database.acquire_table_leases(txn_id, &table_locks) {
             Ok(leases) => leases,
             Err(error) => {
                 database.rollback_transaction(txn_id)?;

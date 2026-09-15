@@ -2,14 +2,18 @@
 //!
 //! A session is the top-level SQL execution context for one database handle. It
 //! dispatches parsed SQL items, keeps explicit transaction state, and preserves
-//! the implicit transaction behavior for standalone mutating statements.
+//! the implicit transaction behavior for standalone statements. Read scans use
+//! shared table locks; mutations acquire or upgrade to exclusive locks before
+//! execution. All locks remain transaction-owned until commit or rollback.
+
+use std::collections::BTreeMap;
 
 use thiserror::Error;
 
 use crate::storage::transaction_manager::TransactionSavepoint;
 use crate::{
     core::{
-        Database,
+        Database, LockMode, TableId,
         database::StatementTransactionMode,
         error::{InternalError, InvariantViolation, StorageError},
         lock_manager::TableLease,
@@ -91,13 +95,13 @@ impl<'db> Session<'db> {
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
         let transaction_mode = statement_transaction_mode(&statement);
         let plan = Planner::new(self.database).plan_physical_statement(&statement)?;
-        let table_ids = plan_table_ids(&plan);
+        let table_locks = plan_table_locks(&plan);
 
         if let Some(txn_id) = self.active_txn {
             if transaction_mode == StatementTransactionMode::Ddl {
                 self.database.acquire_ddl_gate(txn_id)?;
             }
-            let leases = match self.database.acquire_table_leases(txn_id, &table_ids) {
+            let leases = match self.database.acquire_table_leases(txn_id, &table_locks) {
                 Ok(leases) => leases,
                 Err(error) => {
                     self.database.rollback_transaction(txn_id)?;
@@ -107,7 +111,7 @@ impl<'db> Session<'db> {
             };
             self.execute_explicit_transaction_statement(txn_id, leases, plan)
         } else {
-            self.execute_implicit_transaction(plan, table_ids, transaction_mode)
+            self.execute_implicit_transaction(plan, table_locks, transaction_mode)
         }
     }
 
@@ -199,11 +203,11 @@ impl<'db> Session<'db> {
     fn execute_implicit_transaction<'sql>(
         &self,
         plan: PhysicalPlan,
-        table_ids: Vec<crate::core::TableId>,
+        table_locks: Vec<(TableId, LockMode)>,
         mode: StatementTransactionMode,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
         let txn_id = self.database.begin_statement_transaction(mode)?;
-        let leases = match self.database.acquire_table_leases(txn_id, &table_ids) {
+        let leases = match self.database.acquire_table_leases(txn_id, &table_locks) {
             Ok(leases) => leases,
             Err(error) => {
                 self.database.rollback_transaction(txn_id)?;
@@ -256,27 +260,69 @@ fn statement_transaction_mode(statement: &Statement<'_>) -> StatementTransaction
     }
 }
 
-fn plan_table_ids(plan: &PhysicalPlan) -> Vec<crate::core::TableId> {
-    let mut table_ids = Vec::new();
+/// Collects the strongest required mode per table in deterministic ID order.
+/// Mutation targets are locked exclusively before execution, even when their
+/// input is a read scan. Existing shared ownership is upgraded by the manager.
+fn plan_table_locks(plan: &PhysicalPlan) -> Vec<(TableId, LockMode)> {
+    // EXPLAIN formats its input without executing scans or mutations.
+    if matches!(plan.root(), PhysicalPlanNode::Explain { .. }) {
+        return Vec::new();
+    }
+    let mut locks = BTreeMap::new();
     for node in plan.iter() {
-        match node {
+        let (table, mode) = match node {
             PhysicalPlanNode::CreateIndex { table, .. }
             | PhysicalPlanNode::InsertValues { table, .. }
             | PhysicalPlanNode::Update { table, .. }
-            | PhysicalPlanNode::Delete { table, .. }
-            | PhysicalPlanNode::FullTableScan { table }
-            | PhysicalPlanNode::PrimaryKeyRangeScan { table, .. } => {
-                table_ids.push(table.table_id.into());
-            }
-            PhysicalPlanNode::SecondaryIndexScan { scan } => {
-                table_ids.push(scan.table.table_id.into());
-            }
-            _ => {}
+            | PhysicalPlanNode::Delete { table, .. } => (table, LockMode::Exclusive),
+            PhysicalPlanNode::FullTableScan { table }
+            | PhysicalPlanNode::PrimaryKeyRangeScan { table, .. } => (table, LockMode::Shared),
+            PhysicalPlanNode::SecondaryIndexScan { scan } => (&scan.table, LockMode::Shared),
+            _ => continue,
+        };
+        locks
+            .entry(TableId::from(table.table_id))
+            .and_modify(|held| {
+                if mode == LockMode::Exclusive {
+                    *held = mode;
+                }
+            })
+            .or_insert(mode);
+    }
+    locks.into_iter().collect()
+}
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    use super::*;
+    use crate::core::access::CatalogRead;
+
+    #[test]
+    fn plans_request_the_strongest_table_mode_and_explain_requests_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = Database::create(dir.path().join("test.db")).unwrap();
+        Session::new(&database)
+            .execute_sql("CREATE TABLE users (id INT PRIMARY KEY, value INT);")
+            .unwrap();
+        let table_id = database.table_schema_by_name("users").unwrap().table_id.into();
+        for (sql, mode) in [
+            ("SELECT id FROM users;", Some(LockMode::Shared)),
+            ("INSERT INTO users (id, value) VALUES (1, 1);", Some(LockMode::Exclusive)),
+            ("UPDATE users SET value = 2 WHERE id == 1;", Some(LockMode::Exclusive)),
+            ("DELETE FROM users WHERE id == 1;", Some(LockMode::Exclusive)),
+            ("CREATE INDEX idx_users_value ON users (value);", Some(LockMode::Exclusive)),
+            ("SELECT 1;", None),
+            ("EXPLAIN SELECT id FROM users;", None),
+            ("EXPLAIN UPDATE users SET value = 2;", None),
+        ] {
+            let SqlItem::Statement(statement) = Parser::new(sql).item().unwrap() else {
+                panic!("expected statement");
+            };
+            let plan = Planner::new(&database).plan_physical_statement(&statement).unwrap();
+            let expected = mode.map(|mode| (table_id, mode)).into_iter().collect::<Vec<_>>();
+            assert_eq!(plan_table_locks(&plan), expected, "{sql}");
         }
     }
-    table_ids.sort_unstable();
-    table_ids.dedup();
-    table_ids
 }
 
 fn is_no_active_transaction(error: &StorageError) -> bool {
