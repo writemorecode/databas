@@ -124,11 +124,6 @@ impl Storage {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn unlock_for_crash_for_test(&self) -> StorageResult<()> {
-        self.runtime.unlock_for_crash_for_test()
-    }
-
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
         self.runtime.begin_transaction()
     }
@@ -174,16 +169,6 @@ impl Storage {
         self.runtime.sync_database_file()?;
         self.runtime.finish_rollback(txn_id)?;
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn force_next_lsn_exhausted_for_test(&self) -> StorageResult<()> {
-        self.runtime.force_next_lsn_exhausted_for_test()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_next_savepoint_rollback_for_test(&self) -> StorageResult<()> {
-        self.runtime.fail_next_savepoint_rollback_for_test()
     }
 
     #[cfg(test)]
