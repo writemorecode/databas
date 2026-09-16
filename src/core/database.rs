@@ -7,8 +7,6 @@ use crate::core::{
     lock_manager::{LockManager, LockMode, TableLease},
 };
 use crate::relational::catalog_manager::CatalogManager;
-#[cfg(test)]
-use crate::relational::cursor::{IndexCursor, TableCursor};
 use crate::storage::{
     engine::Storage, log_manager::TxnId, transaction_manager::TransactionSavepoint,
 };
@@ -78,11 +76,6 @@ impl Database {
     /// page pin prevents a consistent flush.
     pub fn flush(&self) -> StorageResult<()> {
         self.catalog.flush()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn unlock_for_crash_for_test(&self) {
-        self.storage.unlock_for_crash_for_test().unwrap();
     }
 
     /// Disables new lock requests and cancels pending waits after a fatal error.
@@ -172,37 +165,8 @@ impl Database {
     }
 
     #[cfg(test)]
-    pub(crate) fn force_next_lsn_exhausted_for_test(&self) {
-        self.storage.force_next_lsn_exhausted_for_test().unwrap();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_next_savepoint_rollback_for_test(&self) {
-        self.storage.fail_next_savepoint_rollback_for_test().unwrap();
-    }
-
-    #[cfg(test)]
     pub(crate) fn fail_next_wal_flush_for_test(&self) {
         self.storage.fail_next_wal_flush_for_test().unwrap();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn transaction_is_waiting_for_test(
-        &self,
-        txn_id: TxnId,
-        table_id: TableId,
-    ) -> StorageResult<bool> {
-        Ok(self.locks.transaction_is_waiting_for(txn_id, table_id)?)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn table_cursor_by_name(&self, name: &str) -> StorageResult<TableCursor> {
-        self.catalog.table_cursor_by_name(name)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn index_cursor_by_name(&self, name: &str) -> StorageResult<IndexCursor> {
-        self.catalog.index_cursor_by_name(name)
     }
 
     pub(super) fn catalog(&self) -> &CatalogManager {

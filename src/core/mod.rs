@@ -11,8 +11,6 @@ pub(crate) mod access;
 pub(crate) mod database;
 pub mod error;
 pub mod lock_manager;
-#[cfg(test)]
-pub(crate) mod test_utils;
 pub(crate) mod transaction;
 mod types;
 
