@@ -73,15 +73,6 @@ impl DiskManager {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn unlock_for_crash_for_test(&mut self) -> DiskManagerResult<()> {
-        if self.locked {
-            self.file.unlock()?;
-            self.locked = false;
-        }
-        Ok(())
-    }
-
     pub(crate) fn page_count(&self) -> u64 {
         self.page_count
     }

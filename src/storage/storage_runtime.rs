@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-#[cfg(test)]
-use crate::storage::transaction_manager::FaultInjectingTransactionManager;
 use crate::storage::{
     disk_manager::DiskManager,
     log_manager::{LogManager, Lsn, TxnId},
@@ -19,19 +17,10 @@ use crate::{
     sync::{Mutex, MutexGuard},
 };
 
-#[cfg(not(test))]
 type ActiveTransactionManager = TransactionManager;
-#[cfg(test)]
-type ActiveTransactionManager = FaultInjectingTransactionManager;
 
-#[cfg(not(test))]
 fn make_transaction_manager(max_txn_id: TxnId) -> ActiveTransactionManager {
     TransactionManager::new(max_txn_id)
-}
-
-#[cfg(test)]
-fn make_transaction_manager(max_txn_id: TxnId) -> ActiveTransactionManager {
-    FaultInjectingTransactionManager::new(TransactionManager::new(max_txn_id))
 }
 
 /// Shared concrete storage runtime for database pages and the write-ahead log.
@@ -105,11 +94,6 @@ impl StorageRuntime {
         Ok(Self::lock(&self.disk, "disk manager")?.sync()?)
     }
 
-    #[cfg(test)]
-    pub(crate) fn unlock_for_crash_for_test(&self) -> StorageResult<()> {
-        Ok(Self::lock(&self.disk, "disk manager")?.unlock_for_crash_for_test()?)
-    }
-
     pub(crate) fn flush_wal_through(&self, lsn: Lsn) -> StorageResult<()> {
         Self::lock(&self.log, "log manager")?.flush_through(lsn)?;
         Ok(())
@@ -118,12 +102,6 @@ impl StorageRuntime {
     #[cfg(test)]
     pub(crate) fn force_next_lsn_exhausted_for_test(&self) -> StorageResult<()> {
         Self::lock(&self.log, "log manager")?.force_next_lsn_exhausted_for_test();
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_next_savepoint_rollback_for_test(&self) -> StorageResult<()> {
-        Self::lock(&self.transactions, "transaction manager")?.fail_next_savepoint_rollback();
         Ok(())
     }
 
