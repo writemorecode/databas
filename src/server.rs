@@ -242,8 +242,13 @@ fn serve_connection(
 fn configure_stream(stream: &TcpStream) -> io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT))?;
-    stream.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT))?;
+    if cfg!(debug_assertions) {
+        stream.set_read_timeout(None)?;
+        stream.set_write_timeout(None)?;
+    } else {
+        stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT))?;
+        stream.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT))?;
+    }
     Ok(())
 }
 
