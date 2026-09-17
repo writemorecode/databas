@@ -237,16 +237,6 @@ impl TreeCursor {
         Ok(cells)
     }
 
-    #[cfg(all(test, not(loom)))]
-    pub(super) fn leaf_cell_storage_is_borrowed_for_test(cell: &LeafSplitCell<'_>) -> (bool, bool) {
-        (matches!(cell.key, Cow::Borrowed(_)), matches!(cell.value, Cow::Borrowed(_)))
-    }
-
-    #[cfg(all(test, not(loom)))]
-    pub(super) fn leaf_cell_storage_is_owned_for_test(cell: &LeafSplitCell<'_>) -> (bool, bool) {
-        (matches!(cell.key, Cow::Owned(_)), matches!(cell.value, Cow::Owned(_)))
-    }
-
     /// Rebuilds a split leaf pair from ordered materialized cells.
     pub(super) fn split_leaf_cells(
         &mut self,
@@ -514,5 +504,87 @@ impl TreeCursor {
         {
             self.set_positioned_state(to_page_id, slot_index);
         }
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    use std::{borrow::Cow, collections::BTreeMap};
+
+    use fastrand::Rng;
+
+    use super::*;
+    use crate::storage::btree::test_support::{
+        MAX_RECORDS, TARGET_HEIGHT, assert_matches, cursor, height, oversized_key, random_record,
+        record_bytes, scan,
+    };
+
+    #[ignore = "slow because of fsync"]
+    #[test]
+    fn random_inserts_reach_four_levels_and_remain_searchable() {
+        let mut cursor = cursor(256);
+        let mut rng = Rng::with_seed(0xd47a_ba5e_b7ee_2026);
+        let mut model = BTreeMap::new();
+
+        for _ in 0..MAX_RECORDS {
+            let (key, value) = random_record(&mut rng, &model);
+            cursor.insert(&key, &value).unwrap();
+            model.insert(key, value);
+            if height(&cursor) == TARGET_HEIGHT {
+                break;
+            }
+        }
+
+        assert_eq!(height(&cursor), TARGET_HEIGHT);
+        assert!(model.values().any(|value| value.len() > PAGE_SIZE));
+        assert_matches(&mut cursor, &model);
+    }
+
+    #[test]
+    fn oversized_keys_route_through_interior_pages() {
+        let mut cursor = cursor(256);
+        let mut model = BTreeMap::new();
+
+        for index in 0..48 {
+            let key = oversized_key(index);
+            let value = format!("value-{index}").into_bytes();
+            cursor.insert(&key, &value).unwrap();
+            model.insert(key, value);
+        }
+
+        assert!(height(&cursor) >= 2, "oversized separators should split the root");
+        for (key, value) in &model {
+            assert_eq!(
+                record_bytes(&cursor.get(key).unwrap().unwrap()),
+                (key.clone(), value.clone())
+            );
+            assert!(cursor.seek_to_key(key).unwrap());
+            assert_eq!(
+                record_bytes(&cursor.current().unwrap().unwrap()),
+                (key.clone(), value.clone())
+            );
+        }
+        assert_eq!(scan(&mut cursor), model);
+    }
+
+    #[test]
+    fn leaf_snapshots_borrow_inline_cells_and_own_overflow_cells() {
+        let mut cursor = cursor(8);
+        cursor.insert(b"inline", b"value").unwrap();
+        let overflow = vec![42; PAGE_SIZE];
+        cursor.insert(b"overflow", &overflow).unwrap();
+
+        let inline_page = cursor.leaf_page_for_key(b"inline").unwrap();
+        let mut inline_bytes = [0; PAGE_SIZE];
+        let inline = cursor.snapshot_leaf_cells(inline_page, &mut inline_bytes).unwrap();
+        let inline = inline.iter().find(|cell| cell.key() == b"inline").unwrap();
+        assert!(matches!((&inline.key, &inline.value), (Cow::Borrowed(_), Cow::Borrowed(_))));
+
+        let overflow_page = cursor.leaf_page_for_key(b"overflow").unwrap();
+        let mut overflow_bytes = [0; PAGE_SIZE];
+        let cells = cursor.snapshot_leaf_cells(overflow_page, &mut overflow_bytes).unwrap();
+        let cell = cells.iter().find(|cell| cell.key() == b"overflow").unwrap();
+        assert_eq!(cell.value(), overflow);
+        assert!(matches!((&cell.key, &cell.value), (Cow::Owned(_), Cow::Owned(_))));
     }
 }
