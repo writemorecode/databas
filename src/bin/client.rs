@@ -1,12 +1,13 @@
 use std::{
     env,
     error::Error,
-    io::{self, BufRead, Write},
+    io::{self, Write},
     process,
     time::Instant,
 };
 
 use databas::client::{Client, ClientError, QueryResult};
+use rustyline::{DefaultEditor, error::ReadlineError};
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:5432";
 
@@ -58,25 +59,32 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Cli, ()> {
     Ok(Cli { address, database_name: database_name.ok_or(())?, command })
 }
 
+const HISTORY_FILE: &str = ".databas_history";
+
 fn run_repl(client: &mut Client) -> Result<(), Box<dyn Error>> {
     println!("Databas");
-    let mut input = io::stdin().lock();
-    let mut buffer = String::new();
+    let mut editor = DefaultEditor::new()?;
+    match editor.load_history(HISTORY_FILE) {
+        Ok(()) => {}
+        Err(ReadlineError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
 
     loop {
-        buffer.clear();
-        print!(">>> ");
-        io::stdout().flush()?;
-        if input.read_line(&mut buffer)? == 0 {
-            break;
-        }
-        let sql = buffer.trim_end();
+        let line = match editor.readline(">>> ") {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => break,
+            Err(error) => return Err(error.into()),
+        };
+        let sql = line.trim();
         if sql.is_empty() {
             continue;
         }
         if sql == ".exit" {
             break;
         }
+        editor.add_history_entry(sql)?;
 
         let timer = Instant::now();
         match client.execute(sql) {
@@ -86,6 +94,7 @@ fn run_repl(client: &mut Client) -> Result<(), Box<dyn Error>> {
         }
         println!("Executed query in {:?}.", timer.elapsed());
     }
+    editor.save_history(HISTORY_FILE)?;
     Ok(())
 }
 
