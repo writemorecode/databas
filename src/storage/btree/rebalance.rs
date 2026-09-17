@@ -810,3 +810,113 @@ impl TreeCursor {
         }
     }
 }
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    use std::{collections::BTreeMap, sync::Arc};
+
+    use fastrand::Rng;
+    use tempfile::NamedTempFile;
+
+    use super::*;
+    use crate::{
+        core::error::LimitExceededError,
+        storage::{
+            btree::test_support::{
+                assert_matches, cursor, oversized_key, page_cache, random_record, scan,
+            },
+            disk_manager::DiskManager,
+            storage_runtime::StorageRuntime,
+        },
+    };
+
+    #[ignore = "slow because of fsync"]
+    #[test]
+    fn random_deletes_rebalance_and_empty_the_tree() {
+        let mut cursor = cursor(256);
+        let mut rng = Rng::with_seed(0x9dd0_c312_741f_2026);
+        let mut model = BTreeMap::new();
+
+        for _ in 0..200 {
+            let (key, value) = random_record(&mut rng, &model);
+            cursor.insert(&key, &value).unwrap();
+            model.insert(key, value);
+        }
+        assert_matches(&mut cursor, &model);
+
+        let mut keys = model.keys().cloned().collect::<Vec<_>>();
+        let sorted_keys = keys.clone();
+        while keys == sorted_keys {
+            rng.shuffle(&mut keys);
+        }
+        for key in &keys {
+            cursor.delete(key).unwrap();
+        }
+
+        assert!(scan(&mut cursor).is_empty());
+        for key in keys {
+            assert!(cursor.get(&key).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn failed_interior_rewrite_leaves_the_page_unchanged() {
+        let page_cache = page_cache(16);
+        let (page_id, pin) = page_cache.new_page(None).unwrap();
+        {
+            let mut guard = pin.write(None).unwrap();
+            let mut page = RawInterior::<Write<'_>>::initialize_with_rightmost(guard.page_mut(), 2);
+            page.insert_payload_at(0, 0, 6, None, b"stable").unwrap();
+        }
+        drop(pin);
+        let cursor = TreeCursor::new(page_cache.clone(), page_id).unwrap();
+        let original = *page_cache.fetch_page(page_id).unwrap().read().unwrap().page();
+        let children = (0u8..16)
+            .map(|index| ChildEntry {
+                page_id: 100 + u64::from(index),
+                max_key: Some(vec![index; PAGE_SIZE]),
+            })
+            .collect::<Vec<_>>();
+
+        assert!(matches!(
+            cursor.rewrite_interior_page(page_id, &children, None, None),
+            Err(StorageError::LimitExceeded(LimitExceededError::PageFull { .. }))
+        ));
+        let rewritten = *page_cache.fetch_page(page_id).unwrap().read().unwrap().page();
+        assert_eq!(rewritten, original);
+    }
+
+    #[test]
+    fn unchanged_separator_refresh_does_not_allocate_pages() {
+        let file = NamedTempFile::new().unwrap();
+        let disk = DiskManager::new(file.path()).unwrap();
+        let runtime = Arc::new(StorageRuntime::new(file.path().to_path_buf(), disk).unwrap());
+        let page_cache = PageCache::new(runtime, 256).unwrap();
+        let root = initialize_empty_root(&page_cache, None).unwrap();
+        let mut cursor = TreeCursor::new(page_cache, root).unwrap();
+
+        for index in 0..96 {
+            cursor.insert(&oversized_key(index), b"value").unwrap();
+        }
+        let (_, path) = cursor.leaf_page_path_for_key(&oversized_key(0)).unwrap();
+        assert!(!path.is_empty());
+        cursor.refresh_path_separators(&path).unwrap();
+        let len = file.path().metadata().unwrap().len();
+
+        cursor.refresh_path_separators(&path).unwrap();
+
+        assert_eq!(file.path().metadata().unwrap().len(), len);
+    }
+
+    #[test]
+    fn leaf_max_key_does_not_materialize_an_overflow_value() {
+        let mut cursor = cursor(8);
+        let value = vec![7; MAX_INLINE_OVERFLOW_PAYLOAD_BYTES - b"bravo".len()];
+        cursor.insert(b"alpha", b"small").unwrap();
+        cursor.insert(b"bravo", &value).unwrap();
+
+        let page_id = cursor.leaf_page_for_key(b"bravo").unwrap();
+
+        assert_eq!(cursor.read_leaf_max_key(page_id).unwrap().as_deref(), Some(&b"bravo"[..]));
+    }
+}

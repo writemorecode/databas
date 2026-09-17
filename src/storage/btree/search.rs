@@ -591,3 +591,54 @@ impl TreeCursor {
         self.step_record()
     }
 }
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    use super::*;
+    use crate::storage::btree::test_support::{cursor, oversized_key, record_bytes};
+
+    #[test]
+    fn binary_search_ignores_an_inline_keys_overflow_value() {
+        let mut cursor = cursor(8);
+        let value = vec![7; PAGE_SIZE];
+        cursor.insert(b"alpha", b"small").unwrap();
+        cursor.insert(b"bravo", &value).unwrap();
+        cursor.insert(b"charlie", b"small").unwrap();
+
+        let record = cursor.get(b"bravo").unwrap().unwrap();
+
+        assert_eq!(record_bytes(&record), (b"bravo".to_vec(), value));
+        assert!(cursor.get(b"between").unwrap().is_none());
+    }
+
+    #[test]
+    fn binary_search_compares_keys_stored_in_overflow_pages() {
+        let mut cursor = cursor(16);
+        let key = oversized_key(7);
+        let value = vec![11; PAGE_SIZE];
+        cursor.insert(&key, &value).unwrap();
+
+        let record = cursor.get(&key).unwrap().unwrap();
+
+        assert_eq!(record_bytes(&record), (key, value));
+    }
+
+    #[test]
+    fn seek_after_key_uses_a_strict_exclusive_bound() {
+        let mut cursor = cursor(8);
+        for (key, value) in [
+            (&b"alpha"[..], &b"one"[..]),
+            (&b"bravo"[..], &b"two"[..]),
+            (&b"charlie"[..], &b"three"[..]),
+        ] {
+            cursor.insert(key, value).unwrap();
+        }
+
+        assert!(cursor.seek_after_key(b"alpha").unwrap());
+        assert_eq!(record_bytes(&cursor.current().unwrap().unwrap()).0, b"bravo");
+        assert!(cursor.seek_after_key(b"between").unwrap());
+        assert_eq!(record_bytes(&cursor.current().unwrap().unwrap()).0, b"bravo");
+        assert!(!cursor.seek_after_key(b"charlie").unwrap());
+        assert!(cursor.current().unwrap().is_none());
+    }
+}

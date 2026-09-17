@@ -86,3 +86,55 @@ pub(super) fn expect_page_kind(
         }))
     }
 }
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::storage::btree::test_support::{
+        assert_matches, cursor, height, oversized_key, scan,
+    };
+
+    #[test]
+    fn root_page_stays_stable_as_splits_add_levels() {
+        let mut cursor = cursor(256);
+        let root_page_id = cursor.root_page_id();
+        let mut model = BTreeMap::new();
+
+        for index in 0..256_u16 {
+            let key = oversized_key(index);
+            let value = format!("value-{index}").into_bytes();
+            let epoch = cursor.mutation_epoch();
+            cursor.insert(&key, &value).unwrap();
+            model.insert(key, value);
+
+            assert_eq!(cursor.root_page_id(), root_page_id);
+            assert_eq!(cursor.mutation_epoch(), epoch.wrapping_add(1));
+            if height(&cursor) >= 3 {
+                break;
+            }
+        }
+
+        assert!(height(&cursor) >= 3, "an interior root should have split");
+        assert_matches(&mut cursor, &model);
+    }
+
+    #[test]
+    fn root_page_stays_stable_when_the_tree_shrinks() {
+        let mut cursor = cursor(256);
+        let root_page_id = cursor.root_page_id();
+        let keys = (0..512_u32).map(u32::to_be_bytes).collect::<Vec<_>>();
+
+        for key in &keys {
+            cursor.insert(key, b"value").unwrap();
+        }
+        assert!(height(&cursor) >= 2, "the root should have split");
+
+        for key in keys {
+            cursor.delete(&key).unwrap();
+            assert_eq!(cursor.root_page_id(), root_page_id);
+        }
+        assert_eq!(height(&cursor), 1);
+        assert!(scan(&mut cursor).is_empty());
+    }
+}

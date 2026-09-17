@@ -187,3 +187,45 @@ impl fmt::Debug for Record {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    use super::*;
+    use crate::storage::btree::test_support::{cursor, record_bytes};
+
+    #[test]
+    fn inline_records_remain_page_resident() {
+        let mut cursor = cursor(4);
+        cursor.insert(b"alpha", b"value").unwrap();
+
+        let record = cursor.get(b"alpha").unwrap().unwrap();
+
+        assert!(matches!(record.storage, RecordStorage::PageResident { .. }));
+        assert_eq!(record_bytes(&record), (b"alpha".to_vec(), b"value".to_vec()));
+    }
+
+    #[test]
+    fn overflow_records_are_materialized() {
+        let mut cursor = cursor(4);
+        let value = vec![42; PAGE_SIZE];
+        cursor.insert(b"alpha", &value).unwrap();
+
+        let record = cursor.get(b"alpha").unwrap().unwrap();
+
+        assert!(matches!(record.storage, RecordStorage::Materialized { .. }));
+        assert_eq!(record_bytes(&record), (b"alpha".to_vec(), value));
+    }
+
+    #[test]
+    fn page_resident_records_convert_to_owned_snapshots() {
+        let mut cursor = cursor(4);
+        cursor.insert(b"alpha", b"value").unwrap();
+
+        let owned = cursor.get(b"alpha").unwrap().unwrap().to_owned_record().unwrap();
+
+        owned.with_key_value(|key, value| {
+            assert_eq!(key, b"alpha");
+            assert_eq!(value, b"value");
+        });
+    }
+}
