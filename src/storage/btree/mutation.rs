@@ -246,3 +246,141 @@ impl TreeCursor {
         Ok(())
     }
 }
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use fastrand::Rng;
+
+    use super::*;
+    use crate::storage::btree::test_support::{
+        assert_matches, cursor, random_bytes, random_key, random_record, record_bytes,
+    };
+
+    #[test]
+    fn mutations_advance_the_shared_epoch_only_when_successful() {
+        let mut cursor = cursor(32);
+        let observer = TreeCursor::new(cursor.page_cache.clone(), cursor.root_page_id()).unwrap();
+        let oversized = vec![0; u16::MAX as usize];
+
+        for mutation in [
+            cursor.update(b"missing", b"value"),
+            cursor.delete(b"missing"),
+            cursor.insert(b"oversized", &oversized),
+        ] {
+            assert!(mutation.is_err());
+            assert_eq!(observer.mutation_epoch(), 0);
+        }
+
+        cursor.insert(b"key", b"value").unwrap();
+        assert_eq!(observer.mutation_epoch(), 1);
+        for mutation in [cursor.insert(b"key", b"duplicate"), cursor.update(b"key", &oversized)] {
+            assert!(mutation.is_err());
+            assert_eq!(observer.mutation_epoch(), 1);
+        }
+
+        cursor.update(b"key", b"updated").unwrap();
+        assert_eq!(observer.mutation_epoch(), 2);
+        cursor.delete(b"key").unwrap();
+        assert_eq!(observer.mutation_epoch(), 3);
+    }
+
+    #[ignore = "slow because of fsync"]
+    #[test]
+    fn random_updates_replace_inline_and_overflow_values() {
+        let mut cursor = cursor(256);
+        let mut rng = Rng::with_seed(0xa11d_47e5_2026_0425);
+        let mut model = BTreeMap::new();
+
+        for index in 0..200 {
+            let (key, mut value) = random_record(&mut rng, &model);
+            if index % 9 == 0 {
+                let len = PAGE_SIZE + rng.usize(1..=PAGE_SIZE);
+                value = random_bytes(&mut rng, len);
+            }
+            cursor.insert(&key, &value).unwrap();
+            model.insert(key, value);
+        }
+
+        let mut keys = model.keys().cloned().collect::<Vec<_>>();
+        rng.shuffle(&mut keys);
+        for (index, key) in keys.into_iter().enumerate() {
+            let len = if index % 9 == 0 {
+                PAGE_SIZE + rng.usize(1..=PAGE_SIZE)
+            } else {
+                rng.usize(8..=512)
+            };
+            let old_value = &model[&key];
+            let value = loop {
+                let candidate = random_bytes(&mut rng, len);
+                if candidate != *old_value {
+                    break candidate;
+                }
+            };
+            cursor.update(&key, &value).unwrap();
+            model.insert(key, value);
+        }
+
+        assert!(model.values().any(|value| value.len() > PAGE_SIZE));
+        assert_matches(&mut cursor, &model);
+    }
+
+    #[ignore = "slow because of fsync"]
+    #[test]
+    fn random_mixed_operations_match_a_btreemap_model() {
+        let mut cursor = cursor(256);
+        let mut rng = Rng::with_seed(0x741e_5afe_2026_0429);
+        let mut model = BTreeMap::new();
+
+        for step in 0..3_000 {
+            match if model.len() < 128 { 0 } else { rng.u8(0..100) } {
+                0..=34 => {
+                    let (key, mut value) = random_record(&mut rng, &model);
+                    if step % 31 == 0 {
+                        let len = PAGE_SIZE + rng.usize(1..=PAGE_SIZE);
+                        value = random_bytes(&mut rng, len);
+                    }
+                    cursor.insert(&key, &value).unwrap();
+                    model.insert(key, value);
+                }
+                35..=64 if !model.is_empty() && !rng.bool() => {
+                    let key = random_key(&mut rng, &model);
+                    let record = cursor.get(key).unwrap().unwrap();
+                    assert_eq!(record_bytes(&record).1, model[key]);
+                }
+                35..=64 => {
+                    let (key, _) = random_record(&mut rng, &model);
+                    assert!(cursor.get(&key).unwrap().is_none());
+                }
+                65..=84 => {
+                    let key = random_key(&mut rng, &model).clone();
+                    let len = if step % 31 == 0 {
+                        PAGE_SIZE + rng.usize(1..=PAGE_SIZE)
+                    } else {
+                        rng.usize(8..=512)
+                    };
+                    let old_value = &model[&key];
+                    let value = loop {
+                        let candidate = random_bytes(&mut rng, len);
+                        if candidate != *old_value {
+                            break candidate;
+                        }
+                    };
+                    cursor.update(&key, &value).unwrap();
+                    model.insert(key, value);
+                }
+                _ => {
+                    let key = random_key(&mut rng, &model).clone();
+                    cursor.delete(&key).unwrap();
+                    model.remove(&key);
+                }
+            }
+
+            if step % 50 == 0 {
+                assert_matches(&mut cursor, &model);
+            }
+        }
+        assert_matches(&mut cursor, &model);
+    }
+}
