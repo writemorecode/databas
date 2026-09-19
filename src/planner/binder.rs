@@ -22,7 +22,7 @@ use crate::{
 
 use super::{
     BoundColumn, LogicalPlan, LogicalPlanNode, NodeId, PlannedExpression, PlannerError,
-    PlannerResult, SortTerm, UpdateAssignment,
+    PlannerResult, RelationId, SortTerm, UpdateAssignment,
 };
 
 /// Binds parsed SQL syntax to catalog metadata and builds a logical plan.
@@ -153,15 +153,16 @@ impl<'catalog> Binder<'catalog> {
         nodes: &mut Vec<LogicalPlanNode>,
     ) -> PlannerResult<NodeId> {
         let table = self.table_schema(query.table)?;
+        let relation = RelationId::new(0);
         let mut input =
-            push_logical_node(nodes, LogicalPlanNode::TableScan { table: table.clone() });
+            push_logical_node(nodes, LogicalPlanNode::TableScan { relation, table: table.clone() });
 
         if let Some(predicate) = &query.where_clause {
             let predicate = self.bind_expression(predicate, Some(&table))?;
             input = push_logical_node(nodes, LogicalPlanNode::Filter { input, predicate });
         }
 
-        Ok(push_logical_node(nodes, LogicalPlanNode::Delete { table, input }))
+        Ok(push_logical_node(nodes, LogicalPlanNode::Delete { relation, table, input }))
     }
 
     fn plan_update(
@@ -189,14 +190,18 @@ impl<'catalog> Binder<'catalog> {
             });
         }
 
+        let relation = RelationId::new(0);
         let mut input =
-            push_logical_node(nodes, LogicalPlanNode::TableScan { table: table.clone() });
+            push_logical_node(nodes, LogicalPlanNode::TableScan { relation, table: table.clone() });
         if let Some(predicate) = &query.where_clause {
             let predicate = self.bind_expression(predicate, Some(&table))?;
             input = push_logical_node(nodes, LogicalPlanNode::Filter { input, predicate });
         }
 
-        Ok(push_logical_node(nodes, LogicalPlanNode::Update { table, assignments, input }))
+        Ok(push_logical_node(
+            nodes,
+            LogicalPlanNode::Update { relation, table, assignments, input },
+        ))
     }
 
     fn plan_select(
@@ -205,10 +210,12 @@ impl<'catalog> Binder<'catalog> {
         nodes: &mut Vec<LogicalPlanNode>,
     ) -> PlannerResult<NodeId> {
         let table = query.table.map(|name| self.table_schema(name)).transpose()?;
+        let relation = RelationId::new(0);
         let mut input = match &table {
-            Some(table) => {
-                push_logical_node(nodes, LogicalPlanNode::TableScan { table: table.clone() })
-            }
+            Some(table) => push_logical_node(
+                nodes,
+                LogicalPlanNode::TableScan { relation, table: table.clone() },
+            ),
             None => push_logical_node(nodes, LogicalPlanNode::OneRow),
         };
 
@@ -340,6 +347,7 @@ fn bind_column(table: &TableSchema, column: &str) -> PlannerResult<BoundColumn> 
 
 fn bound_column(table: &TableSchema, ordinal: usize, column: &ColumnSchema) -> BoundColumn {
     BoundColumn {
+        relation: RelationId::new(0),
         table: table.name.clone(),
         name: column.name.clone(),
         ordinal,

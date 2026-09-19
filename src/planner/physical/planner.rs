@@ -76,25 +76,32 @@ impl<'catalog> PhysicalPlanner<'catalog> {
                     _ => return Err(PlannerError::InvalidInsertInput),
                 }
             }
-            LogicalPlanNode::Update { table, assignments, input } => PhysicalPlanNode::Update {
-                table,
-                assignments,
-                input: self.build_physical_plan(logical_nodes, input, false, physical_nodes)?,
-            },
-            LogicalPlanNode::Delete { table, input } => PhysicalPlanNode::Delete {
+            LogicalPlanNode::Update { relation, table, assignments, input } => {
+                PhysicalPlanNode::Update {
+                    relation,
+                    table,
+                    assignments,
+                    input: self.build_physical_plan(logical_nodes, input, false, physical_nodes)?,
+                }
+            }
+            LogicalPlanNode::Delete { relation, table, input } => PhysicalPlanNode::Delete {
+                relation,
                 table,
                 input: self.build_physical_plan(logical_nodes, input, false, physical_nodes)?,
             },
             LogicalPlanNode::OneRow => PhysicalPlanNode::OneRow,
-            LogicalPlanNode::TableScan { table } => PhysicalPlanNode::FullTableScan { table },
+            LogicalPlanNode::TableScan { relation, table } => {
+                PhysicalPlanNode::FullTableScan { relation, table }
+            }
             LogicalPlanNode::Filter { input, predicate } => {
                 match take_logical_node(logical_nodes, input)? {
-                    LogicalPlanNode::TableScan { table } => {
+                    LogicalPlanNode::TableScan { relation, table } => {
                         match primary_key_range_predicate(&table, &predicate) {
                             Some(range_predicate) => {
                                 let scan = push_physical_node(
                                     physical_nodes,
                                     PhysicalPlanNode::PrimaryKeyRangeScan {
+                                        relation,
                                         table,
                                         range: range_predicate.range,
                                     },
@@ -112,6 +119,7 @@ impl<'catalog> PhysicalPlanner<'catalog> {
                                 {
                                     Some(index_predicate) => PhysicalPlanNode::SecondaryIndexScan {
                                         scan: SecondaryIndexScanPlan {
+                                            relation,
                                             table,
                                             index: index_predicate.index,
                                             column: index_predicate.column,
@@ -119,7 +127,7 @@ impl<'catalog> PhysicalPlanner<'catalog> {
                                             key_range: index_predicate.key_range,
                                         },
                                     },
-                                    None => PhysicalPlanNode::FullTableScan { table },
+                                    None => PhysicalPlanNode::FullTableScan { relation, table },
                                 };
                                 let input = push_physical_node(physical_nodes, scan);
                                 PhysicalPlanNode::Filter { input, predicate }
@@ -127,7 +135,7 @@ impl<'catalog> PhysicalPlanner<'catalog> {
                             None => {
                                 let input = push_physical_node(
                                     physical_nodes,
-                                    PhysicalPlanNode::FullTableScan { table },
+                                    PhysicalPlanNode::FullTableScan { relation, table },
                                 );
                                 PhysicalPlanNode::Filter { input, predicate }
                             }

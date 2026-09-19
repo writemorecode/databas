@@ -2,7 +2,7 @@
 
 use crate::core::{TableSchema, TupleSchema};
 
-use super::{BoundColumn, NodeId, PlannedExpression, SortTerm, UpdateAssignment};
+use super::{BoundColumn, NodeId, PlannedExpression, RelationId, SortTerm, UpdateAssignment};
 
 /// Catalog-bound logical plan stored in a contiguous arena.
 ///
@@ -85,14 +85,19 @@ pub enum LogicalPlanNode {
     /// Assignment targets are bound and checked for duplicate names before this
     /// node is built. Primary-key columns are rejected here because changing
     /// them would require moving table records.
-    Update { table: TableSchema, assignments: Vec<UpdateAssignment>, input: NodeId },
+    Update {
+        relation: RelationId,
+        table: TableSchema,
+        assignments: Vec<UpdateAssignment>,
+        input: NodeId,
+    },
     /// Delete rows from a table selected by an input plan.
-    Delete { table: TableSchema, input: NodeId },
+    Delete { relation: RelationId, table: TableSchema, input: NodeId },
     /// Synthetic single-row input used for projection-only selects without a
     /// `FROM` clause.
     OneRow,
     /// Read every row from a catalog table.
-    TableScan { table: TableSchema },
+    TableScan { relation: RelationId, table: TableSchema },
     /// Keep only rows for which the predicate evaluates truthfully.
     ///
     /// Physical planning may use part of this predicate to choose a narrower

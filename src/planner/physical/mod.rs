@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::core::{IndexKeyRange, IndexSchema, TableKeyRange, TableSchema, TupleSchema, Value};
 
-use super::{BoundColumn, NodeId, PlannedExpression, SortTerm, UpdateAssignment};
+use super::{BoundColumn, NodeId, PlannedExpression, RelationId, SortTerm, UpdateAssignment};
 
 mod access_path;
 mod planner;
@@ -124,6 +124,8 @@ pub enum PhysicalPlanNode {
     },
     /// Update rows from a table selected by an input operator.
     Update {
+        /// Query-local identity of the target table occurrence.
+        relation: RelationId,
         /// Target table.
         table: TableSchema,
         /// Bound column assignments.
@@ -133,6 +135,8 @@ pub enum PhysicalPlanNode {
     },
     /// Delete rows from a table selected by an input operator.
     Delete {
+        /// Query-local identity of the target table occurrence.
+        relation: RelationId,
         /// Target table.
         table: TableSchema,
         /// Row-producing operator that yields target table records.
@@ -144,6 +148,8 @@ pub enum PhysicalPlanNode {
     OneRow,
     /// Scan all rows from a table.
     FullTableScan {
+        /// Query-local identity of the scanned table occurrence.
+        relation: RelationId,
         /// Table to scan.
         table: TableSchema,
     },
@@ -154,6 +160,8 @@ pub enum PhysicalPlanNode {
     /// expressed as a key range, the range scan is wrapped in a
     /// [`PhysicalPlanNode::Filter`] for the residual expression.
     PrimaryKeyRangeScan {
+        /// Query-local identity of the scanned table occurrence.
+        relation: RelationId,
         /// Table to scan.
         table: TableSchema,
         /// Primary-key range to scan.
@@ -214,6 +222,8 @@ pub enum PhysicalPlanNode {
 /// storage layer scans.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SecondaryIndexScanPlan {
+    /// Query-local identity of the scanned table occurrence.
+    pub relation: RelationId,
     /// Table to fetch rows from.
     pub table: TableSchema,
     /// Secondary index to scan.
@@ -304,8 +314,10 @@ fn physical_plan_label(plan: &PhysicalPlanNode) -> String {
         }
         PhysicalPlanNode::Delete { table, .. } => format!("Delete table={}", table.name),
         PhysicalPlanNode::OneRow => "OneRow".to_owned(),
-        PhysicalPlanNode::FullTableScan { table } => format!("FullTableScan table={}", table.name),
-        PhysicalPlanNode::PrimaryKeyRangeScan { table, range } => {
+        PhysicalPlanNode::FullTableScan { table, .. } => {
+            format!("FullTableScan table={}", table.name)
+        }
+        PhysicalPlanNode::PrimaryKeyRangeScan { table, range, .. } => {
             format!("PrimaryKeyRangeScan table={} range=[{}]", table.name, range)
         }
         PhysicalPlanNode::SecondaryIndexScan { scan } => format!(
