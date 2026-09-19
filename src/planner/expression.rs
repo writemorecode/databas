@@ -7,6 +7,8 @@ use crate::{
     sql_parser::parser::{op::Op, stmt::select::Ordering},
 };
 
+use super::RelationId;
+
 /// Expression after literal conversion and column binding.
 ///
 /// Planned expressions are the scalar language shared by filters, projections,
@@ -48,6 +50,8 @@ impl fmt::Display for PlannedExpression {
 /// row schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundColumn {
+    /// Query-local identity of the table occurrence that owns this column.
+    pub relation: RelationId,
     /// Name of the table that owns this column.
     pub table: String,
     /// Column name.

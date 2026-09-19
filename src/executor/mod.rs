@@ -337,7 +337,7 @@ impl<'txn, 'db> Executor<'txn, 'db> {
             PhysicalPlanNode::InsertValues { table, columns, values } => {
                 execute_insert_values(self.transaction, table, columns, values)
             }
-            PhysicalPlanNode::Update { table, assignments, input } => {
+            PhysicalPlanNode::Update { table, assignments, input, .. } => {
                 let output_inner = self.execute_node(nodes, input)?;
                 execute_update(
                     self.transaction,
@@ -346,21 +346,21 @@ impl<'txn, 'db> Executor<'txn, 'db> {
                     output_inner.into_rows("UPDATE")?,
                 )
             }
-            PhysicalPlanNode::Delete { table, input } => {
+            PhysicalPlanNode::Delete { table, input, .. } => {
                 let output_inner = self.execute_node(nodes, input)?;
                 execute_delete(self.transaction, table, output_inner.into_rows("DELETE")?)
             }
             PhysicalPlanNode::OneRow => Ok(ExecutionOutput::Rows {
                 rows: collect_rows(std::iter::once_with(|| empty_record(0))),
             }),
-            PhysicalPlanNode::FullTableScan { table } => {
+            PhysicalPlanNode::FullTableScan { table, .. } => {
                 let rows = self
                     .transaction
                     .scan_table(&table)?
                     .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
                 Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
-            PhysicalPlanNode::PrimaryKeyRangeScan { table, range } => {
+            PhysicalPlanNode::PrimaryKeyRangeScan { table, range, .. } => {
                 let rows = self
                     .transaction
                     .scan_table_range(&table, range)?
