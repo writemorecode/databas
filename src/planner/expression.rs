@@ -1,4 +1,4 @@
-//! Catalog-bound scalar expressions shared by logical and physical plans.
+//! Scalar expressions used by bound logical and executable physical plans.
 
 use std::fmt;
 
@@ -7,54 +7,20 @@ use crate::{
     sql_parser::parser::{op::Op, stmt::select::Ordering},
 };
 
-/// Expression after literal conversion and column binding.
-///
-/// Planned expressions are the scalar language shared by filters, projections,
-/// update assignments, and insert values. Identifiers have already been
-/// resolved into [`BoundColumn`] values, and parser literals have already been
-/// converted into storage [`Value`]s.
-///
-/// The planner does not type-check every operator combination. It records the
-/// bound expression tree and leaves value-dependent type errors, such as adding
-/// incompatible values or evaluating a non-boolean predicate, to execution.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PlannedExpression {
-    /// Constant storage value.
-    Literal(Value),
-    /// Reference to a bound table column.
-    Column(BoundColumn),
-    /// Unary operator applied to a planned expression.
-    Unary { op: Op, expr: Box<PlannedExpression> },
-    /// Binary operator applied to two planned expressions.
-    Binary { left: Box<PlannedExpression>, op: Op, right: Box<PlannedExpression> },
-}
+use super::RelationId;
 
-impl fmt::Display for PlannedExpression {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PlannedExpression::Literal(value) => write!(f, "{value}"),
-            PlannedExpression::Column(column) => write!(f, "{column}"),
-            PlannedExpression::Unary { op, expr } => write!(f, "{op}{expr}"),
-            PlannedExpression::Binary { left, op, right } => write!(f, "({left} {op} {right})"),
-        }
-    }
-}
-
-/// Catalog column reference resolved during planning.
-///
-/// A bound column is deliberately redundant: it stores display names for
-/// diagnostics and plan formatting, plus the row ordinal and data type needed by
-/// the executor. `ordinal` is the zero-based position of the column in the table
-/// row schema.
+/// Catalog column reference resolved during SQL binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundColumn {
-    /// Name of the table that owns this column.
+    /// Query-local identity of the table occurrence that owns this column.
+    pub relation: RelationId,
+    /// Table name retained for diagnostics and plan formatting.
     pub table: String,
     /// Column name.
     pub name: String,
-    /// Zero-based column position in the table row.
+    /// Zero-based position in the source table row.
     pub ordinal: usize,
-    /// Storage type recorded for the column.
+    /// Catalog type of the column.
     pub data_type: DataType,
 }
 
@@ -64,17 +30,111 @@ impl fmt::Display for BoundColumn {
     }
 }
 
-/// One bound column assignment from an `UPDATE ... SET` clause.
-///
-/// The target column has already been checked for existence, duplicate
-/// assignment, and primary-key immutability. The expression is evaluated against
-/// the original row when the update executes.
+/// Scalar expression after catalog binding but before physical slot assignment.
 #[derive(Debug, Clone, PartialEq)]
-pub struct UpdateAssignment {
+pub enum BoundExpr {
+    /// Constant storage value.
+    Literal(Value),
+    /// Reference to a query-local bound column.
+    Column(BoundColumn),
+    /// Unary operator applied to a bound expression.
+    Unary { op: Op, expr: Box<BoundExpr> },
+    /// Binary operator applied to two bound expressions.
+    Binary { left: Box<BoundExpr>, op: Op, right: Box<BoundExpr> },
+}
+
+impl BoundExpr {
+    pub(crate) fn data_type(&self) -> Option<DataType> {
+        match self {
+            Self::Literal(value) => value_data_type(value),
+            Self::Column(column) => Some(column.data_type),
+            Self::Unary { op: Op::Not, .. } => Some(DataType::Boolean),
+            Self::Unary { expr, .. } => expr.data_type(),
+            Self::Binary {
+                op:
+                    Op::And
+                    | Op::Or
+                    | Op::EqualsEquals
+                    | Op::NotEquals
+                    | Op::LessThan
+                    | Op::GreaterThan
+                    | Op::LessThanOrEqual
+                    | Op::GreaterThanOrEqual,
+                ..
+            } => Some(DataType::Boolean),
+            Self::Binary { left, .. } => left.data_type(),
+        }
+    }
+}
+
+impl fmt::Display for BoundExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Literal(value) => write!(f, "{value}"),
+            Self::Column(column) => write!(f, "{column}"),
+            Self::Unary { op, expr } => write!(f, "{op}{expr}"),
+            Self::Binary { left, op, right } => write!(f, "({left} {op} {right})"),
+        }
+    }
+}
+
+/// Input slot selected for an executable expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecColumn {
+    /// Zero-based slot in the physical operator's input row.
+    pub slot: usize,
+    /// Qualified source name retained for diagnostics and `EXPLAIN`.
+    pub name: String,
+    /// Statically known slot type.
+    pub data_type: DataType,
+}
+
+impl fmt::Display for ExecColumn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+/// Scalar expression after physical input slots have been assigned.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecExpr {
+    /// Constant storage value.
+    Literal(Value),
+    /// Reference to an input row slot.
+    Column(ExecColumn),
+    /// Unary operator applied to an executable expression.
+    Unary { op: Op, expr: Box<ExecExpr> },
+    /// Binary operator applied to two executable expressions.
+    Binary { left: Box<ExecExpr>, op: Op, right: Box<ExecExpr> },
+}
+
+impl fmt::Display for ExecExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Literal(value) => write!(f, "{value}"),
+            Self::Column(column) => write!(f, "{column}"),
+            Self::Unary { op, expr } => write!(f, "{op}{expr}"),
+            Self::Binary { left, op, right } => write!(f, "({left} {op} {right})"),
+        }
+    }
+}
+
+/// One bound column assignment from an `UPDATE ... SET` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundUpdateAssignment {
     /// Target column to overwrite.
     pub column: BoundColumn,
     /// Expression evaluated against the original row.
-    pub expression: PlannedExpression,
+    pub expression: BoundExpr,
+}
+
+/// One executable update assignment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateAssignment {
+    /// Target catalog column.
+    pub column: BoundColumn,
+    /// Slot-resolved expression evaluated against the original row.
+    pub expression: ExecExpr,
 }
 
 impl fmt::Display for UpdateAssignment {
@@ -83,16 +143,21 @@ impl fmt::Display for UpdateAssignment {
     }
 }
 
-/// One bound column and optional direction from an `ORDER BY` clause.
-///
-/// Only simple column sort keys are represented today. A missing direction
-/// means SQL omitted `ASC` or `DESC`; consumers should treat that as their
-/// default ascending order.
+/// One bound `ORDER BY` term.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundSortTerm {
+    /// Bound source column used as the sort key.
+    pub column: BoundColumn,
+    /// Requested direction, or `None` for the SQL default.
+    pub direction: Option<Ordering>,
+}
+
+/// One executable `ORDER BY` term.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SortTerm {
-    /// Column used as the sort key.
-    pub column: BoundColumn,
-    /// Direction specified by SQL, or `None` when the query omitted one.
+    /// Input slot used as the sort key.
+    pub column: ExecColumn,
+    /// Requested direction, or `None` for the SQL default.
     pub direction: Option<Ordering>,
 }
 
@@ -103,5 +168,16 @@ impl fmt::Display for SortTerm {
             write!(f, " {direction}")?;
         }
         Ok(())
+    }
+}
+
+fn value_data_type(value: &Value) -> Option<DataType> {
+    match value {
+        Value::Null => None,
+        Value::Integer(_) => Some(DataType::Integer),
+        Value::Float(_) => Some(DataType::Float),
+        Value::String(_) => Some(DataType::Text),
+        Value::Boolean(_) => Some(DataType::Boolean),
+        Value::UnsignedInteger(_) => Some(DataType::UnsignedInteger),
     }
 }

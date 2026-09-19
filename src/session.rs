@@ -275,7 +275,7 @@ fn plan_table_locks(plan: &PhysicalPlan) -> Vec<(TableId, LockMode)> {
             | PhysicalPlanNode::InsertValues { table, .. }
             | PhysicalPlanNode::Update { table, .. }
             | PhysicalPlanNode::Delete { table, .. } => (table, LockMode::Exclusive),
-            PhysicalPlanNode::FullTableScan { table }
+            PhysicalPlanNode::FullTableScan { table, .. }
             | PhysicalPlanNode::PrimaryKeyRangeScan { table, .. } => (table, LockMode::Shared),
             PhysicalPlanNode::SecondaryIndexScan { scan } => (&scan.table, LockMode::Shared),
             _ => continue,

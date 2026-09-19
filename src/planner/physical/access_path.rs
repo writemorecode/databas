@@ -9,7 +9,7 @@ use crate::{
     sql_parser::parser::op::Op,
 };
 
-use crate::planner::{BoundColumn, IndexValueBound, IndexValueRange, PlannedExpression};
+use crate::planner::{BoundColumn, BoundExpr, IndexValueBound, IndexValueRange};
 
 #[derive(Debug, Clone, PartialEq)]
 /// A primary-key scan range and an optional predicate that must be evaluated afterward.
@@ -17,7 +17,7 @@ pub(super) struct RangePredicate {
     /// The table-key range that can be applied during the scan.
     pub(super) range: TableKeyRange,
     /// The part of the predicate that could not be represented by `range`.
-    pub(super) residual: Option<PlannedExpression>,
+    pub(super) residual: Option<BoundExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,7 +39,7 @@ pub(super) struct IndexPredicate {
 /// first column or when the predicate does not provide a usable range.
 pub(super) fn primary_key_range_predicate(
     table: &TableSchema,
-    predicate: &PlannedExpression,
+    predicate: &BoundExpr,
 ) -> Option<RangePredicate> {
     let primary_key = table.row.columns.first()?;
     if !primary_key.primary_key || primary_key.data_type != DataType::Integer {
@@ -56,7 +56,7 @@ pub(super) fn primary_key_range_predicate(
 /// into the returned value and encoded-key ranges.
 pub(super) fn secondary_index_predicate(
     table: &TableSchema,
-    predicate: &PlannedExpression,
+    predicate: &BoundExpr,
     indexes: &[IndexSchema],
 ) -> Option<IndexPredicate> {
     let mut conjuncts = Vec::new();
@@ -94,12 +94,9 @@ pub(super) fn secondary_index_predicate(
 }
 
 /// Flattens a tree of `AND` expressions into individual conjuncts.
-fn flatten_conjuncts<'a>(
-    expression: &'a PlannedExpression,
-    conjuncts: &mut Vec<&'a PlannedExpression>,
-) {
+fn flatten_conjuncts<'a>(expression: &'a BoundExpr, conjuncts: &mut Vec<&'a BoundExpr>) {
     match expression {
-        PlannedExpression::Binary { left, op: Op::And, right } => {
+        BoundExpr::Binary { left, op: Op::And, right } => {
             flatten_conjuncts(left, conjuncts);
             flatten_conjuncts(right, conjuncts);
         }
@@ -143,7 +140,7 @@ struct SecondaryIndexCandidate {
 /// Finds an indexed column comparison suitable for secondary-index access.
 fn secondary_index_comparison(
     table: &TableSchema,
-    comparison: &PlannedExpression,
+    comparison: &BoundExpr,
     indexes: &[IndexSchema],
 ) -> Option<SecondaryIndexCandidate> {
     let comparison = index_comparison(table, comparison)?;
@@ -155,7 +152,7 @@ fn secondary_index_comparison(
 /// Extracts a comparison when it targets the requested bound column.
 fn index_comparison_for_column<'a>(
     table: &TableSchema,
-    comparison: &'a PlannedExpression,
+    comparison: &'a BoundExpr,
     column: &BoundColumn,
 ) -> Option<IndexComparison<'a>> {
     let comparison = index_comparison(table, comparison)?;
@@ -168,9 +165,9 @@ fn index_comparison_for_column<'a>(
 /// returned comparison always describes the column relative to the literal.
 fn index_comparison<'a>(
     table: &TableSchema,
-    comparison: &'a PlannedExpression,
+    comparison: &'a BoundExpr,
 ) -> Option<IndexComparison<'a>> {
-    let PlannedExpression::Binary { left, op, right } = comparison else {
+    let BoundExpr::Binary { left, op, right } = comparison else {
         return None;
     };
     index_comparison_from_operands(table, left, *op, right)
@@ -180,14 +177,14 @@ fn index_comparison<'a>(
 /// Builds an index comparison from a column followed by a literal operand.
 fn index_comparison_from_operands<'a>(
     table: &TableSchema,
-    column: &PlannedExpression,
+    column: &BoundExpr,
     op: Op,
-    value: &'a PlannedExpression,
+    value: &'a BoundExpr,
 ) -> Option<IndexComparison<'a>> {
-    let PlannedExpression::Column(column) = column else {
+    let BoundExpr::Column(column) = column else {
         return None;
     };
-    let PlannedExpression::Literal(value) = value else {
+    let BoundExpr::Literal(value) = value else {
         return None;
     };
     if column.table != table.name || !value_matches_data_type(value, column.data_type) {
@@ -215,9 +212,9 @@ fn index_comparison_from_operands<'a>(
 /// Builds an index comparison from a literal followed by a column operand.
 fn index_comparison_from_reversed_operands<'a>(
     table: &TableSchema,
-    value: &'a PlannedExpression,
+    value: &'a BoundExpr,
     op: Op,
-    column: &PlannedExpression,
+    column: &BoundExpr,
 ) -> Option<IndexComparison<'a>> {
     let reversed = reverse_comparison_op(op)?;
     index_comparison_from_operands(table, column, reversed, value)
@@ -387,10 +384,10 @@ fn value_matches_data_type(value: &Value, data_type: DataType) -> bool {
 /// otherwise, the unusable side is preserved as a residual predicate.
 fn range_predicate_from_expression(
     table: &TableSchema,
-    expression: &PlannedExpression,
+    expression: &BoundExpr,
 ) -> Option<RangePredicate> {
     match expression {
-        PlannedExpression::Binary { left, op: Op::And, right } => {
+        BoundExpr::Binary { left, op: Op::And, right } => {
             let left = range_predicate_from_expression(table, left)?;
             if let Some(left_residual) = left.residual {
                 return Some(RangePredicate {
@@ -409,35 +406,31 @@ fn range_predicate_from_expression(
                 }
             }
         }
-        PlannedExpression::Binary { left, op, right } => {
-            range_from_comparison(table, left, *op, right)
-                .map(|range| RangePredicate { range, residual: None })
-        }
-        PlannedExpression::Literal(_)
-        | PlannedExpression::Column(_)
-        | PlannedExpression::Unary { .. } => None,
+        BoundExpr::Binary { left, op, right } => range_from_comparison(table, left, *op, right)
+            .map(|range| RangePredicate { range, residual: None }),
+        BoundExpr::Literal(_) | BoundExpr::Column(_) | BoundExpr::Unary { .. } => None,
     }
 }
 
 /// Combines two planned expressions into a logical `AND` expression.
-fn and_expression(left: PlannedExpression, right: PlannedExpression) -> PlannedExpression {
-    PlannedExpression::Binary { left: Box::new(left), op: Op::And, right: Box::new(right) }
+fn and_expression(left: BoundExpr, right: BoundExpr) -> BoundExpr {
+    BoundExpr::Binary { left: Box::new(left), op: Op::And, right: Box::new(right) }
 }
 
 /// Converts a primary-key comparison into a table-key range.
 fn range_from_comparison(
     table: &TableSchema,
-    left: &PlannedExpression,
+    left: &BoundExpr,
     op: Op,
-    right: &PlannedExpression,
+    right: &BoundExpr,
 ) -> Option<TableKeyRange> {
     match (left, right) {
-        (PlannedExpression::Column(column), PlannedExpression::Literal(Value::Integer(value)))
+        (BoundExpr::Column(column), BoundExpr::Literal(Value::Integer(value)))
             if is_table_primary_key(table, column) =>
         {
             range_from_column_comparison(op, *value)
         }
-        (PlannedExpression::Literal(Value::Integer(value)), PlannedExpression::Column(column))
+        (BoundExpr::Literal(Value::Integer(value)), BoundExpr::Column(column))
             if is_table_primary_key(table, column) =>
         {
             range_from_literal_comparison(op, *value)

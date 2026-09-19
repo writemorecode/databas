@@ -21,8 +21,8 @@ use crate::{
 };
 
 use super::{
-    BoundColumn, LogicalPlan, LogicalPlanNode, PlannedExpression, PlannerError, PlannerResult,
-    SortTerm, UpdateAssignment,
+    BoundColumn, BoundExpr, BoundSortTerm, BoundUpdateAssignment, LogicalPlan, LogicalPlanNode,
+    NodeId, PlanSchema, PlannerError, PlannerResult, RelationId,
 };
 
 /// Binds parsed SQL syntax to catalog metadata and builds a logical plan.
@@ -45,7 +45,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         statement: &Statement<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         match statement {
             Statement::Explain(statement) => self.plan_explain(statement, nodes),
             Statement::CreateTable(query) => self.plan_create_table(query, nodes),
@@ -61,7 +61,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         statement: &Statement<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let input = match statement {
             Statement::Select(query) => self.plan_select(query, nodes)?,
             Statement::Update(query) => self.plan_update(query, nodes)?,
@@ -79,7 +79,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         query: &CreateTableQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         Ok(push_logical_node(
             nodes,
             LogicalPlanNode::CreateTable {
@@ -93,7 +93,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         query: &CreateIndexQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let table = self.table_schema(query.table_name)?;
         let mut seen = HashSet::new();
         let mut columns = Vec::new();
@@ -115,7 +115,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         query: &InsertQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let table = self.table_schema(query.table)?;
         let mut seen = HashSet::new();
         let mut columns = Vec::new();
@@ -143,7 +143,10 @@ impl<'catalog> Binder<'catalog> {
             );
         }
 
-        let input = push_logical_node(nodes, LogicalPlanNode::Values { rows });
+        let input = push_logical_node(
+            nodes,
+            LogicalPlanNode::Values { rows, output: PlanSchema::default() },
+        );
         Ok(push_logical_node(nodes, LogicalPlanNode::Insert { table, columns, input }))
     }
 
@@ -151,24 +154,31 @@ impl<'catalog> Binder<'catalog> {
         &self,
         query: &DeleteQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let table = self.table_schema(query.table)?;
-        let mut input =
-            push_logical_node(nodes, LogicalPlanNode::TableScan { table: table.clone() });
+        let relation = RelationId::new(0);
+        let output = PlanSchema::for_table(relation, &table);
+        let mut input = push_logical_node(
+            nodes,
+            LogicalPlanNode::TableScan { relation, table: table.clone(), output: output.clone() },
+        );
 
         if let Some(predicate) = &query.where_clause {
             let predicate = self.bind_expression(predicate, Some(&table))?;
-            input = push_logical_node(nodes, LogicalPlanNode::Filter { input, predicate });
+            input = push_logical_node(
+                nodes,
+                LogicalPlanNode::Filter { input, predicate, output: output.clone() },
+            );
         }
 
-        Ok(push_logical_node(nodes, LogicalPlanNode::Delete { table, input }))
+        Ok(push_logical_node(nodes, LogicalPlanNode::Delete { relation, table, input }))
     }
 
     fn plan_update(
         &self,
         query: &UpdateQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let table = self.table_schema(query.table)?;
         let mut seen = HashSet::new();
         let mut assignments = Vec::new();
@@ -183,38 +193,62 @@ impl<'catalog> Binder<'catalog> {
             if table.row.columns[column.ordinal].primary_key {
                 return Err(PlannerError::PrimaryKeyUpdate { column: column.name });
             }
-            assignments.push(UpdateAssignment {
+            assignments.push(BoundUpdateAssignment {
                 column,
                 expression: self.bind_expression(&assignment.expression, Some(&table))?,
             });
         }
 
-        let mut input =
-            push_logical_node(nodes, LogicalPlanNode::TableScan { table: table.clone() });
+        let relation = RelationId::new(0);
+        let output = PlanSchema::for_table(relation, &table);
+        let mut input = push_logical_node(
+            nodes,
+            LogicalPlanNode::TableScan { relation, table: table.clone(), output: output.clone() },
+        );
         if let Some(predicate) = &query.where_clause {
             let predicate = self.bind_expression(predicate, Some(&table))?;
-            input = push_logical_node(nodes, LogicalPlanNode::Filter { input, predicate });
+            input = push_logical_node(
+                nodes,
+                LogicalPlanNode::Filter { input, predicate, output: output.clone() },
+            );
         }
 
-        Ok(push_logical_node(nodes, LogicalPlanNode::Update { table, assignments, input }))
+        Ok(push_logical_node(
+            nodes,
+            LogicalPlanNode::Update { relation, table, assignments, input },
+        ))
     }
 
     fn plan_select(
         &self,
         query: &SelectQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let table = query.table.map(|name| self.table_schema(name)).transpose()?;
+        let relation = RelationId::new(0);
         let mut input = match &table {
-            Some(table) => {
-                push_logical_node(nodes, LogicalPlanNode::TableScan { table: table.clone() })
+            Some(table) => push_logical_node(
+                nodes,
+                LogicalPlanNode::TableScan {
+                    relation,
+                    table: table.clone(),
+                    output: PlanSchema::for_table(relation, table),
+                },
+            ),
+            None => {
+                push_logical_node(nodes, LogicalPlanNode::OneRow { output: PlanSchema::default() })
             }
-            None => push_logical_node(nodes, LogicalPlanNode::OneRow),
         };
+        let mut output = table
+            .as_ref()
+            .map_or_else(PlanSchema::default, |table| PlanSchema::for_table(relation, table));
 
         if let Some(predicate) = &query.where_clause {
             let predicate = self.bind_expression(predicate, table.as_ref())?;
-            input = push_logical_node(nodes, LogicalPlanNode::Filter { input, predicate });
+            input = push_logical_node(
+                nodes,
+                LogicalPlanNode::Filter { input, predicate, output: output.clone() },
+            );
         }
 
         if let Some(order_by) = &query.order_by {
@@ -222,24 +256,37 @@ impl<'catalog> Binder<'catalog> {
                 .terms
                 .iter()
                 .map(|term| {
-                    Ok(SortTerm {
+                    Ok(BoundSortTerm {
                         column: bind_column_reference(table.as_ref(), &term.column)?,
                         direction: term.order.clone(),
                     })
                 })
                 .collect::<PlannerResult<Vec<_>>>()?;
-            input = push_logical_node(nodes, LogicalPlanNode::Sort { input, terms });
+            input = push_logical_node(
+                nodes,
+                LogicalPlanNode::Sort { input, terms, output: output.clone() },
+            );
         }
 
         let expressions = self.bind_projection(&query.columns.0, table.as_ref())?;
-        input = push_logical_node(nodes, LogicalPlanNode::Project { input, expressions });
+        output = PlanSchema::for_expressions(&expressions);
+        input = push_logical_node(
+            nodes,
+            LogicalPlanNode::Project { input, expressions, output: output.clone() },
+        );
 
         if let Some(offset) = query.offset {
-            input = push_logical_node(nodes, LogicalPlanNode::Offset { input, offset });
+            input = push_logical_node(
+                nodes,
+                LogicalPlanNode::Offset { input, offset, output: output.clone() },
+            );
         }
 
         if let Some(limit) = query.limit {
-            input = push_logical_node(nodes, LogicalPlanNode::Limit { input, limit });
+            input = push_logical_node(
+                nodes,
+                LogicalPlanNode::Limit { input, limit, output: output.clone() },
+            );
         }
 
         Ok(input)
@@ -249,7 +296,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         expressions: &[Expression<'_>],
         source_table: Option<&TableSchema>,
-    ) -> PlannerResult<Vec<PlannedExpression>> {
+    ) -> PlannerResult<Vec<BoundExpr>> {
         let mut bound = Vec::new();
         for expression in expressions {
             match expression {
@@ -257,7 +304,7 @@ impl<'catalog> Binder<'catalog> {
                     let source_table = source_table.ok_or(PlannerError::WildcardRequiresTable)?;
                     bound.extend(source_table.row.columns.iter().enumerate().map(
                         |(ordinal, column)| {
-                            PlannedExpression::Column(bound_column(source_table, ordinal, column))
+                            BoundExpr::Column(bound_column(source_table, ordinal, column))
                         },
                     ));
                 }
@@ -271,17 +318,17 @@ impl<'catalog> Binder<'catalog> {
         &self,
         expression: &Expression<'_>,
         source_table: Option<&TableSchema>,
-    ) -> PlannerResult<PlannedExpression> {
+    ) -> PlannerResult<BoundExpr> {
         match expression {
-            Expression::Literal(literal) => Ok(PlannedExpression::Literal(Value::from(literal))),
+            Expression::Literal(literal) => Ok(BoundExpr::Literal(Value::from(literal))),
             Expression::ColumnReference(reference) => {
-                bind_column_reference(source_table, reference).map(PlannedExpression::Column)
+                bind_column_reference(source_table, reference).map(BoundExpr::Column)
             }
-            Expression::UnaryOp((op, expr)) => Ok(PlannedExpression::Unary {
+            Expression::UnaryOp((op, expr)) => Ok(BoundExpr::Unary {
                 op: *op,
                 expr: Box::new(self.bind_expression(expr, source_table)?),
             }),
-            Expression::BinaryOp((left, op, right)) => Ok(PlannedExpression::Binary {
+            Expression::BinaryOp((left, op, right)) => Ok(BoundExpr::Binary {
                 left: Box::new(self.bind_expression(left, source_table)?),
                 op: *op,
                 right: Box::new(self.bind_expression(right, source_table)?),
@@ -303,10 +350,10 @@ impl<'catalog> Binder<'catalog> {
     }
 }
 
-fn push_logical_node(nodes: &mut Vec<LogicalPlanNode>, node: LogicalPlanNode) -> usize {
-    let index = nodes.len();
+fn push_logical_node(nodes: &mut Vec<LogicalPlanNode>, node: LogicalPlanNode) -> NodeId {
+    let id = NodeId::new(nodes.len());
     nodes.push(node);
-    index
+    id
 }
 
 fn bind_column_reference(
@@ -340,6 +387,7 @@ fn bind_column(table: &TableSchema, column: &str) -> PlannerResult<BoundColumn> 
 
 fn bound_column(table: &TableSchema, ordinal: usize, column: &ColumnSchema) -> BoundColumn {
     BoundColumn {
+        relation: RelationId::new(0),
         table: table.name.clone(),
         name: column.name.clone(),
         ordinal,
@@ -347,9 +395,9 @@ fn bound_column(table: &TableSchema, ordinal: usize, column: &ColumnSchema) -> B
     }
 }
 
-fn literal_expression(expression: &Expression<'_>) -> Option<PlannedExpression> {
+fn literal_expression(expression: &Expression<'_>) -> Option<BoundExpr> {
     match expression {
-        Expression::Literal(literal) => Some(PlannedExpression::Literal(Value::from(literal))),
+        Expression::Literal(literal) => Some(BoundExpr::Literal(Value::from(literal))),
         _ => None,
     }
 }
