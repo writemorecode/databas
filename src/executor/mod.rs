@@ -16,7 +16,7 @@ use crate::{
         OwnedTableRecord, TableKey, TableRecord as BorrowedTableRecord, Transaction, Tuple, Value,
         error::{StorageError, StorageResult},
     },
-    planner::{PhysicalPlan, PhysicalPlanNode},
+    planner::{NodeId, PhysicalPlan, PhysicalPlanNode},
     sql_parser::parser::op::Op,
 };
 
@@ -315,9 +315,9 @@ impl<'txn, 'db> Executor<'txn, 'db> {
     fn execute_node(
         &mut self,
         nodes: &mut [Option<PhysicalPlanNode>],
-        node_index: usize,
+        node_id: NodeId,
     ) -> ExecutorResult<ExecutionOutput> {
-        let Some(node) = nodes.get_mut(node_index).and_then(Option::take) else {
+        let Some(node) = nodes.get_mut(node_id.index()).and_then(Option::take) else {
             return Err(ExecutorError::UnsupportedOperator { operator: "INVALID PLAN" });
         };
         match node {

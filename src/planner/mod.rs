@@ -32,6 +32,7 @@
 mod binder;
 mod error;
 mod expression;
+mod identity;
 mod logical;
 mod physical;
 mod plan;
@@ -39,6 +40,7 @@ mod planning;
 
 pub use error::{PlannerError, PlannerResult};
 pub use expression::{BoundColumn, PlannedExpression, SortTerm, UpdateAssignment};
+pub use identity::NodeId;
 pub use logical::{LogicalPlan, LogicalPlanNode};
 pub use physical::{
     IndexValueBound, IndexValueRange, PhysicalPlan, PhysicalPlanNode, SecondaryIndexScanPlan,
