@@ -19,7 +19,7 @@ pub enum PlannerError {
     /// A qualified column referenced a table that is not an input to the expression.
     #[error("table not in scope: {table}")]
     TableNotInScope { table: String },
-    /// A statement referenced a column that is not present in the bound table.
+    /// A statement referenced a column that is not present in any input relation.
     #[error("column {column} not found")]
     ColumnNotFound { column: String },
     /// An `INSERT` column list named the same column more than once.
@@ -55,6 +55,9 @@ pub enum PlannerError {
     /// Physical planning found an invalid or reused logical node reference.
     #[error("invalid logical plan")]
     InvalidLogicalPlan,
+    /// A bound column was not produced by the physical operator's input.
+    #[error("column {column} is not available from the plan input")]
+    ColumnNotInInput { column: String },
     /// Physical planning found an insert input shape it cannot execute.
     #[error("invalid insert input: expected VALUES")]
     InvalidInsertInput,

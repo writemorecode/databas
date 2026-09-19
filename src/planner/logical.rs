@@ -2,7 +2,9 @@
 
 use crate::core::{TableSchema, TupleSchema};
 
-use super::{BoundColumn, NodeId, PlannedExpression, RelationId, SortTerm, UpdateAssignment};
+use super::{
+    BoundColumn, BoundExpr, BoundSortTerm, BoundUpdateAssignment, NodeId, PlanSchema, RelationId,
+};
 
 /// Catalog-bound logical plan stored in a contiguous arena.
 ///
@@ -43,6 +45,11 @@ impl LogicalPlan {
         &self.nodes[id.index()]
     }
 
+    /// Returns the output schema of a relational node.
+    pub fn output_schema(&self, id: NodeId) -> Option<&PlanSchema> {
+        self.node(id).output_schema()
+    }
+
     /// Iterates over all nodes in arena order.
     pub fn iter(&self) -> impl Iterator<Item = &LogicalPlanNode> {
         self.nodes.iter()
@@ -71,44 +78,52 @@ pub enum LogicalPlanNode {
     /// Create a secondary index over bound columns from an existing table.
     CreateIndex { name: String, table: TableSchema, columns: Vec<BoundColumn> },
     /// Literal rows, usually produced by an `INSERT ... VALUES` statement.
-    ///
-    /// The current planner accepts only literal expressions in insert values, so
-    /// this node is side-effect free and independent of table input.
-    Values { rows: Vec<Vec<PlannedExpression>> },
+    Values { rows: Vec<Vec<BoundExpr>>, output: PlanSchema },
     /// Insert rows from an input plan into bound table columns.
-    ///
-    /// The input is currently expected to be [`LogicalPlanNode::Values`] during
-    /// physical planning.
     Insert { table: TableSchema, columns: Vec<BoundColumn>, input: NodeId },
     /// Update rows in a table selected by an input plan.
-    ///
-    /// Assignment targets are bound and checked for duplicate names before this
-    /// node is built. Primary-key columns are rejected here because changing
-    /// them would require moving table records.
     Update {
         relation: RelationId,
         table: TableSchema,
-        assignments: Vec<UpdateAssignment>,
+        assignments: Vec<BoundUpdateAssignment>,
         input: NodeId,
     },
     /// Delete rows from a table selected by an input plan.
     Delete { relation: RelationId, table: TableSchema, input: NodeId },
-    /// Synthetic single-row input used for projection-only selects without a
-    /// `FROM` clause.
-    OneRow,
-    /// Read every row from a catalog table.
-    TableScan { relation: RelationId, table: TableSchema },
+    /// Synthetic single-row input used for projection-only selects.
+    OneRow { output: PlanSchema },
+    /// Read every row from a bound table occurrence.
+    TableScan { relation: RelationId, table: TableSchema, output: PlanSchema },
     /// Keep only rows for which the predicate evaluates truthfully.
-    ///
-    /// Physical planning may use part of this predicate to choose a narrower
-    /// table access path. Any remaining predicate is preserved as a filter.
-    Filter { input: NodeId, predicate: PlannedExpression },
+    Filter { input: NodeId, predicate: BoundExpr, output: PlanSchema },
     /// Order input rows by one or more columns.
-    Sort { input: NodeId, terms: Vec<SortTerm> },
+    Sort { input: NodeId, terms: Vec<BoundSortTerm>, output: PlanSchema },
     /// Produce output expressions from each input row.
-    Project { input: NodeId, expressions: Vec<PlannedExpression> },
+    Project { input: NodeId, expressions: Vec<BoundExpr>, output: PlanSchema },
     /// Skip the first `offset` input rows.
-    Offset { input: NodeId, offset: u32 },
+    Offset { input: NodeId, offset: u32, output: PlanSchema },
     /// Emit at most `limit` input rows.
-    Limit { input: NodeId, limit: u32 },
+    Limit { input: NodeId, limit: u32, output: PlanSchema },
+}
+
+impl LogicalPlanNode {
+    /// Returns the ordered output schema for row-producing operators.
+    pub fn output_schema(&self) -> Option<&PlanSchema> {
+        match self {
+            Self::Values { output, .. }
+            | Self::OneRow { output }
+            | Self::TableScan { output, .. }
+            | Self::Filter { output, .. }
+            | Self::Sort { output, .. }
+            | Self::Project { output, .. }
+            | Self::Offset { output, .. }
+            | Self::Limit { output, .. } => Some(output),
+            Self::Explain { .. }
+            | Self::CreateTable { .. }
+            | Self::CreateIndex { .. }
+            | Self::Insert { .. }
+            | Self::Update { .. }
+            | Self::Delete { .. } => None,
+        }
+    }
 }

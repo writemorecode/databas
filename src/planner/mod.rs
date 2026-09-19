@@ -9,8 +9,8 @@
 //!
 //! During logical planning, table and column names are resolved against the
 //! catalog, wildcard projections are expanded, duplicate target columns are
-//! rejected, and scalar expressions are converted into [`PlannedExpression`]
-//! trees. The resulting plan carries [`TableSchema`](crate::core::TableSchema) and
+//! rejected, and scalar expressions are converted into [`BoundExpr`] trees.
+//! The resulting plan carries [`TableSchema`](crate::core::TableSchema) and
 //! [`BoundColumn`] values
 //! so later stages can work with ordinals and storage types instead of repeating
 //! name lookup.
@@ -37,9 +37,16 @@ mod logical;
 mod physical;
 mod plan;
 mod planning;
+mod schema;
 
 pub use error::{PlannerError, PlannerResult};
-pub use expression::{BoundColumn, PlannedExpression, SortTerm, UpdateAssignment};
+pub use expression::{
+    BoundColumn, BoundExpr, BoundSortTerm, BoundUpdateAssignment, ExecColumn, ExecExpr, SortTerm,
+    UpdateAssignment,
+};
+
+/// Backwards-compatible name for bound scalar expressions.
+pub type PlannedExpression = BoundExpr;
 pub use identity::{NodeId, RelationId};
 pub use logical::{LogicalPlan, LogicalPlanNode};
 pub use physical::{
@@ -47,6 +54,7 @@ pub use physical::{
 };
 pub use plan::Plan;
 pub use planning::Planner;
+pub use schema::{PlanColumn, PlanSchema};
 
 #[cfg(test)]
 mod tests {
@@ -201,12 +209,12 @@ mod tests {
             values,
             &[
                 vec![
-                    PlannedExpression::Literal(Value::String("Ada".into())),
-                    PlannedExpression::Literal(Value::Integer(1)),
+                    ExecExpr::Literal(Value::String("Ada".into())),
+                    ExecExpr::Literal(Value::Integer(1)),
                 ],
                 vec![
-                    PlannedExpression::Literal(Value::String("Grace".into())),
-                    PlannedExpression::Literal(Value::Integer(2)),
+                    ExecExpr::Literal(Value::String("Grace".into())),
+                    ExecExpr::Literal(Value::Integer(2)),
                 ],
             ]
         );
