@@ -433,7 +433,7 @@ mod tests {
             error::{ConstraintError, StorageError},
         },
         error::DatabaseError,
-        planner::{PhysicalPlan, PhysicalPlanNode, PlannedExpression},
+        planner::{ExecExpr, PhysicalPlan, PhysicalPlanNode},
         session::Session,
         sql_parser::parser::op::Op,
     };
@@ -470,8 +470,8 @@ mod tests {
         let transaction = database.transaction(txn_id, Vec::new());
         let plan = PhysicalPlan::new(PhysicalPlanNode::Values {
             rows: vec![
-                vec![PlannedExpression::Literal(Value::Integer(10))],
-                vec![PlannedExpression::Literal(Value::Integer(20))],
+                vec![ExecExpr::Literal(Value::Integer(10))],
+                vec![ExecExpr::Literal(Value::Integer(20))],
             ],
         });
 

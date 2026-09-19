@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::core::{IndexKeyRange, IndexSchema, TableKeyRange, TableSchema, TupleSchema, Value};
 
-use super::{BoundColumn, NodeId, PlannedExpression, RelationId, SortTerm, UpdateAssignment};
+use super::{BoundColumn, ExecExpr, NodeId, RelationId, SortTerm, UpdateAssignment};
 
 mod access_path;
 mod planner;
@@ -64,8 +64,8 @@ impl PhysicalPlan {
         (self.nodes, self.root)
     }
 
-    pub(crate) fn display_node(&self, index: NodeId) -> impl fmt::Display + '_ {
-        PhysicalPlanDisplay { plan: self, root: index }
+    pub(crate) fn display_node(&self, id: NodeId) -> impl fmt::Display + '_ {
+        PhysicalPlanDisplay { plan: self, root: id }
     }
 }
 
@@ -111,7 +111,7 @@ pub enum PhysicalPlanNode {
     /// Produce literal rows.
     Values {
         /// Planned expressions for each literal row.
-        rows: Vec<Vec<PlannedExpression>>,
+        rows: Vec<Vec<ExecExpr>>,
     },
     /// Insert literal values into bound table columns.
     InsertValues {
@@ -120,7 +120,7 @@ pub enum PhysicalPlanNode {
         /// Target columns in value order.
         columns: Vec<BoundColumn>,
         /// Literal value rows to insert.
-        values: Vec<Vec<PlannedExpression>>,
+        values: Vec<Vec<ExecExpr>>,
     },
     /// Update rows from a table selected by an input operator.
     Update {
@@ -182,7 +182,7 @@ pub enum PhysicalPlanNode {
         /// Input operator.
         input: NodeId,
         /// Predicate evaluated for each input row.
-        predicate: PlannedExpression,
+        predicate: ExecExpr,
     },
     /// Sort rows from an input physical operator.
     Sort {
@@ -196,7 +196,7 @@ pub enum PhysicalPlanNode {
         /// Input operator.
         input: NodeId,
         /// Output expressions in result-column order.
-        expressions: Vec<PlannedExpression>,
+        expressions: Vec<ExecExpr>,
     },
     /// Skip input rows before producing output.
     Offset {
@@ -256,13 +256,13 @@ impl fmt::Display for PhysicalPlan {
 
 fn format_physical_plan(
     plan: &PhysicalPlan,
-    node_index: NodeId,
+    node_id: NodeId,
     f: &mut fmt::Formatter<'_>,
     prefix: &str,
     is_last: bool,
     is_root: bool,
 ) -> fmt::Result {
-    let node = plan.node(node_index);
+    let node = plan.node(node_id);
     if !is_root {
         write!(f, "\n{}{} ", prefix, if is_last { "`-" } else { "|-" })?;
     }

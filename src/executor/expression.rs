@@ -1,6 +1,6 @@
 use crate::{
     core::{OwnedTableRecord, TableKey, TableSchema, Transaction, Tuple, TupleView, Value},
-    planner::{BoundColumn, PlannedExpression, UpdateAssignment},
+    planner::{BoundColumn, ExecColumn, ExecExpr, UpdateAssignment},
     sql_parser::parser::op::Op,
 };
 
@@ -12,7 +12,7 @@ use super::{ExecutionOutput, ExecutorError, ExecutorResult, ExecutorRow, RowStre
 /// the input record's table key. This is primarily useful for tests and callers
 /// that need expression evaluation without building a full projection plan.
 pub fn evaluate_expression(
-    expression: &PlannedExpression,
+    expression: &ExecExpr,
     record: &ExecutorRow,
 ) -> ExecutorResult<ExecutorRow> {
     evaluate_expressions(std::slice::from_ref(expression), record)
@@ -22,7 +22,7 @@ pub fn evaluate_expression(
 ///
 /// Each values row is evaluated against an empty synthetic record. The row's
 /// position in the `VALUES` list becomes the result table key.
-pub(super) fn execute_values(rows: Vec<Vec<PlannedExpression>>) -> ExecutorResult<ExecutionOutput> {
+pub(super) fn execute_values(rows: Vec<Vec<ExecExpr>>) -> ExecutorResult<ExecutionOutput> {
     let rows = rows.into_iter().enumerate().map(|(row_index, expressions)| {
         let table_key = TableKey::try_from(row_index)
             .map_err(|_out_of_range| ExecutorError::ValuesRowIndexOutOfRange { row_index })?;
@@ -61,7 +61,7 @@ pub(super) fn execute_insert_values(
     transaction: &Transaction<'_>,
     table: TableSchema,
     columns: Vec<BoundColumn>,
-    values: Vec<Vec<PlannedExpression>>,
+    values: Vec<Vec<ExecExpr>>,
 ) -> ExecutorResult<ExecutionOutput> {
     let mut affected = 0;
 
@@ -153,7 +153,7 @@ pub(super) fn execute_delete(
 
 /// Evaluates a projection list against one input record.
 pub(super) fn evaluate_expressions(
-    expressions: &[PlannedExpression],
+    expressions: &[ExecExpr],
     record: &ExecutorRow,
 ) -> ExecutorResult<ExecutorRow> {
     EvaluationContext::with_record(record, |context| {
@@ -163,7 +163,7 @@ pub(super) fn evaluate_expressions(
 
 /// Evaluates expressions using an already-parsed tuple context.
 fn evaluate_expressions_in_context(
-    expressions: &[PlannedExpression],
+    expressions: &[ExecExpr],
     context: &EvaluationContext<'_>,
 ) -> ExecutorResult<ExecutorRow> {
     let values = expressions
@@ -179,17 +179,17 @@ fn evaluate_expressions_in_context(
 /// operand, so expressions like `FALSE AND (1 / 0)` do not report division by
 /// zero.
 pub(super) fn evaluate_value(
-    expression: &PlannedExpression,
+    expression: &ExecExpr,
     context: &EvaluationContext<'_>,
 ) -> ExecutorResult<Value> {
     match expression {
-        PlannedExpression::Literal(value) => Ok(value.clone()),
-        PlannedExpression::Column(column) => context.evaluate_column(column),
-        PlannedExpression::Unary { op, expr } => {
+        ExecExpr::Literal(value) => Ok(value.clone()),
+        ExecExpr::Column(column) => context.evaluate_column(column),
+        ExecExpr::Unary { op, expr } => {
             let value = evaluate_value(expr, context)?;
             evaluate_unary(*op, value)
         }
-        PlannedExpression::Binary { left, op, right } => {
+        ExecExpr::Binary { left, op, right } => {
             let left = evaluate_value(left, context)?;
             if matches!(op, Op::And | Op::Or) {
                 return evaluate_logical_binary(left, *op, right, context);
@@ -238,8 +238,8 @@ impl<'a> EvaluationContext<'a> {
     }
 
     /// Reads the value for a planner-bound column reference.
-    fn evaluate_column(&self, column: &BoundColumn) -> ExecutorResult<Value> {
-        self.value_at(column.ordinal, &column.name)
+    fn evaluate_column(&self, column: &ExecColumn) -> ExecutorResult<Value> {
+        self.value_at(column.slot, &column.name)
     }
 
     /// Reads the value at `ordinal`, using `column_name` for diagnostics.
@@ -281,7 +281,7 @@ fn evaluate_binary(left: Value, op: Op, right: Value) -> ExecutorResult<Value> {
 fn evaluate_logical_binary(
     left: Value,
     op: Op,
-    right: &PlannedExpression,
+    right: &ExecExpr,
     context: &EvaluationContext<'_>,
 ) -> ExecutorResult<Value> {
     match (left, op) {
