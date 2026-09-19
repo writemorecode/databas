@@ -7,7 +7,7 @@ use super::{
     access_path::{IndexPredicate, primary_key_range_predicate, secondary_index_predicate},
 };
 use crate::planner::{
-    LogicalPlan, LogicalPlanNode, PlannedExpression, PlannerError, PlannerResult,
+    LogicalPlan, LogicalPlanNode, NodeId, PlannedExpression, PlannerError, PlannerResult,
 };
 
 /// Selects executable operators and access paths for a logical plan.
@@ -32,11 +32,11 @@ impl<'catalog> PhysicalPlanner<'catalog> {
     fn build_physical_plan(
         &self,
         logical_nodes: &mut [Option<LogicalPlanNode>],
-        logical_node_index: usize,
+        logical_node_id: NodeId,
         allow_secondary_index_scans: bool,
         physical_nodes: &mut Vec<PhysicalPlanNode>,
-    ) -> PlannerResult<usize> {
-        let logical = take_logical_node(logical_nodes, logical_node_index)?;
+    ) -> PlannerResult<NodeId> {
+        let logical = take_logical_node(logical_nodes, logical_node_id)?;
         self.build_physical_node(
             logical_nodes,
             logical,
@@ -51,7 +51,7 @@ impl<'catalog> PhysicalPlanner<'catalog> {
         logical: LogicalPlanNode,
         allow_secondary_index_scans: bool,
         physical_nodes: &mut Vec<PhysicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let node = match logical {
             LogicalPlanNode::Explain { input } => PhysicalPlanNode::Explain {
                 input: self.build_physical_plan(
@@ -196,13 +196,13 @@ impl<'catalog> PhysicalPlanner<'catalog> {
 
 fn take_logical_node(
     nodes: &mut [Option<LogicalPlanNode>],
-    index: usize,
+    id: NodeId,
 ) -> PlannerResult<LogicalPlanNode> {
-    nodes.get_mut(index).and_then(Option::take).ok_or(PlannerError::InvalidLogicalPlan)
+    nodes.get_mut(id.index()).and_then(Option::take).ok_or(PlannerError::InvalidLogicalPlan)
 }
 
-fn push_physical_node(nodes: &mut Vec<PhysicalPlanNode>, node: PhysicalPlanNode) -> usize {
-    let index = nodes.len();
+fn push_physical_node(nodes: &mut Vec<PhysicalPlanNode>, node: PhysicalPlanNode) -> NodeId {
+    let id = NodeId::new(nodes.len());
     nodes.push(node);
-    index
+    id
 }

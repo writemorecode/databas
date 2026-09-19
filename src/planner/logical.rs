@@ -2,40 +2,45 @@
 
 use crate::core::{TableSchema, TupleSchema};
 
-use super::{BoundColumn, PlannedExpression, SortTerm, UpdateAssignment};
+use super::{BoundColumn, NodeId, PlannedExpression, SortTerm, UpdateAssignment};
 
 /// Catalog-bound logical plan stored in a contiguous arena.
 ///
-/// Nodes refer to their inputs by index. A logical plan describes relational
-/// meaning without selecting concrete scan or execution strategies.
+/// Nodes refer to their inputs by [`NodeId`]. A logical plan describes
+/// relational meaning without selecting concrete scan or execution strategies.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogicalPlan {
     nodes: Vec<LogicalPlanNode>,
-    root: usize,
+    root: NodeId,
 }
 
 impl LogicalPlan {
     /// Creates a plan containing a single root node.
     pub fn new(root: LogicalPlanNode) -> Self {
-        Self { nodes: vec![root], root: 0 }
+        Self { nodes: vec![root], root: NodeId::new(0) }
     }
 
-    /// Adds a node and makes it the plan root, returning its index.
-    pub fn push(&mut self, node: LogicalPlanNode) -> usize {
-        let index = self.nodes.len();
+    /// Adds a node and makes it the plan root, returning its ID.
+    pub fn push(&mut self, node: LogicalPlanNode) -> NodeId {
+        let id = NodeId::new(self.nodes.len());
         self.nodes.push(node);
-        self.root = index;
-        index
+        self.root = id;
+        id
     }
 
     /// Returns the root node.
     pub fn root(&self) -> &LogicalPlanNode {
-        &self.nodes[self.root]
+        self.node(self.root)
     }
 
-    /// Returns a node by arena index.
-    pub fn node(&self, index: usize) -> &LogicalPlanNode {
-        &self.nodes[index]
+    /// Returns the root node ID.
+    pub fn root_id(&self) -> NodeId {
+        self.root
+    }
+
+    /// Returns a node by arena ID.
+    pub fn node(&self, id: NodeId) -> &LogicalPlanNode {
+        &self.nodes[id.index()]
     }
 
     /// Iterates over all nodes in arena order.
@@ -43,12 +48,12 @@ impl LogicalPlan {
         self.nodes.iter()
     }
 
-    pub(crate) fn from_parts(nodes: Vec<LogicalPlanNode>, root: usize) -> Self {
-        debug_assert!(root < nodes.len());
+    pub(crate) fn from_parts(nodes: Vec<LogicalPlanNode>, root: NodeId) -> Self {
+        debug_assert!(root.index() < nodes.len());
         Self { nodes, root }
     }
 
-    pub(crate) fn into_parts(self) -> (Vec<LogicalPlanNode>, usize) {
+    pub(crate) fn into_parts(self) -> (Vec<LogicalPlanNode>, NodeId) {
         (self.nodes, self.root)
     }
 }
@@ -56,11 +61,11 @@ impl LogicalPlan {
 /// One operator in a [`LogicalPlan`] arena.
 ///
 /// Every table or column reference is already bound to catalog metadata. Input
-/// fields contain indexes into the owning plan's node arena.
+/// fields contain IDs into the owning plan's node arena.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogicalPlanNode {
     /// Return the physical plan for an input statement without executing it.
-    Explain { input: usize },
+    Explain { input: NodeId },
     /// Create a table with the provided tuple schema.
     CreateTable { name: String, schema: TupleSchema },
     /// Create a secondary index over bound columns from an existing table.
@@ -74,15 +79,15 @@ pub enum LogicalPlanNode {
     ///
     /// The input is currently expected to be [`LogicalPlanNode::Values`] during
     /// physical planning.
-    Insert { table: TableSchema, columns: Vec<BoundColumn>, input: usize },
+    Insert { table: TableSchema, columns: Vec<BoundColumn>, input: NodeId },
     /// Update rows in a table selected by an input plan.
     ///
     /// Assignment targets are bound and checked for duplicate names before this
     /// node is built. Primary-key columns are rejected here because changing
     /// them would require moving table records.
-    Update { table: TableSchema, assignments: Vec<UpdateAssignment>, input: usize },
+    Update { table: TableSchema, assignments: Vec<UpdateAssignment>, input: NodeId },
     /// Delete rows from a table selected by an input plan.
-    Delete { table: TableSchema, input: usize },
+    Delete { table: TableSchema, input: NodeId },
     /// Synthetic single-row input used for projection-only selects without a
     /// `FROM` clause.
     OneRow,
@@ -92,13 +97,13 @@ pub enum LogicalPlanNode {
     ///
     /// Physical planning may use part of this predicate to choose a narrower
     /// table access path. Any remaining predicate is preserved as a filter.
-    Filter { input: usize, predicate: PlannedExpression },
+    Filter { input: NodeId, predicate: PlannedExpression },
     /// Order input rows by one or more columns.
-    Sort { input: usize, terms: Vec<SortTerm> },
+    Sort { input: NodeId, terms: Vec<SortTerm> },
     /// Produce output expressions from each input row.
-    Project { input: usize, expressions: Vec<PlannedExpression> },
+    Project { input: NodeId, expressions: Vec<PlannedExpression> },
     /// Skip the first `offset` input rows.
-    Offset { input: usize, offset: u32 },
+    Offset { input: NodeId, offset: u32 },
     /// Emit at most `limit` input rows.
-    Limit { input: usize, limit: u32 },
+    Limit { input: NodeId, limit: u32 },
 }

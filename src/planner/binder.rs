@@ -21,8 +21,8 @@ use crate::{
 };
 
 use super::{
-    BoundColumn, LogicalPlan, LogicalPlanNode, PlannedExpression, PlannerError, PlannerResult,
-    SortTerm, UpdateAssignment,
+    BoundColumn, LogicalPlan, LogicalPlanNode, NodeId, PlannedExpression, PlannerError,
+    PlannerResult, SortTerm, UpdateAssignment,
 };
 
 /// Binds parsed SQL syntax to catalog metadata and builds a logical plan.
@@ -45,7 +45,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         statement: &Statement<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         match statement {
             Statement::Explain(statement) => self.plan_explain(statement, nodes),
             Statement::CreateTable(query) => self.plan_create_table(query, nodes),
@@ -61,7 +61,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         statement: &Statement<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let input = match statement {
             Statement::Select(query) => self.plan_select(query, nodes)?,
             Statement::Update(query) => self.plan_update(query, nodes)?,
@@ -79,7 +79,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         query: &CreateTableQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         Ok(push_logical_node(
             nodes,
             LogicalPlanNode::CreateTable {
@@ -93,7 +93,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         query: &CreateIndexQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let table = self.table_schema(query.table_name)?;
         let mut seen = HashSet::new();
         let mut columns = Vec::new();
@@ -115,7 +115,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         query: &InsertQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let table = self.table_schema(query.table)?;
         let mut seen = HashSet::new();
         let mut columns = Vec::new();
@@ -151,7 +151,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         query: &DeleteQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let table = self.table_schema(query.table)?;
         let mut input =
             push_logical_node(nodes, LogicalPlanNode::TableScan { table: table.clone() });
@@ -168,7 +168,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         query: &UpdateQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let table = self.table_schema(query.table)?;
         let mut seen = HashSet::new();
         let mut assignments = Vec::new();
@@ -203,7 +203,7 @@ impl<'catalog> Binder<'catalog> {
         &self,
         query: &SelectQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<usize> {
+    ) -> PlannerResult<NodeId> {
         let table = query.table.map(|name| self.table_schema(name)).transpose()?;
         let mut input = match &table {
             Some(table) => {
@@ -303,10 +303,10 @@ impl<'catalog> Binder<'catalog> {
     }
 }
 
-fn push_logical_node(nodes: &mut Vec<LogicalPlanNode>, node: LogicalPlanNode) -> usize {
-    let index = nodes.len();
+fn push_logical_node(nodes: &mut Vec<LogicalPlanNode>, node: LogicalPlanNode) -> NodeId {
+    let id = NodeId::new(nodes.len());
     nodes.push(node);
-    index
+    id
 }
 
 fn bind_column_reference(
