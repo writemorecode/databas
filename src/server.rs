@@ -18,7 +18,7 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    core::{Database, Tuple, error::StorageError},
+    core::{Database, error::StorageError},
     error::DatabaseError,
     executor::{ExecutionOutput, ExecutorError},
     planner::PlannerError,
@@ -385,18 +385,7 @@ fn send_output(stream: &mut TcpStream, output: ExecutionOutput) -> Result<(), Co
                         return Ok(());
                     }
                 };
-                let tuple = match row.with_record(Tuple::from_bytes) {
-                    Ok(Ok(tuple)) => tuple,
-                    Ok(Err(error)) => {
-                        send_error(stream, ErrorCode::ExecutionError, &error.to_string())?;
-                        return Ok(());
-                    }
-                    Err(error) => {
-                        send_storage_error(stream, error)?;
-                        return Ok(());
-                    }
-                };
-                let payload = protocol::encode_row(tuple.values())?;
+                let payload = protocol::encode_row(row.values())?;
                 protocol::write_frame(stream, ROW, &payload)?;
                 count = count
                     .checked_add(1)
