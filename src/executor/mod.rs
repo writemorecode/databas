@@ -1,22 +1,23 @@
 //! Physical query execution.
 //!
 //! The executor consumes [`PhysicalPlan`] trees produced by the planner and
-//! turns them into either a lazy stream of table records or an immediate
-//! side-effect result such as rows affected or schema changed. Row-producing
+//! turns them into either a stream of executor rows or an immediate side-effect
+//! result such as rows affected or schema changed. Row-producing
 //! operators are deliberately iterator-based: scans, filters, projections,
 //! limits, and offsets do their work as the caller pulls rows from the returned
 //! [`RowStream`].
 //!
-//! This module is also responsible for evaluating planned scalar expressions
-//! against encoded table records and shaping inserted values into the target
+//! This module is also responsible for evaluating executable scalar expressions
+//! against slot-addressed row values and shaping inserted values into the target
 //! table layout before handing the write to storage.
 
 use crate::{
     core::{
-        OwnedTableRecord, TableKey, TableRecord as BorrowedTableRecord, Transaction, Tuple, Value,
+        CatalogId, OwnedTableRecord, TableKey, TableRecord as BorrowedTableRecord, Transaction,
+        Tuple, Value,
         error::{StorageError, StorageResult},
     },
-    planner::{NodeId, PhysicalPlan, PhysicalPlanNode},
+    planner::{NodeId, PhysicalPlan, PhysicalPlanNode, RelationId},
     sql_parser::parser::op::Op,
 };
 
@@ -99,12 +100,6 @@ pub enum ExecutorError {
         /// Operand value rejected by the operator.
         value: Value,
     },
-    /// A synthetic row index for a `VALUES` result exceeded the table-key range.
-    #[error("VALUES row index {row_index} does not fit in a table key")]
-    ValuesRowIndexOutOfRange {
-        /// Zero-based position of the row in the `VALUES` list.
-        row_index: usize,
-    },
     /// Integer arithmetic overflowed.
     #[error("integer overflow while evaluating operator {op}")]
     IntegerOverflow {
@@ -132,6 +127,12 @@ pub enum ExecutorError {
         /// Name of the unsupported physical operator.
         operator: &'static str,
     },
+    /// A mutation input row did not retain the target relation's storage locator.
+    #[error("row does not contain a locator for relation {relation:?}")]
+    MissingRowLocator {
+        /// Query-local target relation.
+        relation: RelationId,
+    },
     /// An inserted value row did not match the number of target columns.
     #[error("insert row has {values} values for {columns} columns")]
     InsertColumnValueCount {
@@ -145,66 +146,96 @@ pub enum ExecutorError {
 /// Result type returned by executor operations.
 pub type ExecutorResult<T> = Result<T, ExecutorError>;
 
+/// Stable storage identity retained alongside an executor row's values.
+#[derive(Debug, Clone)]
+pub struct RowLocator {
+    relation: RelationId,
+    table_id: CatalogId,
+    record: OwnedTableRecord,
+}
+
+impl RowLocator {
+    /// Returns the query-local relation this record came from.
+    pub fn relation(&self) -> RelationId {
+        self.relation
+    }
+
+    /// Returns the catalog table containing the record.
+    pub fn table_id(&self) -> CatalogId {
+        self.table_id
+    }
+
+    /// Returns the table key of the source record.
+    pub fn table_key(&self) -> TableKey {
+        self.record.table_key
+    }
+
+    pub(crate) fn record(&self) -> &OwnedTableRecord {
+        &self.record
+    }
+}
+
 /// Row produced by the query executor.
 ///
-/// Scan rows can borrow storage pages through cursor-backed records, while
-/// synthetic and projected rows own their encoded tuple bytes.
-#[derive(Debug)]
-pub enum ExecutorRow {
-    /// Stable row snapshot with owned encoded tuple bytes.
-    Owned(OwnedTableRecord),
-    /// Cursor-backed row that may keep a storage page pinned.
-    Borrowed(BorrowedTableRecord),
+/// Values are independent of storage layout and can represent projections or
+/// future joined rows. Source records needed by mutations are retained
+/// separately as relation-specific [`RowLocator`] values.
+#[derive(Debug, Clone)]
+pub struct ExecutorRow {
+    values: Vec<Value>,
+    locators: Vec<RowLocator>,
 }
 
 impl ExecutorRow {
-    /// Returns this row's table key.
-    pub fn table_key(&self) -> TableKey {
-        match self {
-            Self::Owned(record) => record.table_key,
-            Self::Borrowed(record) => record.table_key(),
-        }
+    /// Creates a synthetic row with no storage locators.
+    pub fn from_values(values: Vec<Value>) -> Self {
+        Self { values, locators: Vec::new() }
     }
 
-    /// Executes `f` with the encoded tuple bytes for this row.
+    fn from_table_record(
+        relation: RelationId,
+        table_id: CatalogId,
+        record: BorrowedTableRecord,
+    ) -> ExecutorResult<Self> {
+        let record = record.to_owned_record()?;
+        let values =
+            Tuple::from_bytes(&record.record).map_err(ExecutorError::InvalidTuple)?.into_values();
+        let locator = RowLocator { relation, table_id, record };
+        Ok(Self { values, locators: vec![locator] })
+    }
+
+    /// Returns this row's values in physical slot order.
+    pub fn values(&self) -> &[Value] {
+        &self.values
+    }
+
+    /// Returns all source-row locators retained through relational operators.
+    pub fn locators(&self) -> &[RowLocator] {
+        &self.locators
+    }
+
+    /// Returns the source record for a query-local relation, if present.
+    pub fn locator(&self, relation: RelationId) -> Option<&RowLocator> {
+        self.locators.iter().find(|locator| locator.relation == relation)
+    }
+
+    pub(crate) fn with_values(&self, values: Vec<Value>) -> Self {
+        Self { values, locators: self.locators.clone() }
+    }
+
+    /// Executes `f` with this row encoded in the storage tuple format.
     pub fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
-        match self {
-            Self::Owned(record) => Ok(f(&record.record)),
-            Self::Borrowed(record) => record.with_record(f),
-        }
-    }
-
-    /// Returns this row as a stable owned snapshot.
-    pub fn to_owned_record(&self) -> StorageResult<OwnedTableRecord> {
-        match self {
-            Self::Owned(record) => Ok(record.clone()),
-            Self::Borrowed(record) => record.to_owned_record(),
-        }
-    }
-
-    /// Converts this row into an owned snapshot without cloning an already-owned row.
-    pub fn into_owned_record(self) -> StorageResult<OwnedTableRecord> {
-        match self {
-            Self::Owned(record) => Ok(record),
-            Self::Borrowed(record) => record.to_owned_record(),
-        }
+        let record = Tuple::new(self.values.clone()).to_bytes()?;
+        Ok(f(&record))
     }
 }
 
 impl std::fmt::Display for ExecutorRow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.with_record(|record| match Tuple::from_bytes(record) {
-            Ok(tuple) => {
-                for value in &tuple {
-                    write!(f, "{value}\t")?;
-                }
-                Ok(())
-            }
-            Err(_) => write!(f, "<invalid tuple>"),
-        }) {
-            Ok(result) => result,
-            Err(error) => write!(f, "<unavailable row: {error}>"),
+        for value in &self.values {
+            write!(f, "{value}\t")?;
         }
+        Ok(())
     }
 }
 
@@ -214,12 +245,7 @@ pub(crate) type RowStream = Box<dyn Iterator<Item = ExecutorResult<ExecutorRow>>
 fn collect_rows(
     rows: impl Iterator<Item = ExecutorResult<ExecutorRow>>,
 ) -> Vec<ExecutorResult<ExecutorRow>> {
-    rows.map(|row| {
-        row.and_then(|row| {
-            row.into_owned_record().map(ExecutorRow::Owned).map_err(ExecutorError::from)
-        })
-    })
-    .collect()
+    rows.collect()
 }
 
 /// Result of executing one physical plan.
@@ -337,50 +363,57 @@ impl<'txn, 'db> Executor<'txn, 'db> {
             PhysicalPlanNode::InsertValues { table, columns, values } => {
                 execute_insert_values(self.transaction, table, columns, values)
             }
-            PhysicalPlanNode::Update { table, assignments, input, .. } => {
+            PhysicalPlanNode::Update { relation, table, assignments, input } => {
                 let output_inner = self.execute_node(nodes, input)?;
                 execute_update(
                     self.transaction,
+                    relation,
                     table,
                     assignments,
                     output_inner.into_rows("UPDATE")?,
                 )
             }
-            PhysicalPlanNode::Delete { table, input, .. } => {
+            PhysicalPlanNode::Delete { relation, table, input } => {
                 let output_inner = self.execute_node(nodes, input)?;
-                execute_delete(self.transaction, table, output_inner.into_rows("DELETE")?)
+                execute_delete(self.transaction, relation, table, output_inner.into_rows("DELETE")?)
             }
             PhysicalPlanNode::OneRow => Ok(ExecutionOutput::Rows {
-                rows: collect_rows(std::iter::once_with(|| empty_record(0))),
+                rows: collect_rows(std::iter::once_with(|| Ok(empty_record()))),
             }),
-            PhysicalPlanNode::FullTableScan { table, .. } => {
-                let rows = self
-                    .transaction
-                    .scan_table(&table)?
-                    .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
+            PhysicalPlanNode::FullTableScan { relation, table } => {
+                let table_id = table.table_id;
+                let rows = self.transaction.scan_table(&table)?.map(move |record| {
+                    let record = record.map_err(ExecutorError::from)?;
+                    ExecutorRow::from_table_record(relation, table_id, record)
+                });
                 Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
-            PhysicalPlanNode::PrimaryKeyRangeScan { table, range, .. } => {
-                let rows = self
-                    .transaction
-                    .scan_table_range(&table, range)?
-                    .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
+            PhysicalPlanNode::PrimaryKeyRangeScan { relation, table, range } => {
+                let table_id = table.table_id;
+                let rows = self.transaction.scan_table_range(&table, range)?.map(move |record| {
+                    let record = record.map_err(ExecutorError::from)?;
+                    ExecutorRow::from_table_record(relation, table_id, record)
+                });
                 Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
             PhysicalPlanNode::SecondaryIndexScan { scan } => {
+                let table_id = scan.table.table_id;
+                let relation = scan.relation;
                 let rows = self
                     .transaction
                     .scan_index(&scan.table, &scan.index, scan.key_range)?
-                    .map(|record| record.map(ExecutorRow::Borrowed).map_err(Into::into));
+                    .map(move |record| {
+                        let record = record.map_err(ExecutorError::from)?;
+                        ExecutorRow::from_table_record(relation, table_id, record)
+                    });
                 Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
             PhysicalPlanNode::Filter { input, predicate } => {
                 let output_inner = self.execute_node(nodes, input)?;
                 let rows = output_inner.into_rows("FILTER")?.filter_map(move |row| match row {
                     Ok(row) => {
-                        let result = EvaluationContext::with_record(&row, |context| {
-                            evaluate_value(&predicate, context)
-                        });
+                        let context = EvaluationContext::from_row(&row);
+                        let result = evaluate_value(&predicate, &context);
                         match result {
                             Ok(Value::Boolean(true)) => Some(Ok(row)),
                             Ok(Value::Boolean(false)) => None,
@@ -464,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn values_assigns_a_key_to_each_literal_row() {
+    fn values_evaluates_each_literal_row() {
         let (_dir, database) = database();
         let txn_id = database.begin_transaction().unwrap();
         let transaction = database.transaction(txn_id, Vec::new());
@@ -483,7 +516,6 @@ mod tests {
             .collect::<ExecutorResult<Vec<_>>>()
             .unwrap();
 
-        assert_eq!(rows.iter().map(ExecutorRow::table_key).collect::<Vec<_>>(), vec![0, 1]);
         assert_eq!(
             rows.iter().map(row_values).collect::<Vec<_>>(),
             vec![vec![Value::Integer(10)], vec![Value::Integer(20)],]

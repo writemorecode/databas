@@ -1,16 +1,15 @@
 use crate::{
-    core::{OwnedTableRecord, TableKey, TableSchema, Transaction, Tuple, TupleView, Value},
-    planner::{BoundColumn, ExecColumn, ExecExpr, UpdateAssignment},
+    core::{TableSchema, Transaction, Tuple, Value},
+    planner::{BoundColumn, ExecColumn, ExecExpr, RelationId, UpdateAssignment},
     sql_parser::parser::op::Op,
 };
 
 use super::{ExecutionOutput, ExecutorError, ExecutorResult, ExecutorRow, RowStream, collect_rows};
 
-/// Evaluates one planned scalar expression against a record.
+/// Evaluates one executable scalar expression against a row.
 ///
-/// The result is represented as a single-column [`ExecutorRow`] that preserves
-/// the input record's table key. This is primarily useful for tests and callers
-/// that need expression evaluation without building a full projection plan.
+/// The result contains one value and preserves any source locators carried by
+/// the input row.
 pub fn evaluate_expression(
     expression: &ExecExpr,
     record: &ExecutorRow,
@@ -19,14 +18,9 @@ pub fn evaluate_expression(
 }
 
 /// Executes a `VALUES` plan as a stream of evaluated literal rows.
-///
-/// Each values row is evaluated against an empty synthetic record. The row's
-/// position in the `VALUES` list becomes the result table key.
 pub(super) fn execute_values(rows: Vec<Vec<ExecExpr>>) -> ExecutorResult<ExecutionOutput> {
-    let rows = rows.into_iter().enumerate().map(|(row_index, expressions)| {
-        let table_key = TableKey::try_from(row_index)
-            .map_err(|_out_of_range| ExecutorError::ValuesRowIndexOutOfRange { row_index })?;
-        let input = empty_record(table_key)?;
+    let rows = rows.into_iter().map(|expressions| {
+        let input = empty_record();
         evaluate_expressions(&expressions, &input)
     });
     Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
@@ -73,23 +67,21 @@ pub(super) fn execute_insert_values(
             });
         }
 
-        let input = empty_record(0)?;
-        let row_values = EvaluationContext::with_record(&input, |input_context| {
-            let mut row_values = vec![Value::Null; table.row.columns.len()];
-            for (column, expression) in columns.iter().zip(expressions.iter()) {
-                let len = row_values.len();
-                let value = evaluate_value(expression, input_context)?;
-                let slot = row_values.get_mut(column.ordinal).ok_or_else(|| {
-                    ExecutorError::ColumnOrdinalOutOfBounds {
-                        column: column.name.clone(),
-                        ordinal: column.ordinal,
-                        len,
-                    }
-                })?;
-                *slot = value;
-            }
-            Ok(row_values)
-        })?;
+        let input = empty_record();
+        let input_context = EvaluationContext::from_row(&input);
+        let mut row_values = vec![Value::Null; table.row.columns.len()];
+        for (column, expression) in columns.iter().zip(expressions.iter()) {
+            let len = row_values.len();
+            let value = evaluate_value(expression, &input_context)?;
+            let slot = row_values.get_mut(column.ordinal).ok_or_else(|| {
+                ExecutorError::ColumnOrdinalOutOfBounds {
+                    column: column.name.clone(),
+                    ordinal: column.ordinal,
+                    len,
+                }
+            })?;
+            *slot = value;
+        }
         transaction.insert_table_row(&table, row_values)?;
         affected += 1;
     }
@@ -100,6 +92,7 @@ pub(super) fn execute_insert_values(
 /// Executes an `UPDATE` plan by consuming and mutating one target row at a time.
 pub(super) fn execute_update(
     transaction: &Transaction<'_>,
+    relation: RelationId,
     table: TableSchema,
     assignments: Vec<UpdateAssignment>,
     target_rows: RowStream,
@@ -107,11 +100,16 @@ pub(super) fn execute_update(
     let mut affected = 0;
 
     for row in target_rows {
-        let owned_row = row?.into_owned_record()?;
-
-        let context = EvaluationContext::from_owned_record(&owned_row)?;
-        let mut values =
-            context.tuple.to_owned_tuple().map_err(ExecutorError::InvalidTuple)?.into_values();
+        let row = row?;
+        let owned_row = row
+            .locator(relation)
+            .ok_or(ExecutorError::MissingRowLocator { relation })?
+            .record()
+            .clone();
+        let context = EvaluationContext::from_row(&row);
+        let mut values = Tuple::from_bytes(&owned_row.record)
+            .map_err(ExecutorError::InvalidTuple)?
+            .into_values();
 
         for assignment in &assignments {
             let len = values.len();
@@ -136,41 +134,35 @@ pub(super) fn execute_update(
 /// Executes a `DELETE` plan by consuming and deleting one target row at a time.
 pub(super) fn execute_delete(
     transaction: &Transaction<'_>,
+    relation: RelationId,
     table: TableSchema,
     target_rows: RowStream,
 ) -> ExecutorResult<ExecutionOutput> {
     let mut affected = 0;
 
     for row in target_rows {
-        let owned_row = row?.into_owned_record()?;
+        let row = row?;
+        let owned_row =
+            row.locator(relation).ok_or(ExecutorError::MissingRowLocator { relation })?.record();
 
-        transaction.delete_table_row(&table, &owned_row)?;
+        transaction.delete_table_row(&table, owned_row)?;
         affected += 1;
     }
 
     Ok(ExecutionOutput::RowsAffected(affected))
 }
 
-/// Evaluates a projection list against one input record.
+/// Evaluates a projection list against one input row.
 pub(super) fn evaluate_expressions(
     expressions: &[ExecExpr],
     record: &ExecutorRow,
 ) -> ExecutorResult<ExecutorRow> {
-    EvaluationContext::with_record(record, |context| {
-        evaluate_expressions_in_context(expressions, context)
-    })
-}
-
-/// Evaluates expressions using an already-parsed tuple context.
-fn evaluate_expressions_in_context(
-    expressions: &[ExecExpr],
-    context: &EvaluationContext<'_>,
-) -> ExecutorResult<ExecutorRow> {
+    let context = EvaluationContext::from_row(record);
     let values = expressions
         .iter()
-        .map(|expression| evaluate_value(expression, context))
+        .map(|expression| evaluate_value(expression, &context))
         .collect::<ExecutorResult<Vec<_>>>()?;
-    record_from_values(context.table_key, values)
+    Ok(record.with_values(values))
 }
 
 /// Evaluates a scalar expression to one typed value.
@@ -200,41 +192,14 @@ pub(super) fn evaluate_value(
     }
 }
 
-/// Parsed view of an input record used while evaluating expressions.
-///
-/// The context keeps the original table key so projected records preserve their
-/// source identity, and it keeps a zero-copy tuple view so column references can
-/// read typed values by ordinal.
+/// Borrowed view of an executor row used while evaluating expressions.
 pub(super) struct EvaluationContext<'a> {
-    table_key: TableKey,
-    tuple: TupleView<'a>,
-}
-
-impl EvaluationContext<'_> {
-    /// Parses the encoded tuple bytes from `record` and evaluates `f` while
-    /// the record bytes are still borrowed.
-    pub(super) fn with_record<R>(
-        record: &ExecutorRow,
-        f: impl FnOnce(&EvaluationContext<'_>) -> ExecutorResult<R>,
-    ) -> ExecutorResult<R> {
-        let table_key = record.table_key();
-        record.with_record(|bytes| {
-            let tuple = TupleView::parse(bytes).map_err(ExecutorError::InvalidTuple)?;
-            let context = EvaluationContext { table_key, tuple };
-            f(&context)
-        })?
-    }
+    values: &'a [Value],
 }
 
 impl<'a> EvaluationContext<'a> {
-    /// Parses the encoded tuple bytes from an owned table record.
-    pub(super) fn from_owned_record(record: &'a OwnedTableRecord) -> ExecutorResult<Self> {
-        Self::from_bytes(record.table_key, &record.record)
-    }
-
-    fn from_bytes(table_key: TableKey, record: &'a [u8]) -> ExecutorResult<Self> {
-        let tuple = TupleView::parse(record).map_err(ExecutorError::InvalidTuple)?;
-        Ok(Self { table_key, tuple })
+    pub(super) fn from_row(row: &'a ExecutorRow) -> Self {
+        Self { values: row.values() }
     }
 
     /// Reads the value for a planner-bound column reference.
@@ -244,11 +209,12 @@ impl<'a> EvaluationContext<'a> {
 
     /// Reads the value at `ordinal`, using `column_name` for diagnostics.
     fn value_at(&self, ordinal: usize, column_name: &str) -> ExecutorResult<Value> {
-        let len = self.tuple.len();
-        let value = self.tuple.values().nth(ordinal).ok_or_else(|| {
-            ExecutorError::ColumnOrdinalOutOfBounds { column: column_name.to_owned(), ordinal, len }
-        })?;
-        value.map(Value::from).map_err(ExecutorError::InvalidTuple)
+        let len = self.values.len();
+        self.values.get(ordinal).cloned().ok_or_else(|| ExecutorError::ColumnOrdinalOutOfBounds {
+            column: column_name.to_owned(),
+            ordinal,
+            len,
+        })
     }
 }
 
@@ -398,28 +364,7 @@ fn compare_ordered<T: PartialOrd>(left: &T, op: Op, right: &T) -> ExecutorResult
     }
 }
 
-/// Builds an encoded empty record with the provided table key.
-pub(super) fn empty_record(table_key: TableKey) -> ExecutorResult<ExecutorRow> {
-    record_from_values(table_key, Vec::new())
-}
-
-/// Builds a table record from owned typed values.
-pub(super) fn record_from_values(
-    table_key: TableKey,
-    values: Vec<Value>,
-) -> ExecutorResult<ExecutorRow> {
-    owned_record_from_values(table_key, values).map(ExecutorRow::Owned)
-}
-
-pub(super) fn owned_record_from_values(
-    table_key: TableKey,
-    values: Vec<Value>,
-) -> ExecutorResult<OwnedTableRecord> {
-    let record = record_bytes_from_values(values)?;
-    Ok(OwnedTableRecord { table_key, record: record.into_boxed_slice() })
-}
-
-/// Serializes typed values using the tuple storage format.
-fn record_bytes_from_values(values: Vec<Value>) -> ExecutorResult<Vec<u8>> {
-    Tuple::new(values).to_bytes().map_err(ExecutorError::InvalidTuple)
+/// Builds an empty synthetic row.
+pub(super) fn empty_record() -> ExecutorRow {
+    ExecutorRow::from_values(Vec::new())
 }
