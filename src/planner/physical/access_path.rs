@@ -9,7 +9,7 @@ use crate::{
     sql_parser::parser::op::Op,
 };
 
-use crate::planner::{BoundColumn, BoundExpr, IndexValueBound, IndexValueRange};
+use crate::planner::{BoundColumn, BoundExpr, IndexValueBound, IndexValueRange, RelationId};
 
 #[derive(Debug, Clone, PartialEq)]
 /// A primary-key scan range and an optional predicate that must be evaluated afterward.
@@ -39,6 +39,7 @@ pub(super) struct IndexPredicate {
 /// first column or when the predicate does not provide a usable range.
 pub(super) fn primary_key_range_predicate(
     table: &TableSchema,
+    relation: RelationId,
     predicate: &BoundExpr,
 ) -> Option<RangePredicate> {
     let primary_key = table.row.columns.first()?;
@@ -46,7 +47,7 @@ pub(super) fn primary_key_range_predicate(
         return None;
     }
 
-    range_predicate_from_expression(table, predicate)
+    range_predicate_from_expression(table, relation, predicate)
 }
 
 /// Derives an index-key range from predicates that constrain an exact,
@@ -56,6 +57,7 @@ pub(super) fn primary_key_range_predicate(
 /// into the returned value and encoded-key ranges.
 pub(super) fn secondary_index_predicate(
     table: &TableSchema,
+    relation: RelationId,
     predicate: &BoundExpr,
     indexes: &[IndexSchema],
 ) -> Option<IndexPredicate> {
@@ -63,7 +65,7 @@ pub(super) fn secondary_index_predicate(
     flatten_conjuncts(predicate, &mut conjuncts);
 
     for conjunct in &conjuncts {
-        let Some(candidate) = secondary_index_comparison(table, conjunct, indexes) else {
+        let Some(candidate) = secondary_index_comparison(table, relation, conjunct, indexes) else {
             continue;
         };
         let mut value_range = IndexValueRange::default();
@@ -71,7 +73,7 @@ pub(super) fn secondary_index_predicate(
 
         for conjunct in &conjuncts {
             if let Some(comparison) =
-                index_comparison_for_column(table, conjunct, &candidate.column)
+                index_comparison_for_column(relation, conjunct, &candidate.column)
             {
                 combine_index_ranges(
                     &mut value_range,
@@ -140,10 +142,11 @@ struct SecondaryIndexCandidate {
 /// Finds an indexed column comparison suitable for secondary-index access.
 fn secondary_index_comparison(
     table: &TableSchema,
+    relation: RelationId,
     comparison: &BoundExpr,
     indexes: &[IndexSchema],
 ) -> Option<SecondaryIndexCandidate> {
-    let comparison = index_comparison(table, comparison)?;
+    let comparison = index_comparison(relation, comparison)?;
     let index =
         indexes.iter().find(|index| exact_single_column_index(index, table, &comparison.column))?;
     Some(SecondaryIndexCandidate { index: index.clone(), column: comparison.column })
@@ -151,11 +154,11 @@ fn secondary_index_comparison(
 
 /// Extracts a comparison when it targets the requested bound column.
 fn index_comparison_for_column<'a>(
-    table: &TableSchema,
+    relation: RelationId,
     comparison: &'a BoundExpr,
     column: &BoundColumn,
 ) -> Option<IndexComparison<'a>> {
-    let comparison = index_comparison(table, comparison)?;
+    let comparison = index_comparison(relation, comparison)?;
     (comparison.column == *column).then_some(comparison)
 }
 
@@ -164,19 +167,19 @@ fn index_comparison_for_column<'a>(
 /// Comparisons written with the literal on the left are normalized so the
 /// returned comparison always describes the column relative to the literal.
 fn index_comparison<'a>(
-    table: &TableSchema,
+    relation: RelationId,
     comparison: &'a BoundExpr,
 ) -> Option<IndexComparison<'a>> {
     let BoundExpr::Binary { left, op, right } = comparison else {
         return None;
     };
-    index_comparison_from_operands(table, left, *op, right)
-        .or_else(|| index_comparison_from_reversed_operands(table, left, *op, right))
+    index_comparison_from_operands(relation, left, *op, right)
+        .or_else(|| index_comparison_from_reversed_operands(relation, left, *op, right))
 }
 
 /// Builds an index comparison from a column followed by a literal operand.
 fn index_comparison_from_operands<'a>(
-    table: &TableSchema,
+    relation: RelationId,
     column: &BoundExpr,
     op: Op,
     value: &'a BoundExpr,
@@ -187,7 +190,7 @@ fn index_comparison_from_operands<'a>(
     let BoundExpr::Literal(value) = value else {
         return None;
     };
-    if column.table != table.name || !value_matches_data_type(value, column.data_type) {
+    if column.relation != relation || !value_matches_data_type(value, column.data_type) {
         return None;
     }
 
@@ -211,13 +214,13 @@ fn index_comparison_from_operands<'a>(
 
 /// Builds an index comparison from a literal followed by a column operand.
 fn index_comparison_from_reversed_operands<'a>(
-    table: &TableSchema,
+    relation: RelationId,
     value: &'a BoundExpr,
     op: Op,
     column: &BoundExpr,
 ) -> Option<IndexComparison<'a>> {
     let reversed = reverse_comparison_op(op)?;
-    index_comparison_from_operands(table, column, reversed, value)
+    index_comparison_from_operands(relation, column, reversed, value)
 }
 
 /// Reverses a comparison operator when its operands are swapped.
@@ -384,11 +387,12 @@ fn value_matches_data_type(value: &Value, data_type: DataType) -> bool {
 /// otherwise, the unusable side is preserved as a residual predicate.
 fn range_predicate_from_expression(
     table: &TableSchema,
+    relation: RelationId,
     expression: &BoundExpr,
 ) -> Option<RangePredicate> {
     match expression {
         BoundExpr::Binary { left, op: Op::And, right } => {
-            let left = range_predicate_from_expression(table, left)?;
+            let left = range_predicate_from_expression(table, relation, left)?;
             if let Some(left_residual) = left.residual {
                 return Some(RangePredicate {
                     range: left.range,
@@ -396,7 +400,7 @@ fn range_predicate_from_expression(
                 });
             }
 
-            match range_predicate_from_expression(table, right) {
+            match range_predicate_from_expression(table, relation, right) {
                 Some(right) => Some(RangePredicate {
                     range: combine_ranges(left.range, right.range),
                     residual: right.residual,
@@ -406,8 +410,10 @@ fn range_predicate_from_expression(
                 }
             }
         }
-        BoundExpr::Binary { left, op, right } => range_from_comparison(table, left, *op, right)
-            .map(|range| RangePredicate { range, residual: None }),
+        BoundExpr::Binary { left, op, right } => {
+            range_from_comparison(table, relation, left, *op, right)
+                .map(|range| RangePredicate { range, residual: None })
+        }
         BoundExpr::Literal(_) | BoundExpr::Column(_) | BoundExpr::Unary { .. } => None,
     }
 }
@@ -420,18 +426,19 @@ fn and_expression(left: BoundExpr, right: BoundExpr) -> BoundExpr {
 /// Converts a primary-key comparison into a table-key range.
 fn range_from_comparison(
     table: &TableSchema,
+    relation: RelationId,
     left: &BoundExpr,
     op: Op,
     right: &BoundExpr,
 ) -> Option<TableKeyRange> {
     match (left, right) {
         (BoundExpr::Column(column), BoundExpr::Literal(Value::Integer(value)))
-            if is_table_primary_key(table, column) =>
+            if is_table_primary_key(table, relation, column) =>
         {
             range_from_column_comparison(op, *value)
         }
         (BoundExpr::Literal(Value::Integer(value)), BoundExpr::Column(column))
-            if is_table_primary_key(table, column) =>
+            if is_table_primary_key(table, relation, column) =>
         {
             range_from_literal_comparison(op, *value)
         }
@@ -440,8 +447,8 @@ fn range_from_comparison(
 }
 
 /// Reports whether a bound column is the table's first-column primary key.
-fn is_table_primary_key(table: &TableSchema, column: &BoundColumn) -> bool {
-    column.table == table.name && column.ordinal == 0 && table.row.columns[0].primary_key
+fn is_table_primary_key(table: &TableSchema, relation: RelationId, column: &BoundColumn) -> bool {
+    column.relation == relation && column.ordinal == 0 && table.row.columns[0].primary_key
 }
 
 /// Converts a comparison with the column on the left into a key range.

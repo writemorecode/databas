@@ -614,6 +614,27 @@ mod tests {
     }
 
     #[test]
+    fn select_supports_table_aliases_in_projection_and_filter() {
+        let (_dir, database) = database();
+        execute(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, score INT);")
+            .unwrap();
+        execute(
+            &database,
+            "INSERT INTO users (id, name, score) VALUES \
+             (1, 'Ada', 20), (2, 'Grace', 10), (3, 'Linus', 30);",
+        )
+        .unwrap();
+
+        assert_eq!(
+            query(&database, "SELECT u.name, u.score + 1 FROM users AS u WHERE u.score >= 20;"),
+            vec![
+                vec![Value::String("Ada".into()), Value::Integer(21)],
+                vec![Value::String("Linus".into()), Value::Integer(31)],
+            ]
+        );
+    }
+
+    #[test]
     fn filter_rejects_non_boolean_predicates() {
         let (_dir, database) = database();
         execute(&database, "CREATE TABLE users (id INT PRIMARY KEY);").unwrap();

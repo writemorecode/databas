@@ -168,7 +168,7 @@ mod tests {
     use crate::sql_parser::parser::stmt::{
         Statement::{self},
         lists::ExpressionList,
-        select::SelectQuery,
+        select::{SelectQuery, TableReference},
     };
 
     #[test]
@@ -186,7 +186,7 @@ mod tests {
         let query = parser.stmt();
 
         let expected_query = Statement::Select(SelectQuery {
-            table: Some("products"),
+            table: Some(TableReference { name: "products", alias: None }),
             joins: vec![],
             columns: ExpressionList(vec![
                 Expression::AggregateFunction(AggregateFunction {
