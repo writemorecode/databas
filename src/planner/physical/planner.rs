@@ -8,7 +8,8 @@ use super::{
 };
 use crate::planner::{
     BoundExpr, BoundSortTerm, BoundUpdateAssignment, ExecColumn, ExecExpr, LogicalPlan,
-    LogicalPlanNode, NodeId, PlanSchema, PlannerError, PlannerResult, SortTerm, UpdateAssignment,
+    LogicalPlanNode, NodeId, PlanSchema, PlannerError, PlannerResult, RelationId, SortTerm,
+    UpdateAssignment,
 };
 
 /// Selects executable operators and access paths for a logical plan.
@@ -103,7 +104,7 @@ impl<'catalog> PhysicalPlanner<'catalog> {
                 let input_schema = logical_output_schema(logical_nodes, input)?;
                 match take_logical_node(logical_nodes, input)? {
                     LogicalPlanNode::TableScan { relation, table, .. } => {
-                        match primary_key_range_predicate(&table, &predicate) {
+                        match primary_key_range_predicate(&table, relation, &predicate) {
                             Some(range_predicate) => {
                                 let scan = push_physical_node(
                                     physical_nodes,
@@ -123,7 +124,7 @@ impl<'catalog> PhysicalPlanner<'catalog> {
                             }
                             None if allow_secondary_index_scans => {
                                 let scan = match self
-                                    .secondary_index_predicate(&table, &predicate)?
+                                    .secondary_index_predicate(&table, relation, &predicate)?
                                 {
                                     Some(index_predicate) => PhysicalPlanNode::SecondaryIndexScan {
                                         scan: SecondaryIndexScanPlan {
@@ -218,10 +219,11 @@ impl<'catalog> PhysicalPlanner<'catalog> {
     fn secondary_index_predicate(
         &self,
         table: &TableSchema,
+        relation: RelationId,
         predicate: &BoundExpr,
     ) -> PlannerResult<Option<IndexPredicate>> {
         let indexes = self.catalog.index_schemas_for_table(table)?;
-        Ok(secondary_index_predicate(table, predicate, &indexes))
+        Ok(secondary_index_predicate(table, relation, predicate, &indexes))
     }
 }
 

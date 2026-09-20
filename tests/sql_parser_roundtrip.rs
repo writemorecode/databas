@@ -56,7 +56,7 @@ fn insert_query() -> BoxedStrategy<String> {
 fn select_query() -> BoxedStrategy<String> {
     (
         prop::collection::vec(expression(true), 1..=4),
-        prop::option::of(identifier()),
+        prop::option::of((identifier(), prop::option::of(identifier()))),
         prop::option::of(expression(false)),
         prop::option::of(prop::collection::vec(
             (identifier(), prop::sample::select(&["", " ASC", " DESC"]))
@@ -68,8 +68,11 @@ fn select_query() -> BoxedStrategy<String> {
     )
         .prop_map(|(columns, table, predicate, order_by, limit, offset)| {
             let mut sql = format!("SELECT {}", columns.join(", "));
-            if let Some(table) = table {
+            if let Some((table, alias)) = table {
                 sql.push_str(&format!(" FROM {table}"));
+                if let Some(alias) = alias {
+                    sql.push_str(&format!(" AS {alias}"));
+                }
             }
             if let Some(predicate) = predicate {
                 sql.push_str(&format!(" WHERE {predicate}"));
@@ -93,6 +96,7 @@ fn join_query() -> BoxedStrategy<String> {
     (
         prop::collection::vec(expression(true), 1..=4),
         identifier(),
+        prop::option::of(identifier()),
         prop::collection::vec(
             (
                 any::<bool>(),
@@ -105,13 +109,17 @@ fn join_query() -> BoxedStrategy<String> {
         ),
         prop::option::of(expression(false)),
     )
-        .prop_map(|(columns, source_table, joins, predicate)| {
+        .prop_map(|(columns, source_table, source_alias, joins, predicate)| {
+            let source_qualifier = source_alias.unwrap_or(source_table);
             let mut sql = format!("SELECT {} FROM {source_table}", columns.join(", "));
+            if let Some(alias) = source_alias {
+                sql.push_str(&format!(" AS {alias}"));
+            }
             for (explicit_inner, table, alias, left_column, right_column) in joins {
                 let join_keyword = if explicit_inner { " INNER JOIN" } else { " JOIN" };
                 let qualifier = alias.unwrap_or(table);
                 sql.push_str(&format!(
-                    "{join_keyword} {table}{} ON {source_table}.{left_column} == {qualifier}.{right_column}",
+                    "{join_keyword} {table}{} ON {source_qualifier}.{left_column} == {qualifier}.{right_column}",
                     alias.map(|alias| format!(" AS {alias}")).unwrap_or_default()
                 ));
             }

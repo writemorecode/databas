@@ -61,11 +61,15 @@ mod tests {
     use super::*;
     use crate::{
         core::{
-            CatalogId, ColumnSchema, DataType, IndexColumnSchema, IndexSchema,
-            InvalidArgumentError, StorageError, TableSchema, TupleSchema, Value,
-            access::CatalogRead,
+            CatalogId, ColumnSchema, DataType, IndexColumnSchema, IndexKeyBound, IndexKeyRange,
+            IndexSchema, InvalidArgumentError, StorageError, TableKeyBound, TableKeyRange,
+            TableSchema, TupleSchema, Value, access::CatalogRead,
         },
-        sql_parser::parser::{Parser, stmt::Statement},
+        relational::{cursor::encode_index_entry_key, tuple::Tuple},
+        sql_parser::parser::{
+            Parser,
+            stmt::{Statement, select::Ordering},
+        },
     };
 
     fn parse(sql: &str) -> Statement<'_> {
@@ -237,6 +241,144 @@ mod tests {
             ),
             "Project expressions=[users.name, (users.age + 1)]\n\
              `- PrimaryKeyRangeScan table=users range=[lower=7 inclusive upper=7 inclusive]"
+        );
+    }
+
+    #[test]
+    fn select_table_aliases_bind_qualified_columns_in_every_clause() {
+        let relation = RelationId::new(0);
+        let mut expected = PhysicalPlan::new(PhysicalPlanNode::PrimaryKeyRangeScan {
+            relation,
+            table: users_table(),
+            range: TableKeyRange {
+                lower: Some(TableKeyBound::Inclusive(7)),
+                upper: Some(TableKeyBound::Inclusive(7)),
+            },
+        });
+        let scan = expected.root_id();
+        let sort = expected.push(PhysicalPlanNode::Sort {
+            input: scan,
+            terms: vec![SortTerm {
+                column: ExecColumn { slot: 2, name: "u.age".into(), data_type: DataType::Integer },
+                direction: Some(Ordering::Descending),
+            }],
+        });
+        expected.push(PhysicalPlanNode::Project {
+            input: sort,
+            expressions: vec![ExecExpr::Column(ExecColumn {
+                slot: 1,
+                name: "u.name".into(),
+                data_type: DataType::Text,
+            })],
+        });
+
+        assert_eq!(
+            plan(
+                &MemoryCatalog::default(),
+                "SELECT u.name FROM users AS u WHERE u.id == 7 ORDER BY u.age DESC;",
+            )
+            .physical,
+            expected
+        );
+
+        let mut expected =
+            PhysicalPlan::new(PhysicalPlanNode::FullTableScan { relation, table: users_table() });
+        let scan = expected.root_id();
+        expected.push(PhysicalPlanNode::Project {
+            input: scan,
+            expressions: vec![
+                ExecExpr::Column(ExecColumn {
+                    slot: 0,
+                    name: "u.id".into(),
+                    data_type: DataType::Integer,
+                }),
+                ExecExpr::Column(ExecColumn {
+                    slot: 1,
+                    name: "u.name".into(),
+                    data_type: DataType::Text,
+                }),
+                ExecExpr::Column(ExecColumn {
+                    slot: 2,
+                    name: "u.age".into(),
+                    data_type: DataType::Integer,
+                }),
+            ],
+        });
+
+        assert_eq!(plan(&MemoryCatalog::default(), "SELECT * FROM users AS u;").physical, expected);
+    }
+
+    #[test]
+    fn table_alias_hides_the_catalog_table_name() {
+        let catalog = MemoryCatalog::default();
+        let planner = Planner::with_schema(&catalog);
+
+        assert!(matches!(
+            planner.plan_statement(&parse("SELECT users.name FROM users AS u;")),
+            Err(PlannerError::TableNotInScope { table }) if table == "users"
+        ));
+    }
+
+    #[test]
+    fn aliased_predicates_can_use_secondary_indexes() {
+        let catalog = MemoryCatalog::with_indexes(&[("users_name", 1)]);
+        let relation = RelationId::new(0);
+        let indexed_value = Value::String("Ada".into());
+        let encoded_value = Tuple::new(vec![indexed_value.clone()]).to_bytes().unwrap();
+        let indexed_column = BoundColumn {
+            relation,
+            table: "u".into(),
+            name: "name".into(),
+            ordinal: 1,
+            data_type: DataType::Text,
+        };
+        let mut expected = PhysicalPlan::new(PhysicalPlanNode::SecondaryIndexScan {
+            scan: SecondaryIndexScanPlan {
+                relation,
+                table: users_table(),
+                index: catalog.indexes[0].clone(),
+                column: indexed_column,
+                value_range: IndexValueRange {
+                    lower: Some(IndexValueBound::Inclusive(indexed_value.clone())),
+                    upper: Some(IndexValueBound::Inclusive(indexed_value.clone())),
+                },
+                key_range: IndexKeyRange {
+                    lower: Some(IndexKeyBound::Inclusive(encode_index_entry_key(
+                        &encoded_value,
+                        i32::MIN,
+                    ))),
+                    upper: Some(IndexKeyBound::Inclusive(encode_index_entry_key(
+                        &encoded_value,
+                        i32::MAX,
+                    ))),
+                },
+            },
+        });
+        let scan = expected.root_id();
+        let filter = expected.push(PhysicalPlanNode::Filter {
+            input: scan,
+            predicate: ExecExpr::Binary {
+                left: Box::new(ExecExpr::Column(ExecColumn {
+                    slot: 1,
+                    name: "u.name".into(),
+                    data_type: DataType::Text,
+                })),
+                op: crate::sql_parser::parser::op::Op::EqualsEquals,
+                right: Box::new(ExecExpr::Literal(indexed_value)),
+            },
+        });
+        expected.push(PhysicalPlanNode::Project {
+            input: filter,
+            expressions: vec![ExecExpr::Column(ExecColumn {
+                slot: 0,
+                name: "u.id".into(),
+                data_type: DataType::Integer,
+            })],
+        });
+
+        assert_eq!(
+            plan(&catalog, "SELECT u.id FROM users AS u WHERE u.name == 'Ada';").physical,
+            expected
         );
     }
 
