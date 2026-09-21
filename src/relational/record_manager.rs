@@ -29,7 +29,7 @@ pub(crate) struct TableScan {
 
 /// Iterator over table rows referenced by matching secondary-index entries.
 pub(crate) struct IndexScan {
-    table: TableSchema,
+    table_name: String,
     table_cursor: TableCursor,
     index_cursor: IndexCursor,
     key_range: IndexKeyRange,
@@ -71,7 +71,7 @@ pub(crate) fn scan_index(
     key_range: IndexKeyRange,
 ) -> StorageResult<IndexScan> {
     Ok(IndexScan {
-        table: table.clone(),
+        table_name: table.name.clone(),
         table_cursor: table_cursor(catalog, txn_id, &table.name)?,
         index_cursor: index_cursor(catalog, txn_id, &index.name)?,
         key_range,
@@ -244,7 +244,7 @@ impl Iterator for IndexScan {
                         Ok(None) => {
                             self.done = true;
                             return Some(Err(invalid_index_entry(
-                                &self.table,
+                                &self.table_name,
                                 table_key,
                                 "index entry references missing table row",
                             )));
@@ -452,12 +452,12 @@ fn value_type_name(value: &Value) -> &'static str {
     }
 }
 
-fn invalid_index_entry(table: &TableSchema, table_key: TableKey, reason: &str) -> StorageError {
+fn invalid_index_entry(table_name: &str, table_key: TableKey, reason: &str) -> StorageError {
     StorageError::Corruption(CorruptionError {
         component: CorruptionComponent::Catalog,
         page_id: None,
         kind: CorruptionKind::InvalidTableRecord {
-            table: table.name.clone(),
+            table: table_name.to_owned(),
             table_key,
             reason: reason.to_owned(),
         },

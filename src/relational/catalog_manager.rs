@@ -49,6 +49,10 @@ impl CatalogManager {
         self.storage.flush()
     }
 
+    pub(crate) fn storage(&self) -> &Storage {
+        &self.storage
+    }
+
     /// Creates a cataloged table, allocates its root page, and records its columns.
     pub fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
         validate_user_table_schema(name, &row)?;
@@ -402,26 +406,25 @@ impl CatalogManager {
     }
 
     fn insert_table_catalog_row(&self, row: &TableCatalogRow) -> StorageResult<()> {
-        self.insert_catalog_row(SYS_TABLES_ROOT_PAGE_ID, row.table_id, &row.encode())
+        self.insert_catalog_row(SYS_TABLES_ROOT_PAGE_ID, row.table_id, &row.to_bytes()?)
     }
 
     fn insert_index_catalog_row(&self, row: &IndexCatalogRow) -> StorageResult<()> {
-        self.insert_catalog_row(SYS_INDEXES_ROOT_PAGE_ID, row.index_id, &row.encode())
+        self.insert_catalog_row(SYS_INDEXES_ROOT_PAGE_ID, row.index_id, &row.to_bytes()?)
     }
 
     fn insert_column_catalog_row(&self, row: &ColumnCatalogRow) -> StorageResult<()> {
-        self.insert_catalog_row(SYS_COLUMNS_ROOT_PAGE_ID, row.column_id, &row.encode())
+        self.insert_catalog_row(SYS_COLUMNS_ROOT_PAGE_ID, row.column_id, &row.to_bytes()?)
     }
 
     fn insert_catalog_row(
         &self,
         root_page_id: PageId,
         table_key: CatalogId,
-        tuple: &Tuple,
+        bytes: &[u8],
     ) -> StorageResult<()> {
         let mut cursor = self.table_cursor(root_page_id)?;
-        let bytes = tuple.to_bytes()?;
-        cursor.insert(table_key, &bytes)
+        cursor.insert(table_key, bytes)
     }
 }
 

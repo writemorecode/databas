@@ -415,13 +415,14 @@ impl IndexSchema {
 }
 
 impl TableCatalogRow {
-    /// Encodes this catalog row as a storage tuple.
-    pub fn encode(&self) -> Tuple {
-        Tuple::new(vec![
-            Value::Integer(self.table_id),
-            Value::String(self.name.clone()),
-            Value::UnsignedInteger(self.root_page_id),
-        ])
+    /// Serializes this catalog row without cloning its name.
+    pub fn to_bytes(&self) -> std::io::Result<Vec<u8>> {
+        let values = [
+            ValueRef::Integer(self.table_id),
+            ValueRef::String(&self.name),
+            ValueRef::UnsignedInteger(self.root_page_id),
+        ];
+        TupleRef::new(&values).to_bytes()
     }
 
     /// Decodes a `sys_tables` storage tuple.
@@ -436,15 +437,16 @@ impl TableCatalogRow {
 }
 
 impl IndexCatalogRow {
-    /// Encodes this catalog row as a storage tuple.
-    pub fn encode(&self) -> Tuple {
-        Tuple::new(vec![
-            Value::Integer(self.index_id),
-            Value::String(self.name.clone()),
-            Value::Integer(self.table_id),
-            Value::UnsignedInteger(self.root_page_id),
-            Value::Boolean(self.unique),
-        ])
+    /// Serializes this catalog row without cloning its name.
+    pub fn to_bytes(&self) -> std::io::Result<Vec<u8>> {
+        let values = [
+            ValueRef::Integer(self.index_id),
+            ValueRef::String(&self.name),
+            ValueRef::Integer(self.table_id),
+            ValueRef::UnsignedInteger(self.root_page_id),
+            ValueRef::Boolean(self.unique),
+        ];
+        TupleRef::new(&values).to_bytes()
     }
 
     /// Decodes a `sys_indexes` storage tuple.
@@ -461,20 +463,21 @@ impl IndexCatalogRow {
 }
 
 impl ColumnCatalogRow {
-    /// Encodes this catalog row as a storage tuple.
-    pub fn encode(&self) -> Tuple {
-        Tuple::new(vec![
-            Value::Integer(self.column_id),
-            Value::Integer(self.object_kind.catalog_tag()),
-            Value::Integer(self.object_id),
-            Value::UnsignedInteger(self.ordinal),
-            Value::String(self.name.clone()),
-            Value::Integer(self.data_type.catalog_tag()),
-            Value::Boolean(self.nullable),
-            Value::Boolean(self.primary_key),
-            optional_integer(self.source_table_id),
-            optional_unsigned(self.source_column_ordinal),
-        ])
+    /// Serializes this catalog row without cloning its name.
+    pub fn to_bytes(&self) -> std::io::Result<Vec<u8>> {
+        let values = [
+            ValueRef::Integer(self.column_id),
+            ValueRef::Integer(self.object_kind.catalog_tag()),
+            ValueRef::Integer(self.object_id),
+            ValueRef::UnsignedInteger(self.ordinal),
+            ValueRef::String(&self.name),
+            ValueRef::Integer(self.data_type.catalog_tag()),
+            ValueRef::Boolean(self.nullable),
+            ValueRef::Boolean(self.primary_key),
+            optional_integer_ref(self.source_table_id),
+            optional_unsigned_ref(self.source_column_ordinal),
+        ];
+        TupleRef::new(&values).to_bytes()
     }
 
     /// Decodes a `sys_columns` storage tuple.
@@ -619,14 +622,6 @@ const fn column(
     primary_key: bool,
 ) -> SystemColumnSchema<'static> {
     SystemColumnSchema { name, data_type, nullable, primary_key }
-}
-
-fn optional_unsigned(value: Option<u64>) -> Value {
-    value.map(Value::UnsignedInteger).unwrap_or(Value::Null)
-}
-
-fn optional_integer(value: Option<i32>) -> Value {
-    value.map(Value::Integer).unwrap_or(Value::Null)
 }
 
 fn optional_unsigned_ref(value: Option<u64>) -> ValueRef<'static> {
