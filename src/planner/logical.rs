@@ -1,6 +1,9 @@
 //! Catalog-bound logical plan representation.
 
-use crate::core::{TableSchema, TupleSchema};
+use crate::{
+    core::{TableSchema, TupleSchema},
+    sql_parser::parser::stmt::select::JoinType,
+};
 
 use super::{
     BoundColumn, BoundExpr, BoundSortTerm, BoundUpdateAssignment, NodeId, PlanSchema, RelationId,
@@ -104,6 +107,14 @@ pub enum LogicalPlanNode {
     Offset { input: NodeId, offset: u32, output: PlanSchema },
     /// Emit at most `limit` input rows.
     Limit { input: NodeId, limit: u32, output: PlanSchema },
+    /// Join rows from another table for which a predicate evaluates truthfully.
+    Join {
+        left: NodeId,
+        right: NodeId,
+        join_type: JoinType,
+        predicate: BoundExpr,
+        output: PlanSchema,
+    },
 }
 
 impl LogicalPlanNode {
@@ -117,7 +128,8 @@ impl LogicalPlanNode {
             | Self::Sort { output, .. }
             | Self::Project { output, .. }
             | Self::Offset { output, .. }
-            | Self::Limit { output, .. } => Some(output),
+            | Self::Limit { output, .. }
+            | Self::Join { output, .. } => Some(output),
             Self::Explain { .. }
             | Self::CreateTable { .. }
             | Self::CreateIndex { .. }

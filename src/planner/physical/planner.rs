@@ -212,6 +212,7 @@ impl<'catalog> PhysicalPlanner<'catalog> {
                 )?,
                 limit,
             },
+            LogicalPlanNode::Join { .. } => return Err(PlannerError::UnsupportedJoin),
         };
         Ok(push_physical_node(physical_nodes, node))
     }

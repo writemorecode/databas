@@ -62,6 +62,13 @@ impl PlanSchema {
     pub(crate) fn slot_for(&self, column: &BoundColumn) -> Option<usize> {
         self.columns.iter().position(|candidate| candidate.source.as_ref() == Some(column))
     }
+
+    pub(crate) fn join(left: Self, right: Self) -> Self {
+        let mut columns = vec![];
+        columns.extend(left.columns);
+        columns.extend(right.columns);
+        Self { columns }
+    }
 }
 
 /// Metadata for one output slot.
