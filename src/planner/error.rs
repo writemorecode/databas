@@ -28,6 +28,9 @@ pub enum PlannerError {
     /// Two table occurrences expose the same qualifier in one query scope.
     #[error("duplicate table qualifier: {qualifier}")]
     DuplicateTableQualifier { qualifier: String },
+    /// A query contains more table occurrences than query-local IDs can represent.
+    #[error("query contains too many table relations")]
+    TooManyRelations,
     /// An `INSERT` column list named the same column more than once.
     #[error("duplicate insert column: {column}")]
     DuplicateInsertColumn { column: String },
