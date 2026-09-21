@@ -3,7 +3,7 @@
 use crate::{
     core::{
         DataType, IndexKeyBound, IndexKeyRange, IndexSchema, TableKey, TableKeyBound,
-        TableKeyRange, TableSchema, Tuple, Value,
+        TableKeyRange, TableSchema, TupleRef, Value, ValueRef,
     },
     relational::cursor::encode_index_entry_key,
     sql_parser::parser::op::Op,
@@ -124,7 +124,7 @@ enum IndexComparisonKind {
 /// A normalized comparison between an indexed column and a literal value.
 struct IndexComparison<'a> {
     /// The indexed column being compared.
-    column: BoundColumn,
+    column: &'a BoundColumn,
     /// The literal value used by the comparison.
     value: &'a Value,
     /// The normalized comparison operator.
@@ -148,8 +148,8 @@ fn secondary_index_comparison(
 ) -> Option<SecondaryIndexCandidate> {
     let comparison = index_comparison(relation, comparison)?;
     let index =
-        indexes.iter().find(|index| exact_single_column_index(index, table, &comparison.column))?;
-    Some(SecondaryIndexCandidate { index: index.clone(), column: comparison.column })
+        indexes.iter().find(|index| exact_single_column_index(index, table, comparison.column))?;
+    Some(SecondaryIndexCandidate { index: index.clone(), column: comparison.column.clone() })
 }
 
 /// Extracts a comparison when it targets the requested bound column.
@@ -159,7 +159,7 @@ fn index_comparison_for_column<'a>(
     column: &BoundColumn,
 ) -> Option<IndexComparison<'a>> {
     let comparison = index_comparison(relation, comparison)?;
-    (comparison.column == *column).then_some(comparison)
+    (*comparison.column == *column).then_some(comparison)
 }
 
 /// Parses a planned expression as a column-to-literal comparison.
@@ -180,7 +180,7 @@ fn index_comparison<'a>(
 /// Builds an index comparison from a column followed by a literal operand.
 fn index_comparison_from_operands<'a>(
     relation: RelationId,
-    column: &BoundExpr,
+    column: &'a BoundExpr,
     op: Op,
     value: &'a BoundExpr,
 ) -> Option<IndexComparison<'a>> {
@@ -209,7 +209,7 @@ fn index_comparison_from_operands<'a>(
         return None;
     }
 
-    Some(IndexComparison { column: column.clone(), value, kind })
+    Some(IndexComparison { column, value, kind })
 }
 
 /// Builds an index comparison from a literal followed by a column operand.
@@ -217,7 +217,7 @@ fn index_comparison_from_reversed_operands<'a>(
     relation: RelationId,
     value: &'a BoundExpr,
     op: Op,
-    column: &BoundExpr,
+    column: &'a BoundExpr,
 ) -> Option<IndexComparison<'a>> {
     let reversed = reverse_comparison_op(op)?;
     index_comparison_from_operands(relation, column, reversed, value)
@@ -322,14 +322,14 @@ fn combine_index_upper_bound(
 
 /// Encodes the first index entry key allowed by a lower value bound.
 fn index_lower_key(value: &Value, inclusive: bool) -> Option<Vec<u8>> {
-    let prefix = Tuple::new(vec![value.clone()]).to_bytes().ok()?;
+    let prefix = TupleRef::new(&[ValueRef::from(value)]).to_bytes().ok()?;
     let table_key = if inclusive { TableKey::MIN } else { TableKey::MAX };
     Some(encode_index_entry_key(&prefix, table_key))
 }
 
 /// Encodes the last index entry key allowed by an upper value bound.
 fn index_upper_key(value: &Value, inclusive: bool) -> Option<Vec<u8>> {
-    let prefix = Tuple::new(vec![value.clone()]).to_bytes().ok()?;
+    let prefix = TupleRef::new(&[ValueRef::from(value)]).to_bytes().ok()?;
     let table_key = if inclusive { TableKey::MAX } else { TableKey::MIN };
     Some(encode_index_entry_key(&prefix, table_key))
 }
