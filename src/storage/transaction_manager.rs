@@ -284,57 +284,48 @@ impl TransactionManager {
         log: &mut LogManager,
         savepoint: TransactionSavepoint,
     ) -> StorageResult<Vec<PageRestore>> {
-        let active = self.transaction(savepoint.txn_id)?;
-        if savepoint.undo_len > active.undo_pages.len() {
-            return Err(invariant(InvariantViolation::InvalidTransactionSavepoint {
-                txn_id: savepoint.txn_id,
-                undo_len: savepoint.undo_len,
-                active_undo_len: active.undo_pages.len(),
-            }));
-        }
-
-        let rollback_pages = active.undo_pages[savepoint.undo_len..].to_vec();
-        let mut restore_pages = Vec::with_capacity(rollback_pages.len());
-        for undo in rollback_pages.into_iter().rev() {
-            let expected_lsn = match log.next_lsn() {
-                Ok(lsn) => lsn,
-                Err(err) => {
-                    self.record_failure(savepoint.txn_id);
-                    return Err(err.into());
-                }
-            };
-            let mut redo = undo.before;
-            stamp_page_lsn(&mut redo, expected_lsn);
-            let lsn = match log.append_record(
-                savepoint.txn_id,
-                LogRecordKind::PageUpdate {
-                    page_id: undo.page_id,
-                    redo_data: &redo,
-                    undo_data: &undo.after,
-                },
-            ) {
-                Ok(lsn) => lsn,
-                Err(err) => {
-                    self.record_failure(savepoint.txn_id);
-                    return Err(err.into());
-                }
-            };
-            if lsn != expected_lsn {
-                self.record_failure(savepoint.txn_id);
-                return Err(invariant(InvariantViolation::WalLog {
-                    message: format!(
-                        "compensation WAL append assigned LSN {lsn}, expected {expected_lsn}"
-                    ),
+        let rollback = {
+            let active = self.transaction(savepoint.txn_id)?;
+            if savepoint.undo_len > active.undo_pages.len() {
+                return Err(invariant(InvariantViolation::InvalidTransactionSavepoint {
+                    txn_id: savepoint.txn_id,
+                    undo_len: savepoint.undo_len,
+                    active_undo_len: active.undo_pages.len(),
                 }));
             }
-            restore_pages.push(PageRestore {
-                page_id: undo.page_id,
-                image: redo,
-                wal_flush_lsn: lsn,
-            });
-        }
 
-        Ok(restore_pages)
+            let undo_pages = &active.undo_pages[savepoint.undo_len..];
+            let mut restore_pages = Vec::with_capacity(undo_pages.len());
+            for undo in undo_pages.iter().rev() {
+                let expected_lsn = log.next_lsn()?;
+                let mut redo = undo.before;
+                stamp_page_lsn(&mut redo, expected_lsn);
+                let lsn = log.append_record(
+                    savepoint.txn_id,
+                    LogRecordKind::PageUpdate {
+                        page_id: undo.page_id,
+                        redo_data: &redo,
+                        undo_data: &undo.after,
+                    },
+                )?;
+                if lsn != expected_lsn {
+                    return Err(invariant(InvariantViolation::WalLog {
+                        message: format!(
+                            "compensation WAL append assigned LSN {lsn}, expected {expected_lsn}"
+                        ),
+                    }));
+                }
+                restore_pages.push(PageRestore {
+                    page_id: undo.page_id,
+                    image: redo,
+                    wal_flush_lsn: lsn,
+                });
+            }
+
+            Ok(restore_pages)
+        };
+
+        rollback.inspect_err(|_| self.record_failure(savepoint.txn_id))
     }
 
     /// Discards undo entries after their savepoint restore images are installed.

@@ -25,7 +25,7 @@ impl TreeCursor {
         &self,
         key: &[u8],
         value: &[u8],
-    ) -> StorageResult<(Option<PageId>, Vec<u8>)> {
+    ) -> StorageResult<(Option<PageId>, [u8; MAX_INLINE_OVERFLOW_PAYLOAD_BYTES], usize)> {
         let payload_len = key.len() + value.len();
         self.checked_payload_len(payload_len)?;
         let mut inline_payload = [0; MAX_INLINE_OVERFLOW_PAYLOAD_BYTES];
@@ -65,8 +65,7 @@ impl TreeCursor {
             inline_payload[key.len()..payload_len].copy_from_slice(value);
             None
         };
-        let inline_payload = inline_payload[..local_payload_len(payload_len)].to_vec();
-        Ok((first_overflow_page_id, inline_payload))
+        Ok((first_overflow_page_id, inline_payload, local_payload_len(payload_len)))
     }
 
     pub(super) fn insert_leaf_payload_at(
@@ -76,13 +75,14 @@ impl TreeCursor {
         key: &[u8],
         value: &[u8],
     ) -> StorageResult<u16> {
-        let (first_overflow_page_id, inline_payload) = self.prepare_leaf_payload(key, value)?;
+        let (first_overflow_page_id, inline_payload, inline_payload_len) =
+            self.prepare_leaf_payload(key, value)?;
         Ok(leaf.insert_payload_at(
             slot_index,
             key.len(),
             value.len(),
             first_overflow_page_id,
-            &inline_payload,
+            &inline_payload[..inline_payload_len],
         )?)
     }
 
@@ -94,13 +94,14 @@ impl TreeCursor {
         key: &[u8],
         value: &[u8],
     ) -> StorageResult<u16> {
-        let (first_overflow_page_id, inline_payload) = self.prepare_leaf_payload(key, value)?;
+        let (first_overflow_page_id, inline_payload, inline_payload_len) =
+            self.prepare_leaf_payload(key, value)?;
         Ok(leaf.update_payload_at(
             slot_index,
             key.len(),
             value.len(),
             first_overflow_page_id,
-            &inline_payload,
+            &inline_payload[..inline_payload_len],
         )?)
     }
 
