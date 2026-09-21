@@ -14,14 +14,15 @@ pub fn evaluate_expression(
     expression: &ExecExpr,
     record: &ExecutorRow,
 ) -> ExecutorResult<ExecutorRow> {
-    evaluate_expressions(std::slice::from_ref(expression), record)
+    evaluate_values(std::slice::from_ref(expression), record)
+        .map(|values| record.with_values(values))
 }
 
 /// Executes a `VALUES` plan as a stream of evaluated literal rows.
 pub(super) fn execute_values(rows: Vec<Vec<ExecExpr>>) -> ExecutorResult<ExecutionOutput> {
     let rows = rows.into_iter().map(|expressions| {
         let input = empty_record();
-        evaluate_expressions(&expressions, &input)
+        evaluate_values(&expressions, &input).map(ExecutorRow::from_values)
     });
     Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
 }
@@ -101,11 +102,8 @@ pub(super) fn execute_update(
 
     for row in target_rows {
         let row = row?;
-        let owned_row = row
-            .locator(relation)
-            .ok_or(ExecutorError::MissingRowLocator { relation })?
-            .record()
-            .clone();
+        let owned_row =
+            row.locator(relation).ok_or(ExecutorError::MissingRowLocator { relation })?.record();
         let context = EvaluationContext::from_row(&row);
         let mut values = Tuple::from_bytes(&owned_row.record)
             .map_err(ExecutorError::InvalidTuple)?
@@ -124,7 +122,7 @@ pub(super) fn execute_update(
             *slot = value;
         }
 
-        transaction.update_table_row(&table, &owned_row, values)?;
+        transaction.update_table_row(&table, owned_row, values)?;
         affected += 1;
     }
 
@@ -155,14 +153,15 @@ pub(super) fn execute_delete(
 /// Evaluates a projection list against one input row.
 pub(super) fn evaluate_expressions(
     expressions: &[ExecExpr],
-    record: &ExecutorRow,
+    record: ExecutorRow,
 ) -> ExecutorResult<ExecutorRow> {
+    let values = evaluate_values(expressions, &record)?;
+    Ok(record.into_with_values(values))
+}
+
+fn evaluate_values(expressions: &[ExecExpr], record: &ExecutorRow) -> ExecutorResult<Vec<Value>> {
     let context = EvaluationContext::from_row(record);
-    let values = expressions
-        .iter()
-        .map(|expression| evaluate_value(expression, &context))
-        .collect::<ExecutorResult<Vec<_>>>()?;
-    Ok(record.with_values(values))
+    expressions.iter().map(|expression| evaluate_value(expression, &context)).collect()
 }
 
 /// Evaluates a scalar expression to one typed value.

@@ -14,7 +14,7 @@
 use crate::{
     core::{
         CatalogId, OwnedTableRecord, TableKey, TableRecord as BorrowedTableRecord, Transaction,
-        Tuple, Value,
+        Tuple, TupleRef, Value, ValueRef,
         error::{StorageError, StorageResult},
     },
     planner::{NodeId, PhysicalPlan, PhysicalPlanNode, RelationId},
@@ -223,9 +223,14 @@ impl ExecutorRow {
         Self { values, locators: self.locators.clone() }
     }
 
+    pub(crate) fn into_with_values(self, values: Vec<Value>) -> Self {
+        Self { values, locators: self.locators }
+    }
+
     /// Executes `f` with this row encoded in the storage tuple format.
     pub fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
-        let record = Tuple::new(self.values.clone()).to_bytes()?;
+        let values = self.values.iter().map(ValueRef::from).collect::<Vec<_>>();
+        let record = TupleRef::new(&values).to_bytes()?;
         Ok(f(&record))
     }
 }
@@ -433,7 +438,7 @@ impl<'txn, 'db> Executor<'txn, 'db> {
                 let output_inner = self.execute_node(nodes, input)?;
                 let rows = output_inner
                     .into_rows("PROJECT")?
-                    .map(move |row| row.and_then(|row| evaluate_expressions(&expressions, &row)));
+                    .map(move |row| row.and_then(|row| evaluate_expressions(&expressions, row)));
                 Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
             }
 
