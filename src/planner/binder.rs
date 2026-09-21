@@ -157,6 +157,7 @@ impl<'catalog> Binder<'catalog> {
     ) -> PlannerResult<NodeId> {
         let table = self.table_schema(query.table)?;
         let relation = RelationId::new(0);
+        let scope = BindingScope::for_table(&table);
         let output = PlanSchema::for_table(relation, &table);
         let mut input = push_logical_node(
             nodes,
@@ -164,8 +165,7 @@ impl<'catalog> Binder<'catalog> {
         );
 
         if let Some(predicate) = &query.where_clause {
-            let predicate =
-                self.bind_expression(predicate, Some(BindingScope::for_table(&table)))?;
+            let predicate = self.bind_expression(predicate, &scope)?;
             input = push_logical_node(
                 nodes,
                 LogicalPlanNode::Filter { input, predicate, output: output.clone() },
@@ -181,6 +181,8 @@ impl<'catalog> Binder<'catalog> {
         nodes: &mut Vec<LogicalPlanNode>,
     ) -> PlannerResult<NodeId> {
         let table = self.table_schema(query.table)?;
+        let relation = RelationId::new(0);
+        let scope = BindingScope::for_table(&table);
         let mut seen = HashSet::new();
         let mut assignments = Vec::new();
 
@@ -196,22 +198,17 @@ impl<'catalog> Binder<'catalog> {
             }
             assignments.push(BoundUpdateAssignment {
                 column,
-                expression: self.bind_expression(
-                    &assignment.expression,
-                    Some(BindingScope::for_table(&table)),
-                )?,
+                expression: self.bind_expression(&assignment.expression, &scope)?,
             });
         }
 
-        let relation = RelationId::new(0);
         let output = PlanSchema::for_table(relation, &table);
         let mut input = push_logical_node(
             nodes,
             LogicalPlanNode::TableScan { relation, table: table.clone(), output: output.clone() },
         );
         if let Some(predicate) = &query.where_clause {
-            let predicate =
-                self.bind_expression(predicate, Some(BindingScope::for_table(&table)))?;
+            let predicate = self.bind_expression(predicate, &scope)?;
             input = push_logical_node(
                 nodes,
                 LogicalPlanNode::Filter { input, predicate, output: output.clone() },
@@ -233,8 +230,12 @@ impl<'catalog> Binder<'catalog> {
             query.table.as_ref().map(|reference| self.table_schema(reference.name)).transpose()?;
         let relation = RelationId::new(0);
         let source = table.as_ref().zip(query.table.as_ref()).map(|(table, reference)| {
-            BindingScope { table, qualifier: reference.qualifier(), relation }
+            RelationBinding { table, qualifier: reference.qualifier(), relation }
         });
+        let mut scope = BindingScope::default();
+        if let Some(source) = source {
+            scope.add_relation(source)?;
+        }
         let mut input = match source {
             Some(source) => push_logical_node(
                 nodes,
@@ -257,7 +258,7 @@ impl<'catalog> Binder<'catalog> {
         });
 
         if let Some(predicate) = &query.where_clause {
-            let predicate = self.bind_expression(predicate, source)?;
+            let predicate = self.bind_expression(predicate, &scope)?;
             input = push_logical_node(
                 nodes,
                 LogicalPlanNode::Filter { input, predicate, output: output.clone() },
@@ -270,7 +271,7 @@ impl<'catalog> Binder<'catalog> {
                 .iter()
                 .map(|term| {
                     Ok(BoundSortTerm {
-                        column: bind_column_reference(source, &term.column)?,
+                        column: bind_column_reference(&scope, &term.column)?,
                         direction: term.order.clone(),
                     })
                 })
@@ -281,7 +282,7 @@ impl<'catalog> Binder<'catalog> {
             );
         }
 
-        let expressions = self.bind_projection(&query.columns.0, source)?;
+        let expressions = self.bind_projection(&query.columns.0, &scope)?;
         output = PlanSchema::for_expressions(&expressions);
         input = push_logical_node(
             nodes,
@@ -308,20 +309,24 @@ impl<'catalog> Binder<'catalog> {
     fn bind_projection(
         &self,
         expressions: &[Expression<'_>],
-        source: Option<BindingScope<'_>>,
+        scope: &BindingScope<'_>,
     ) -> PlannerResult<Vec<BoundExpr>> {
         let mut bound = Vec::new();
         for expression in expressions {
             match expression {
                 Expression::Wildcard => {
-                    let source = source.ok_or(PlannerError::WildcardRequiresTable)?;
-                    bound.extend(source.table.row.columns.iter().enumerate().map(
-                        |(ordinal, column)| {
-                            BoundExpr::Column(bound_scoped_column(source, ordinal, column))
-                        },
-                    ));
+                    if scope.relations.is_empty() {
+                        return Err(PlannerError::WildcardRequiresTable);
+                    }
+                    for source in &scope.relations {
+                        bound.extend(source.table.row.columns.iter().enumerate().map(
+                            |(ordinal, column)| {
+                                BoundExpr::Column(bound_scoped_column(*source, ordinal, column))
+                            },
+                        ));
+                    }
                 }
-                _ => bound.push(self.bind_expression(expression, source)?),
+                _ => bound.push(self.bind_expression(expression, scope)?),
             }
         }
         Ok(bound)
@@ -330,21 +335,20 @@ impl<'catalog> Binder<'catalog> {
     fn bind_expression(
         &self,
         expression: &Expression<'_>,
-        source: Option<BindingScope<'_>>,
+        scope: &BindingScope<'_>,
     ) -> PlannerResult<BoundExpr> {
         match expression {
             Expression::Literal(literal) => Ok(BoundExpr::Literal(Value::from(literal))),
             Expression::ColumnReference(reference) => {
-                bind_column_reference(source, reference).map(BoundExpr::Column)
+                bind_column_reference(scope, reference).map(BoundExpr::Column)
             }
-            Expression::UnaryOp((op, expr)) => Ok(BoundExpr::Unary {
-                op: *op,
-                expr: Box::new(self.bind_expression(expr, source)?),
-            }),
+            Expression::UnaryOp((op, expr)) => {
+                Ok(BoundExpr::Unary { op: *op, expr: Box::new(self.bind_expression(expr, scope)?) })
+            }
             Expression::BinaryOp((left, op, right)) => Ok(BoundExpr::Binary {
-                left: Box::new(self.bind_expression(left, source)?),
+                left: Box::new(self.bind_expression(left, scope)?),
                 op: *op,
-                right: Box::new(self.bind_expression(right, source)?),
+                right: Box::new(self.bind_expression(right, scope)?),
             }),
             Expression::Wildcard => Err(PlannerError::UnsupportedWildcardPosition),
             Expression::AggregateFunction(aggregate) => {
@@ -369,47 +373,80 @@ fn push_logical_node(nodes: &mut Vec<LogicalPlanNode>, node: LogicalPlanNode) ->
     id
 }
 
+/// One table occurrence visible while binding a statement.
 #[derive(Clone, Copy)]
-struct BindingScope<'a> {
+struct RelationBinding<'a> {
     table: &'a TableSchema,
     qualifier: &'a str,
     relation: RelationId,
 }
 
+/// Ordered relation namespace visible at one point in a statement.
+#[derive(Default)]
+struct BindingScope<'a> {
+    relations: Vec<RelationBinding<'a>>,
+}
+
 impl<'a> BindingScope<'a> {
+    fn for_table(table: &'a TableSchema) -> Self {
+        Self { relations: vec![RelationBinding::for_table(table)] }
+    }
+
+    fn add_relation(&mut self, relation: RelationBinding<'a>) -> PlannerResult<()> {
+        if self.relations.iter().any(|existing| existing.qualifier == relation.qualifier) {
+            return Err(PlannerError::DuplicateTableQualifier {
+                qualifier: relation.qualifier.to_owned(),
+            });
+        }
+        self.relations.push(relation);
+        Ok(())
+    }
+}
+
+impl<'a> RelationBinding<'a> {
     fn for_table(table: &'a TableSchema) -> Self {
         Self { table, qualifier: &table.name, relation: RelationId::new(0) }
     }
 }
 
 fn bind_column_reference(
-    source: Option<BindingScope<'_>>,
+    scope: &BindingScope<'_>,
     reference: &ColumnReference<'_>,
 ) -> PlannerResult<BoundColumn> {
-    let Some(source) = source else {
-        return match reference.table {
-            Some(table) => Err(PlannerError::TableNotInScope { table: table.to_owned() }),
-            None => Err(PlannerError::ColumnNotFound { column: reference.column.to_owned() }),
-        };
-    };
-    if let Some(qualifier) = reference.table
-        && qualifier != source.qualifier
-    {
-        return Err(PlannerError::TableNotInScope { table: qualifier.to_owned() });
+    if let Some(qualifier) = reference.table {
+        let source = scope
+            .relations
+            .iter()
+            .find(|source| source.qualifier == qualifier)
+            .ok_or_else(|| PlannerError::TableNotInScope { table: qualifier.to_owned() })?;
+        return find_relation_column(*source, reference.column)
+            .ok_or_else(|| PlannerError::ColumnNotFound { column: reference.column.to_owned() });
     }
+
+    let mut matches =
+        scope.relations.iter().filter_map(|source| find_relation_column(*source, reference.column));
+    let column = matches
+        .next()
+        .ok_or_else(|| PlannerError::ColumnNotFound { column: reference.column.to_owned() })?;
+    if matches.next().is_some() {
+        return Err(PlannerError::AmbiguousColumn { column: reference.column.to_owned() });
+    }
+    Ok(column)
+}
+
+fn find_relation_column(source: RelationBinding<'_>, column: &str) -> Option<BoundColumn> {
     source
         .table
         .row
         .columns
         .iter()
         .enumerate()
-        .find(|(_, schema)| schema.name == reference.column)
+        .find(|(_, schema)| schema.name == column)
         .map(|(ordinal, schema)| bound_scoped_column(source, ordinal, schema))
-        .ok_or_else(|| PlannerError::ColumnNotFound { column: reference.column.to_owned() })
 }
 
 fn bound_scoped_column(
-    source: BindingScope<'_>,
+    source: RelationBinding<'_>,
     ordinal: usize,
     column: &ColumnSchema,
 ) -> BoundColumn {
@@ -468,5 +505,107 @@ fn unsupported_expr(expression: &Expression<'_>) -> PlannerError {
         }
         Expression::Wildcard => PlannerError::UnsupportedWildcardPosition,
         _ => PlannerError::UnsupportedExpression { expression: expression.to_string() },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{DataType, TupleSchema};
+
+    fn table(table_id: i32, name: &str, columns: &[&str]) -> TableSchema {
+        TableSchema {
+            table_id,
+            name: name.into(),
+            root_page_id: u64::try_from(table_id).unwrap(),
+            row: TupleSchema {
+                columns: columns
+                    .iter()
+                    .map(|name| ColumnSchema {
+                        name: (*name).into(),
+                        data_type: DataType::Integer,
+                        nullable: false,
+                        primary_key: false,
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn binding_scope_resolves_qualified_and_unique_unqualified_columns() {
+        let users = table(1, "users", &["id", "name"]);
+        let orders = table(2, "orders", &["id", "user_id", "total"]);
+        let mut scope = BindingScope::default();
+        scope
+            .add_relation(RelationBinding {
+                table: &users,
+                qualifier: "u",
+                relation: RelationId::new(0),
+            })
+            .unwrap();
+        scope
+            .add_relation(RelationBinding {
+                table: &orders,
+                qualifier: "o",
+                relation: RelationId::new(1),
+            })
+            .unwrap();
+
+        let name = bind_column_reference(&scope, &ColumnReference { table: None, column: "name" })
+            .unwrap();
+        assert_eq!((name.relation, name.ordinal, &*name.table), (RelationId::new(0), 1, "u"));
+
+        let total =
+            bind_column_reference(&scope, &ColumnReference { table: Some("o"), column: "total" })
+                .unwrap();
+        assert_eq!((total.relation, total.ordinal, &*total.table), (RelationId::new(1), 2, "o"));
+    }
+
+    #[test]
+    fn binding_scope_rejects_ambiguous_columns_and_hidden_table_names() {
+        let users = table(1, "users", &["id", "name"]);
+        let orders = table(2, "orders", &["id", "user_id"]);
+        let scope = BindingScope {
+            relations: vec![
+                RelationBinding { table: &users, qualifier: "u", relation: RelationId::new(0) },
+                RelationBinding { table: &orders, qualifier: "o", relation: RelationId::new(1) },
+            ],
+        };
+
+        assert!(matches!(
+            bind_column_reference(&scope, &ColumnReference { table: None, column: "id" }),
+            Err(PlannerError::AmbiguousColumn { column }) if column == "id"
+        ));
+        assert!(matches!(
+            bind_column_reference(
+                &scope,
+                &ColumnReference { table: Some("users"), column: "id" },
+            ),
+            Err(PlannerError::TableNotInScope { table }) if table == "users"
+        ));
+    }
+
+    #[test]
+    fn binding_scope_rejects_duplicate_relation_qualifiers() {
+        let users = table(1, "users", &["id"]);
+        let orders = table(2, "orders", &["id"]);
+        let mut scope = BindingScope::default();
+        scope
+            .add_relation(RelationBinding {
+                table: &users,
+                qualifier: "source",
+                relation: RelationId::new(0),
+            })
+            .unwrap();
+
+        assert!(matches!(
+            scope.add_relation(RelationBinding {
+                table: &orders,
+                qualifier: "source",
+                relation: RelationId::new(1),
+            }),
+            Err(PlannerError::DuplicateTableQualifier { qualifier }) if qualifier == "source"
+        ));
     }
 }
