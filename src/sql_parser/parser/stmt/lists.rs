@@ -6,9 +6,13 @@ use crate::sql_parser::parser::expr::Expression;
 pub struct ExpressionList<'a>(pub Vec<Expression<'a>>);
 impl Display for ExpressionList<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let strings: Vec<String> = self.0.iter().map(|v| v.to_string()).collect();
-        let joined = strings.join(", ");
-        write!(f, "{joined}")
+        for (index, expression) in self.0.iter().enumerate() {
+            if index > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{expression}")?;
+        }
+        Ok(())
     }
 }
 
