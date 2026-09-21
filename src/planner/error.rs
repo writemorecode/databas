@@ -64,4 +64,7 @@ pub enum PlannerError {
     /// Storage or catalog access failed while planning.
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
+    /// Physical planning of joins have not yet been implemented.
+    #[error("physical planning of joins not yet implemented")]
+    UnsupportedJoin,
 }
