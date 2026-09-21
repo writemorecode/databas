@@ -22,6 +22,12 @@ pub enum PlannerError {
     /// A statement referenced a column that is not present in any input relation.
     #[error("column {column} not found")]
     ColumnNotFound { column: String },
+    /// An unqualified column exists in more than one input relation.
+    #[error("column {column} is ambiguous")]
+    AmbiguousColumn { column: String },
+    /// Two table occurrences expose the same qualifier in one query scope.
+    #[error("duplicate table qualifier: {qualifier}")]
+    DuplicateTableQualifier { qualifier: String },
     /// An `INSERT` column list named the same column more than once.
     #[error("duplicate insert column: {column}")]
     DuplicateInsertColumn { column: String },
