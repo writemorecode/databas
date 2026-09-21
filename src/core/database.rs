@@ -14,7 +14,6 @@ use crate::storage::{
 /// Public database handle for one database file.
 pub struct Database {
     catalog: CatalogManager,
-    storage: Storage,
     locks: LockManager,
 }
 
@@ -59,8 +58,8 @@ impl Database {
     }
 
     fn from_storage(storage: Storage) -> StorageResult<Self> {
-        let catalog = CatalogManager::from_storage(storage.clone())?;
-        Ok(Self { catalog, storage, locks: LockManager::default() })
+        let catalog = CatalogManager::from_storage(storage)?;
+        Ok(Self { catalog, locks: LockManager::default() })
     }
 
     /// Returns the database-file path associated with this database.
@@ -95,13 +94,13 @@ impl Database {
         &self,
         mode: StatementTransactionMode,
     ) -> StorageResult<TxnId> {
-        let txn_id = self.storage.begin_transaction()?;
+        let txn_id = self.catalog.storage().begin_transaction()?;
         let admission = match mode {
             StatementTransactionMode::Ordinary => self.locks.begin_transaction(txn_id),
             StatementTransactionMode::Ddl => self.locks.begin_ddl_transaction(txn_id),
         };
         if let Err(error) = admission {
-            self.storage.rollback_transaction(txn_id)?;
+            self.catalog.storage().rollback_transaction(txn_id)?;
             return Err(error.into());
         }
         Ok(txn_id)
@@ -130,8 +129,8 @@ impl Database {
     }
 
     pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        let result = self.storage.commit_transaction(txn_id);
-        if !self.storage.transaction_is_active(txn_id)? {
+        let result = self.catalog.storage().commit_transaction(txn_id);
+        if !self.catalog.storage().transaction_is_active(txn_id)? {
             self.locks.begin_commit(txn_id)?;
             self.locks.finish_transaction(txn_id)?;
         }
@@ -139,34 +138,34 @@ impl Database {
     }
 
     pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
-        self.storage.statement_savepoint(txn_id)
+        self.catalog.storage().statement_savepoint(txn_id)
     }
 
     pub(crate) fn rollback_to_savepoint(
         &self,
         savepoint: TransactionSavepoint,
     ) -> StorageResult<()> {
-        self.storage.rollback_to_savepoint(savepoint)
+        self.catalog.storage().rollback_to_savepoint(savepoint)
     }
 
     pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
         self.locks.begin_rollback(txn_id)?;
-        self.storage.rollback_transaction(txn_id)?;
+        self.catalog.storage().rollback_transaction(txn_id)?;
         self.locks.finish_transaction(txn_id)?;
         Ok(())
     }
 
     pub(crate) fn transaction_is_active(&self, txn_id: TxnId) -> StorageResult<bool> {
-        self.storage.transaction_is_active(txn_id)
+        self.catalog.storage().transaction_is_active(txn_id)
     }
 
     pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
-        self.storage.transaction_is_poisoned(txn_id)
+        self.catalog.storage().transaction_is_poisoned(txn_id)
     }
 
     #[cfg(test)]
     pub(crate) fn fail_next_wal_flush_for_test(&self) {
-        self.storage.fail_next_wal_flush_for_test().unwrap();
+        self.catalog.storage().fail_next_wal_flush_for_test().unwrap();
     }
 
     pub(super) fn catalog(&self) -> &CatalogManager {
@@ -242,7 +241,7 @@ mod tests {
             Err(StorageError::Lock(LockError::DdlBusy { txn_id }))
                 if txn_id == rejected_txn
         ));
-        assert!(!database.storage.transaction_is_active(rejected_txn).unwrap());
+        assert!(!database.catalog.storage().transaction_is_active(rejected_txn).unwrap());
         assert_eq!(
             database.locks.transaction_phase(rejected_txn),
             Err(LockError::TransactionNotActive { txn_id: rejected_txn })
