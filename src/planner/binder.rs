@@ -585,7 +585,8 @@ mod tests {
     use super::*;
     use crate::{
         core::{DataType, IndexSchema, TupleSchema},
-        sql_parser::parser::Parser,
+        planner::Planner,
+        sql_parser::parser::{Parser, op::Op, stmt::select::JoinType},
     };
 
     fn table(table_id: i32, name: &str, columns: &[&str]) -> TableSchema {
@@ -636,15 +637,22 @@ mod tests {
         Binder::new(catalog).bind(&parse(sql))
     }
 
+    fn scoped_column(
+        table: &TableSchema,
+        qualifier: &str,
+        relation: RelationId,
+        column: &str,
+    ) -> BoundColumn {
+        find_relation_column(RelationBinding { table, qualifier, relation }, column)
+            .expect("test column should exist")
+    }
+
     #[test]
     fn select_join_builds_bound_scans_join_and_following_operators() {
-        let catalog = TestCatalog {
-            tables: vec![
-                table(1, "users", &["id", "name"]),
-                table(2, "orders", &["id", "user_id", "total"]),
-            ],
-        };
-        let plan = bind_select(
+        let users = table(1, "users", &["id", "name"]);
+        let orders = table(2, "orders", &["id", "user_id", "total"]);
+        let catalog = TestCatalog { tables: vec![users.clone(), orders.clone()] };
+        let got = bind_select(
             &catalog,
             "SELECT u.name, o.total FROM users AS u \
              JOIN orders AS o ON u.id == o.user_id \
@@ -652,79 +660,70 @@ mod tests {
         )
         .unwrap();
 
-        let LogicalPlanNode::TableScan { relation, output, .. } = plan.node(NodeId::new(0)) else {
-            panic!("expected left table scan");
-        };
-        assert_eq!(*relation, RelationId::new(0));
-        assert_eq!(
-            output
-                .columns
-                .iter()
-                .map(|column| column.source.as_ref().unwrap().to_string())
-                .collect::<Vec<_>>(),
-            ["u.id", "u.name"]
-        );
+        let users_relation = RelationId::new(0);
+        let orders_relation = RelationId::new(1);
+        let users_id = scoped_column(&users, "u", users_relation, "id");
+        let users_name = scoped_column(&users, "u", users_relation, "name");
+        let orders_user_id = scoped_column(&orders, "o", orders_relation, "user_id");
+        let orders_total = scoped_column(&orders, "o", orders_relation, "total");
+        let users_output = PlanSchema::for_qualified_table(users_relation, &users, "u");
+        let orders_output = PlanSchema::for_qualified_table(orders_relation, &orders, "o");
 
-        let LogicalPlanNode::TableScan { relation, output, .. } = plan.node(NodeId::new(1)) else {
-            panic!("expected right table scan");
-        };
-        assert_eq!(*relation, RelationId::new(1));
-        assert_eq!(
-            output
-                .columns
-                .iter()
-                .map(|column| column.source.as_ref().unwrap().to_string())
-                .collect::<Vec<_>>(),
-            ["o.id", "o.user_id", "o.total"]
-        );
+        let mut expected = LogicalPlan::new(LogicalPlanNode::TableScan {
+            relation: users_relation,
+            table: users,
+            output: users_output.clone(),
+        });
+        let users_scan = expected.root_id();
+        let orders_scan = expected.push(LogicalPlanNode::TableScan {
+            relation: orders_relation,
+            table: orders,
+            output: orders_output.clone(),
+        });
+        let join_output = PlanSchema::join(users_output, orders_output);
+        let join = expected.push(LogicalPlanNode::Join {
+            left: users_scan,
+            right: orders_scan,
+            join_type: JoinType::Inner,
+            predicate: BoundExpr::Binary {
+                left: Box::new(BoundExpr::Column(users_id)),
+                op: Op::EqualsEquals,
+                right: Box::new(BoundExpr::Column(orders_user_id)),
+            },
+            output: join_output.clone(),
+        });
+        let filter = expected.push(LogicalPlanNode::Filter {
+            input: join,
+            predicate: BoundExpr::Binary {
+                left: Box::new(BoundExpr::Column(orders_total.clone())),
+                op: Op::GreaterThan,
+                right: Box::new(BoundExpr::Literal(Value::Integer(10))),
+            },
+            output: join_output.clone(),
+        });
+        let sort = expected.push(LogicalPlanNode::Sort {
+            input: filter,
+            terms: vec![BoundSortTerm { column: users_name.clone(), direction: None }],
+            output: join_output,
+        });
+        let expressions = vec![BoundExpr::Column(users_name), BoundExpr::Column(orders_total)];
+        let projection_output = PlanSchema::for_expressions(&expressions);
+        expected.push(LogicalPlanNode::Project {
+            input: sort,
+            expressions,
+            output: projection_output,
+        });
 
-        let LogicalPlanNode::Join { left, right, predicate, output, .. } =
-            plan.node(NodeId::new(2))
-        else {
-            panic!("expected join");
-        };
-        assert_eq!((*left, *right), (NodeId::new(0), NodeId::new(1)));
-        assert_eq!(predicate.to_string(), "(u.id == o.user_id)");
-        assert_eq!(
-            output
-                .columns
-                .iter()
-                .map(|column| column.source.as_ref().unwrap().to_string())
-                .collect::<Vec<_>>(),
-            ["u.id", "u.name", "o.id", "o.user_id", "o.total"]
-        );
-
-        assert!(matches!(
-            plan.node(NodeId::new(3)),
-            LogicalPlanNode::Filter { input, predicate, .. }
-                if *input == NodeId::new(2) && predicate.to_string() == "(o.total > 10)"
-        ));
-        assert!(matches!(
-            plan.node(NodeId::new(4)),
-            LogicalPlanNode::Sort { input, terms, .. }
-                if *input == NodeId::new(3)
-                    && terms[0].column.relation == RelationId::new(0)
-                    && terms[0].column.to_string() == "u.name"
-        ));
-        assert!(matches!(
-            plan.root(),
-            LogicalPlanNode::Project { input, expressions, .. }
-                if *input == NodeId::new(4)
-                    && expressions.iter().map(ToString::to_string).collect::<Vec<_>>()
-                        == ["u.name", "o.total"]
-        ));
+        assert_eq!(got, expected);
     }
 
     #[test]
     fn multiple_joins_are_left_deep_and_receive_distinct_relation_ids() {
-        let catalog = TestCatalog {
-            tables: vec![
-                table(1, "users", &["id"]),
-                table(2, "orders", &["user_id", "product_id"]),
-                table(3, "products", &["id", "name"]),
-            ],
-        };
-        let plan = bind_select(
+        let users = table(1, "users", &["id"]);
+        let orders = table(2, "orders", &["user_id", "product_id"]);
+        let products = table(3, "products", &["id", "name"]);
+        let catalog = TestCatalog { tables: vec![users.clone(), orders.clone(), products.clone()] };
+        let got = bind_select(
             &catalog,
             "SELECT p.name FROM users AS u \
              JOIN orders AS o ON u.id == o.user_id \
@@ -732,32 +731,130 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(
-            plan.node(NodeId::new(1)),
-            LogicalPlanNode::TableScan { relation, .. } if *relation == RelationId::new(1)
-        ));
-        assert!(matches!(
-            plan.node(NodeId::new(2)),
-            LogicalPlanNode::Join { left, right, .. }
-                if (*left, *right) == (NodeId::new(0), NodeId::new(1))
-        ));
-        assert!(matches!(
-            plan.node(NodeId::new(3)),
-            LogicalPlanNode::TableScan { relation, .. } if *relation == RelationId::new(2)
-        ));
-        assert!(matches!(
-            plan.node(NodeId::new(4)),
-            LogicalPlanNode::Join { left, right, predicate, output, .. }
-                if (*left, *right) == (NodeId::new(2), NodeId::new(3))
-                    && predicate.to_string() == "(o.product_id == p.id)"
-                    && output.columns.len() == 5
-        ));
-        assert!(matches!(
-            plan.root(),
-            LogicalPlanNode::Project { input, expressions, .. }
-                if *input == NodeId::new(4)
-                    && expressions[0].to_string() == "p.name"
-        ));
+        let users_relation = RelationId::new(0);
+        let orders_relation = RelationId::new(1);
+        let products_relation = RelationId::new(2);
+        let users_id = scoped_column(&users, "u", users_relation, "id");
+        let orders_user_id = scoped_column(&orders, "o", orders_relation, "user_id");
+        let orders_product_id = scoped_column(&orders, "o", orders_relation, "product_id");
+        let products_id = scoped_column(&products, "p", products_relation, "id");
+        let products_name = scoped_column(&products, "p", products_relation, "name");
+        let users_output = PlanSchema::for_qualified_table(users_relation, &users, "u");
+        let orders_output = PlanSchema::for_qualified_table(orders_relation, &orders, "o");
+        let products_output = PlanSchema::for_qualified_table(products_relation, &products, "p");
+
+        let mut expected = LogicalPlan::new(LogicalPlanNode::TableScan {
+            relation: users_relation,
+            table: users,
+            output: users_output.clone(),
+        });
+        let users_scan = expected.root_id();
+        let orders_scan = expected.push(LogicalPlanNode::TableScan {
+            relation: orders_relation,
+            table: orders,
+            output: orders_output.clone(),
+        });
+        let first_join_output = PlanSchema::join(users_output, orders_output);
+        let first_join = expected.push(LogicalPlanNode::Join {
+            left: users_scan,
+            right: orders_scan,
+            join_type: JoinType::Inner,
+            predicate: BoundExpr::Binary {
+                left: Box::new(BoundExpr::Column(users_id)),
+                op: Op::EqualsEquals,
+                right: Box::new(BoundExpr::Column(orders_user_id)),
+            },
+            output: first_join_output.clone(),
+        });
+        let products_scan = expected.push(LogicalPlanNode::TableScan {
+            relation: products_relation,
+            table: products,
+            output: products_output.clone(),
+        });
+        let second_join_output = PlanSchema::join(first_join_output, products_output);
+        let second_join = expected.push(LogicalPlanNode::Join {
+            left: first_join,
+            right: products_scan,
+            join_type: JoinType::Inner,
+            predicate: BoundExpr::Binary {
+                left: Box::new(BoundExpr::Column(orders_product_id)),
+                op: Op::EqualsEquals,
+                right: Box::new(BoundExpr::Column(products_id)),
+            },
+            output: second_join_output,
+        });
+        let expressions = vec![BoundExpr::Column(products_name)];
+        let projection_output = PlanSchema::for_expressions(&expressions);
+        expected.push(LogicalPlanNode::Project {
+            input: second_join,
+            expressions,
+            output: projection_output,
+        });
+
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn self_join_wildcard_preserves_each_aliased_relation() {
+        let employees = table(1, "employees", &["id", "manager_id"]);
+        let catalog = TestCatalog { tables: vec![employees.clone()] };
+        let got = bind_select(
+            &catalog,
+            "SELECT * FROM employees AS employee \
+             JOIN employees AS manager ON employee.manager_id == manager.id;",
+        )
+        .unwrap();
+
+        let employee_relation = RelationId::new(0);
+        let manager_relation = RelationId::new(1);
+        let employee_id = scoped_column(&employees, "employee", employee_relation, "id");
+        let employee_manager_id =
+            scoped_column(&employees, "employee", employee_relation, "manager_id");
+        let manager_id = scoped_column(&employees, "manager", manager_relation, "id");
+        let manager_manager_id =
+            scoped_column(&employees, "manager", manager_relation, "manager_id");
+        let employee_output =
+            PlanSchema::for_qualified_table(employee_relation, &employees, "employee");
+        let manager_output =
+            PlanSchema::for_qualified_table(manager_relation, &employees, "manager");
+
+        let mut expected = LogicalPlan::new(LogicalPlanNode::TableScan {
+            relation: employee_relation,
+            table: employees.clone(),
+            output: employee_output.clone(),
+        });
+        let employee_scan = expected.root_id();
+        let manager_scan = expected.push(LogicalPlanNode::TableScan {
+            relation: manager_relation,
+            table: employees,
+            output: manager_output.clone(),
+        });
+        let join_output = PlanSchema::join(employee_output, manager_output);
+        let join = expected.push(LogicalPlanNode::Join {
+            left: employee_scan,
+            right: manager_scan,
+            join_type: JoinType::Inner,
+            predicate: BoundExpr::Binary {
+                left: Box::new(BoundExpr::Column(employee_manager_id.clone())),
+                op: Op::EqualsEquals,
+                right: Box::new(BoundExpr::Column(manager_id.clone())),
+            },
+            output: join_output,
+        });
+        let expressions = vec![
+            BoundExpr::Column(employee_id),
+            BoundExpr::Column(employee_manager_id),
+            BoundExpr::Column(manager_id),
+            BoundExpr::Column(manager_manager_id),
+        ];
+        let projection_output = PlanSchema::for_expressions(&expressions);
+        expected.push(LogicalPlanNode::Project {
+            input: join,
+            expressions,
+            output: projection_output,
+        });
+
+        assert_eq!(got, expected);
     }
 
     #[test]
@@ -778,6 +875,64 @@ mod tests {
                  JOIN products AS p ON o.id == p.id;",
             ),
             Err(PlannerError::TableNotInScope { table }) if table == "p"
+        ));
+    }
+
+    #[test]
+    fn select_join_rejects_a_missing_joined_table() {
+        let catalog = TestCatalog { tables: vec![table(1, "users", &["id"])] };
+
+        assert!(matches!(
+            bind_select(
+                &catalog,
+                "SELECT users.id FROM users JOIN missing ON users.id == missing.id;",
+            ),
+            Err(PlannerError::TableNotFound { name }) if name == "missing"
+        ));
+    }
+
+    #[test]
+    fn select_join_rejects_an_ambiguous_unqualified_column() {
+        let catalog = TestCatalog {
+            tables: vec![table(1, "users", &["id"]), table(2, "orders", &["id", "user_id"])],
+        };
+
+        assert!(matches!(
+            bind_select(
+                &catalog,
+                "SELECT id FROM users JOIN orders ON users.id == orders.user_id;",
+            ),
+            Err(PlannerError::AmbiguousColumn { column }) if column == "id"
+        ));
+    }
+
+    #[test]
+    fn select_join_rejects_duplicate_qualifiers() {
+        let catalog = TestCatalog {
+            tables: vec![table(1, "users", &["id"]), table(2, "orders", &["user_id"])],
+        };
+
+        assert!(matches!(
+            bind_select(
+                &catalog,
+                "SELECT source.id FROM users AS source \
+                 JOIN orders AS source ON source.id == source.user_id;",
+            ),
+            Err(PlannerError::DuplicateTableQualifier { qualifier }) if qualifier == "source"
+        ));
+    }
+
+    #[test]
+    fn physical_planning_rejects_logical_joins_until_they_are_supported() {
+        let catalog = TestCatalog {
+            tables: vec![table(1, "users", &["id"]), table(2, "orders", &["user_id"])],
+        };
+        let statement =
+            parse("SELECT users.id FROM users JOIN orders ON users.id == orders.user_id;");
+
+        assert!(matches!(
+            Planner::with_schema(&catalog).plan_statement(&statement),
+            Err(PlannerError::UnsupportedJoin)
         ));
     }
 
