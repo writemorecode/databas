@@ -428,7 +428,7 @@ impl CatalogManager {
     }
 }
 
-fn validate_user_table_schema(name: &str, row: &TupleSchema) -> StorageResult<()> {
+pub(crate) fn validate_user_table_schema(name: &str, row: &TupleSchema) -> StorageResult<()> {
     let primary_key_count = row.columns.iter().filter(|column| column.primary_key).count();
     if primary_key_count != 1 {
         return Err(StorageError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {

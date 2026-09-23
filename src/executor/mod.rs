@@ -13,8 +13,8 @@
 
 use crate::{
     core::{
-        CatalogId, OwnedTableRecord, TableKey, TableRecord as BorrowedTableRecord, Transaction,
-        Tuple, TupleRef, Value, ValueRef,
+        CatalogId, OwnedTableRecord, TableKey, Tuple, TupleRef, Value, ValueRef,
+        access::RelationalAccess,
         error::{StorageError, StorageResult},
     },
     planner::{NodeId, PhysicalPlan, PhysicalPlanNode, RelationId},
@@ -195,9 +195,8 @@ impl ExecutorRow {
     fn from_table_record(
         relation: RelationId,
         table_id: CatalogId,
-        record: BorrowedTableRecord,
+        record: OwnedTableRecord,
     ) -> ExecutorResult<Self> {
-        let record = record.to_owned_record()?;
         let values =
             Tuple::from_bytes(&record.record).map_err(ExecutorError::InvalidTuple)?.into_values();
         let locator = RowLocator { relation, table_id, record };
@@ -313,17 +312,23 @@ impl std::fmt::Display for ExecutionOutput {
     }
 }
 
-/// Executes physical query plans through a transaction-scoped relational gateway.
+/// Executes physical query plans through a relational gateway.
 ///
-/// The executor owns no transaction state; the caller supplies an active
-/// transaction with the leases required by the plan.
-pub struct Executor<'txn, 'db> {
-    transaction: &'txn Transaction<'db>,
+/// The executor owns no transaction state; the caller supplies an access handle
+/// with the transaction and leases required by the plan.
+pub struct Executor<'txn, R>
+where
+    R: RelationalAccess,
+{
+    transaction: &'txn R,
 }
 
-impl<'txn, 'db> Executor<'txn, 'db> {
+impl<'txn, R> Executor<'txn, R>
+where
+    R: RelationalAccess,
+{
     /// Creates an executor scoped to an active transaction.
-    pub(crate) fn in_transaction(transaction: &'txn Transaction<'db>) -> Self {
+    pub(crate) fn in_transaction(transaction: &'txn R) -> Self {
         Self { transaction }
     }
 
@@ -461,376 +466,4 @@ impl<'txn, 'db> Executor<'txn, 'db> {
 }
 
 #[cfg(test)]
-mod tests {
-    use tempfile::{TempDir, tempdir};
-
-    use super::*;
-    use crate::{
-        core::{
-            DataType, Database, Tuple, Value,
-            error::{ConstraintError, StorageError},
-        },
-        error::DatabaseError,
-        planner::{ExecExpr, PhysicalPlan, PhysicalPlanNode},
-        session::Session,
-        sql_parser::parser::op::Op,
-    };
-
-    fn database() -> (TempDir, Database) {
-        let dir = tempdir().unwrap();
-        let database = Database::create(dir.path().join("test.db")).unwrap();
-        (dir, database)
-    }
-
-    fn execute<'sql>(
-        database: &Database,
-        sql: &'sql str,
-    ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        Session::new(database).execute_sql(sql)
-    }
-
-    fn row_values(row: &ExecutorRow) -> Vec<Value> {
-        row.with_record(|bytes| Tuple::from_bytes(bytes).unwrap().into_values()).unwrap()
-    }
-
-    fn try_rows(output: ExecutionOutput) -> ExecutorResult<Vec<Vec<Value>>> {
-        output.into_rows("TEST")?.map(|row| row.map(|row| row_values(&row))).collect()
-    }
-
-    fn query(database: &Database, sql: &str) -> Vec<Vec<Value>> {
-        try_rows(execute(database, sql).unwrap()).unwrap()
-    }
-
-    #[test]
-    fn values_evaluates_each_literal_row() {
-        let (_dir, database) = database();
-        let txn_id = database.begin_transaction().unwrap();
-        let transaction = database.transaction(txn_id, Vec::new());
-        let plan = PhysicalPlan::new(PhysicalPlanNode::Values {
-            rows: vec![
-                vec![ExecExpr::Literal(Value::Integer(10))],
-                vec![ExecExpr::Literal(Value::Integer(20))],
-            ],
-        });
-
-        let rows = Executor::in_transaction(&transaction)
-            .execute(plan)
-            .unwrap()
-            .into_rows("TEST")
-            .unwrap()
-            .collect::<ExecutorResult<Vec<_>>>()
-            .unwrap();
-
-        assert_eq!(
-            rows.iter().map(row_values).collect::<Vec<_>>(),
-            vec![vec![Value::Integer(10)], vec![Value::Integer(20)],]
-        );
-
-        drop(transaction);
-        database.rollback_transaction(txn_id).unwrap();
-    }
-
-    #[test]
-    fn select_without_from_evaluates_arithmetic() {
-        let (_dir, database) = database();
-
-        assert_eq!(
-            query(&database, "SELECT 7 + 5, 7 - 5, 7 * 5, 10 / 5, -5, 1.5 + 0.5;"),
-            vec![vec![
-                Value::Integer(12),
-                Value::Integer(2),
-                Value::Integer(35),
-                Value::Integer(2),
-                Value::Integer(-5),
-                Value::Float(2.0),
-            ]]
-        );
-    }
-
-    #[test]
-    fn select_without_from_evaluates_boolean_expressions() {
-        let (_dir, database) = database();
-
-        assert_eq!(
-            query(
-                &database,
-                "SELECT NOT FALSE, 1 < 2, 2 <= 2, 3 > 2, 3 >= 3, \
-                 1 == 1, 1 != 2, TRUE AND TRUE, FALSE OR TRUE;",
-            ),
-            vec![vec![Value::Boolean(true); 9]]
-        );
-    }
-
-    #[test]
-    fn boolean_expressions_short_circuit() {
-        let (_dir, database) = database();
-
-        assert_eq!(
-            query(&database, "SELECT FALSE AND 1 / 0 == 0, TRUE OR 1 / 0 == 0;"),
-            vec![vec![Value::Boolean(false), Value::Boolean(true)]]
-        );
-    }
-
-    #[test]
-    fn invalid_expressions_return_precise_errors() {
-        let (_dir, database) = database();
-
-        assert!(matches!(
-            try_rows(execute(&database, "SELECT 1 / 0;").unwrap()),
-            Err(ExecutorError::DivisionByZero)
-        ));
-        assert!(matches!(
-            try_rows(execute(&database, "SELECT 2147483647 + 1;").unwrap()),
-            Err(ExecutorError::IntegerOverflow { op: Op::Add })
-        ));
-        assert!(matches!(
-            try_rows(execute(&database, "SELECT 1 + 1.0;").unwrap()),
-            Err(ExecutorError::UnsupportedBinary { .. })
-        ));
-        assert!(matches!(
-            try_rows(execute(&database, "SELECT 1 == 1.0;").unwrap()),
-            Err(ExecutorError::ComparisonTypeMismatch { .. })
-        ));
-        assert!(matches!(
-            try_rows(execute(&database, "SELECT TRUE AND 1;").unwrap()),
-            Err(ExecutorError::NonBooleanLogicalOperand { .. })
-        ));
-    }
-
-    #[test]
-    fn select_scans_filters_and_projects_rows() {
-        let (_dir, database) = database();
-        execute(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, score INT);")
-            .unwrap();
-        execute(
-            &database,
-            "INSERT INTO users (id, name, score) VALUES \
-             (1, 'Ada', 20), (2, 'Grace', 10), (3, 'Linus', 30);",
-        )
-        .unwrap();
-
-        assert_eq!(
-            query(
-                &database,
-                "SELECT name, score + 1 FROM users WHERE score > 10 AND name != 'Linus';"
-            ),
-            vec![vec![Value::String("Ada".into()), Value::Integer(21)]]
-        );
-    }
-
-    #[test]
-    fn select_supports_table_aliases_in_projection_and_filter() {
-        let (_dir, database) = database();
-        execute(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, score INT);")
-            .unwrap();
-        execute(
-            &database,
-            "INSERT INTO users (id, name, score) VALUES \
-             (1, 'Ada', 20), (2, 'Grace', 10), (3, 'Linus', 30);",
-        )
-        .unwrap();
-
-        assert_eq!(
-            query(&database, "SELECT u.name, u.score + 1 FROM users AS u WHERE u.score >= 20;"),
-            vec![
-                vec![Value::String("Ada".into()), Value::Integer(21)],
-                vec![Value::String("Linus".into()), Value::Integer(31)],
-            ]
-        );
-    }
-
-    #[test]
-    fn filter_rejects_non_boolean_predicates() {
-        let (_dir, database) = database();
-        execute(&database, "CREATE TABLE users (id INT PRIMARY KEY);").unwrap();
-        execute(&database, "INSERT INTO users (id) VALUES (1);").unwrap();
-
-        assert!(matches!(
-            try_rows(execute(&database, "SELECT id FROM users WHERE id;").unwrap()),
-            Err(ExecutorError::NonBooleanPredicate { value: Value::Integer(1) })
-        ));
-    }
-
-    #[test]
-    fn primary_and_secondary_index_scans_return_matching_rows() {
-        let (_dir, database) = database();
-        execute(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, score INT);")
-            .unwrap();
-        execute(
-            &database,
-            "INSERT INTO users (id, name, score) VALUES \
-             (1, 'Ada', 10), (2, 'Grace', 20), (3, 'Linus', 20), (4, 'Margaret', 30);",
-        )
-        .unwrap();
-        execute(&database, "CREATE INDEX users_score ON users (score);").unwrap();
-        execute(&database, "INSERT INTO users (id, name, score) VALUES (5, 'Ken', 20);").unwrap();
-
-        assert_eq!(
-            query(&database, "SELECT id FROM users WHERE id >= 2 AND id < 4;"),
-            vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]
-        );
-        assert_eq!(
-            query(&database, "SELECT id FROM users WHERE score == 20 AND id > 2;"),
-            vec![vec![Value::Integer(3)], vec![Value::Integer(5)]]
-        );
-        assert_eq!(
-            query(&database, "SELECT id FROM users WHERE score >= 20 AND score < 30;"),
-            vec![vec![Value::Integer(2)], vec![Value::Integer(3)], vec![Value::Integer(5)],]
-        );
-    }
-
-    #[test]
-    fn limit_and_offset_select_the_requested_window() {
-        let (_dir, database) = database();
-        execute(&database, "CREATE TABLE numbers (id INT PRIMARY KEY);").unwrap();
-        execute(&database, "INSERT INTO numbers (id) VALUES (1), (2), (3), (4);").unwrap();
-
-        assert_eq!(
-            query(&database, "SELECT id FROM numbers LIMIT 2 OFFSET 1;"),
-            vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]
-        );
-        assert!(query(&database, "SELECT id FROM numbers OFFSET 10;").is_empty());
-        assert!(query(&database, "SELECT id FROM numbers LIMIT 0;").is_empty());
-    }
-
-    #[test]
-    fn insert_maps_columns_to_the_table_schema() {
-        let (_dir, database) = database();
-        execute(
-            &database,
-            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, score INT NULLABLE);",
-        )
-        .unwrap();
-
-        assert!(matches!(
-            execute(&database, "INSERT INTO users (name, id) VALUES ('Ada', 1);").unwrap(),
-            ExecutionOutput::RowsAffected(1)
-        ));
-        assert_eq!(
-            query(&database, "SELECT id, name, score FROM users;"),
-            vec![vec![Value::Integer(1), Value::String("Ada".into()), Value::Null]]
-        );
-    }
-
-    #[test]
-    fn insert_enforces_nullability_and_column_types() {
-        let (_dir, database) = database();
-        execute(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
-
-        assert!(matches!(
-            execute(&database, "INSERT INTO users (id) VALUES (1);"),
-            Err(DatabaseError::Executor(ExecutorError::Storage(StorageError::Constraint(
-                ConstraintError::NullValue { column }
-            )))) if column == "name"
-        ));
-        assert!(matches!(
-            execute(&database, "INSERT INTO users (id, name) VALUES ('two', 'Grace');"),
-            Err(DatabaseError::Executor(ExecutorError::Storage(StorageError::Constraint(
-                ConstraintError::ColumnTypeMismatch {
-                    column,
-                    expected: DataType::Integer,
-                    actual: "text",
-                }
-            )))) if column == "id"
-        ));
-        assert!(query(&database, "SELECT id FROM users;").is_empty());
-    }
-
-    #[test]
-    fn failed_multi_row_insert_is_atomic() {
-        let (_dir, database) = database();
-        execute(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
-
-        assert!(
-            execute(&database, "INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 99);").is_err()
-        );
-        assert!(query(&database, "SELECT id FROM users;").is_empty());
-    }
-
-    #[test]
-    fn update_evaluates_assignments_and_refreshes_indexes() {
-        let (_dir, database) = database();
-        execute(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, score INT);")
-            .unwrap();
-        execute(&database, "CREATE INDEX users_name ON users (name);").unwrap();
-        execute(
-            &database,
-            "INSERT INTO users (id, name, score) VALUES (1, 'Ada', 10), (2, 'Grace', 20);",
-        )
-        .unwrap();
-
-        assert!(matches!(
-            execute(
-                &database,
-                "UPDATE users SET name = 'Linus', score = score + 1 WHERE name == 'Ada';",
-            )
-            .unwrap(),
-            ExecutionOutput::RowsAffected(1)
-        ));
-        assert!(query(&database, "SELECT id FROM users WHERE name == 'Ada';").is_empty());
-        assert_eq!(
-            query(&database, "SELECT id, score FROM users WHERE name == 'Linus';"),
-            vec![vec![Value::Integer(1), Value::Integer(11)]]
-        );
-    }
-
-    #[test]
-    fn failed_multi_row_update_is_atomic() {
-        let (_dir, database) = database();
-        execute(&database, "CREATE TABLE users (id INT PRIMARY KEY, score INT);").unwrap();
-        execute(&database, "INSERT INTO users (id, score) VALUES (1, 10), (2, 20);").unwrap();
-
-        assert!(matches!(
-            execute(&database, "UPDATE users SET score = 10 / (2 - id);"),
-            Err(DatabaseError::Executor(ExecutorError::DivisionByZero))
-        ));
-        assert_eq!(
-            query(&database, "SELECT score FROM users;"),
-            vec![vec![Value::Integer(10)], vec![Value::Integer(20)]]
-        );
-    }
-
-    #[test]
-    fn delete_removes_matching_rows_and_index_entries() {
-        let (_dir, database) = database();
-        execute(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
-        execute(&database, "CREATE INDEX users_name ON users (name);").unwrap();
-        execute(
-            &database,
-            "INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 'Ada'), (3, 'Grace');",
-        )
-        .unwrap();
-
-        assert!(matches!(
-            execute(&database, "DELETE FROM users WHERE name == 'Ada';").unwrap(),
-            ExecutionOutput::RowsAffected(2)
-        ));
-        assert!(query(&database, "SELECT id FROM users WHERE name == 'Ada';").is_empty());
-        assert_eq!(
-            query(&database, "SELECT id FROM users WHERE name == 'Grace';"),
-            vec![vec![Value::Integer(3)]]
-        );
-    }
-
-    #[test]
-    fn mutations_do_not_skip_rows_when_btree_pages_change() {
-        let (_dir, database) = database();
-        execute(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
-        let values = (1..=40)
-            .map(|id| format!("({id}, '{}')", "x".repeat(40)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        execute(&database, &format!("INSERT INTO users (id, name) VALUES {values};")).unwrap();
-
-        let large_name = "y".repeat(500);
-        assert!(matches!(
-            execute(&database, &format!("UPDATE users SET name = '{large_name}';")).unwrap(),
-            ExecutionOutput::RowsAffected(40)
-        ));
-        assert!(matches!(
-            execute(&database, "DELETE FROM users;").unwrap(),
-            ExecutionOutput::RowsAffected(40)
-        ));
-        assert!(query(&database, "SELECT id FROM users;").is_empty());
-    }
-}
+mod tests;

@@ -380,7 +380,7 @@ fn range_start(lower: Option<TableKeyBound>) -> RangeStart {
     }
 }
 
-fn validate_table_row(table: &TableSchema, values: &[Value]) -> StorageResult<()> {
+pub(crate) fn validate_table_row(table: &TableSchema, values: &[Value]) -> StorageResult<()> {
     if values.len() != table.row.columns.len() {
         return Err(StorageError::InvalidArgument(InvalidArgumentError::TableRowValueCount {
             table: table.name.clone(),
@@ -411,7 +411,10 @@ fn validate_table_row(table: &TableSchema, values: &[Value]) -> StorageResult<()
     Ok(())
 }
 
-fn table_key_from_values(table: &TableSchema, values: &[Value]) -> StorageResult<TableKey> {
+pub(crate) fn table_key_from_values(
+    table: &TableSchema,
+    values: &[Value],
+) -> StorageResult<TableKey> {
     match values.first() {
         Some(Value::Integer(value)) => Ok(*value),
         Some(Value::Null) => Err(StorageError::Constraint(ConstraintError::NullValue {

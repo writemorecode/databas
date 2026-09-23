@@ -1,5 +1,5 @@
 use crate::{
-    core::{TableSchema, Transaction, Tuple, Value},
+    core::{TableSchema, Tuple, Value, access::RelationalAccess},
     planner::{BoundColumn, ExecColumn, ExecExpr, RelationId, UpdateAssignment},
     sql_parser::parser::op::Op,
 };
@@ -53,7 +53,7 @@ pub(super) fn offset_rows(mut rows: RowStream, mut remaining: usize) -> RowStrea
 /// Each value row is evaluated, expanded into the target table layout, and then
 /// handed to storage for validation and insertion.
 pub(super) fn execute_insert_values(
-    transaction: &Transaction<'_>,
+    transaction: &impl RelationalAccess,
     table: TableSchema,
     columns: Vec<BoundColumn>,
     values: Vec<Vec<ExecExpr>>,
@@ -92,7 +92,7 @@ pub(super) fn execute_insert_values(
 
 /// Executes an `UPDATE` plan by consuming and mutating one target row at a time.
 pub(super) fn execute_update(
-    transaction: &Transaction<'_>,
+    transaction: &impl RelationalAccess,
     relation: RelationId,
     table: TableSchema,
     assignments: Vec<UpdateAssignment>,
@@ -131,7 +131,7 @@ pub(super) fn execute_update(
 
 /// Executes a `DELETE` plan by consuming and deleting one target row at a time.
 pub(super) fn execute_delete(
-    transaction: &Transaction<'_>,
+    transaction: &impl RelationalAccess,
     relation: RelationId,
     table: TableSchema,
     target_rows: RowStream,

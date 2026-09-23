@@ -100,7 +100,7 @@ impl IndexManager {
     }
 }
 
-fn index_key_from_record(
+pub(crate) fn index_key_from_record(
     table: &TableSchema,
     index: &IndexSchema,
     record: &OwnedTableRecord,
