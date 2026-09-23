@@ -27,7 +27,6 @@ pub use error::{
     InvalidArgumentError, LimitExceededError, StorageError, StorageResult,
 };
 pub use lock_manager::{LockError, LockMode, TableId};
-pub(crate) use transaction::Transaction;
 pub use types::{
     CatalogId, IndexKeyBound, IndexKeyRange, PageId, TableKey, TableKeyBound, TableKeyRange, TxnId,
 };
