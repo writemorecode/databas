@@ -52,11 +52,12 @@ because only one request may be in flight.
 | `0x03` | `QUERY` | client → server | one UTF-8 SQL item |
 | `0x10` | `ROW` | server → client | typed row, below |
 | `0x11` | `COMPLETE` | server → client | completion kind and data |
+| `0x12` | `ROW_DESCRIPTION` | server → client | result column names, below |
 | `0x7f` | `ERROR` | server → client | error code and message |
 
 A query response is either:
 
-- zero or more `ROW` messages followed by one row `COMPLETE`;
+- one `ROW_DESCRIPTION`, zero or more `ROW` messages, then one row `COMPLETE`;
 - one non-row `COMPLETE`; or
 - one `ERROR`.
 
@@ -77,9 +78,11 @@ tag and has the following data:
 | `0x04` | float | IEEE-754 binary32 bits; NaN is invalid |
 | `0x05` | unsigned integer | `u64` |
 
-Rows do not include column names because the current executor does not expose a
-result-column metadata API. Adding metadata requires a future protocol version
-or a backwards-compatible new message type.
+### Row description payload
+
+A row-producing response starts with one `ROW_DESCRIPTION`. Its payload starts
+with a `u32` column count, followed by each display name as a `u32` UTF-8 byte
+length and that many bytes. Names are in the same order as values in each row.
 
 ### Completion payload
 

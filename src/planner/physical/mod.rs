@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::core::{IndexKeyRange, IndexSchema, TableKeyRange, TableSchema, TupleSchema, Value};
 
-use super::{BoundColumn, ExecExpr, NodeId, RelationId, SortTerm, UpdateAssignment};
+use super::{BoundColumn, ExecExpr, NodeId, PlanSchema, RelationId, SortTerm, UpdateAssignment};
 
 mod access_path;
 mod planner;
@@ -19,20 +19,36 @@ pub(super) use planner::PhysicalPlanner;
 pub struct PhysicalPlan {
     nodes: Vec<PhysicalPlanNode>,
     root: NodeId,
+    output_schema: Option<PlanSchema>,
 }
 
 impl PhysicalPlan {
-    /// Creates a plan containing a single root node.
+    /// Creates a plan containing a single root node without output metadata.
+    /// Use [`Self::with_output_schema`] to describe a manually built result.
     pub fn new(root: PhysicalPlanNode) -> Self {
-        Self { nodes: vec![root], root: NodeId::new(0) }
+        Self { nodes: vec![root], root: NodeId::new(0), output_schema: None }
     }
 
     /// Adds a node and makes it the plan root, returning its ID.
+    /// Clears output metadata, which described the previous root.
     pub fn push(&mut self, node: PhysicalPlanNode) -> NodeId {
         let id = NodeId::new(self.nodes.len());
         self.nodes.push(node);
         self.root = id;
+        self.output_schema = None;
         id
+    }
+
+    /// Attaches the output schema of the current root in row-value order.
+    pub fn with_output_schema(mut self, schema: PlanSchema) -> Self {
+        self.output_schema = Some(schema);
+        self
+    }
+
+    /// Returns result metadata, including when execution produces no rows.
+    /// Non-row plans and manually built plans without metadata return `None`.
+    pub fn output_schema(&self) -> Option<&PlanSchema> {
+        self.output_schema.as_ref()
     }
 
     /// Returns the root node.
@@ -55,13 +71,17 @@ impl PhysicalPlan {
         self.nodes.iter()
     }
 
-    pub(crate) fn from_parts(nodes: Vec<PhysicalPlanNode>, root: NodeId) -> Self {
+    pub(crate) fn from_parts(
+        nodes: Vec<PhysicalPlanNode>,
+        root: NodeId,
+        output_schema: Option<PlanSchema>,
+    ) -> Self {
         debug_assert!(root.index() < nodes.len());
-        Self { nodes, root }
+        Self { nodes, root, output_schema }
     }
 
-    pub(crate) fn into_parts(self) -> (Vec<PhysicalPlanNode>, NodeId) {
-        (self.nodes, self.root)
+    pub(crate) fn into_parts(self) -> (Vec<PhysicalPlanNode>, NodeId, Option<PlanSchema>) {
+        (self.nodes, self.root, self.output_schema)
     }
 
     pub(crate) fn display_node(&self, id: NodeId) -> impl fmt::Display + '_ {

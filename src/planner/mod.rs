@@ -278,7 +278,12 @@ mod tests {
                 "SELECT u.name FROM users AS u WHERE u.id == 7 ORDER BY u.age DESC;",
             )
             .physical,
-            expected
+            expected.with_output_schema(PlanSchema {
+                columns: vec![
+                    PlanSchema::for_qualified_table(relation, &users_table(), "u").columns[1]
+                        .clone(),
+                ],
+            })
         );
 
         let mut expected =
@@ -305,7 +310,14 @@ mod tests {
             ],
         });
 
-        assert_eq!(plan(&MemoryCatalog::default(), "SELECT * FROM users AS u;").physical, expected);
+        assert_eq!(
+            plan(&MemoryCatalog::default(), "SELECT * FROM users AS u;").physical,
+            expected.with_output_schema(PlanSchema::for_qualified_table(
+                relation,
+                &users_table(),
+                "u",
+            ))
+        );
     }
 
     #[test]
@@ -378,7 +390,12 @@ mod tests {
 
         assert_eq!(
             plan(&catalog, "SELECT u.id FROM users AS u WHERE u.name == 'Ada';").physical,
-            expected
+            expected.with_output_schema(PlanSchema {
+                columns: vec![
+                    PlanSchema::for_qualified_table(relation, &users_table(), "u").columns[0]
+                        .clone(),
+                ],
+            })
         );
     }
 

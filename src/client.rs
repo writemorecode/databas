@@ -15,7 +15,7 @@ use crate::{
     protocol::{
         self, COMPLETE, COMPLETE_COMMAND_OK, COMPLETE_EXPLAIN, COMPLETE_ROWS,
         COMPLETE_ROWS_AFFECTED, COMPLETE_SCHEMA_AFFECTED, ERROR, ErrorCode, Frame, QUERY, READY,
-        ROW, STARTUP,
+        ROW, ROW_DESCRIPTION, STARTUP,
     },
 };
 
@@ -59,8 +59,13 @@ pub enum ClientError {
 pub enum QueryResult {
     /// Textual physical plan returned by `EXPLAIN`.
     Explain(String),
-    /// Typed rows returned by a row-producing statement.
-    Rows(Vec<Vec<Value>>),
+    /// Named columns and typed rows returned by a row-producing statement.
+    Rows {
+        /// Display names in row-value order.
+        columns: Vec<String>,
+        /// Materialized result rows.
+        rows: Vec<Vec<Value>>,
+    },
     /// Number of rows changed by a data-modification statement.
     RowsAffected(u64),
     /// A schema statement completed successfully.
@@ -73,7 +78,7 @@ impl fmt::Display for QueryResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Explain(plan) => formatter.write_str(plan),
-            Self::Rows(rows) => write!(formatter, "{} rows returned.", rows.len()),
+            Self::Rows { rows, .. } => write!(formatter, "{} rows returned.", rows.len()),
             Self::RowsAffected(count) => write!(formatter, "{count} rows affected."),
             Self::SchemaAffected => formatter.write_str("Schema affected."),
             Self::CommandOk => formatter.write_str("Command executed."),
@@ -124,13 +129,23 @@ impl Client {
     /// not close the connection, so the client may issue another query.
     pub fn execute(&mut self, sql: &str) -> Result<QueryResult, ClientError> {
         protocol::write_frame(&mut self.stream, QUERY, sql.as_bytes())?;
+        let mut columns = None;
         let mut rows = Vec::new();
 
         loop {
             let frame = read_required_frame(&mut self.stream, "server closed during query")?;
             match frame.kind {
-                ROW => rows.push(protocol::decode_row(&frame.payload)?),
-                COMPLETE => return decode_complete(&frame.payload, rows),
+                ROW_DESCRIPTION if columns.is_none() && rows.is_empty() => {
+                    columns = Some(protocol::decode_row_description(&frame.payload)?);
+                }
+                ROW_DESCRIPTION => {
+                    return Err(ClientError::UnexpectedMessage(
+                        "duplicate or late ROW_DESCRIPTION",
+                    ));
+                }
+                ROW if columns.is_some() => rows.push(protocol::decode_row(&frame.payload)?),
+                ROW => return Err(ClientError::UnexpectedMessage("ROW before ROW_DESCRIPTION")),
+                COMPLETE => return decode_complete(&frame.payload, columns, rows),
                 ERROR => return Err(decode_server_error(&frame.payload)?.into()),
                 _ => {
                     return Err(ClientError::UnexpectedMessage(
@@ -167,7 +182,11 @@ fn decode_server_error(payload: &[u8]) -> Result<ServerError, ClientError> {
     Ok(ServerError { code, message })
 }
 
-fn decode_complete(payload: &[u8], rows: Vec<Vec<Value>>) -> Result<QueryResult, ClientError> {
+fn decode_complete(
+    payload: &[u8],
+    columns: Option<Vec<String>>,
+    rows: Vec<Vec<Value>>,
+) -> Result<QueryResult, ClientError> {
     let Some((&kind, data)) = payload.split_first() else {
         return Err(ClientError::UnexpectedMessage("COMPLETE payload is empty"));
     };
@@ -177,7 +196,12 @@ fn decode_complete(payload: &[u8], rows: Vec<Vec<Value>>) -> Result<QueryResult,
             if expected != rows.len() as u64 {
                 return Err(ClientError::UnexpectedMessage("row completion count does not match"));
             }
-            Ok(QueryResult::Rows(rows))
+            let columns = columns
+                .ok_or(ClientError::UnexpectedMessage("row completion without ROW_DESCRIPTION"))?;
+            if rows.iter().any(|row| row.len() != columns.len()) {
+                return Err(ClientError::UnexpectedMessage("row width does not match columns"));
+            }
+            Ok(QueryResult::Rows { columns, rows })
         }
         COMPLETE_EXPLAIN => {
             require_no_rows(&rows)?;

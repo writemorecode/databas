@@ -100,7 +100,8 @@ fn run_repl(client: &mut Client) -> Result<(), Box<dyn Error>> {
 
 fn write_query_result(result: QueryResult, writer: &mut impl Write) -> io::Result<()> {
     match result {
-        QueryResult::Rows(rows) => {
+        QueryResult::Rows { columns, rows } => {
+            writeln!(writer, "{}", columns.join("\t"))?;
             for row in rows {
                 for (index, value) in row.iter().enumerate() {
                     if index != 0 {

@@ -23,12 +23,13 @@ impl<'catalog> PhysicalPlanner<'catalog> {
     }
 
     pub(in crate::planner) fn plan(&self, logical: LogicalPlan) -> PlannerResult<PhysicalPlan> {
+        let output_schema = logical.output_schema(logical.root_id()).cloned();
         let (logical_nodes, logical_root) = logical.into_parts();
         let mut logical_nodes = logical_nodes.into_iter().map(Some).collect::<Vec<_>>();
         let mut physical_nodes = Vec::new();
         let root =
             self.build_physical_plan(&mut logical_nodes, logical_root, true, &mut physical_nodes)?;
-        Ok(PhysicalPlan::from_parts(physical_nodes, root))
+        Ok(PhysicalPlan::from_parts(physical_nodes, root, output_schema))
     }
 
     fn build_physical_plan(
