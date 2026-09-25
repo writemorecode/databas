@@ -48,7 +48,10 @@ impl PlanSchema {
         let columns = expressions
             .iter()
             .map(|expression| PlanColumn {
-                name: expression.to_string(),
+                name: match expression {
+                    BoundExpr::Column(column) => column.name.clone(),
+                    _ => expression.to_string(),
+                },
                 data_type: expression.data_type(),
                 source: match expression {
                     BoundExpr::Column(column) => Some(column.clone()),

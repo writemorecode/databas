@@ -25,7 +25,7 @@ use crate::{
     protocol::{
         self, COMPLETE, COMPLETE_COMMAND_OK, COMPLETE_EXPLAIN, COMPLETE_ROWS,
         COMPLETE_ROWS_AFFECTED, COMPLETE_SCHEMA_AFFECTED, ERROR, ErrorCode, QUERY, READY, ROW,
-        STARTUP,
+        ROW_DESCRIPTION, STARTUP,
     },
     session::Session,
     thread_pool::{ThreadPool, ThreadPoolError},
@@ -371,7 +371,9 @@ fn handle_queries(
 
 fn send_output(stream: &mut TcpStream, output: ExecutionOutput) -> Result<(), ConnectionError> {
     match output {
-        ExecutionOutput::Rows { rows } => {
+        ExecutionOutput::Rows { columns, rows } => {
+            let description = protocol::encode_row_description(&columns)?;
+            protocol::write_frame(stream, ROW_DESCRIPTION, &description)?;
             let mut count = 0_u64;
             for row in rows {
                 let row = match row {
@@ -675,8 +677,27 @@ mod tests {
         );
         assert_eq!(
             client.execute("SELECT id, name FROM items;").unwrap(),
-            QueryResult::Rows(vec![vec![Value::Integer(1), Value::String("one".to_owned())]])
+            QueryResult::Rows {
+                columns: vec!["id".to_owned(), "name".to_owned()],
+                rows: vec![vec![Value::Integer(1), Value::String("one".to_owned())]],
+            }
         );
+        assert_eq!(
+            client.execute("SELECT name, id + 1 FROM items LIMIT 0;").unwrap(),
+            QueryResult::Rows {
+                columns: vec!["name".to_owned(), "(items.id + 1)".to_owned()],
+                rows: vec![],
+            }
+        );
+        client.execute("BEGIN;").unwrap();
+        assert_eq!(
+            client.execute("SELECT name FROM items;").unwrap(),
+            QueryResult::Rows {
+                columns: vec!["name".to_owned()],
+                rows: vec![vec![Value::String("one".to_owned())]],
+            }
+        );
+        client.execute("COMMIT;").unwrap();
         let error = client.execute("SELECT FROM;").unwrap_err();
         assert!(matches!(
             error,

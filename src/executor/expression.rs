@@ -24,7 +24,7 @@ pub(super) fn execute_values(rows: Vec<Vec<ExecExpr>>) -> ExecutorResult<Executi
         let input = empty_record();
         evaluate_values(&expressions, &input).map(ExecutorRow::from_values)
     });
-    Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
+    Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
 }
 
 /// Skips rows from a child stream while still surfacing skipped-row errors.

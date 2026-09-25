@@ -258,6 +258,8 @@ pub enum ExecutionOutput {
     Explain(String),
     /// Fully materialized result rows owned by the completed execution.
     Rows {
+        /// Display names of the result columns, in row-value order.
+        columns: Vec<String>,
         /// Rows drained before the statement transaction is finalized.
         rows: Vec<ExecutorResult<ExecutorRow>>,
     },
@@ -278,7 +280,7 @@ impl ExecutionOutput {
     pub(crate) fn into_rows(self, operator: &'static str) -> ExecutorResult<RowStream> {
         match self {
             Self::Explain(_) => Err(ExecutorError::ExpectedRows { operator }),
-            Self::Rows { rows } => Ok(Box::new(rows.into_iter())),
+            Self::Rows { rows, .. } => Ok(Box::new(rows.into_iter())),
             Self::RowsAffected(_) | Self::SchemaAffected | Self::CommandOk => {
                 Err(ExecutorError::ExpectedRows { operator })
             }
@@ -334,18 +336,23 @@ where
 
     /// Executes a physical plan and returns its output.
     ///
-    /// Row-producing operators return immediately with a lazy [`RowStream`].
-    /// The underlying scan, filter, projection, limit, or offset work is then
-    /// performed as the caller consumes that stream. DDL and insert operators
-    /// perform their side effects before returning.
+    /// Row results are materialized before returning and include the physical
+    /// plan's output column names, even when no rows match. Manually built plans
+    /// without an output schema return an empty column list.
     pub fn execute(&mut self, plan: impl Into<PhysicalPlan>) -> ExecutorResult<ExecutionOutput> {
         let plan = plan.into();
         if let PhysicalPlanNode::Explain { input } = plan.root() {
             return Ok(ExecutionOutput::Explain(plan.display_node(*input).to_string()));
         }
-        let (nodes, root) = plan.into_parts();
+        let (nodes, root, output_schema) = plan.into_parts();
         let mut nodes = nodes.into_iter().map(Some).collect::<Vec<_>>();
-        self.execute_node(&mut nodes, root)
+        let mut output = self.execute_node(&mut nodes, root)?;
+        if let ExecutionOutput::Rows { columns, .. } = &mut output {
+            *columns = output_schema
+                .map(|schema| schema.columns.into_iter().map(|column| column.name).collect())
+                .unwrap_or_default();
+        }
+        Ok(output)
     }
 
     fn execute_node(
@@ -388,6 +395,7 @@ where
                 execute_delete(self.transaction, relation, table, output_inner.into_rows("DELETE")?)
             }
             PhysicalPlanNode::OneRow => Ok(ExecutionOutput::Rows {
+                columns: Vec::new(),
                 rows: collect_rows(std::iter::once_with(|| Ok(empty_record()))),
             }),
             PhysicalPlanNode::FullTableScan { relation, table } => {
@@ -396,7 +404,7 @@ where
                     let record = record.map_err(ExecutorError::from)?;
                     ExecutorRow::from_table_record(relation, table_id, record)
                 });
-                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
+                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
             }
             PhysicalPlanNode::PrimaryKeyRangeScan { relation, table, range } => {
                 let table_id = table.table_id;
@@ -404,7 +412,7 @@ where
                     let record = record.map_err(ExecutorError::from)?;
                     ExecutorRow::from_table_record(relation, table_id, record)
                 });
-                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
+                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
             }
             PhysicalPlanNode::SecondaryIndexScan { scan } => {
                 let table_id = scan.table.table_id;
@@ -416,7 +424,7 @@ where
                         let record = record.map_err(ExecutorError::from)?;
                         ExecutorRow::from_table_record(relation, table_id, record)
                     });
-                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
+                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
             }
             PhysicalPlanNode::Filter { input, predicate } => {
                 let output_inner = self.execute_node(nodes, input)?;
@@ -433,7 +441,7 @@ where
                     }
                     Err(error) => Some(Err(error)),
                 });
-                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
+                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
             }
             PhysicalPlanNode::Sort { input: _, terms: _ } => {
                 // TODO: Change tuple serialization format to allow value comparison from raw byte slices
@@ -444,7 +452,7 @@ where
                 let rows = output_inner
                     .into_rows("PROJECT")?
                     .map(move |row| row.and_then(|row| evaluate_expressions(&expressions, row)));
-                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
+                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
             }
 
             PhysicalPlanNode::Offset { input, offset } => {
@@ -452,14 +460,14 @@ where
                 // TODO: Make `offset` a usize value.
                 let offset = offset as usize;
                 let rows = offset_rows(output_inner.into_rows("OFFSET")?, offset);
-                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
+                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
             }
             PhysicalPlanNode::Limit { input, limit } => {
                 let output_inner = self.execute_node(nodes, input)?;
                 // TODO: Make `limit` a usize value.
                 let limit = limit as usize;
                 let rows = output_inner.into_rows("LIMIT")?.take(limit);
-                Ok(ExecutionOutput::Rows { rows: collect_rows(rows) })
+                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
             }
         }
     }

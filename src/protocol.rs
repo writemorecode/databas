@@ -21,6 +21,7 @@ pub(crate) const READY: u8 = 0x02;
 pub(crate) const QUERY: u8 = 0x03;
 pub(crate) const ROW: u8 = 0x10;
 pub(crate) const COMPLETE: u8 = 0x11;
+pub(crate) const ROW_DESCRIPTION: u8 = 0x12;
 pub(crate) const ERROR: u8 = 0x7f;
 
 pub(crate) const COMPLETE_ROWS: u8 = 0x00;
@@ -224,6 +225,45 @@ pub(crate) fn decode_error(payload: &[u8]) -> Result<(ErrorCode, String), Protoc
         ProtocolError::InvalidUtf8 { context: "error message is not UTF-8", source }
     })?;
     Ok((code, message.to_owned()))
+}
+
+pub(crate) fn encode_row_description(columns: &[String]) -> Result<Vec<u8>, ProtocolError> {
+    let count = u32::try_from(columns.len())
+        .map_err(|_out_of_range| ProtocolError::Malformed("too many result columns"))?;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&count.to_be_bytes());
+    for column in columns {
+        let length = u32::try_from(column.len())
+            .map_err(|_out_of_range| ProtocolError::Malformed("column name is too large"))?;
+        payload.extend_from_slice(&length.to_be_bytes());
+        payload.extend_from_slice(column.as_bytes());
+    }
+    Ok(payload)
+}
+
+pub(crate) fn decode_row_description(payload: &[u8]) -> Result<Vec<String>, ProtocolError> {
+    let mut decoder = Decoder::new(payload);
+    let count = decoder.u32()? as usize;
+    if count > decoder.remaining() / size_of::<u32>() {
+        return Err(ProtocolError::Malformed("column count exceeds row description payload"));
+    }
+    let mut columns = Vec::new();
+    columns
+        .try_reserve(count)
+        .map_err(|source| ProtocolError::RowAllocationFailed { value_count: count, source })?;
+    for _ in 0..count {
+        let length = decoder.u32()? as usize;
+        let bytes = decoder.bytes(length)?;
+        let name = std::str::from_utf8(bytes).map_err(|source| ProtocolError::InvalidUtf8 {
+            context: "column name is not UTF-8",
+            source,
+        })?;
+        columns.push(name.to_owned());
+    }
+    if decoder.remaining() != 0 {
+        return Err(ProtocolError::Malformed("row description has trailing bytes"));
+    }
+    Ok(columns)
 }
 
 pub(crate) fn encode_row(values: &[Value]) -> Result<Vec<u8>, ProtocolError> {
