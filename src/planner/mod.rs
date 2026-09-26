@@ -34,6 +34,7 @@ mod error;
 mod expression;
 mod identity;
 mod logical;
+mod optimizer;
 mod physical;
 mod plan;
 mod planning;
