@@ -71,6 +71,7 @@ mod tests {
         relational::{cursor::encode_index_entry_key, tuple::Tuple},
         sql_parser::parser::{
             Parser,
+            op::Op,
             stmt::{Statement, select::Ordering},
         },
     };
@@ -229,10 +230,12 @@ mod tests {
 
     #[test]
     fn select_star_expands_bound_table_columns() {
-        assert_eq!(
-            physical(&MemoryCatalog::default(), "SELECT * FROM users;"),
-            "FullTableScan table=users"
-        );
+        let relation = RelationId::new(0);
+        let expected =
+            PhysicalPlan::new(PhysicalPlanNode::FullTableScan { relation, table: users_table() })
+                .with_output_schema(PlanSchema::for_table(relation, &users_table()));
+
+        assert_eq!(plan(&MemoryCatalog::default(), "SELECT * FROM users;").physical, expected);
     }
 
     #[test]
@@ -383,9 +386,19 @@ mod tests {
 
     #[test]
     fn select_without_from_uses_one_synthetic_row() {
+        let expression = ExecExpr::Literal(Value::Integer(3));
+        let output = PlanSchema::for_expressions(&[BoundExpr::Binary {
+            left: Box::new(BoundExpr::Literal(Value::Integer(1))),
+            op: Op::Add,
+            right: Box::new(BoundExpr::Literal(Value::Integer(2))),
+        }]);
+        let mut expected = PhysicalPlan::new(PhysicalPlanNode::OneRow);
+        let input = expected.root_id();
+        expected.push(PhysicalPlanNode::Project { input, expressions: vec![expression] });
+
         assert_eq!(
-            physical(&MemoryCatalog::default(), "SELECT 1 + 2;"),
-            "Project expressions=[3]\n`- OneRow"
+            plan(&MemoryCatalog::default(), "SELECT 1 + 2;").physical,
+            expected.with_output_schema(output)
         );
     }
 
