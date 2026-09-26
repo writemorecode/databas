@@ -166,6 +166,8 @@ pub enum PhysicalPlanNode {
     ///
     /// This is the row source for `SELECT` statements without a `FROM` clause.
     OneRow,
+    /// Produce no rows.
+    Empty,
     /// Scan all rows from a table.
     FullTableScan {
         /// Query-local identity of the scanned table occurrence.
@@ -334,6 +336,7 @@ fn physical_plan_label(plan: &PhysicalPlanNode) -> String {
         }
         PhysicalPlanNode::Delete { table, .. } => format!("Delete table={}", table.name),
         PhysicalPlanNode::OneRow => "OneRow".to_owned(),
+        PhysicalPlanNode::Empty => "Empty".to_owned(),
         PhysicalPlanNode::FullTableScan { table, .. } => {
             format!("FullTableScan table={}", table.name)
         }

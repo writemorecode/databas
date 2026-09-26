@@ -95,6 +95,8 @@ pub enum LogicalPlanNode {
     Delete { relation: RelationId, table: TableSchema, input: NodeId },
     /// Synthetic single-row input used for projection-only selects.
     OneRow { output: PlanSchema },
+    /// Produce no rows while retaining the relational output schema.
+    Empty { output: PlanSchema },
     /// Read every row from a bound table occurrence.
     TableScan { relation: RelationId, table: TableSchema, output: PlanSchema },
     /// Keep only rows for which the predicate evaluates truthfully.
@@ -123,6 +125,7 @@ impl LogicalPlanNode {
         match self {
             Self::Values { output, .. }
             | Self::OneRow { output }
+            | Self::Empty { output }
             | Self::TableScan { output, .. }
             | Self::Filter { output, .. }
             | Self::Sort { output, .. }

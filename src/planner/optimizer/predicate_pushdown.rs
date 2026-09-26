@@ -88,6 +88,7 @@ impl PredicatePushdown {
             | LogicalPlanNode::CreateIndex { .. }
             | LogicalPlanNode::Values { .. }
             | LogicalPlanNode::OneRow { .. }
+            | LogicalPlanNode::Empty { .. }
             | LogicalPlanNode::TableScan { .. }) => self.push(leaf),
         };
         Ok(rebuilt)

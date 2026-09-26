@@ -398,6 +398,10 @@ where
                 columns: Vec::new(),
                 rows: collect_rows(std::iter::once_with(|| Ok(empty_record()))),
             }),
+            PhysicalPlanNode::Empty => Ok(ExecutionOutput::Rows {
+                columns: Vec::new(),
+                rows: collect_rows(std::iter::empty()),
+            }),
             PhysicalPlanNode::FullTableScan { relation, table } => {
                 let table_id = table.table_id;
                 let rows = self.transaction.scan_table(&table)?.map(move |record| {
