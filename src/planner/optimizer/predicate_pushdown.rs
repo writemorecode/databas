@@ -1,4 +1,4 @@
-//! Predicate pushdown for inner joins.
+//! Predicate pushdown through relational operators.
 
 use crate::core::Value;
 
@@ -9,7 +9,8 @@ use super::{
     expression::{combine_conjuncts, conjuncts, referenced_columns},
 };
 
-/// Pushes predicates as close as possible to the inputs of inner joins.
+/// Pushes predicates through sorts and direct-column projections, and toward
+/// the individual inputs of inner joins.
 ///
 /// Conjuncts which reference only one join input become filters on that input.
 /// Conjuncts which need both inputs are evaluated as part of the join predicate.
@@ -108,6 +109,15 @@ impl PredicatePushdown {
         let input_node =
             self.output.get(input.index()).cloned().ok_or(PlannerError::InvalidLogicalPlan)?;
         match input_node {
+            LogicalPlanNode::Sort { input: sort_input, terms, output } => {
+                let sort_input = self.push_predicates(sort_input, predicates)?;
+                self.output[input.index()] =
+                    LogicalPlanNode::Sort { input: sort_input, terms, output };
+                Ok(input)
+            }
+            LogicalPlanNode::Project { input: project_input, expressions, output } => {
+                self.push_through_project(input, project_input, expressions, output, predicates)
+            }
             LogicalPlanNode::Join { left, right, join_type, predicate, output } => {
                 let mut all_join_predicates = conjuncts(predicate);
                 let (left_predicates, right_predicates, join_predicates) =
@@ -142,6 +152,38 @@ impl PredicatePushdown {
                     output,
                 }))
             }
+        }
+    }
+
+    fn push_through_project(
+        &mut self,
+        project: NodeId,
+        project_input: NodeId,
+        expressions: Vec<BoundExpr>,
+        output: PlanSchema,
+        predicates: Vec<BoundExpr>,
+    ) -> PlannerResult<NodeId> {
+        let mut pushed = Vec::new();
+        let mut residual = Vec::new();
+        for predicate in predicates {
+            match rewrite_through_project(predicate.clone(), &output, &expressions) {
+                Some(predicate) => pushed.push(predicate),
+                None => residual.push(predicate),
+            }
+        }
+
+        let project_input = self.push_predicates(project_input, pushed)?;
+        self.output[project.index()] =
+            LogicalPlanNode::Project { input: project_input, expressions, output: output.clone() };
+        if residual.is_empty() {
+            Ok(project)
+        } else {
+            Ok(self.push(LogicalPlanNode::Filter {
+                input: project,
+                predicate: combine_conjuncts(residual)
+                    .unwrap_or(BoundExpr::Literal(Value::Boolean(true))),
+                output,
+            }))
         }
     }
 
@@ -182,6 +224,31 @@ impl PredicatePushdown {
     }
 }
 
+fn rewrite_through_project(
+    expression: BoundExpr,
+    output: &PlanSchema,
+    projections: &[BoundExpr],
+) -> Option<BoundExpr> {
+    match expression {
+        BoundExpr::Literal(_) => Some(expression),
+        BoundExpr::Column(column) => {
+            let BoundExpr::Column(source) = projections.get(output.slot_for(&column)?)? else {
+                return None;
+            };
+            Some(BoundExpr::Column(source.clone()))
+        }
+        BoundExpr::Unary { op, expr } => Some(BoundExpr::Unary {
+            op,
+            expr: Box::new(rewrite_through_project(*expr, output, projections)?),
+        }),
+        BoundExpr::Binary { left, op, right } => Some(BoundExpr::Binary {
+            left: Box::new(rewrite_through_project(*left, output, projections)?),
+            op,
+            right: Box::new(rewrite_through_project(*right, output, projections)?),
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PredicateInput {
     Left,
@@ -203,5 +270,104 @@ fn predicate_input(predicate: &BoundExpr, left: &PlanSchema, right: &PlanSchema)
         PredicateInput::Right
     } else {
         PredicateInput::Join
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        core::{DataType, Value},
+        planner::{BoundColumn, PlanColumn, RelationId},
+        sql_parser::parser::op::Op,
+    };
+
+    use super::*;
+
+    fn column(name: &str, ordinal: usize) -> BoundColumn {
+        BoundColumn {
+            relation: RelationId::new(0),
+            table: "items".into(),
+            name: name.into(),
+            ordinal,
+            data_type: DataType::Integer,
+        }
+    }
+
+    fn schema(columns: &[BoundColumn]) -> PlanSchema {
+        PlanSchema {
+            columns: columns
+                .iter()
+                .map(|column| PlanColumn {
+                    name: column.name.clone(),
+                    data_type: Some(column.data_type),
+                    source: Some(column.clone()),
+                })
+                .collect(),
+        }
+    }
+
+    fn equals(column: BoundColumn, value: i32) -> BoundExpr {
+        BoundExpr::Binary {
+            left: Box::new(BoundExpr::Column(column)),
+            op: Op::EqualsEquals,
+            right: Box::new(BoundExpr::Literal(Value::Integer(value))),
+        }
+    }
+
+    #[test]
+    fn pushes_filters_below_sorts() {
+        let id = column("id", 0);
+        let schema = schema(std::slice::from_ref(&id));
+        let predicate = equals(id, 7);
+        let mut plan = LogicalPlan::new(LogicalPlanNode::OneRow { output: schema.clone() });
+        let input = plan.root_id();
+        let sort =
+            plan.push(LogicalPlanNode::Sort { input, terms: Vec::new(), output: schema.clone() });
+        plan.push(LogicalPlanNode::Filter {
+            input: sort,
+            predicate: predicate.clone(),
+            output: schema.clone(),
+        });
+
+        let optimized = optimize(plan).unwrap();
+        let LogicalPlanNode::Sort { input, .. } = optimized.root() else {
+            panic!("expected sort root");
+        };
+
+        assert_eq!(
+            optimized.node(*input),
+            &LogicalPlanNode::Filter { input: NodeId::new(0), predicate, output: schema }
+        );
+    }
+
+    #[test]
+    fn pushes_filters_through_direct_column_projections() {
+        let id = column("id", 0);
+        let unused = column("unused", 1);
+        let input_schema = schema(&[id.clone(), unused]);
+        let output_schema = schema(std::slice::from_ref(&id));
+        let predicate = equals(id.clone(), 7);
+        let mut plan = LogicalPlan::new(LogicalPlanNode::OneRow { output: input_schema.clone() });
+        let input = plan.root_id();
+        let project = plan.push(LogicalPlanNode::Project {
+            input,
+            expressions: vec![BoundExpr::Column(id)],
+            output: output_schema.clone(),
+        });
+        plan.push(LogicalPlanNode::Filter {
+            input: project,
+            predicate: predicate.clone(),
+            output: output_schema.clone(),
+        });
+
+        let optimized = optimize(plan).unwrap();
+        let LogicalPlanNode::Project { input, .. } = optimized.root() else {
+            panic!("expected project root");
+        };
+
+        assert_eq!(
+            optimized.node(*input),
+            &LogicalPlanNode::Filter { input: NodeId::new(0), predicate, output: input_schema }
+        );
     }
 }

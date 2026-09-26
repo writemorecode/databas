@@ -13,7 +13,9 @@
 //! The resulting plan carries [`TableSchema`](crate::core::TableSchema) and
 //! [`BoundColumn`] values
 //! so later stages can work with ordinals and storage types instead of repeating
-//! name lookup.
+//! name lookup. Logical optimization folds constant scalar expressions,
+//! eliminates empty and redundant operators, pushes predicates toward source
+//! scans, and propagates literal constraints through inner-join equalities.
 //!
 //! Physical planning is intentionally small and predictable. Most relational
 //! operators are translated directly, while table access can be narrowed from a

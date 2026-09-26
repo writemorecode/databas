@@ -14,6 +14,10 @@ pub(super) fn optimize(logical: LogicalPlan) -> PlannerResult<LogicalPlan> {
     let logical = expression_simplification::optimize(logical);
     let logical = empty_simplification::optimize(logical)?;
     let logical = operator_simplification::optimize(logical)?;
+
+    // The first pushdown gives equality inference visibility into predicates
+    // originating above joins. The second places newly inferred predicates on
+    // their individual join inputs.
     let logical = predicate_pushdown::optimize(logical)?;
     let logical = equality_inference::optimize(logical)?;
     predicate_pushdown::optimize(logical)
