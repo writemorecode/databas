@@ -5,7 +5,10 @@ use crate::{
     sql_parser::parser::stmt::Statement,
 };
 
-use super::{PhysicalPlan, Plan, PlannerResult, binder::Binder, physical::PhysicalPlanner};
+use super::{
+    LogicalPlan, PhysicalPlan, Plan, PlannerResult, binder::Binder, optimizer,
+    physical::PhysicalPlanner,
+};
 
 /// Planner bound to a database catalog.
 ///
@@ -24,6 +27,11 @@ impl<'catalog> Planner<'catalog> {
     /// Creates a planner over an arbitrary catalog implementation.
     pub(crate) fn with_schema(catalog: &'catalog dyn CatalogRead) -> Self {
         Self { catalog }
+    }
+
+    /// Builds only the catalog-bound logical plan for one parsed statement.
+    pub fn plan_logical_statement(&self, statement: &Statement<'_>) -> PlannerResult<LogicalPlan> {
+        Binder::new(self.catalog).bind(statement).and_then(optimizer::optimize)
     }
 
     /// Builds both the bound logical plan and executable physical plan.
