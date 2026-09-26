@@ -1,10 +1,12 @@
 //! Predicate pushdown for inner joins.
 
-use crate::{core::Value, sql_parser::parser::op::Op};
+use crate::core::Value;
 
-use super::super::{
-    BoundColumn, BoundExpr, LogicalPlan, LogicalPlanNode, NodeId, PlanSchema, PlannerError,
-    PlannerResult,
+use super::{
+    super::{
+        BoundExpr, LogicalPlan, LogicalPlanNode, NodeId, PlanSchema, PlannerError, PlannerResult,
+    },
+    expression::{combine_conjuncts, conjuncts, referenced_columns},
 };
 
 /// Pushes predicates as close as possible to the inputs of inner joins.
@@ -188,8 +190,7 @@ enum PredicateInput {
 }
 
 fn predicate_input(predicate: &BoundExpr, left: &PlanSchema, right: &PlanSchema) -> PredicateInput {
-    let mut columns = Vec::new();
-    referenced_columns(predicate, &mut columns);
+    let columns = referenced_columns(predicate);
 
     // Keep constants at the join. Choosing either side would be arbitrary and
     // would make a constant-false predicate depend on that input's cardinality.
@@ -203,43 +204,4 @@ fn predicate_input(predicate: &BoundExpr, left: &PlanSchema, right: &PlanSchema)
     } else {
         PredicateInput::Join
     }
-}
-
-fn referenced_columns<'expression>(
-    expression: &'expression BoundExpr,
-    columns: &mut Vec<&'expression BoundColumn>,
-) {
-    match expression {
-        BoundExpr::Literal(_) => {}
-        BoundExpr::Column(column) => columns.push(column),
-        BoundExpr::Unary { expr, .. } => referenced_columns(expr, columns),
-        BoundExpr::Binary { left, right, .. } => {
-            referenced_columns(left, columns);
-            referenced_columns(right, columns);
-        }
-    }
-}
-
-fn conjuncts(expression: BoundExpr) -> Vec<BoundExpr> {
-    let mut conjuncts = Vec::new();
-    flatten_conjuncts(expression, &mut conjuncts);
-    conjuncts
-}
-
-fn flatten_conjuncts(expression: BoundExpr, conjuncts: &mut Vec<BoundExpr>) {
-    match expression {
-        BoundExpr::Binary { left, op: Op::And, right } => {
-            flatten_conjuncts(*left, conjuncts);
-            flatten_conjuncts(*right, conjuncts);
-        }
-        expression => conjuncts.push(expression),
-    }
-}
-
-fn combine_conjuncts(conjuncts: Vec<BoundExpr>) -> Option<BoundExpr> {
-    conjuncts.into_iter().reduce(|left, right| BoundExpr::Binary {
-        left: Box::new(left),
-        op: Op::And,
-        right: Box::new(right),
-    })
 }
