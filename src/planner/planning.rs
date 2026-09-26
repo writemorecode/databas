@@ -36,7 +36,7 @@ impl<'catalog> Planner<'catalog> {
 
     /// Builds both the bound logical plan and executable physical plan.
     pub fn plan_statement(&self, statement: &Statement<'_>) -> PlannerResult<Plan> {
-        let logical = Binder::new(self.catalog).bind(statement)?;
+        let logical = self.plan_logical_statement(statement)?;
         let physical = PhysicalPlanner::new(self.catalog).plan(logical.clone())?;
         Ok(Plan { logical, physical })
     }
@@ -46,7 +46,7 @@ impl<'catalog> Planner<'catalog> {
         &self,
         statement: &Statement<'_>,
     ) -> PlannerResult<PhysicalPlan> {
-        let logical = Binder::new(self.catalog).bind(statement)?;
+        let logical = self.plan_logical_statement(statement)?;
         PhysicalPlanner::new(self.catalog).plan(logical)
     }
 }

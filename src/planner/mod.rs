@@ -229,7 +229,7 @@ mod tests {
     fn select_star_expands_bound_table_columns() {
         assert_eq!(
             physical(&MemoryCatalog::default(), "SELECT * FROM users;"),
-            "Project expressions=[users.id, users.name, users.age]\n`- FullTableScan table=users"
+            "FullTableScan table=users"
         );
     }
 
@@ -287,29 +287,8 @@ mod tests {
             })
         );
 
-        let mut expected =
+        let expected =
             PhysicalPlan::new(PhysicalPlanNode::FullTableScan { relation, table: users_table() });
-        let scan = expected.root_id();
-        expected.push(PhysicalPlanNode::Project {
-            input: scan,
-            expressions: vec![
-                ExecExpr::Column(ExecColumn {
-                    slot: 0,
-                    name: "u.id".into(),
-                    data_type: DataType::Integer,
-                }),
-                ExecExpr::Column(ExecColumn {
-                    slot: 1,
-                    name: "u.name".into(),
-                    data_type: DataType::Text,
-                }),
-                ExecExpr::Column(ExecColumn {
-                    slot: 2,
-                    name: "u.age".into(),
-                    data_type: DataType::Integer,
-                }),
-            ],
-        });
 
         assert_eq!(
             plan(&MemoryCatalog::default(), "SELECT * FROM users AS u;").physical,
@@ -404,7 +383,7 @@ mod tests {
     fn select_without_from_uses_one_synthetic_row() {
         assert_eq!(
             physical(&MemoryCatalog::default(), "SELECT 1 + 2;"),
-            "Project expressions=[(1 + 2)]\n`- OneRow"
+            "Project expressions=[3]\n`- OneRow"
         );
     }
 
