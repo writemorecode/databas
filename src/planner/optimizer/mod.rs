@@ -2,6 +2,7 @@
 
 mod empty_simplification;
 mod expression_simplification;
+mod operator_simplification;
 mod predicate_pushdown;
 
 use super::{LogicalPlan, PlannerResult};
@@ -10,5 +11,6 @@ use super::{LogicalPlan, PlannerResult};
 pub(super) fn optimize(logical: LogicalPlan) -> PlannerResult<LogicalPlan> {
     let logical = expression_simplification::optimize(logical);
     let logical = empty_simplification::optimize(logical)?;
+    let logical = operator_simplification::optimize(logical)?;
     predicate_pushdown::optimize(logical)
 }
