@@ -98,6 +98,7 @@ impl<'catalog> PhysicalPlanner<'catalog> {
                 input: self.build_physical_plan(logical_nodes, input, false, physical_nodes)?,
             },
             LogicalPlanNode::OneRow { .. } => PhysicalPlanNode::OneRow,
+            LogicalPlanNode::Empty { .. } => PhysicalPlanNode::Empty,
             LogicalPlanNode::TableScan { relation, table, .. } => {
                 PhysicalPlanNode::FullTableScan { relation, table }
             }
