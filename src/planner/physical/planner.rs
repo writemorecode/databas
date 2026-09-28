@@ -108,6 +108,12 @@ impl<'catalog> PhysicalPlanner<'catalog> {
                     LogicalPlanNode::TableScan { relation, table, .. } => {
                         match primary_key_range_predicate(&table, relation, &predicate) {
                             Some(range_predicate) => {
+                                if range_predicate.range.is_empty() {
+                                    return Ok(push_physical_node(
+                                        physical_nodes,
+                                        PhysicalPlanNode::Empty,
+                                    ));
+                                }
                                 let scan = push_physical_node(
                                     physical_nodes,
                                     PhysicalPlanNode::PrimaryKeyRangeScan {
@@ -183,13 +189,17 @@ impl<'catalog> PhysicalPlanner<'catalog> {
             }
             LogicalPlanNode::Project { input, expressions, .. } => {
                 let input_schema = logical_output_schema(logical_nodes, input)?;
+                let input = self.build_physical_plan(
+                    logical_nodes,
+                    input,
+                    allow_secondary_index_scans,
+                    physical_nodes,
+                )?;
+                if matches!(physical_nodes.get(input.index()), Some(PhysicalPlanNode::Empty)) {
+                    return Ok(input);
+                }
                 PhysicalPlanNode::Project {
-                    input: self.build_physical_plan(
-                        logical_nodes,
-                        input,
-                        allow_secondary_index_scans,
-                        physical_nodes,
-                    )?,
+                    input,
                     expressions: expressions
                         .into_iter()
                         .map(|expression| lower_expression(expression, &input_schema))

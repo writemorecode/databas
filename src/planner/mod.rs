@@ -419,6 +419,33 @@ mod tests {
     }
 
     #[test]
+    fn contradictory_primary_key_bounds_produce_empty_scans() {
+        let catalog = MemoryCatalog::default();
+        for predicate in [
+            "id == 2 AND id == 3",
+            "id > 3 AND id < 3",
+            "id >= 3 AND id < 3",
+            "id > 3 AND id <= 3",
+            "id > 9 AND id < 2",
+        ] {
+            let select = plan(&catalog, &format!("SELECT name FROM users WHERE {predicate};"));
+            assert_eq!(select.physical.root(), &PhysicalPlanNode::Empty, "{predicate}");
+
+            let update = plan(&catalog, &format!("UPDATE users SET age = 1 WHERE {predicate};"));
+            let PhysicalPlanNode::Update { input, .. } = update.physical.root() else {
+                panic!("expected Update for {predicate}");
+            };
+            assert_eq!(update.physical.node(*input), &PhysicalPlanNode::Empty, "{predicate}");
+
+            let delete = plan(&catalog, &format!("DELETE FROM users WHERE {predicate};"));
+            let PhysicalPlanNode::Delete { input, .. } = delete.physical.root() else {
+                panic!("expected Delete for {predicate}");
+            };
+            assert_eq!(delete.physical.node(*input), &PhysicalPlanNode::Empty, "{predicate}");
+        }
+    }
+
+    #[test]
     fn mutations_never_scan_a_secondary_index() {
         let catalog = MemoryCatalog::with_indexes(&[("users_age", 2)]);
 
