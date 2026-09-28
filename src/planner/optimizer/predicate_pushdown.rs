@@ -20,23 +20,30 @@ pub(super) fn optimize(logical: LogicalPlan) -> PlannerResult<LogicalPlan> {
     PredicatePushdown::new(logical).optimize()
 }
 
+/// Rebuilds a plan while moving predicates closer to their data sources.
 struct PredicatePushdown {
+    /// Original plan nodes being traversed.
     input: Vec<LogicalPlanNode>,
+    /// Root node of the original plan.
     input_root: NodeId,
+    /// Rebuilt plan nodes.
     output: Vec<LogicalPlanNode>,
 }
 
 impl PredicatePushdown {
+    /// Creates a pushdown pass from an owned logical plan.
     fn new(logical: LogicalPlan) -> Self {
         let (input, input_root) = logical.into_parts();
         Self { input, input_root, output: Vec::new() }
     }
 
+    /// Rebuilds the plan while pushing predicates toward scans and join inputs.
     fn optimize(mut self) -> PlannerResult<LogicalPlan> {
         let root = self.rebuild(self.input_root)?;
         Ok(LogicalPlan::from_parts(self.output, root))
     }
 
+    /// Recursively rebuilds a node and distributes predicates where possible.
     fn rebuild(&mut self, id: NodeId) -> PlannerResult<NodeId> {
         let node = self.input.get(id.index()).cloned().ok_or(PlannerError::InvalidLogicalPlan)?;
         let rebuilt = match node {
@@ -97,6 +104,7 @@ impl PredicatePushdown {
         Ok(rebuilt)
     }
 
+    /// Pushes conjuncts through supported operators or adds a filter at this node.
     fn push_predicates(
         &mut self,
         input: NodeId,
@@ -155,6 +163,7 @@ impl PredicatePushdown {
         }
     }
 
+    /// Rewrites pushable predicates through a projection and retains residuals above it.
     fn push_through_project(
         &mut self,
         project: NodeId,
@@ -187,6 +196,7 @@ impl PredicatePushdown {
         }
     }
 
+    /// Assigns predicates to the left input, right input, or join condition.
     fn partition_join_predicates(
         &self,
         left: NodeId,
@@ -210,6 +220,7 @@ impl PredicatePushdown {
         Ok((left_predicates, right_predicates, join_predicates))
     }
 
+    /// Gets the output schema for a rebuilt node.
     fn output_schema(&self, id: NodeId) -> PlannerResult<&PlanSchema> {
         self.output
             .get(id.index())
@@ -217,6 +228,7 @@ impl PredicatePushdown {
             .ok_or(PlannerError::InvalidLogicalPlan)
     }
 
+    /// Appends a rebuilt node and returns its arena identifier.
     fn push(&mut self, node: LogicalPlanNode) -> NodeId {
         let id = NodeId::new(self.output.len());
         self.output.push(node);
@@ -224,6 +236,7 @@ impl PredicatePushdown {
     }
 }
 
+/// Rewrites references to projected columns as references to their source expressions.
 fn rewrite_through_project(
     expression: BoundExpr,
     output: &PlanSchema,
@@ -249,13 +262,18 @@ fn rewrite_through_project(
     }
 }
 
+/// Destination selected for a predicate around a join.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PredicateInput {
+    /// Predicate references only columns from the left input.
     Left,
+    /// Predicate references only columns from the right input.
     Right,
+    /// Predicate references both inputs or is a constant.
     Join,
 }
 
+/// Determines which join inputs are required to evaluate a predicate.
 fn predicate_input(predicate: &BoundExpr, left: &PlanSchema, right: &PlanSchema) -> PredicateInput {
     let columns = referenced_columns(predicate);
 

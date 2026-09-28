@@ -6,27 +6,35 @@ use super::super::{
     BoundExpr, LogicalPlan, LogicalPlanNode, NodeId, PlanSchema, PlannerError, PlannerResult,
 };
 
+/// Replaces relational subplans known to produce no rows with `Empty` nodes.
 pub(super) fn optimize(logical: LogicalPlan) -> PlannerResult<LogicalPlan> {
     EmptySimplification::new(logical).optimize()
 }
 
+/// Rebuilds a logical plan while eliminating branches with no possible rows.
 struct EmptySimplification {
+    /// Original plan nodes being traversed.
     input: Vec<LogicalPlanNode>,
+    /// Root node of the original plan.
     input_root: NodeId,
+    /// Rebuilt plan nodes.
     output: Vec<LogicalPlanNode>,
 }
 
 impl EmptySimplification {
+    /// Creates a simplifier from an owned logical plan.
     fn new(logical: LogicalPlan) -> Self {
         let (input, input_root) = logical.into_parts();
         Self { input, input_root, output: Vec::new() }
     }
 
+    /// Rebuilds the plan from its root and returns the simplified plan.
     fn optimize(mut self) -> PlannerResult<LogicalPlan> {
         let root = self.rebuild(self.input_root)?;
         Ok(LogicalPlan::from_parts(self.output, root))
     }
 
+    /// Recursively rebuilds a node, replacing any empty-producing subtree.
     fn rebuild(&mut self, id: NodeId) -> PlannerResult<NodeId> {
         let node = self.input.get(id.index()).cloned().ok_or(PlannerError::InvalidLogicalPlan)?;
         let rebuilt = match node {
@@ -127,6 +135,7 @@ impl EmptySimplification {
         Ok(rebuilt)
     }
 
+    /// Reports whether a rebuilt node is the empty-row source.
     fn is_empty(&self, id: NodeId) -> PlannerResult<bool> {
         self.output
             .get(id.index())
@@ -134,10 +143,12 @@ impl EmptySimplification {
             .ok_or(PlannerError::InvalidLogicalPlan)
     }
 
+    /// Appends an empty node with the requested output schema.
     fn empty(&mut self, output: PlanSchema) -> NodeId {
         self.push(LogicalPlanNode::Empty { output })
     }
 
+    /// Appends a rebuilt node and returns its arena identifier.
     fn push(&mut self, node: LogicalPlanNode) -> NodeId {
         let id = NodeId::new(self.output.len());
         self.output.push(node);

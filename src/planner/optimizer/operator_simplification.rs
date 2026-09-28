@@ -6,27 +6,35 @@ use super::super::{
     BoundExpr, LogicalPlan, LogicalPlanNode, NodeId, PlanSchema, PlannerError, PlannerResult,
 };
 
+/// Removes redundant projections and combines adjacent compatible operators.
 pub(super) fn optimize(logical: LogicalPlan) -> PlannerResult<LogicalPlan> {
     OperatorSimplification::new(logical).optimize()
 }
 
+/// Rebuilds a plan while simplifying adjacent operators.
 struct OperatorSimplification {
+    /// Original plan nodes being traversed.
     input: Vec<LogicalPlanNode>,
+    /// Root node of the original plan.
     input_root: NodeId,
+    /// Simplified nodes built so far.
     output: Vec<LogicalPlanNode>,
 }
 
 impl OperatorSimplification {
+    /// Creates a simplifier from an owned logical plan.
     fn new(logical: LogicalPlan) -> Self {
         let (input, input_root) = logical.into_parts();
         Self { input, input_root, output: Vec::new() }
     }
 
+    /// Rebuilds the plan from its root and returns the simplified plan.
     fn optimize(mut self) -> PlannerResult<LogicalPlan> {
         let root = self.rebuild(self.input_root)?;
         Ok(LogicalPlan::from_parts(self.output, root))
     }
 
+    /// Recursively rebuilds and simplifies a node and its inputs.
     fn rebuild(&mut self, id: NodeId) -> PlannerResult<NodeId> {
         let node = self.input.get(id.index()).cloned().ok_or(PlannerError::InvalidLogicalPlan)?;
         let rebuilt = match node {
@@ -82,6 +90,7 @@ impl OperatorSimplification {
         Ok(rebuilt)
     }
 
+    /// Merges a filter with an adjacent filter when possible.
     fn combine_filter(
         &mut self,
         input: NodeId,
@@ -107,6 +116,7 @@ impl OperatorSimplification {
         }
     }
 
+    /// Removes identity projections and combines adjacent projections.
     fn simplify_project(
         &mut self,
         input: NodeId,
@@ -137,6 +147,7 @@ impl OperatorSimplification {
         Ok(self.push(LogicalPlanNode::Project { input, expressions, output }))
     }
 
+    /// Combines adjacent offsets when their sum is representable.
     fn combine_offset(
         &mut self,
         input: NodeId,
@@ -156,6 +167,7 @@ impl OperatorSimplification {
         }
     }
 
+    /// Combines adjacent limits by retaining the smaller limit.
     fn combine_limit(
         &mut self,
         input: NodeId,
@@ -175,10 +187,12 @@ impl OperatorSimplification {
         }
     }
 
+    /// Looks up a rebuilt node, returning an error for an invalid identifier.
     fn node(&self, id: NodeId) -> PlannerResult<&LogicalPlanNode> {
         self.output.get(id.index()).ok_or(PlannerError::InvalidLogicalPlan)
     }
 
+    /// Appends a rebuilt node and returns its arena identifier.
     fn push(&mut self, node: LogicalPlanNode) -> NodeId {
         let id = NodeId::new(self.output.len());
         self.output.push(node);
@@ -186,6 +200,7 @@ impl OperatorSimplification {
     }
 }
 
+/// Reports whether a projection returns every input column unchanged and in order.
 fn is_identity_projection(
     expressions: &[BoundExpr],
     input: &PlanSchema,
@@ -201,6 +216,7 @@ fn is_identity_projection(
         })
 }
 
+/// Rewrites expressions to reference the inputs of a preceding projection.
 fn substitute_projection(
     expressions: &[BoundExpr],
     input_schema: &PlanSchema,
@@ -213,6 +229,7 @@ fn substitute_projection(
         .collect()
 }
 
+/// Rewrites one expression through the column mapping of a projection.
 fn substitute_expression(
     expression: BoundExpr,
     input_schema: &PlanSchema,
