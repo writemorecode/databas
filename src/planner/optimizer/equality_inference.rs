@@ -45,6 +45,7 @@ pub(super) fn optimize(logical: LogicalPlan) -> PlannerResult<LogicalPlan> {
     Ok(LogicalPlan::from_parts(nodes, root))
 }
 
+/// Collects filter and join conjuncts reachable below a plan node.
 fn collect_predicates(
     nodes: &[LogicalPlanNode],
     id: NodeId,
@@ -66,6 +67,7 @@ fn collect_predicates(
     Ok(())
 }
 
+/// Derives missing column-to-literal equalities from equality-connected columns.
 fn infer_equalities(predicates: &[BoundExpr]) -> Vec<BoundExpr> {
     let mut classes = EquivalenceClasses::default();
     for predicate in predicates {
@@ -103,6 +105,7 @@ fn infer_equalities(predicates: &[BoundExpr]) -> Vec<BoundExpr> {
     inferred
 }
 
+/// Extracts same-type column equality operands from a predicate.
 fn column_equality(predicate: &BoundExpr) -> Option<(&BoundColumn, &BoundColumn)> {
     let BoundExpr::Binary { left, op: Op::EqualsEquals, right } = predicate else {
         return None;
@@ -113,6 +116,7 @@ fn column_equality(predicate: &BoundExpr) -> Option<(&BoundColumn, &BoundColumn)
     (left.data_type == right.data_type).then_some((left, right))
 }
 
+/// Extracts a column and literal compared for equality, in either operand order.
 fn column_literal_equality(predicate: &BoundExpr) -> Option<(&BoundColumn, &Value)> {
     let BoundExpr::Binary { left, op: Op::EqualsEquals, right } = predicate else {
         return None;
@@ -124,6 +128,7 @@ fn column_literal_equality(predicate: &BoundExpr) -> Option<(&BoundColumn, &Valu
     }
 }
 
+/// Checks whether a predicate already constrains a column to the given value.
 fn has_constraint(predicates: &[BoundExpr], column: &BoundColumn, value: &Value) -> bool {
     predicates.iter().any(|predicate| {
         column_literal_equality(predicate).is_some_and(|(candidate, candidate_value)| {
@@ -132,6 +137,7 @@ fn has_constraint(predicates: &[BoundExpr], column: &BoundColumn, value: &Value)
     })
 }
 
+/// Reports whether a literal's type is compatible with a bound column.
 fn value_matches_column(value: &Value, column: &BoundColumn) -> bool {
     match value {
         Value::Integer(_) => column.data_type == DataType::Integer,
@@ -145,13 +151,17 @@ fn value_matches_column(value: &Value, column: &BoundColumn) -> bool {
     }
 }
 
+/// Disjoint sets of columns connected by equality predicates.
 #[derive(Default)]
 struct EquivalenceClasses {
+    /// Columns represented by this disjoint-set forest.
     columns: Vec<BoundColumn>,
+    /// Parent index for each column; roots point to themselves.
     parents: Vec<usize>,
 }
 
 impl EquivalenceClasses {
+    /// Adds a column if absent and returns its set index.
     fn add(&mut self, column: &BoundColumn) -> usize {
         if let Some(index) = self.columns.iter().position(|candidate| candidate == column) {
             return index;
@@ -162,6 +172,7 @@ impl EquivalenceClasses {
         index
     }
 
+    /// Merges the sets containing two columns.
     fn union(&mut self, left: &BoundColumn, right: &BoundColumn) {
         let left = self.add(left);
         let right = self.add(right);
@@ -172,6 +183,7 @@ impl EquivalenceClasses {
         }
     }
 
+    /// Iterates over columns in the same equality class as `column`.
     fn equivalent_columns(&self, column: &BoundColumn) -> impl Iterator<Item = &BoundColumn> {
         let index = self.columns.iter().position(|candidate| candidate == column);
         let root = index.map(|index| self.root(index));
@@ -180,6 +192,7 @@ impl EquivalenceClasses {
         })
     }
 
+    /// Finds the representative index for a set member.
     fn root(&self, mut index: usize) -> usize {
         while self.parents[index] != index {
             index = self.parents[index];

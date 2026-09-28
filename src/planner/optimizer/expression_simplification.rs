@@ -14,6 +14,7 @@ pub(super) fn optimize(logical: LogicalPlan) -> LogicalPlan {
     LogicalPlan::from_parts(nodes, root)
 }
 
+/// Simplifies scalar expressions carried by a single logical operator.
 fn simplify_node(node: LogicalPlanNode) -> LogicalPlanNode {
     match node {
         LogicalPlanNode::Values { rows, output } => LogicalPlanNode::Values {
@@ -58,6 +59,7 @@ fn simplify_node(node: LogicalPlanNode) -> LogicalPlanNode {
     }
 }
 
+/// Recursively simplifies an expression tree.
 fn simplify_expression(expression: BoundExpr) -> BoundExpr {
     match expression {
         BoundExpr::Literal(_) | BoundExpr::Column(_) => expression,
@@ -73,6 +75,7 @@ fn simplify_expression(expression: BoundExpr) -> BoundExpr {
     }
 }
 
+/// Folds a unary operation or applies safe boolean/comparison rewrites.
 fn simplify_unary(op: Op, expression: BoundExpr) -> BoundExpr {
     if let BoundExpr::Literal(value) = &expression
         && let Some(value) = evaluate_unary(op, value)
@@ -95,6 +98,7 @@ fn simplify_unary(op: Op, expression: BoundExpr) -> BoundExpr {
     BoundExpr::Unary { op, expr: Box::new(expression) }
 }
 
+/// Folds literal binary operations and applies boolean identity rewrites.
 fn simplify_binary(left: BoundExpr, op: Op, right: BoundExpr) -> BoundExpr {
     if let (BoundExpr::Literal(left_value), BoundExpr::Literal(right_value)) = (&left, &right)
         && let Some(value) = evaluate_binary(left_value, op, right_value)
@@ -127,6 +131,7 @@ fn simplify_binary(left: BoundExpr, op: Op, right: BoundExpr) -> BoundExpr {
     BoundExpr::Binary { left: Box::new(left), op, right: Box::new(right) }
 }
 
+/// Returns the comparison equivalent to negating a supported predicate.
 fn invert_comparison(expression: &BoundExpr) -> Option<BoundExpr> {
     let BoundExpr::Binary { left, op, right } = expression else {
         return None;
@@ -163,6 +168,7 @@ fn invert_comparison(expression: &BoundExpr) -> Option<BoundExpr> {
     Some(BoundExpr::Binary { left: left.clone(), op, right: right.clone() })
 }
 
+/// Evaluates a supported unary operator on a literal value.
 fn evaluate_unary(op: Op, value: &Value) -> Option<Value> {
     match (op, value) {
         (Op::Not, Value::Boolean(value)) => Some(Value::Boolean(!value)),
@@ -172,6 +178,7 @@ fn evaluate_unary(op: Op, value: &Value) -> Option<Value> {
     }
 }
 
+/// Evaluates a supported binary operator on two literal values.
 fn evaluate_binary(left: &Value, op: Op, right: &Value) -> Option<Value> {
     match op {
         Op::And | Op::Or => evaluate_boolean(left, op, right),
@@ -184,6 +191,7 @@ fn evaluate_binary(left: &Value, op: Op, right: &Value) -> Option<Value> {
     }
 }
 
+/// Evaluates boolean conjunction or disjunction when both operands are boolean.
 fn evaluate_boolean(left: &Value, op: Op, right: &Value) -> Option<Value> {
     let (Value::Boolean(left), Value::Boolean(right)) = (left, right) else {
         return None;
@@ -195,6 +203,7 @@ fn evaluate_boolean(left: &Value, op: Op, right: &Value) -> Option<Value> {
     }))
 }
 
+/// Evaluates supported same-type integer or floating-point arithmetic.
 fn evaluate_arithmetic(left: &Value, op: Op, right: &Value) -> Option<Value> {
     match (left, op, right) {
         (Value::Integer(left), Op::Add, Value::Integer(right)) => {
@@ -219,6 +228,7 @@ fn evaluate_arithmetic(left: &Value, op: Op, right: &Value) -> Option<Value> {
     }
 }
 
+/// Evaluates equality or inequality for compatible literal types.
 fn evaluate_equality(left: &Value, op: Op, right: &Value) -> Option<Value> {
     let equal = match (left, right) {
         (Value::Null, Value::Null) => true,
@@ -232,6 +242,7 @@ fn evaluate_equality(left: &Value, op: Op, right: &Value) -> Option<Value> {
     Some(Value::Boolean(if op == Op::EqualsEquals { equal } else { !equal }))
 }
 
+/// Evaluates an ordering comparison for compatible literal types.
 fn evaluate_ordering(left: &Value, op: Op, right: &Value) -> Option<Value> {
     macro_rules! compare {
         ($left:expr, $right:expr) => {
