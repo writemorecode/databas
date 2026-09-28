@@ -121,6 +121,19 @@ pub struct TableKeyRange {
 }
 
 impl TableKeyRange {
+    /// Returns whether the bounds cannot contain any primary key.
+    pub fn is_empty(self) -> bool {
+        match (self.lower, self.upper) {
+            (Some(lower), Some(upper)) => {
+                lower.value() > upper.value()
+                    || (lower.value() == upper.value()
+                        && (matches!(lower, TableKeyBound::Exclusive(_))
+                            || matches!(upper, TableKeyBound::Exclusive(_))))
+            }
+            _ => false,
+        }
+    }
+
     /// Returns a range with no lower or upper bound.
     pub fn unbounded() -> Self {
         Self::default()
