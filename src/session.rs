@@ -21,7 +21,10 @@ use crate::{
     error::DatabaseError,
     executor::{ExecutionOutput, Executor},
     planner::{PhysicalPlan, PhysicalPlanNode, Planner},
-    sql_parser::parser::{Command, Parser, SqlItem, stmt::Statement},
+    sql_parser::{
+        error::{SQLError, SQLErrorKind},
+        parser::{Command, Parser, SqlItem, stmt::Statement},
+    },
 };
 
 /// Errors raised by session-level transaction control.
@@ -69,13 +72,30 @@ impl<'db> Session<'db> {
         self.active_txn
     }
 
-    /// Parses and executes one top-level SQL item.
+    /// Parses and executes all SQL items in order, returning the final result.
+    /// Earlier row results are drained so their errors are not silently lost.
     pub fn execute_sql<'sql>(
         &mut self,
         sql: &'sql str,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        let item = Parser::new(sql).item()?;
-        self.execute_item(item)
+        // Parse the whole request before executing any item, so malformed trailing
+        // SQL cannot leave a partially executed transaction behind.
+        let items = Parser::new(sql).collect::<Result<Vec<_>, _>>()?;
+        let mut items = items.into_iter();
+        let Some(first) = items.next() else {
+            return Err(SQLError::new(SQLErrorKind::UnexpectedEnd, sql.len()).into());
+        };
+
+        let mut output = self.execute_item(first)?;
+        for item in items {
+            if let ExecutionOutput::Rows { rows, .. } = output {
+                for row in rows {
+                    row?;
+                }
+            }
+            output = self.execute_item(item)?;
+        }
+        Ok(output)
     }
 
     /// Executes one parsed SQL item.

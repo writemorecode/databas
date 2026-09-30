@@ -55,10 +55,8 @@ impl<'a> Iterator for Parser<'a> {
     type Item = Result<SqlItem<'a>, SQLError<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.item() {
-            Err(SQLError { kind: SQLErrorKind::UnexpectedEnd, .. }) => None,
-            other => Some(other),
-        }
+        self.lexer.peek()?;
+        Some(self.item())
     }
 }
 

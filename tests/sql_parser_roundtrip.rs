@@ -1,6 +1,9 @@
 #![allow(clippy::panic, reason = "panics in tests provide clear assertion failures")]
 
-use databas::sql_parser::parser::{Parser, SqlItem, stmt::Statement};
+use databas::sql_parser::{
+    error::SQLErrorKind,
+    parser::{Command, Parser, SqlItem, stmt::Statement},
+};
 use proptest::prelude::*;
 
 const IDENTIFIERS: &[&str] =
@@ -245,6 +248,22 @@ fn assert_items_round_trip(sql: &str) {
     let reparsed = parse_items(&displayed);
 
     assert_eq!(parsed, reparsed, "SQL did not round-trip: {sql}\ndisplayed as: {displayed}");
+}
+
+#[test]
+fn parser_iterator_reports_incomplete_final_item() {
+    let mut parser = Parser::new("BEGIN; COMMIT");
+    assert_eq!(parser.next().unwrap().unwrap(), SqlItem::Command(Command::Begin));
+    assert_eq!(parser.next().unwrap().unwrap_err().kind, SQLErrorKind::UnexpectedEnd);
+    assert!(parser.next().is_none());
+}
+
+#[test]
+fn parser_iterator_ignores_only_trailing_whitespace_and_comments() {
+    let items = Parser::new("BEGIN; -- a comment\n /* another comment */")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(items, vec![SqlItem::Command(Command::Begin)]);
 }
 
 proptest! {
