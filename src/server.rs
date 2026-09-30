@@ -655,14 +655,16 @@ mod tests {
     fn client_and_server_execute_queries_over_tcp() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("network.db");
+        let server_path = path.clone();
         let (address_sender, address_receiver) = mpsc::sync_channel(1);
 
         let server_thread = thread::spawn(move || {
-            let database = Database::create(path).unwrap();
+            let database = Database::create(server_path).unwrap();
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             address_sender.send(listener.local_addr().unwrap()).unwrap();
             let server = Server::new(listener, database, "main").unwrap();
             server.serve_one().unwrap();
+            server.database.flush().unwrap();
         });
 
         let address = address_receiver.recv().unwrap();
@@ -698,6 +700,33 @@ mod tests {
             }
         );
         client.execute("COMMIT;").unwrap();
+        assert!(matches!(
+            client.execute("BEGIN; INSERT INTO items (id, name) VALUES (2, 'two'); COMMIT"),
+            Err(ClientError::Server(crate::client::ServerError {
+                code: ErrorCode::SyntaxError,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            client.execute("COMMIT;"),
+            Err(ClientError::Server(crate::client::ServerError {
+                code: ErrorCode::TransactionError,
+                ..
+            }))
+        ));
+        assert_eq!(
+            client
+                .execute("BEGIN; INSERT INTO items (id, name) VALUES (2, 'two'); COMMIT;")
+                .unwrap(),
+            QueryResult::CommandOk
+        );
+        assert_eq!(
+            client.execute("SELECT name FROM items WHERE id == 2;").unwrap(),
+            QueryResult::Rows {
+                columns: vec!["name".to_owned()],
+                rows: vec![vec![Value::String("two".to_owned())]],
+            }
+        );
         let error = client.execute("SELECT FROM;").unwrap_err();
         assert!(matches!(
             error,
@@ -706,6 +735,15 @@ mod tests {
 
         drop(client);
         server_thread.join().unwrap();
+
+        let reopened = Database::open(&path).unwrap();
+        let ExecutionOutput::Rows { rows, .. } =
+            Session::new(&reopened).execute_sql("SELECT name FROM items WHERE id == 2;").unwrap()
+        else {
+            panic!("expected rows from SELECT");
+        };
+        let values = rows.into_iter().map(|row| row.unwrap().values().to_vec()).collect::<Vec<_>>();
+        assert_eq!(values, vec![vec![Value::String("two".to_owned())]]);
     }
 
     #[test]

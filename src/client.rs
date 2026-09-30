@@ -117,10 +117,11 @@ impl Client {
         }
     }
 
-    /// Executes one SQL item and collects its complete result.
+    /// Executes one or more SQL items and collects the final item's result.
     ///
-    /// Row frames are streamed by the server but collected into memory by this
-    /// convenience API. Calls are strictly sequential on this connection.
+    /// Earlier results in a multi-item request are discarded. Row frames for
+    /// the final item are streamed by the server but collected into memory by
+    /// this convenience API. Calls are strictly sequential on this connection.
     ///
     /// # Errors
     ///
