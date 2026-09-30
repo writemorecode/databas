@@ -25,7 +25,7 @@ use crate::{
     protocol::{
         self, COMPLETE, COMPLETE_COMMAND_OK, COMPLETE_EXPLAIN, COMPLETE_ROWS,
         COMPLETE_ROWS_AFFECTED, COMPLETE_SCHEMA_AFFECTED, ERROR, ErrorCode, QUERY, READY, ROW,
-        ROW_DESCRIPTION, STARTUP,
+        ROW_DESCRIPTION, STARTUP, TRANSACTION_STATUS, TRANSACTION_STATUS_REQUEST,
     },
     session::Session,
     thread_pool::{ThreadPool, ThreadPoolError},
@@ -346,6 +346,22 @@ fn handle_queries(
                 return Ok(());
             }
         };
+        if frame.kind == TRANSACTION_STATUS_REQUEST {
+            if !frame.payload.is_empty() {
+                send_error(
+                    stream,
+                    ErrorCode::InvalidRequest,
+                    "transaction status payload must be empty",
+                )?;
+            } else {
+                protocol::write_frame(
+                    stream,
+                    TRANSACTION_STATUS,
+                    &[u8::from(session.has_active_transaction())],
+                )?;
+            }
+            continue;
+        }
         if frame.kind != QUERY {
             send_error(stream, ErrorCode::InvalidRequest, "expected a QUERY message")?;
             continue;

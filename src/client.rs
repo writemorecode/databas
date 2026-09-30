@@ -15,7 +15,7 @@ use crate::{
     protocol::{
         self, COMPLETE, COMPLETE_COMMAND_OK, COMPLETE_EXPLAIN, COMPLETE_ROWS,
         COMPLETE_ROWS_AFFECTED, COMPLETE_SCHEMA_AFFECTED, ERROR, ErrorCode, Frame, QUERY, READY,
-        ROW, ROW_DESCRIPTION, STARTUP,
+        ROW, ROW_DESCRIPTION, STARTUP, TRANSACTION_STATUS, TRANSACTION_STATUS_REQUEST,
     },
 };
 
@@ -114,6 +114,29 @@ impl Client {
             READY => Err(ClientError::UnexpectedMessage("READY payload must be empty")),
             ERROR => Err(decode_server_error(&frame.payload)?.into()),
             _ => Err(ClientError::UnexpectedMessage("expected READY or ERROR during startup")),
+        }
+    }
+
+    /// Returns whether this connection has an explicit transaction open.
+    ///
+    /// The server reports its session state, including changes from multi-item
+    /// requests and requests that failed after executing some items.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection fails or the response is malformed.
+    pub fn has_active_transaction(&mut self) -> Result<bool, ClientError> {
+        protocol::write_frame(&mut self.stream, TRANSACTION_STATUS_REQUEST, &[])?;
+        let frame =
+            read_required_frame(&mut self.stream, "server closed during transaction status")?;
+        match (frame.kind, frame.payload.as_slice()) {
+            (TRANSACTION_STATUS, [0]) => Ok(false),
+            (TRANSACTION_STATUS, [1]) => Ok(true),
+            (TRANSACTION_STATUS, _) => {
+                Err(ClientError::UnexpectedMessage("invalid transaction status payload"))
+            }
+            (ERROR, payload) => Err(decode_server_error(payload)?.into()),
+            _ => Err(ClientError::UnexpectedMessage("expected transaction status or ERROR")),
         }
     }
 

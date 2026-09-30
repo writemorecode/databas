@@ -67,6 +67,11 @@ impl<'db> Session<'db> {
         Ok(())
     }
 
+    /// Whether this session has an explicit transaction open.
+    pub(crate) fn has_active_transaction(&self) -> bool {
+        self.active_txn.is_some()
+    }
+
     #[cfg(test)]
     pub(crate) fn active_transaction_id_for_test(&self) -> Option<u64> {
         self.active_txn

@@ -19,9 +19,13 @@ const HEADER_LEN: usize = 12;
 pub(crate) const STARTUP: u8 = 0x01;
 pub(crate) const READY: u8 = 0x02;
 pub(crate) const QUERY: u8 = 0x03;
+// Requests the current connection's explicit transaction state (empty payload).
+pub(crate) const TRANSACTION_STATUS_REQUEST: u8 = 0x04;
 pub(crate) const ROW: u8 = 0x10;
 pub(crate) const COMPLETE: u8 = 0x11;
 pub(crate) const ROW_DESCRIPTION: u8 = 0x12;
+// One-byte payload: 0 = idle, 1 = in an explicit transaction.
+pub(crate) const TRANSACTION_STATUS: u8 = 0x13;
 pub(crate) const ERROR: u8 = 0x7f;
 
 pub(crate) const COMPLETE_ROWS: u8 = 0x00;
