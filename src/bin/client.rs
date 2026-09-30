@@ -71,7 +71,8 @@ fn run_repl(client: &mut Client) -> Result<(), Box<dyn Error>> {
     }
 
     loop {
-        let line = match editor.readline(">>> ") {
+        let prompt = if client.has_active_transaction()? { "(txn) >>> " } else { ">>> " };
+        let line = match editor.readline(prompt) {
             Ok(line) => line,
             Err(ReadlineError::Interrupted) => continue,
             Err(ReadlineError::Eof) => break,
