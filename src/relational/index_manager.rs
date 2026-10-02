@@ -1,6 +1,5 @@
 use crate::core::{
-    IndexSchema, OwnedTableRecord, TableKey, TableRecord, TableSchema, Tuple, TupleView, TxnId,
-    Value,
+    IndexSchema, OwnedTableRecord, TableKey, TableRecord, TableSchema, TupleRef, TupleView, TxnId,
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
 };
 use crate::relational::{catalog_manager::CatalogManager, cursor::encode_index_entry_key};
@@ -141,13 +140,10 @@ fn index_key_from_record_bytes(
                 ),
             )
         })?;
-        let value = value.map_err(|error| {
-            invalid_table_record(table, table_key, format!("invalid tuple value: {error}"))
-        })?;
-        values.push(Value::from(value));
+        values.push(value);
     }
 
-    Tuple::new(values).to_bytes().map_err(StorageError::from)
+    TupleRef::new(&values).to_bytes().map_err(StorageError::from)
 }
 
 fn invalid_table_record(table: &TableSchema, table_key: TableKey, reason: String) -> StorageError {
@@ -163,7 +159,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::{ColumnSchema, DataType, TupleSchema, Value};
+    use crate::core::{ColumnSchema, DataType, Tuple, TupleSchema, Value};
     use crate::relational::{catalog_manager::CatalogManager, record_manager::RecordManager};
     use crate::storage::engine::Storage;
 
