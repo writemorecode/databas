@@ -91,10 +91,4 @@ pub enum TupleAllocationError {
         #[source]
         source: TryReserveError,
     },
-    #[error("failed to allocate {byte_count} tuple string bytes: {source}")]
-    StringBytes {
-        byte_count: usize,
-        #[source]
-        source: TryReserveError,
-    },
 }

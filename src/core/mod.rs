@@ -20,7 +20,7 @@ pub use crate::relational::catalog::{
 pub use crate::relational::cursor::{
     IndexEntry, IndexEntryView, OwnedIndexEntry, OwnedTableRecord, TableRecord, TableRecordView,
 };
-pub use crate::relational::tuple::{EncodedTupleView, Tuple, TupleRef, TupleView, Value, ValueRef};
+pub use crate::relational::tuple::{Tuple, TupleRef, TupleView, Value, ValueRef};
 pub use database::Database;
 pub use error::{
     ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InternalError,
