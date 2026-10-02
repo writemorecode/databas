@@ -161,147 +161,261 @@ mod tests {
         Planner::with_schema(catalog).plan_statement(&parse(sql)).unwrap()
     }
 
-    fn physical(catalog: &MemoryCatalog, sql: &str) -> String {
-        plan(catalog, sql).physical.to_string()
+    fn physical_plan(
+        nodes: Vec<PhysicalPlanNode>,
+        output_schema: Option<PlanSchema>,
+    ) -> PhysicalPlan {
+        let root = NodeId::new(nodes.len() - 1);
+        PhysicalPlan::from_parts(nodes, root, output_schema)
+    }
+
+    fn assert_physical_plan(catalog: &MemoryCatalog, sql: &str, expected: PhysicalPlan) {
+        assert_eq!(plan(catalog, sql).physical, expected, "{sql}");
+    }
+
+    fn bound_column(relation: RelationId, table: &str, ordinal: usize) -> BoundColumn {
+        let column = &users_table().row.columns[ordinal];
+        BoundColumn {
+            relation,
+            table: table.into(),
+            name: column.name.clone(),
+            ordinal,
+            data_type: column.data_type,
+        }
+    }
+
+    fn exec_column(slot: usize, name: &str, data_type: DataType) -> ExecColumn {
+        ExecColumn { slot, name: name.into(), data_type }
+    }
+
+    fn users_output(relation: RelationId, table: &str, ordinals: &[usize]) -> PlanSchema {
+        let columns = PlanSchema::for_qualified_table(relation, &users_table(), table).columns;
+        PlanSchema { columns: ordinals.iter().map(|&ordinal| columns[ordinal].clone()).collect() }
+    }
+
+    fn secondary_index_scan(
+        catalog: &MemoryCatalog,
+        index: usize,
+        relation: RelationId,
+        column: usize,
+        lower: Option<(Value, bool)>,
+        upper: Option<(Value, bool)>,
+    ) -> PhysicalPlanNode {
+        let key_bound = |value: &Value, inclusive, table_key| {
+            let value = Tuple::new(vec![value.clone()]).to_bytes().unwrap();
+            let bound = encode_index_entry_key(&value, table_key);
+            if inclusive {
+                IndexKeyBound::Inclusive(bound)
+            } else {
+                IndexKeyBound::Exclusive(bound)
+            }
+        };
+        let lower_key = lower.as_ref().map(|(value, inclusive)| {
+            key_bound(value, *inclusive, if *inclusive { i32::MIN } else { i32::MAX })
+        });
+        let upper_key = upper.as_ref().map(|(value, inclusive)| {
+            key_bound(value, *inclusive, if *inclusive { i32::MAX } else { i32::MIN })
+        });
+        let value_bound = |(value, inclusive): (Value, bool)| {
+            if inclusive {
+                IndexValueBound::Inclusive(value)
+            } else {
+                IndexValueBound::Exclusive(value)
+            }
+        };
+        PhysicalPlanNode::SecondaryIndexScan {
+            scan: SecondaryIndexScanPlan {
+                relation,
+                table: users_table(),
+                index: catalog.indexes[index].clone(),
+                column: bound_column(relation, "users", column),
+                value_range: IndexValueRange {
+                    lower: lower.map(value_bound),
+                    upper: upper.map(value_bound),
+                },
+                key_range: IndexKeyRange { lower: lower_key, upper: upper_key },
+            },
+        }
     }
 
     #[test]
     fn create_table_preserves_the_declared_schema() {
-        let plan = plan(
-            &MemoryCatalog::default(),
-            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT NULLABLE);",
-        );
-
         assert_eq!(
-            plan.logical.root(),
-            &LogicalPlanNode::CreateTable {
-                name: "users".into(),
-                schema: users_table().row.clone()
+            plan(
+                &MemoryCatalog::default(),
+                "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT NULLABLE);",
+            ),
+            Plan {
+                logical: LogicalPlan::from_parts(
+                    vec![LogicalPlanNode::CreateTable {
+                        name: "users".into(),
+                        schema: users_table().row.clone(),
+                    }],
+                    NodeId::new(0),
+                ),
+                physical: physical_plan(
+                    vec![PhysicalPlanNode::CreateTable {
+                        name: "users".into(),
+                        schema: users_table().row,
+                    }],
+                    None,
+                ),
             }
-        );
-        assert_eq!(
-            plan.physical.root(),
-            &PhysicalPlanNode::CreateTable { name: "users".into(), schema: users_table().row }
         );
     }
 
     #[test]
     fn create_index_binds_source_columns() {
-        let plan =
-            plan(&MemoryCatalog::default(), "CREATE INDEX users_name_age ON users (name, age);");
-        let PhysicalPlanNode::CreateIndex { name, table, columns } = plan.physical.root() else {
-            panic!("expected CreateIndex, got {:?}", plan.physical.root());
-        };
-
-        assert_eq!(name, "users_name_age");
-        assert_eq!(table.name, "users");
-        assert_eq!(
-            columns.iter().map(|column| (&*column.name, column.ordinal)).collect::<Vec<_>>(),
-            vec![("name", 1), ("age", 2)]
+        let relation = RelationId::new(0);
+        assert_physical_plan(
+            &MemoryCatalog::default(),
+            "CREATE INDEX users_name_age ON users (name, age);",
+            physical_plan(
+                vec![PhysicalPlanNode::CreateIndex {
+                    name: "users_name_age".into(),
+                    table: users_table(),
+                    columns: vec![
+                        bound_column(relation, "users", 1),
+                        bound_column(relation, "users", 2),
+                    ],
+                }],
+                None,
+            ),
         );
     }
 
     #[test]
     fn insert_binds_columns_and_literal_rows() {
-        let plan = plan(
+        let relation = RelationId::new(0);
+        assert_physical_plan(
             &MemoryCatalog::default(),
             "INSERT INTO users (name, id) VALUES ('Ada', 1), ('Grace', 2);",
-        );
-        let PhysicalPlanNode::InsertValues { table, columns, values } = plan.physical.root() else {
-            panic!("expected InsertValues, got {:?}", plan.physical.root());
-        };
-
-        assert_eq!(table.name, "users");
-        assert_eq!(columns.iter().map(|column| &*column.name).collect::<Vec<_>>(), ["name", "id"]);
-        assert_eq!(
-            values,
-            &[
-                vec![
-                    ExecExpr::Literal(Value::String("Ada".into())),
-                    ExecExpr::Literal(Value::Integer(1)),
-                ],
-                vec![
-                    ExecExpr::Literal(Value::String("Grace".into())),
-                    ExecExpr::Literal(Value::Integer(2)),
-                ],
-            ]
+            physical_plan(
+                vec![PhysicalPlanNode::InsertValues {
+                    table: users_table(),
+                    columns: vec![
+                        bound_column(relation, "users", 1),
+                        bound_column(relation, "users", 0),
+                    ],
+                    values: vec![
+                        vec![
+                            ExecExpr::Literal(Value::String("Ada".into())),
+                            ExecExpr::Literal(Value::Integer(1)),
+                        ],
+                        vec![
+                            ExecExpr::Literal(Value::String("Grace".into())),
+                            ExecExpr::Literal(Value::Integer(2)),
+                        ],
+                    ],
+                }],
+                None,
+            ),
         );
     }
 
     #[test]
     fn select_star_expands_bound_table_columns() {
         let relation = RelationId::new(0);
-        let expected =
-            PhysicalPlan::new(PhysicalPlanNode::FullTableScan { relation, table: users_table() })
-                .with_output_schema(PlanSchema::for_table(relation, &users_table()));
+        let expected = physical_plan(
+            vec![PhysicalPlanNode::FullTableScan { relation, table: users_table() }],
+            Some(PlanSchema::for_table(relation, &users_table())),
+        );
 
-        assert_eq!(plan(&MemoryCatalog::default(), "SELECT * FROM users;").physical, expected);
+        assert_physical_plan(&MemoryCatalog::default(), "SELECT * FROM users;", expected);
     }
 
     #[test]
     fn select_binds_qualified_columns_and_expressions() {
-        assert_eq!(
-            physical(
-                &MemoryCatalog::default(),
-                "SELECT users.name, age + 1 FROM users WHERE users.id == 7;",
+        let relation = RelationId::new(0);
+        assert_physical_plan(
+            &MemoryCatalog::default(),
+            "SELECT users.name, age + 1 FROM users WHERE users.id == 7;",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::PrimaryKeyRangeScan {
+                        relation,
+                        table: users_table(),
+                        range: TableKeyRange {
+                            lower: Some(TableKeyBound::Inclusive(7)),
+                            upper: Some(TableKeyBound::Inclusive(7)),
+                        },
+                    },
+                    PhysicalPlanNode::Project {
+                        input: NodeId::new(0),
+                        expressions: vec![
+                            ExecExpr::Column(exec_column(1, "users.name", DataType::Text)),
+                            ExecExpr::Binary {
+                                left: Box::new(ExecExpr::Column(exec_column(
+                                    2,
+                                    "users.age",
+                                    DataType::Integer,
+                                ))),
+                                op: Op::Add,
+                                right: Box::new(ExecExpr::Literal(Value::Integer(1))),
+                            },
+                        ],
+                    },
+                ],
+                Some(PlanSchema::for_expressions(&[
+                    BoundExpr::Column(bound_column(relation, "users", 1)),
+                    BoundExpr::Binary {
+                        left: Box::new(BoundExpr::Column(bound_column(relation, "users", 2))),
+                        op: Op::Add,
+                        right: Box::new(BoundExpr::Literal(Value::Integer(1))),
+                    },
+                ])),
             ),
-            "Project expressions=[users.name, (users.age + 1)]\n\
-             `- PrimaryKeyRangeScan table=users range=[lower=7 inclusive upper=7 inclusive]"
         );
     }
 
     #[test]
     fn select_table_aliases_bind_qualified_columns_in_every_clause() {
         let relation = RelationId::new(0);
-        let mut expected = PhysicalPlan::new(PhysicalPlanNode::PrimaryKeyRangeScan {
-            relation,
-            table: users_table(),
-            range: TableKeyRange {
-                lower: Some(TableKeyBound::Inclusive(7)),
-                upper: Some(TableKeyBound::Inclusive(7)),
-            },
-        });
-        let scan = expected.root_id();
-        let sort = expected.push(PhysicalPlanNode::Sort {
-            input: scan,
-            terms: vec![SortTerm {
-                column: ExecColumn { slot: 2, name: "u.age".into(), data_type: DataType::Integer },
-                direction: Some(Ordering::Descending),
-            }],
-        });
-        expected.push(PhysicalPlanNode::Project {
-            input: sort,
-            expressions: vec![ExecExpr::Column(ExecColumn {
-                slot: 1,
-                name: "u.name".into(),
-                data_type: DataType::Text,
-            })],
-        });
-
-        assert_eq!(
-            plan(
-                &MemoryCatalog::default(),
-                "SELECT u.name FROM users AS u WHERE u.id == 7 ORDER BY u.age DESC;",
-            )
-            .physical,
-            expected.with_output_schema(PlanSchema {
-                columns: vec![
-                    PlanSchema::for_qualified_table(relation, &users_table(), "u").columns[1]
-                        .clone(),
+        assert_physical_plan(
+            &MemoryCatalog::default(),
+            "SELECT u.name FROM users AS u WHERE u.id == 7 ORDER BY u.age DESC;",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::PrimaryKeyRangeScan {
+                        relation,
+                        table: users_table(),
+                        range: TableKeyRange {
+                            lower: Some(TableKeyBound::Inclusive(7)),
+                            upper: Some(TableKeyBound::Inclusive(7)),
+                        },
+                    },
+                    PhysicalPlanNode::Sort {
+                        input: NodeId::new(0),
+                        terms: vec![SortTerm {
+                            column: exec_column(2, "u.age", DataType::Integer),
+                            direction: Some(Ordering::Descending),
+                        }],
+                    },
+                    PhysicalPlanNode::Project {
+                        input: NodeId::new(1),
+                        expressions: vec![ExecExpr::Column(exec_column(
+                            1,
+                            "u.name",
+                            DataType::Text,
+                        ))],
+                    },
                 ],
-            })
+                Some(PlanSchema {
+                    columns: vec![
+                        PlanSchema::for_qualified_table(relation, &users_table(), "u").columns[1]
+                            .clone(),
+                    ],
+                }),
+            ),
         );
 
-        let expected =
-            PhysicalPlan::new(PhysicalPlanNode::FullTableScan { relation, table: users_table() });
-
-        assert_eq!(
-            plan(&MemoryCatalog::default(), "SELECT * FROM users AS u;").physical,
-            expected.with_output_schema(PlanSchema::for_qualified_table(
-                relation,
-                &users_table(),
-                "u",
-            ))
+        assert_physical_plan(
+            &MemoryCatalog::default(),
+            "SELECT * FROM users AS u;",
+            physical_plan(
+                vec![PhysicalPlanNode::FullTableScan { relation, table: users_table() }],
+                Some(PlanSchema::for_qualified_table(relation, &users_table(), "u")),
+            ),
         );
     }
 
@@ -329,58 +443,61 @@ mod tests {
             ordinal: 1,
             data_type: DataType::Text,
         };
-        let mut expected = PhysicalPlan::new(PhysicalPlanNode::SecondaryIndexScan {
-            scan: SecondaryIndexScanPlan {
-                relation,
-                table: users_table(),
-                index: catalog.indexes[0].clone(),
-                column: indexed_column,
-                value_range: IndexValueRange {
-                    lower: Some(IndexValueBound::Inclusive(indexed_value.clone())),
-                    upper: Some(IndexValueBound::Inclusive(indexed_value.clone())),
-                },
-                key_range: IndexKeyRange {
-                    lower: Some(IndexKeyBound::Inclusive(encode_index_entry_key(
-                        &encoded_value,
-                        i32::MIN,
-                    ))),
-                    upper: Some(IndexKeyBound::Inclusive(encode_index_entry_key(
-                        &encoded_value,
-                        i32::MAX,
-                    ))),
-                },
-            },
-        });
-        let scan = expected.root_id();
-        let filter = expected.push(PhysicalPlanNode::Filter {
-            input: scan,
-            predicate: ExecExpr::Binary {
-                left: Box::new(ExecExpr::Column(ExecColumn {
-                    slot: 1,
-                    name: "u.name".into(),
-                    data_type: DataType::Text,
-                })),
-                op: crate::sql_parser::parser::op::Op::EqualsEquals,
-                right: Box::new(ExecExpr::Literal(indexed_value)),
-            },
-        });
-        expected.push(PhysicalPlanNode::Project {
-            input: filter,
-            expressions: vec![ExecExpr::Column(ExecColumn {
-                slot: 0,
-                name: "u.id".into(),
-                data_type: DataType::Integer,
-            })],
-        });
-
-        assert_eq!(
-            plan(&catalog, "SELECT u.id FROM users AS u WHERE u.name == 'Ada';").physical,
-            expected.with_output_schema(PlanSchema {
-                columns: vec![
-                    PlanSchema::for_qualified_table(relation, &users_table(), "u").columns[0]
-                        .clone(),
+        assert_physical_plan(
+            &catalog,
+            "SELECT u.id FROM users AS u WHERE u.name == 'Ada';",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::SecondaryIndexScan {
+                        scan: SecondaryIndexScanPlan {
+                            relation,
+                            table: users_table(),
+                            index: catalog.indexes[0].clone(),
+                            column: indexed_column,
+                            value_range: IndexValueRange {
+                                lower: Some(IndexValueBound::Inclusive(indexed_value.clone())),
+                                upper: Some(IndexValueBound::Inclusive(indexed_value.clone())),
+                            },
+                            key_range: IndexKeyRange {
+                                lower: Some(IndexKeyBound::Inclusive(encode_index_entry_key(
+                                    &encoded_value,
+                                    i32::MIN,
+                                ))),
+                                upper: Some(IndexKeyBound::Inclusive(encode_index_entry_key(
+                                    &encoded_value,
+                                    i32::MAX,
+                                ))),
+                            },
+                        },
+                    },
+                    PhysicalPlanNode::Filter {
+                        input: NodeId::new(0),
+                        predicate: ExecExpr::Binary {
+                            left: Box::new(ExecExpr::Column(exec_column(
+                                1,
+                                "u.name",
+                                DataType::Text,
+                            ))),
+                            op: Op::EqualsEquals,
+                            right: Box::new(ExecExpr::Literal(indexed_value)),
+                        },
+                    },
+                    PhysicalPlanNode::Project {
+                        input: NodeId::new(1),
+                        expressions: vec![ExecExpr::Column(exec_column(
+                            0,
+                            "u.id",
+                            DataType::Integer,
+                        ))],
+                    },
                 ],
-            })
+                Some(PlanSchema {
+                    columns: vec![
+                        PlanSchema::for_qualified_table(relation, &users_table(), "u").columns[0]
+                            .clone(),
+                    ],
+                }),
+            ),
         );
     }
 
@@ -392,35 +509,84 @@ mod tests {
             op: Op::Add,
             right: Box::new(BoundExpr::Literal(Value::Integer(2))),
         }]);
-        let mut expected = PhysicalPlan::new(PhysicalPlanNode::OneRow);
-        let input = expected.root_id();
-        expected.push(PhysicalPlanNode::Project { input, expressions: vec![expression] });
-
-        assert_eq!(
-            plan(&MemoryCatalog::default(), "SELECT 1 + 2;").physical,
-            expected.with_output_schema(output)
+        let expected = physical_plan(
+            vec![
+                PhysicalPlanNode::OneRow,
+                PhysicalPlanNode::Project { input: NodeId::new(0), expressions: vec![expression] },
+            ],
+            Some(output),
         );
+
+        assert_physical_plan(&MemoryCatalog::default(), "SELECT 1 + 2;", expected);
     }
 
     #[test]
     fn update_and_delete_choose_primary_key_scans() {
         let catalog = MemoryCatalog::default();
+        let relation = RelationId::new(0);
 
-        assert_eq!(
-            physical(&catalog, "UPDATE users SET age = age + 1 WHERE id == 7;"),
-            "Update table=users assignments=[users.age = (users.age + 1)]\n\
-             `- PrimaryKeyRangeScan table=users range=[lower=7 inclusive upper=7 inclusive]"
+        assert_physical_plan(
+            &catalog,
+            "UPDATE users SET age = age + 1 WHERE id == 7;",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::PrimaryKeyRangeScan {
+                        relation,
+                        table: users_table(),
+                        range: TableKeyRange {
+                            lower: Some(TableKeyBound::Inclusive(7)),
+                            upper: Some(TableKeyBound::Inclusive(7)),
+                        },
+                    },
+                    PhysicalPlanNode::Update {
+                        relation,
+                        table: users_table(),
+                        assignments: vec![UpdateAssignment {
+                            column: bound_column(relation, "users", 2),
+                            expression: ExecExpr::Binary {
+                                left: Box::new(ExecExpr::Column(exec_column(
+                                    2,
+                                    "users.age",
+                                    DataType::Integer,
+                                ))),
+                                op: Op::Add,
+                                right: Box::new(ExecExpr::Literal(Value::Integer(1))),
+                            },
+                        }],
+                        input: NodeId::new(0),
+                    },
+                ],
+                None,
+            ),
         );
-        assert_eq!(
-            physical(&catalog, "DELETE FROM users WHERE 2 <= id AND id < 5;"),
-            "Delete table=users\n\
-             `- PrimaryKeyRangeScan table=users range=[lower=2 inclusive upper=5 exclusive]"
+        assert_physical_plan(
+            &catalog,
+            "DELETE FROM users WHERE 2 <= id AND id < 5;",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::PrimaryKeyRangeScan {
+                        relation,
+                        table: users_table(),
+                        range: TableKeyRange {
+                            lower: Some(TableKeyBound::Inclusive(2)),
+                            upper: Some(TableKeyBound::Exclusive(5)),
+                        },
+                    },
+                    PhysicalPlanNode::Delete {
+                        relation,
+                        table: users_table(),
+                        input: NodeId::new(0),
+                    },
+                ],
+                None,
+            ),
         );
     }
 
     #[test]
     fn contradictory_primary_key_bounds_produce_empty_scans() {
         let catalog = MemoryCatalog::default();
+        let relation = RelationId::new(0);
         for predicate in [
             "id == 2 AND id == 3",
             "id > 3 AND id < 3",
@@ -428,82 +594,288 @@ mod tests {
             "id > 3 AND id <= 3",
             "id > 9 AND id < 2",
         ] {
-            let select = plan(&catalog, &format!("SELECT name FROM users WHERE {predicate};"));
-            assert_eq!(select.physical.root(), &PhysicalPlanNode::Empty, "{predicate}");
-
-            let update = plan(&catalog, &format!("UPDATE users SET age = 1 WHERE {predicate};"));
-            let PhysicalPlanNode::Update { input, .. } = update.physical.root() else {
-                panic!("expected Update for {predicate}");
-            };
-            assert_eq!(update.physical.node(*input), &PhysicalPlanNode::Empty, "{predicate}");
-
-            let delete = plan(&catalog, &format!("DELETE FROM users WHERE {predicate};"));
-            let PhysicalPlanNode::Delete { input, .. } = delete.physical.root() else {
-                panic!("expected Delete for {predicate}");
-            };
-            assert_eq!(delete.physical.node(*input), &PhysicalPlanNode::Empty, "{predicate}");
+            assert_physical_plan(
+                &catalog,
+                &format!("SELECT name FROM users WHERE {predicate};"),
+                physical_plan(
+                    vec![PhysicalPlanNode::Empty],
+                    Some(users_output(relation, "users", &[1])),
+                ),
+            );
+            assert_physical_plan(
+                &catalog,
+                &format!("UPDATE users SET age = 1 WHERE {predicate};"),
+                physical_plan(
+                    vec![
+                        PhysicalPlanNode::Empty,
+                        PhysicalPlanNode::Update {
+                            relation,
+                            table: users_table(),
+                            assignments: vec![UpdateAssignment {
+                                column: bound_column(relation, "users", 2),
+                                expression: ExecExpr::Literal(Value::Integer(1)),
+                            }],
+                            input: NodeId::new(0),
+                        },
+                    ],
+                    None,
+                ),
+            );
+            assert_physical_plan(
+                &catalog,
+                &format!("DELETE FROM users WHERE {predicate};"),
+                physical_plan(
+                    vec![
+                        PhysicalPlanNode::Empty,
+                        PhysicalPlanNode::Delete {
+                            relation,
+                            table: users_table(),
+                            input: NodeId::new(0),
+                        },
+                    ],
+                    None,
+                ),
+            );
         }
     }
 
     #[test]
     fn mutations_never_scan_a_secondary_index() {
         let catalog = MemoryCatalog::with_indexes(&[("users_age", 2)]);
+        let relation = RelationId::new(0);
+        let age_is_seven = ExecExpr::Binary {
+            left: Box::new(ExecExpr::Column(exec_column(2, "users.age", DataType::Integer))),
+            op: Op::EqualsEquals,
+            right: Box::new(ExecExpr::Literal(Value::Integer(7))),
+        };
 
-        for sql in
-            ["UPDATE users SET name = 'Ada' WHERE age == 7;", "DELETE FROM users WHERE age == 7;"]
-        {
-            let plan = physical(&catalog, sql);
-            assert!(plan.contains("FullTableScan table=users"), "{plan}");
-            assert!(!plan.contains("SecondaryIndexScan"), "{plan}");
-        }
+        assert_physical_plan(
+            &catalog,
+            "UPDATE users SET name = 'Ada' WHERE age == 7;",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::FullTableScan { relation, table: users_table() },
+                    PhysicalPlanNode::Filter {
+                        input: NodeId::new(0),
+                        predicate: age_is_seven.clone(),
+                    },
+                    PhysicalPlanNode::Update {
+                        relation,
+                        table: users_table(),
+                        assignments: vec![UpdateAssignment {
+                            column: bound_column(relation, "users", 1),
+                            expression: ExecExpr::Literal(Value::String("Ada".into())),
+                        }],
+                        input: NodeId::new(1),
+                    },
+                ],
+                None,
+            ),
+        );
+        assert_physical_plan(
+            &catalog,
+            "DELETE FROM users WHERE age == 7;",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::FullTableScan { relation, table: users_table() },
+                    PhysicalPlanNode::Filter { input: NodeId::new(0), predicate: age_is_seven },
+                    PhysicalPlanNode::Delete {
+                        relation,
+                        table: users_table(),
+                        input: NodeId::new(1),
+                    },
+                ],
+                None,
+            ),
+        );
     }
 
     #[test]
     fn primary_key_predicates_produce_tight_ranges() {
         let catalog = MemoryCatalog::default();
+        let relation = RelationId::new(0);
 
         for (predicate, range) in [
-            ("id == 10", "lower=10 inclusive upper=10 inclusive"),
-            ("10 <= id AND id < 20", "lower=10 inclusive upper=20 exclusive"),
-            ("id > 3 AND id <= 8", "lower=3 exclusive upper=8 inclusive"),
+            (
+                "id == 10",
+                TableKeyRange {
+                    lower: Some(TableKeyBound::Inclusive(10)),
+                    upper: Some(TableKeyBound::Inclusive(10)),
+                },
+            ),
+            (
+                "10 <= id AND id < 20",
+                TableKeyRange {
+                    lower: Some(TableKeyBound::Inclusive(10)),
+                    upper: Some(TableKeyBound::Exclusive(20)),
+                },
+            ),
+            (
+                "id > 3 AND id <= 8",
+                TableKeyRange {
+                    lower: Some(TableKeyBound::Exclusive(3)),
+                    upper: Some(TableKeyBound::Inclusive(8)),
+                },
+            ),
         ] {
-            let plan = physical(&catalog, &format!("SELECT name FROM users WHERE {predicate};"));
-            assert!(
-                plan.contains(&format!("PrimaryKeyRangeScan table=users range=[{range}]")),
-                "{plan}"
+            assert_physical_plan(
+                &catalog,
+                &format!("SELECT name FROM users WHERE {predicate};"),
+                physical_plan(
+                    vec![
+                        PhysicalPlanNode::PrimaryKeyRangeScan {
+                            relation,
+                            table: users_table(),
+                            range,
+                        },
+                        PhysicalPlanNode::Project {
+                            input: NodeId::new(0),
+                            expressions: vec![ExecExpr::Column(exec_column(
+                                1,
+                                "users.name",
+                                DataType::Text,
+                            ))],
+                        },
+                    ],
+                    Some(users_output(relation, "users", &[1])),
+                ),
             );
-            assert!(!plan.contains("Filter"), "{plan}");
         }
     }
 
     #[test]
     fn unused_predicates_remain_as_residual_filters() {
-        assert_eq!(
-            physical(
-                &MemoryCatalog::default(),
-                "SELECT name FROM users WHERE id < 10 AND age == 7;",
+        let relation = RelationId::new(0);
+        assert_physical_plan(
+            &MemoryCatalog::default(),
+            "SELECT name FROM users WHERE id < 10 AND age == 7;",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::PrimaryKeyRangeScan {
+                        relation,
+                        table: users_table(),
+                        range: TableKeyRange {
+                            lower: None,
+                            upper: Some(TableKeyBound::Exclusive(10)),
+                        },
+                    },
+                    PhysicalPlanNode::Filter {
+                        input: NodeId::new(0),
+                        predicate: ExecExpr::Binary {
+                            left: Box::new(ExecExpr::Column(exec_column(
+                                2,
+                                "users.age",
+                                DataType::Integer,
+                            ))),
+                            op: Op::EqualsEquals,
+                            right: Box::new(ExecExpr::Literal(Value::Integer(7))),
+                        },
+                    },
+                    PhysicalPlanNode::Project {
+                        input: NodeId::new(1),
+                        expressions: vec![ExecExpr::Column(exec_column(
+                            1,
+                            "users.name",
+                            DataType::Text,
+                        ))],
+                    },
+                ],
+                Some(users_output(relation, "users", &[1])),
             ),
-            concat!(
-                "Project expressions=[users.name]\n",
-                "`- Filter predicate=(users.age == 7)\n",
-                "   `- PrimaryKeyRangeScan table=users range=[upper=10 exclusive]",
-            )
         );
     }
 
     #[test]
     fn compatible_secondary_index_predicates_use_index_scans() {
         let catalog = MemoryCatalog::with_indexes(&[("users_name", 1), ("users_age", 2)]);
+        let relation = RelationId::new(0);
 
-        let equality = physical(&catalog, "SELECT id FROM users WHERE name == 'Ada';");
-        assert!(
-            equality.contains("SecondaryIndexScan table=users index=users_name column=users.name")
+        assert_physical_plan(
+            &catalog,
+            "SELECT id FROM users WHERE name == 'Ada';",
+            physical_plan(
+                vec![
+                    secondary_index_scan(
+                        &catalog,
+                        0,
+                        relation,
+                        1,
+                        Some((Value::String("Ada".into()), true)),
+                        Some((Value::String("Ada".into()), true)),
+                    ),
+                    PhysicalPlanNode::Filter {
+                        input: NodeId::new(0),
+                        predicate: ExecExpr::Binary {
+                            left: Box::new(ExecExpr::Column(exec_column(
+                                1,
+                                "users.name",
+                                DataType::Text,
+                            ))),
+                            op: Op::EqualsEquals,
+                            right: Box::new(ExecExpr::Literal(Value::String("Ada".into()))),
+                        },
+                    },
+                    PhysicalPlanNode::Project {
+                        input: NodeId::new(1),
+                        expressions: vec![ExecExpr::Column(exec_column(
+                            0,
+                            "users.id",
+                            DataType::Integer,
+                        ))],
+                    },
+                ],
+                Some(users_output(relation, "users", &[0])),
+            ),
         );
-        assert!(equality.contains("range=[lower=Ada inclusive upper=Ada inclusive]"));
-
-        let range = physical(&catalog, "SELECT id FROM users WHERE 18 <= age AND age < 65;");
-        assert!(range.contains("SecondaryIndexScan table=users index=users_age column=users.age"));
-        assert!(range.contains("range=[lower=18 inclusive upper=65 exclusive]"));
+        assert_physical_plan(
+            &catalog,
+            "SELECT id FROM users WHERE 18 <= age AND age < 65;",
+            physical_plan(
+                vec![
+                    secondary_index_scan(
+                        &catalog,
+                        1,
+                        relation,
+                        2,
+                        Some((Value::Integer(18), true)),
+                        Some((Value::Integer(65), false)),
+                    ),
+                    PhysicalPlanNode::Filter {
+                        input: NodeId::new(0),
+                        predicate: ExecExpr::Binary {
+                            left: Box::new(ExecExpr::Binary {
+                                left: Box::new(ExecExpr::Literal(Value::Integer(18))),
+                                op: Op::LessThanOrEqual,
+                                right: Box::new(ExecExpr::Column(exec_column(
+                                    2,
+                                    "users.age",
+                                    DataType::Integer,
+                                ))),
+                            }),
+                            op: Op::And,
+                            right: Box::new(ExecExpr::Binary {
+                                left: Box::new(ExecExpr::Column(exec_column(
+                                    2,
+                                    "users.age",
+                                    DataType::Integer,
+                                ))),
+                                op: Op::LessThan,
+                                right: Box::new(ExecExpr::Literal(Value::Integer(65))),
+                            }),
+                        },
+                    },
+                    PhysicalPlanNode::Project {
+                        input: NodeId::new(1),
+                        expressions: vec![ExecExpr::Column(exec_column(
+                            0,
+                            "users.id",
+                            DataType::Integer,
+                        ))],
+                    },
+                ],
+                Some(users_output(relation, "users", &[0])),
+            ),
+        );
     }
 
     #[test]
@@ -514,57 +886,297 @@ mod tests {
             ("users_age", 2),
         ]);
 
-        let primary = physical(&catalog, "SELECT name FROM users WHERE id == 1 AND name == 'Ada';");
-        assert!(primary.contains("PrimaryKeyRangeScan"), "{primary}");
-
-        let leftmost =
-            physical(&catalog, "SELECT name FROM users WHERE age == 7 AND name == 'Ada';");
-        assert!(leftmost.contains("index=users_age"), "{leftmost}");
-
-        let creation_order = physical(&catalog, "SELECT name FROM users WHERE name == 'Ada';");
-        assert!(creation_order.contains("index=users_name_first"), "{creation_order}");
+        let relation = RelationId::new(0);
+        assert_physical_plan(
+            &catalog,
+            "SELECT name FROM users WHERE id == 1 AND name == 'Ada';",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::PrimaryKeyRangeScan {
+                        relation,
+                        table: users_table(),
+                        range: TableKeyRange {
+                            lower: Some(TableKeyBound::Inclusive(1)),
+                            upper: Some(TableKeyBound::Inclusive(1)),
+                        },
+                    },
+                    PhysicalPlanNode::Filter {
+                        input: NodeId::new(0),
+                        predicate: ExecExpr::Binary {
+                            left: Box::new(ExecExpr::Column(exec_column(
+                                1,
+                                "users.name",
+                                DataType::Text,
+                            ))),
+                            op: Op::EqualsEquals,
+                            right: Box::new(ExecExpr::Literal(Value::String("Ada".into()))),
+                        },
+                    },
+                    PhysicalPlanNode::Project {
+                        input: NodeId::new(1),
+                        expressions: vec![ExecExpr::Column(exec_column(
+                            1,
+                            "users.name",
+                            DataType::Text,
+                        ))],
+                    },
+                ],
+                Some(users_output(relation, "users", &[1])),
+            ),
+        );
+        assert_physical_plan(
+            &catalog,
+            "SELECT name FROM users WHERE age == 7 AND name == 'Ada';",
+            physical_plan(
+                vec![
+                    secondary_index_scan(
+                        &catalog,
+                        2,
+                        relation,
+                        2,
+                        Some((Value::Integer(7), true)),
+                        Some((Value::Integer(7), true)),
+                    ),
+                    PhysicalPlanNode::Filter {
+                        input: NodeId::new(0),
+                        predicate: ExecExpr::Binary {
+                            left: Box::new(ExecExpr::Binary {
+                                left: Box::new(ExecExpr::Column(exec_column(
+                                    2,
+                                    "users.age",
+                                    DataType::Integer,
+                                ))),
+                                op: Op::EqualsEquals,
+                                right: Box::new(ExecExpr::Literal(Value::Integer(7))),
+                            }),
+                            op: Op::And,
+                            right: Box::new(ExecExpr::Binary {
+                                left: Box::new(ExecExpr::Column(exec_column(
+                                    1,
+                                    "users.name",
+                                    DataType::Text,
+                                ))),
+                                op: Op::EqualsEquals,
+                                right: Box::new(ExecExpr::Literal(Value::String("Ada".into()))),
+                            }),
+                        },
+                    },
+                    PhysicalPlanNode::Project {
+                        input: NodeId::new(1),
+                        expressions: vec![ExecExpr::Column(exec_column(
+                            1,
+                            "users.name",
+                            DataType::Text,
+                        ))],
+                    },
+                ],
+                Some(users_output(relation, "users", &[1])),
+            ),
+        );
+        assert_physical_plan(
+            &catalog,
+            "SELECT name FROM users WHERE name == 'Ada';",
+            physical_plan(
+                vec![
+                    secondary_index_scan(
+                        &catalog,
+                        0,
+                        relation,
+                        1,
+                        Some((Value::String("Ada".into()), true)),
+                        Some((Value::String("Ada".into()), true)),
+                    ),
+                    PhysicalPlanNode::Filter {
+                        input: NodeId::new(0),
+                        predicate: ExecExpr::Binary {
+                            left: Box::new(ExecExpr::Column(exec_column(
+                                1,
+                                "users.name",
+                                DataType::Text,
+                            ))),
+                            op: Op::EqualsEquals,
+                            right: Box::new(ExecExpr::Literal(Value::String("Ada".into()))),
+                        },
+                    },
+                    PhysicalPlanNode::Project {
+                        input: NodeId::new(1),
+                        expressions: vec![ExecExpr::Column(exec_column(
+                            1,
+                            "users.name",
+                            DataType::Text,
+                        ))],
+                    },
+                ],
+                Some(users_output(relation, "users", &[1])),
+            ),
+        );
     }
 
     #[test]
     fn unsupported_access_predicates_use_a_full_scan() {
         let catalog = MemoryCatalog::with_indexes(&[("users_name", 1)]);
+        let relation = RelationId::new(0);
 
-        for predicate in ["age == 7", "name >= 'Amy'", "age == 7 AND id < 10"] {
-            let plan = physical(&catalog, &format!("SELECT name FROM users WHERE {predicate};"));
-            assert!(plan.contains("FullTableScan table=users"), "{plan}");
+        for (predicate, filter) in [
+            (
+                "age == 7",
+                ExecExpr::Binary {
+                    left: Box::new(ExecExpr::Column(exec_column(
+                        2,
+                        "users.age",
+                        DataType::Integer,
+                    ))),
+                    op: Op::EqualsEquals,
+                    right: Box::new(ExecExpr::Literal(Value::Integer(7))),
+                },
+            ),
+            (
+                "name >= 'Amy'",
+                ExecExpr::Binary {
+                    left: Box::new(ExecExpr::Column(exec_column(1, "users.name", DataType::Text))),
+                    op: Op::GreaterThanOrEqual,
+                    right: Box::new(ExecExpr::Literal(Value::String("Amy".into()))),
+                },
+            ),
+            (
+                "age == 7 AND id < 10",
+                ExecExpr::Binary {
+                    left: Box::new(ExecExpr::Binary {
+                        left: Box::new(ExecExpr::Column(exec_column(
+                            2,
+                            "users.age",
+                            DataType::Integer,
+                        ))),
+                        op: Op::EqualsEquals,
+                        right: Box::new(ExecExpr::Literal(Value::Integer(7))),
+                    }),
+                    op: Op::And,
+                    right: Box::new(ExecExpr::Binary {
+                        left: Box::new(ExecExpr::Column(exec_column(
+                            0,
+                            "users.id",
+                            DataType::Integer,
+                        ))),
+                        op: Op::LessThan,
+                        right: Box::new(ExecExpr::Literal(Value::Integer(10))),
+                    }),
+                },
+            ),
+        ] {
+            assert_physical_plan(
+                &catalog,
+                &format!("SELECT name FROM users WHERE {predicate};"),
+                physical_plan(
+                    vec![
+                        PhysicalPlanNode::FullTableScan { relation, table: users_table() },
+                        PhysicalPlanNode::Filter { input: NodeId::new(0), predicate: filter },
+                        PhysicalPlanNode::Project {
+                            input: NodeId::new(1),
+                            expressions: vec![ExecExpr::Column(exec_column(
+                                1,
+                                "users.name",
+                                DataType::Text,
+                            ))],
+                        },
+                    ],
+                    Some(users_output(relation, "users", &[1])),
+                ),
+            );
         }
     }
 
     #[test]
     fn select_operators_are_planned_in_sql_evaluation_order() {
-        assert_eq!(
-            physical(
-                &MemoryCatalog::default(),
-                "SELECT name FROM users ORDER BY id DESC LIMIT 10 OFFSET 5;",
+        let relation = RelationId::new(0);
+        assert_physical_plan(
+            &MemoryCatalog::default(),
+            "SELECT name FROM users ORDER BY id DESC LIMIT 10 OFFSET 5;",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::FullTableScan { relation, table: users_table() },
+                    PhysicalPlanNode::Sort {
+                        input: NodeId::new(0),
+                        terms: vec![SortTerm {
+                            column: exec_column(0, "users.id", DataType::Integer),
+                            direction: Some(Ordering::Descending),
+                        }],
+                    },
+                    PhysicalPlanNode::Project {
+                        input: NodeId::new(1),
+                        expressions: vec![ExecExpr::Column(exec_column(
+                            1,
+                            "users.name",
+                            DataType::Text,
+                        ))],
+                    },
+                    PhysicalPlanNode::Offset { input: NodeId::new(2), offset: 5 },
+                    PhysicalPlanNode::Limit { input: NodeId::new(3), limit: 10 },
+                ],
+                Some(users_output(relation, "users", &[1])),
             ),
-            concat!(
-                "Limit limit=10\n",
-                "`- Offset offset=5\n",
-                "   `- Project expressions=[users.name]\n",
-                "      `- Sort terms=[users.id DESC]\n",
-                "         `- FullTableScan table=users",
-            )
         );
     }
 
     #[test]
     fn explain_wraps_supported_statement_plans() {
         let catalog = MemoryCatalog::default();
+        let relation = RelationId::new(0);
 
-        for (sql, operator) in [
-            ("EXPLAIN SELECT name FROM users;", "Project"),
-            ("EXPLAIN UPDATE users SET name = 'Ada';", "Update"),
-            ("EXPLAIN DELETE FROM users;", "Delete"),
-        ] {
-            let plan = physical(&catalog, sql);
-            assert!(plan.starts_with(&format!("Explain\n`- {operator}")), "{plan}");
-            assert!(plan.contains("FullTableScan table=users"), "{plan}");
-        }
+        assert_physical_plan(
+            &catalog,
+            "EXPLAIN SELECT name FROM users;",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::FullTableScan { relation, table: users_table() },
+                    PhysicalPlanNode::Project {
+                        input: NodeId::new(0),
+                        expressions: vec![ExecExpr::Column(exec_column(
+                            1,
+                            "users.name",
+                            DataType::Text,
+                        ))],
+                    },
+                    PhysicalPlanNode::Explain { input: NodeId::new(1) },
+                ],
+                None,
+            ),
+        );
+        assert_physical_plan(
+            &catalog,
+            "EXPLAIN UPDATE users SET name = 'Ada';",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::FullTableScan { relation, table: users_table() },
+                    PhysicalPlanNode::Update {
+                        relation,
+                        table: users_table(),
+                        assignments: vec![UpdateAssignment {
+                            column: bound_column(relation, "users", 1),
+                            expression: ExecExpr::Literal(Value::String("Ada".into())),
+                        }],
+                        input: NodeId::new(0),
+                    },
+                    PhysicalPlanNode::Explain { input: NodeId::new(1) },
+                ],
+                None,
+            ),
+        );
+        assert_physical_plan(
+            &catalog,
+            "EXPLAIN DELETE FROM users;",
+            physical_plan(
+                vec![
+                    PhysicalPlanNode::FullTableScan { relation, table: users_table() },
+                    PhysicalPlanNode::Delete {
+                        relation,
+                        table: users_table(),
+                        input: NodeId::new(0),
+                    },
+                    PhysicalPlanNode::Explain { input: NodeId::new(1) },
+                ],
+                None,
+            ),
+        );
     }
 
     #[test]
