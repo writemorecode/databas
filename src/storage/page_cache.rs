@@ -21,9 +21,12 @@ use std::{
     sync::TryLockError,
 };
 
-use crate::sync::{
-    Arc, AtomicBool, AtomicU32, AtomicU64, Mutex, MutexGuard, Ordering, RwLock, RwLockReadGuard,
-    RwLockWriteGuard,
+use crate::{
+    core::Lsn,
+    sync::{
+        Arc, AtomicBool, AtomicU32, AtomicU64, Mutex, MutexGuard, Ordering, RwLock,
+        RwLockReadGuard, RwLockWriteGuard,
+    },
 };
 
 use thiserror::Error;
@@ -105,6 +108,9 @@ struct Frame {
     data: RwLock<[u8; PAGE_SIZE]>,
     dirty: AtomicBool,
     lsn: AtomicU64,
+    /// Earliest WAL dependency for this dirty page, used to bound checkpoint
+    /// reclamation. Before a write is logged, this is a conservative lower bound.
+    oldest_unflushed_lsn: AtomicU64,
     pin_count: AtomicU32,
 }
 
@@ -127,6 +133,7 @@ impl Frame {
             data: RwLock::new([0u8; PAGE_SIZE]),
             dirty: AtomicBool::new(false),
             lsn: AtomicU64::new(ZERO_LSN),
+            oldest_unflushed_lsn: AtomicU64::new(ZERO_LSN),
             pin_count: AtomicU32::new(0),
         }
     }
@@ -295,6 +302,27 @@ impl PageCache {
         Ok(())
     }
 
+    /// Makes one bounded pass, releasing cache metadata between frames.
+    /// Pinned pages are deferred, not errors. The returned LSN bounds WAL
+    /// reclamation for skipped dirty pages, including in-flight writes.
+    pub(crate) fn flush_checkpoint(&self) -> PageCacheResult<Option<Lsn>> {
+        let mut oldest = None;
+        for frame_id in 0..self.inner.frames.len() {
+            let _meta = self.inner.lock_meta()?;
+            let frame = &self.inner.frames[frame_id];
+            if !frame.dirty.load(Ordering::Acquire) {
+                continue;
+            }
+            if frame.pin_count.load(Ordering::Acquire) > 0 {
+                let lsn = frame.oldest_unflushed_lsn.load(Ordering::Acquire);
+                oldest = Some(oldest.map_or(lsn, |previous: Lsn| previous.min(lsn)));
+            } else {
+                self.flush_frame_if_dirty(frame_id)?;
+            }
+        }
+        Ok(oldest)
+    }
+
     fn resident_frame_id(
         &self,
         meta: &CacheMeta,
@@ -348,6 +376,7 @@ impl PageCache {
         frame.set_page_id(Some(new_page_id));
         frame.dirty.store(false, Ordering::Release);
         frame.lsn.store(ZERO_LSN, Ordering::Release);
+        frame.oldest_unflushed_lsn.store(ZERO_LSN, Ordering::Release);
         frame.pin_count.store(1, Ordering::Release);
 
         if let Some(old_page_id) = old_page_id {
@@ -376,6 +405,7 @@ impl PageCache {
             .map_err(|err| PageCacheError::Storage(Box::new(err)))?;
         self.inner.runtime.write_page(page_id, &page).map_err(runtime_error)?;
         frame.dirty.store(false, Ordering::Release);
+        frame.oldest_unflushed_lsn.store(ZERO_LSN, Ordering::Release);
         Ok(())
     }
 
@@ -389,9 +419,15 @@ impl PageCache {
             {
                 let mut data = try_write_page_data(&frame.data, restore.page_id)?;
                 *data = restore.image;
+                let oldest = if frame.dirty.load(Ordering::Acquire) {
+                    frame.oldest_unflushed_lsn.load(Ordering::Acquire).min(restore.wal_flush_lsn)
+                } else {
+                    restore.wal_flush_lsn
+                };
+                frame.oldest_unflushed_lsn.store(oldest, Ordering::Release);
+                frame.lsn.store(restore.wal_flush_lsn, Ordering::Release);
+                frame.dirty.store(true, Ordering::Release);
             }
-            frame.dirty.store(true, Ordering::Release);
-            frame.lsn.store(restore.wal_flush_lsn, Ordering::Release);
         }
         Ok(())
     }
@@ -443,6 +479,16 @@ impl PinGuard {
         let page = try_write_page_data(&frame.data, self.page_id)?;
         let before = *page;
         let was_dirty = frame.dirty.load(Ordering::Acquire);
+        if !was_dirty {
+            // An in-flight guard may straddle checkpoint capture. Its actual
+            // update LSN cannot precede this conservative pre-logging bound.
+            let oldest_unflushed_lsn = if txn_id.is_some() {
+                self.page_cache.runtime.next_wal_lsn().map_err(runtime_error)?
+            } else {
+                ZERO_LSN
+            };
+            frame.oldest_unflushed_lsn.store(oldest_unflushed_lsn, Ordering::Release);
+        }
         frame.dirty.store(true, Ordering::Release);
         Ok(PageWriteGuard {
             page,
@@ -537,6 +583,9 @@ impl Drop for PageWriteGuard<'_> {
     fn drop(&mut self) {
         if *self.page == self.before {
             self.frame.dirty.store(self.was_dirty, Ordering::Release);
+            if !self.was_dirty {
+                self.frame.oldest_unflushed_lsn.store(ZERO_LSN, Ordering::Release);
+            }
             return;
         }
 
@@ -544,9 +593,13 @@ impl Drop for PageWriteGuard<'_> {
             Ok(Some(update)) => {
                 *self.page = update.redo;
                 self.frame.lsn.store(update.lsn, Ordering::Release);
+                if !self.was_dirty {
+                    self.frame.oldest_unflushed_lsn.store(update.lsn, Ordering::Release);
+                }
             }
             Ok(None) => {
                 self.frame.lsn.store(ZERO_LSN, Ordering::Release);
+                self.frame.oldest_unflushed_lsn.store(ZERO_LSN, Ordering::Release);
             }
             Err(_) => {
                 *self.page = self.before;

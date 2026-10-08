@@ -1,18 +1,18 @@
 use std::path::PathBuf;
 
-use crate::storage::{
-    disk_manager::DiskManager,
-    log_manager::{LogManager, Lsn, TxnId},
-    recovery::recover_from_wal,
-    transaction_manager::{
-        LoggedPageUpdate, PageRestore, TransactionManager, TransactionRollback,
-        TransactionSavepoint,
-    },
-};
 use crate::{
     core::{
-        PAGE_SIZE, PageId,
+        CheckpointOutcome, PAGE_SIZE, PageId,
         error::{InternalError, StorageError, StorageResult},
+    },
+    storage::{
+        disk_manager::DiskManager,
+        log_manager::{LogManager, Lsn, TxnId},
+        recovery::recover_from_wal,
+        transaction_manager::{
+            LoggedPageUpdate, PageRestore, TransactionManager, TransactionRollback,
+            TransactionSavepoint,
+        },
     },
     sync::{Mutex, MutexGuard},
 };
@@ -32,6 +32,7 @@ fn make_transaction_manager(max_txn_id: TxnId) -> ActiveTransactionManager {
 /// before the log.
 pub(crate) struct StorageRuntime {
     path: PathBuf,
+    checkpoint: Mutex<Checkpointer>,
     disk: Mutex<DiskManager>,
     log: Mutex<LogManager>,
     transactions: Mutex<ActiveTransactionManager>,
@@ -44,6 +45,7 @@ impl StorageRuntime {
         let log = LogManager::new(&path)?;
         let max_txn_id = recovery.max_txn_id.max(log.highest_txn_id());
         Ok(Self {
+            checkpoint: Mutex::new(Checkpointer { path: path.clone() }),
             path,
             disk: Mutex::new(disk),
             log: Mutex::new(log),
@@ -109,6 +111,20 @@ impl StorageRuntime {
     pub(crate) fn fail_next_wal_flush_for_test(&self) -> StorageResult<()> {
         Self::lock(&self.log, "log manager")?.fail_next_flush_for_test();
         Ok(())
+    }
+
+    /// Conservative dependency for a write guard that has not logged yet.
+    pub(crate) fn next_wal_lsn(&self) -> StorageResult<Lsn> {
+        // Exhaustion is reported by the mutation's normal logging path, which
+        // restores bytes and poisons its transaction. Until then retain all WAL.
+        Ok(Self::lock(&self.log, "log manager")?.next_lsn().unwrap_or(0))
+    }
+
+    pub(crate) fn checkpoint<F>(&self, flush_cache: F) -> StorageResult<CheckpointOutcome>
+    where
+        F: FnOnce() -> StorageResult<Option<Lsn>>,
+    {
+        Self::lock(&self.checkpoint, "checkpoint serialization")?.run(self, flush_cache)
     }
 
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
@@ -187,6 +203,50 @@ impl StorageRuntime {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
         let mut log = Self::lock(&self.log, "log manager")?;
         transactions.finish_rollback(&mut log, txn_id)
+    }
+}
+
+/// Owns checkpoint execution and the path used for WAL reclamation.
+///
+/// `run` requires mutable access, so the runtime must hold its checkpoint mutex
+/// throughout horizon capture, cache flushing, and WAL publication.
+struct Checkpointer {
+    path: PathBuf,
+}
+
+impl Checkpointer {
+    fn run<F>(
+        &mut self,
+        runtime: &StorageRuntime,
+        flush_cache: F,
+    ) -> StorageResult<CheckpointOutcome>
+    where
+        F: FnOnce() -> StorageResult<Option<Lsn>>,
+    {
+        // Capture a fixed horizon and preserve all undo for transactions alive
+        // now. New transactions begin after this horizon and are retained too.
+        let mut retain_from = {
+            let transactions = StorageRuntime::lock(&runtime.transactions, "transaction manager")?;
+            let log = StorageRuntime::lock(&runtime.log, "log manager")?;
+            let horizon = log.next_lsn()?;
+            transactions.oldest_begin_lsn().map_or(horizon, |oldest| oldest.min(horizon))
+        };
+        // No transaction/log latch is held while entering the page cache.
+        let deferred = flush_cache()?;
+        if let Some(oldest) = deferred {
+            retain_from = retain_from.min(oldest);
+        }
+        runtime.sync_database_file()?;
+        // Publication serializes with WAL appends, not
+        // transaction lifetimes. Never acquire cache latches in this section.
+        let _transactions = StorageRuntime::lock(&runtime.transactions, "transaction manager")?;
+        let mut log = StorageRuntime::lock(&runtime.log, "log manager")?;
+        let progress = log.reclaim_prefix(&self.path, retain_from)?;
+        if progress.remaining_records == 0 && deferred.is_none() {
+            Ok(CheckpointOutcome::Completed)
+        } else {
+            Ok(CheckpointOutcome::Partial)
+        }
     }
 }
 

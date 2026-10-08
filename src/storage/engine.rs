@@ -124,6 +124,10 @@ impl Storage {
         Ok(())
     }
 
+    pub(crate) fn checkpoint(&self) -> StorageResult<crate::core::CheckpointOutcome> {
+        self.runtime.checkpoint(|| Ok(self.page_cache.flush_checkpoint()?))
+    }
+
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
         self.runtime.begin_transaction()
     }
