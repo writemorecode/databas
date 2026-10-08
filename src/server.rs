@@ -35,6 +35,8 @@ const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const SUPERVISOR_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+const WAL_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Socket cancellation is independent of worker progress and wakes blocked I/O.
 #[derive(Default)]
 struct Cancellation {
@@ -129,12 +131,26 @@ impl Server {
     }
 
     fn serve_with_worker_count(self, worker_count: usize) -> Result<(), ServerError> {
-        let pool = ThreadPool::new(worker_count)?;
+        let mut pool = ThreadPool::new(worker_count)?;
         let (failure_sender, failure_receiver) = mpsc::channel();
         let shutdown = Arc::new(Cancellation::default());
 
+        let database = Arc::clone(&self.database);
+        let failures = failure_sender.clone();
+        let checkpoint_shutdown = Arc::clone(&shutdown);
+        let checkpoint_task = pool.execute_periodic(WAL_CHECKPOINT_INTERVAL, move || {
+            if checkpoint_shutdown.stopped.load(Ordering::Acquire) {
+                return;
+            }
+            if let Err(error) = database.checkpoint() {
+                checkpoint_shutdown.stop();
+                let _ = failures.send(error);
+            }
+        })?;
+
         let result = self.accept_connections(&pool, &failure_sender, &failure_receiver, &shutdown);
         shutdown.stop();
+        drop(checkpoint_task);
         // Wake table-lock waiters before joining. In-flight storage syscalls
         // cannot be interrupted safely; shutdown waits for them to return.
         let stop_result = self.database.stop();

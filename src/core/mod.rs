@@ -21,7 +21,7 @@ pub use crate::relational::cursor::{
     IndexEntry, IndexEntryView, OwnedIndexEntry, OwnedTableRecord, TableRecord, TableRecordView,
 };
 pub use crate::relational::tuple::{Tuple, TupleRef, TupleView, Value, ValueRef};
-pub use database::Database;
+pub use database::{CheckpointOutcome, Database};
 pub use error::{
     ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InternalError,
     InvalidArgumentError, LimitExceededError, StorageError, StorageResult,

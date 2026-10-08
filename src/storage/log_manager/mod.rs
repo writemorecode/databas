@@ -31,6 +31,7 @@ use thiserror::Error;
 pub(crate) use crate::core::{Lsn, TxnId};
 use crate::core::{PAGE_SIZE, PageId};
 
+mod checkpoint;
 #[cfg(test)]
 mod fault_injection;
 mod frame;
@@ -341,6 +342,14 @@ pub(crate) struct LogManager {
 }
 
 impl LogManager {
+    pub(crate) fn flush_all(&mut self) -> Result<(), LogManagerFlushError> {
+        self.flush_through(self.highest_appended_lsn.unwrap_or(ZERO_LSN))
+    }
+
+    pub(crate) fn poison(&mut self) {
+        self.poisoned = true;
+    }
+
     /// Opens or creates the WAL file associated with `db_file_path`.
     ///
     /// Existing complete frames are scanned to reconstruct the highest appended
@@ -533,6 +542,12 @@ impl LogManager {
     }
 }
 
+#[derive(PartialEq)]
+enum LogReadMode {
+    Recovery,
+    Checkpoint,
+}
+
 /// Reads complete WAL frames and returns owned records for crash recovery.
 ///
 /// A torn or incomplete final frame is treated as a non-durable tail: it is
@@ -543,7 +558,15 @@ impl LogManager {
 pub(crate) fn read_recovery_log(
     db_file_path: impl AsRef<Path>,
 ) -> Result<RecoveryLogScan, LogManagerError> {
-    let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
+    read_log(db_file_path.as_ref(), LogReadMode::Recovery)
+}
+
+pub(crate) fn read_checkpoint_log(path: &Path) -> Result<RecoveryLogScan, LogManagerError> {
+    read_log(path, LogReadMode::Checkpoint)
+}
+
+fn read_log(db_file_path: &Path, mode: LogReadMode) -> Result<RecoveryLogScan, LogManagerError> {
+    let wal_file_path = db_file_path.with_added_extension("wal");
     let wal_was_created = !wal_file_path.try_exists()?;
     let mut wal_file = OpenOptions::new()
         .create(true)
@@ -618,6 +641,9 @@ pub(crate) fn read_recovery_log(
     }
 
     if truncated_tail {
+        if mode == LogReadMode::Checkpoint {
+            return Err(LogManagerError::TruncatedFrame { needed: 1, remaining: 0 });
+        }
         wal_file.set_len(offset)?;
         wal_file.sync_all()?;
     }
@@ -671,6 +697,20 @@ fn write_wal_checkpoint_file(
 }
 
 impl RecoveryLogRecordKind {
+    fn as_log_record_kind(&self) -> LogRecordKind<'_> {
+        match self {
+            Self::Begin => LogRecordKind::Begin,
+            Self::Commit => LogRecordKind::Commit,
+            Self::Rollback => LogRecordKind::Rollback,
+            Self::PageAlloc { page_id } => LogRecordKind::PageAlloc { page_id: *page_id },
+            Self::PageUpdate { page_id, redo_data, undo_data } => LogRecordKind::PageUpdate {
+                page_id: *page_id,
+                redo_data: redo_data.as_ref(),
+                undo_data: undo_data.as_ref(),
+            },
+        }
+    }
+
     fn from_log_record_kind(kind: LogRecordKind<'_>) -> Result<Self, LogManagerError> {
         match kind {
             LogRecordKind::Begin => Ok(Self::Begin),

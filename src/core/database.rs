@@ -17,6 +17,16 @@ pub struct Database {
     locks: LockManager,
 }
 
+/// Result of an attempt to apply the WAL and reclaim its records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckpointOutcome {
+    /// The captured history is durable and only the WAL header remains.
+    Completed,
+    /// The pass completed, but undo, deferred pages, or newer WAL records still
+    /// require retained history. This is normal, successful progress.
+    Partial,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StatementTransactionMode {
     Ordinary,
@@ -75,6 +85,17 @@ impl Database {
     /// page pin prevents a consistent flush.
     pub fn flush(&self) -> StorageResult<()> {
         self.catalog.flush()
+    }
+
+    /// Flushes pages incrementally and reclaims a safe WAL prefix while
+    /// transactions continue. Busy pages are deferred, not errors. Active
+    /// transactions retain their undo history but do not prevent the pass.
+    ///
+    /// # Errors
+    /// Returns an error if flushing, replay, or WAL replacement fails. A failure
+    /// during replacement disables further WAL writes; reopen the database.
+    pub fn checkpoint(&self) -> StorageResult<CheckpointOutcome> {
+        self.catalog.storage().checkpoint()
     }
 
     /// Disables new lock requests and cancels pending waits after a fatal error.

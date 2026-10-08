@@ -85,6 +85,8 @@ pub(crate) struct TransactionManager {
 /// In-memory state for one transaction owned by the storage runtime.
 #[derive(Debug)]
 struct ActiveTransaction {
+    /// Preserve undo history for transactions alive at checkpoint capture.
+    begin_lsn: Lsn,
     /// One before-image per logical page mutation, in mutation order.
     ///
     /// Explicit rollback walks every entry in reverse so repeated writes restore
@@ -107,6 +109,10 @@ struct ActiveTransaction {
 }
 
 impl TransactionManager {
+    pub(crate) fn oldest_begin_lsn(&self) -> Option<Lsn> {
+        self.transactions.values().map(|transaction| transaction.begin_lsn).min()
+    }
+
     /// Creates a manager whose next transaction id will be greater than `max_txn_id`.
     ///
     /// Callers seed this with the largest transaction id observed during
@@ -124,11 +130,16 @@ impl TransactionManager {
             .max_txn_id
             .checked_add(1)
             .ok_or_else(|| invariant(InvariantViolation::TransactionIdExhausted))?;
-        log.append_record(txn_id, LogRecordKind::Begin)?;
+        let begin_lsn = log.append_record(txn_id, LogRecordKind::Begin)?;
         self.max_txn_id = txn_id;
         self.transactions.insert(
             txn_id,
-            ActiveTransaction { undo_pages: Vec::new(), rollback_lsn: None, poisoned: false },
+            ActiveTransaction {
+                undo_pages: Vec::new(),
+                begin_lsn,
+                rollback_lsn: None,
+                poisoned: false,
+            },
         );
         Ok(txn_id)
     }
