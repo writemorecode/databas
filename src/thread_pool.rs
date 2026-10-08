@@ -1,4 +1,5 @@
-//! Fixed-size pool for running blocking jobs on reusable worker threads.
+//! Pool for running blocking jobs on reusable worker threads.
+//! Periodic tasks share one additional, lazily created maintenance worker.
 //!
 //! Jobs are submitted through a bounded queue. Dropping or explicitly shutting
 //! down the pool closes that queue, lets workers finish queued jobs, and joins
@@ -6,10 +7,14 @@
 
 use std::{
     sync::{
-        Arc, Mutex,
-        mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{
+            Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError, channel, sync_channel,
+        },
     },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use thiserror::Error;
@@ -22,6 +27,9 @@ pub enum ThreadPoolError {
     /// A pool must contain at least one worker.
     #[error("thread pool size must be greater than zero")]
     InvalidSize,
+    /// Periodic tasks need a nonzero interval.
+    #[error("periodic task interval must be greater than zero")]
+    InvalidInterval,
     /// The job queue closed before a job could be submitted.
     #[error("thread pool job queue is closed")]
     QueueClosed,
@@ -33,10 +41,18 @@ pub enum ThreadPoolError {
     WorkerPanicked { worker_id: usize },
 }
 
-/// A fixed-size pool of worker threads for blocking jobs.
+/// A pool of ordinary workers with an optional reserved maintenance worker.
 pub struct ThreadPool {
     workers: Vec<Worker>,
     sender: Option<SyncSender<Job>>,
+    maintenance_sender: Option<SyncSender<Job>>,
+    timers: Arc<Mutex<Vec<Timer>>>,
+}
+
+struct Timer {
+    cancel: Sender<()>,
+    stopped: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
 }
 
 impl ThreadPool {
@@ -53,7 +69,80 @@ impl ThreadPool {
         let (sender, receiver) = sync_channel(size);
         let receiver = Arc::new(Mutex::new(receiver));
         let workers = (0..size).map(|id| Worker::new(id, Arc::clone(&receiver))).collect();
-        Ok(Self { workers, sender: Some(sender) })
+        Ok(Self {
+            workers,
+            sender: Some(sender),
+            maintenance_sender: None,
+            timers: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    /// Schedules a task at fixed intervals on a reserved maintenance worker.
+    /// Missed ticks are skipped, and invocations of one task never overlap.
+    /// Dropping the returned handle cancels future invocations; an invocation
+    /// already running is allowed to finish. Cancellation joins the timer thread,
+    /// but does not wait for a running invocation. Shutdown cancels all timers.
+    ///
+    /// # Errors
+    /// Returns `InvalidInterval` for a zero interval or `QueueClosed` after shutdown.
+    pub fn execute_periodic<F>(
+        &mut self,
+        interval: Duration,
+        job: F,
+    ) -> Result<PeriodicTask, ThreadPoolError>
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        if interval.is_zero() {
+            return Err(ThreadPoolError::InvalidInterval);
+        }
+        if self.sender.is_none() {
+            return Err(ThreadPoolError::QueueClosed);
+        }
+        let sender = self
+            .maintenance_sender
+            .get_or_insert_with(|| {
+                let (sender, receiver) = sync_channel(1);
+                self.workers.push(Worker::new(self.workers.len(), Arc::new(Mutex::new(receiver))));
+                sender
+            })
+            .clone();
+        let (cancel, cancellation) = channel();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let task_stopped = Arc::clone(&stopped);
+        let pending = Arc::new(AtomicBool::new(false));
+        let job = Arc::new(job);
+        let timer = thread::spawn(move || {
+            while let Err(RecvTimeoutError::Timeout) = cancellation.recv_timeout(interval) {
+                if task_stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                if pending.swap(true, Ordering::AcqRel) {
+                    continue;
+                }
+                let pending_job = Arc::clone(&pending);
+                let job = Arc::clone(&job);
+                let stopped = Arc::clone(&task_stopped);
+                let submission = sender.try_send(Box::new(move || {
+                    if !stopped.load(Ordering::Acquire) {
+                        job();
+                    }
+                    pending_job.store(false, Ordering::Release);
+                }) as Job);
+                match submission {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => pending.store(false, Ordering::Release),
+                    Err(TrySendError::Disconnected(_)) => break,
+                }
+            }
+            task_stopped.store(true, Ordering::Release);
+        });
+        self.timers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(Timer {
+            cancel: cancel.clone(),
+            stopped: Arc::clone(&stopped),
+            thread: timer,
+        });
+        Ok(PeriodicTask { cancel, stopped, timers: Arc::downgrade(&self.timers) })
     }
 
     /// Queues a job, waiting when the bounded queue is full.
@@ -105,6 +194,18 @@ impl ThreadPool {
     }
 
     fn close_and_join(&mut self) -> Result<(), ThreadPoolError> {
+        let timers = {
+            let mut timers = self.timers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *timers)
+        };
+        for timer in &timers {
+            timer.stopped.store(true, Ordering::Release);
+            let _ = timer.cancel.send(());
+        }
+        for timer in timers {
+            let _ = timer.thread.join();
+        }
+        self.maintenance_sender.take();
         self.sender.take();
         let mut panicked_worker = None;
         for worker in &mut self.workers {
@@ -125,6 +226,33 @@ impl ThreadPool {
 impl Drop for ThreadPool {
     fn drop(&mut self) {
         let _ = self.close_and_join();
+    }
+}
+
+/// Cancellation handle for a periodic task. Drop to cancel future runs.
+pub struct PeriodicTask {
+    cancel: Sender<()>,
+    stopped: Arc<AtomicBool>,
+    timers: Weak<Mutex<Vec<Timer>>>,
+}
+
+impl Drop for PeriodicTask {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        let _ = self.cancel.send(());
+        if let Some(timers) = self.timers.upgrade() {
+            let timer = {
+                let mut timers = timers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                timers
+                    .iter()
+                    .position(|timer| Arc::ptr_eq(&timer.stopped, &self.stopped))
+                    .map(|index| timers.swap_remove(index))
+            };
+            // Joining outside the lock lets shutdown and other cancellations proceed.
+            if let Some(timer) = timer {
+                let _ = timer.thread.join();
+            }
+        }
     }
 }
 
