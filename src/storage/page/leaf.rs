@@ -4,7 +4,7 @@ use crate::core::{PAGE_SIZE, PageId, SlotId};
 
 use super::{
     CellCorruption, PageError, PageResult,
-    core::{Leaf, Page, PageAccess, PageAccessMut, SearchResult},
+    core::{Leaf, Page, PageAccess, PageAccessMut},
     format::{
         self, CELL_LENGTH_SIZE, CELL_OVERFLOW_PAGE_ID_SIZE, LEAF_CELL_PREFIX_SIZE,
         MIN_INLINE_OVERFLOW_PAYLOAD_BYTES, USABLE_SPACE_END,
@@ -21,7 +21,6 @@ pub(crate) struct LeafCellParts {
     pub(crate) payload_len: usize,
     pub(crate) first_overflow_page_id: Option<PageId>,
     pub(crate) inline_payload_range: Range<usize>,
-    pub(crate) key_range: Range<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,10 +71,7 @@ where
     let payload_len = format::read_u16(page.bytes(), cell_offset) as usize;
     let first_overflow_page_id =
         format::read_optional_u64(page.bytes(), cell_offset + FIRST_OVERFLOW_PAGE_ID_OFFSET);
-    let key_len = format::read_u16(page.bytes(), cell_offset + KEY_LENGTH_OFFSET) as usize;
     let inline_payload_len = cell_len - LEAF_CELL_PREFIX_SIZE;
-    let key_start = LEAF_CELL_PREFIX_SIZE;
-    let key_end = key_start + key_len.min(inline_payload_len);
 
     Ok(ParsedLeafCell {
         cell_offset,
@@ -83,7 +79,6 @@ where
             payload_len,
             first_overflow_page_id,
             inline_payload_range: LEAF_CELL_PREFIX_SIZE..LEAF_CELL_PREFIX_SIZE + inline_payload_len,
-            key_range: key_start..key_end,
         },
     })
 }
@@ -141,29 +136,10 @@ fn validate_payload_parts(
     Ok((encoded_payload_len, encoded_key_len, encoded_value_len))
 }
 
-fn compare_key<A>(
-    page: &Page<A, Leaf>,
-    slot_index: SlotId,
-    key: &[u8],
-) -> PageResult<std::cmp::Ordering>
-where
-    A: PageAccess,
-{
-    let parsed = cell_parts(page, slot_index)?;
-    let cell_offset = parsed.cell_offset;
-    let key_range = parsed.parts.key_range;
-    Ok(page.bytes()[cell_offset + key_range.start..cell_offset + key_range.end].cmp(key))
-}
-
 impl<A> Page<A, Leaf>
 where
     A: PageAccess,
 {
-    /// Searches the leaf page for `key`.
-    pub(crate) fn search(&self, key: &[u8]) -> PageResult<SearchResult> {
-        self.search_slots_by(|page, slot_index| compare_key(page, slot_index, key))
-    }
-
     /// Returns full payload metadata and the page-relative inline payload range for one cell.
     pub(crate) fn cell_payload_parts(
         &self,
@@ -260,17 +236,11 @@ where
         )
     }
 
-    /// Deletes an existing key/value cell and re-packs the page.
-    pub fn delete(&mut self, key: &[u8]) -> PageResult<SlotId> {
-        let slot_index = match self.search(key)? {
-            SearchResult::Found(slot_index) => slot_index,
-            SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound),
-        };
-
+    /// Deletes a slot located by an overflow-aware cursor search.
+    pub(crate) fn delete_at(&mut self, slot_index: SlotId) -> PageResult<SlotId> {
         let cell_offset = self.slot_offset(slot_index)?;
         let cell_len = self.cell_len(slot_index)?;
         self.remove_slot(slot_index)?;
-        // Do we need to reclaim space after every cell delete?
         self.reclaim_space(cell_offset, cell_len)?;
         Ok(slot_index)
     }

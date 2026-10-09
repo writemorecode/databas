@@ -247,6 +247,7 @@ impl TreeCursor {
         cells: &[LeafSplitCell<'_>],
         target_key: &[u8],
     ) -> StorageResult<PendingSplit> {
+        let old_overflow = self.overflow_heads(leaf_page_id)?;
         let split_index = Self::choose_leaf_split_index(cells)?;
         let (left_cells, right_cells) = cells.split_at(split_index);
 
@@ -281,6 +282,7 @@ impl TreeCursor {
             *leaf_guard.page_mut() = left_page_image;
             *right_guard.page_mut() = right_page_image;
         }
+        self.free_overflow(old_overflow)?;
         self.mark_tree_mutated();
 
         if let Some(next_page_id) = next_page_id {

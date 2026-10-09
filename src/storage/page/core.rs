@@ -1,5 +1,4 @@
 use core::marker::PhantomData;
-use std::cmp::Ordering;
 
 use crate::core::{PAGE_SIZE, PageId, SlotId};
 use crate::storage::log_manager::ZERO_LSN;
@@ -276,25 +275,6 @@ where
         self.validate_slot_index(slot_index)?;
         let offset = format::slot_entry_offset(N::KIND.header_size(), slot_index);
         Ok(format::read_u16(self.bytes(), offset))
-    }
-
-    pub(crate) fn search_slots_by<F>(&self, mut compare_slot: F) -> PageResult<SearchResult>
-    where
-        F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
-    {
-        let mut low: SlotId = 0;
-        let mut high = self.slot_count();
-
-        while low < high {
-            let mid = low + (high - low) / 2;
-            match compare_slot(self, mid)? {
-                Ordering::Less => low = mid + 1,
-                Ordering::Greater => high = mid,
-                Ordering::Equal => return Ok(SearchResult::Found(mid)),
-            }
-        }
-
-        Ok(SearchResult::InsertAt(low))
     }
 
     pub(crate) fn validate_slot_index(&self, slot_index: SlotId) -> PageResult<()> {
