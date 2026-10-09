@@ -67,6 +67,10 @@ pub(crate) fn recover_from_wal(
             RecoveryLogRecordKind::PageAlloc { page_id } => {
                 transaction.page_allocs.push(page_id);
             }
+            RecoveryLogRecordKind::FreelistCheckpoint { .. }
+            | RecoveryLogRecordKind::PageReserve { .. }
+            | RecoveryLogRecordKind::PageRetire { .. }
+            | RecoveryLogRecordKind::LifecycleCancel { .. } => {}
         }
     }
 

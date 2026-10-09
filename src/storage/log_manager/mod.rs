@@ -53,7 +53,7 @@ pub(crate) const ZERO_LSN: Lsn = 0;
 const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
-const WAL_FILE_HEADER_VERSION: u16 = 2;
+const WAL_FILE_HEADER_VERSION: u16 = 3;
 pub(crate) const WAL_FILE_HEADER_LEN: usize = 32;
 const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
 
@@ -189,8 +189,16 @@ pub(crate) enum LogRecordKind<'a> {
     /// while undoing an incomplete transaction during recovery or explicit
     /// rollback.
     PageUpdate { page_id: PageId, redo_data: &'a [u8], undo_data: &'a [u8] },
-    /// Allocation of a database page by a transaction.
+    /// Allocation of a database page by a transaction (raw storage only).
     PageAlloc { page_id: PageId },
+    /// Authoritative membership at the start of a WAL segment (system owner 0).
+    FreelistCheckpoint { page_count: u64, pages: Vec<PageId> },
+    /// Independent reservation; this record's LSN identifies the reservation.
+    PageReserve { page_id: PageId },
+    /// Reclamation intention, published only after the owning transaction commits.
+    PageRetire { page_id: PageId },
+    /// Savepoint compensation referring to a lifecycle record's LSN.
+    LifecycleCancel { target_lsn: Lsn },
 }
 
 /// Owned WAL record returned by recovery scans.
@@ -218,8 +226,16 @@ pub(crate) enum RecoveryLogRecordKind {
     Rollback,
     /// Full-page physical update with owned redo and undo page images.
     PageUpdate { page_id: PageId, redo_data: Box<[u8; PAGE_SIZE]>, undo_data: Box<[u8; PAGE_SIZE]> },
-    /// Allocation of a database page by a transaction.
+    /// Append allocation for raw storage without a database header.
     PageAlloc { page_id: PageId },
+    /// Complete membership snapshot; must be first in its segment and owned by 0.
+    FreelistCheckpoint { page_count: u64, pages: Vec<PageId> },
+    /// Reservation replayed regardless of the owner's eventual outcome.
+    PageReserve { page_id: PageId },
+    /// Retirement held until the owning transaction commits.
+    PageRetire { page_id: PageId },
+    /// Statement undo for an earlier reservation/retirement owned by this user.
+    LifecycleCancel { target_lsn: Lsn },
 }
 
 /// Result of scanning the WAL for recovery.
@@ -243,6 +259,10 @@ pub(crate) enum OwnedLogRecordKind {
     Rollback,
     PageUpdate { page_id: PageId },
     PageAlloc { page_id: PageId },
+    FreelistCheckpoint { page_count: u64, pages: Vec<PageId> },
+    PageReserve { page_id: PageId },
+    PageRetire { page_id: PageId },
+    LifecycleCancel { target_lsn: Lsn },
 }
 
 #[derive(Debug)]
@@ -722,6 +742,14 @@ impl RecoveryLogRecordKind {
                 undo_data: page_image_array(undo_data)?,
             }),
             LogRecordKind::PageAlloc { page_id } => Ok(Self::PageAlloc { page_id }),
+            LogRecordKind::FreelistCheckpoint { page_count, pages } => {
+                Ok(Self::FreelistCheckpoint { page_count, pages })
+            }
+            LogRecordKind::PageReserve { page_id } => Ok(Self::PageReserve { page_id }),
+            LogRecordKind::PageRetire { page_id } => Ok(Self::PageRetire { page_id }),
+            LogRecordKind::LifecycleCancel { target_lsn } => {
+                Ok(Self::LifecycleCancel { target_lsn })
+            }
         }
     }
 }
@@ -850,11 +878,11 @@ mod tests {
     fn rejects_unsupported_version() {
         let records = [LogRecord { txn_id: 1, kind: LogRecordKind::Begin }];
         let mut buf = serialize_to_vec(1, &records);
-        buf[8..10].copy_from_slice(&3u16.to_le_bytes());
+        buf[8..10].copy_from_slice(&4u16.to_le_bytes());
 
         assert!(matches!(
             deserialize_transaction(&buf),
-            Err(LogManagerError::UnsupportedVersion { expected: 2, actual: 3 })
+            Err(LogManagerError::UnsupportedVersion { expected: 3, actual: 4 })
         ));
     }
 
