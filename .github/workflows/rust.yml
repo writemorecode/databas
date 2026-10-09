@@ -6,8 +6,18 @@ on:
   pull_request:
     branches: ["main"]
 
+# Stop spending runner time on superseded PR commits, but let main finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
+  # Fresh runners cannot use workspace incremental builds. Debug symbols also
+  # inflate dependency caches and link times without helping these checks.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   quality:
@@ -16,30 +26,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - name: Cache Cargo build artifacts
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
-            ${{ runner.os }}-cargo-
+      - uses: ./.github/actions/setup-rust
 
       - name: Formatting check
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --no-deps --all-targets --all-features
-
-      - name: Clippy (Loom configuration)
-        run: RUSTFLAGS="--cfg loom" cargo clippy --no-deps --lib --tests
+        run: cargo clippy --locked --no-deps --all-targets --all-features
 
       - name: Documentation
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --locked --no-deps --all-features
 
   test:
     name: Tests
@@ -47,27 +43,31 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - name: Cache Cargo build artifacts
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
-            ${{ runner.os }}-cargo-
+      - uses: ./.github/actions/setup-rust
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
       - name: Test
-        run: cargo nextest run
-
-      - name: Loom tests
-        run: RUSTFLAGS="--cfg loom" cargo test --lib loom_tests -- --test-threads=1
+        run: cargo nextest run --locked
 
       - name: Documentation tests
-        run: cargo test --doc
+        run: cargo test --locked --doc
+
+  loom:
+    name: Loom checks
+    runs-on: ubuntu-latest
+    # Keep the alternate configuration in its own job/cache rather than
+    # rebuilding dependencies with different RUSTFLAGS in the normal jobs.
+    env:
+      RUSTFLAGS: --cfg loom
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+
+      - name: Clippy (Loom configuration)
+        run: cargo clippy --locked --no-deps --lib --tests
+
+      - name: Loom tests
+        run: cargo test --locked --lib loom_tests -- --test-threads=1

@@ -1,0 +1,13 @@
+name: Set up Rust
+description: Install the toolchain from rust-toolchain.toml and restore a job-specific dependency cache
+
+runs:
+  using: composite
+  steps:
+    - uses: mkroening/rust-toolchain-toml@v1.3.5
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        # The default key includes the job, compiler, Cargo manifests and build
+        # environment. Cache dependencies, not stale workspace/incremental builds.
+        cache-bin: "false"
