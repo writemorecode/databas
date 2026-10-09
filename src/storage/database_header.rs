@@ -6,8 +6,9 @@ use crate::core::{
 pub(crate) const DATABASE_HEADER_PAGE_ID: PageId = 0;
 
 const MAGIC: &[u8; 8] = b"DATABAS\0";
-const FORMAT_VERSION: u16 = 2;
-const HEADER_LEN: usize = 12;
+// Version 4 requires logical allocator WAL (version 3); older files must be recreated.
+const FORMAT_VERSION: u16 = 4;
+const HEADER_LEN: usize = 28;
 
 /// Fixed-format database file header stored on page 0.
 pub(crate) struct DatabaseHeader;
@@ -46,6 +47,10 @@ impl DatabaseHeader {
                 actual: page_size,
             }));
         }
+
+        // Freelist fields are validated by the allocator AFTER WAL recovery.
+        // Rebuilding a checkpoint can be interrupted between trunk/header writes;
+        // its durable WAL membership snapshot must be allowed to repair it.
 
         if page[HEADER_LEN..].iter().any(|byte| *byte != 0) {
             return Err(corrupt_header(CorruptionKind::DatabaseHeaderReservedBytesNotZero));

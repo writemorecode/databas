@@ -22,6 +22,7 @@ mod error;
 pub(crate) mod log_manager;
 pub(crate) mod overflow;
 pub(crate) mod page;
+pub(crate) mod page_allocator;
 pub(crate) mod page_cache;
 pub(crate) mod page_replacement;
 pub(crate) mod recovery;
