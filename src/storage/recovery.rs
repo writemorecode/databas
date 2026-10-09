@@ -4,6 +4,7 @@ use crate::core::{PAGE_SIZE, PageId, error::StorageResult};
 use crate::storage::{
     disk_manager::DiskManager,
     log_manager::{Lsn, RecoveryLogRecordKind, TxnId, read_recovery_log, truncate_wal},
+    page_allocator::{replay_lifecycle, write_checkpoint},
 };
 
 #[derive(Debug, Default)]
@@ -40,6 +41,7 @@ pub(crate) fn recover_from_wal(
         return Ok(RecoveryResult { max_txn_id });
     }
     let last_assigned_lsn = scan.last_assigned_lsn;
+    let allocator = replay_lifecycle(&scan.records)?;
 
     let mut transactions: HashMap<TxnId, TransactionRecovery> = HashMap::new();
     let mut committed_page_allocs = Vec::new();
@@ -107,6 +109,11 @@ pub(crate) fn recover_from_wal(
         }
     }
 
+    // Ownership replay has reconciled committed frees, canceled operations and
+    // orphan reservations. Only now is it safe to overwrite free pages as trunks.
+    if let Some(allocator) = &allocator {
+        write_checkpoint(disk, allocator)?;
+    }
     disk.sync()?;
     truncate_wal(path, last_assigned_lsn, max_txn_id)?;
     Ok(RecoveryResult { max_txn_id })
@@ -695,5 +702,98 @@ mod tests {
         let mut second_disk = DiskManager::new(file.path()).unwrap();
         let second = recover_from_wal(file.path(), &mut second_disk).unwrap();
         assert_eq!(second.max_txn_id, 41);
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+#[allow(clippy::unwrap_used)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::storage::{
+        database_header::DatabaseHeader,
+        log_manager::{LogManager, LogRecordKind},
+        page_allocator::read_checkpoint,
+    };
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn recovery_uses_wal_membership_and_preserves_a_committed_reuse_after_loser_cancellation() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut disk = DiskManager::new(file.path()).unwrap();
+        disk.ensure_page_exists(6).unwrap();
+        let mut header = DatabaseHeader::encode_page();
+        // Interrupted checkpoint: inconsistent count and a head whose page now holds data.
+        header[12..20].copy_from_slice(&4u64.to_le_bytes());
+        header[20..28].copy_from_slice(&99u64.to_le_bytes());
+        disk.write_page(0, &header).unwrap();
+        disk.write_page(4, &[33; PAGE_SIZE]).unwrap();
+        disk.write_page(5, &[44; PAGE_SIZE]).unwrap();
+        disk.write_page(6, &[66; PAGE_SIZE]).unwrap(); // unrelated live page
+        let mut log = LogManager::new(file.path()).unwrap();
+        log.append_record(
+            0,
+            LogRecordKind::FreelistCheckpoint { page_count: 7, pages: vec![4, 5] },
+        )
+        .unwrap();
+        let reserved = log.append_record(1, LogRecordKind::PageReserve { page_id: 4 }).unwrap();
+        log.append_record(
+            1,
+            LogRecordKind::PageUpdate {
+                page_id: 4,
+                redo_data: &[11; PAGE_SIZE],
+                undo_data: &[0; PAGE_SIZE],
+            },
+        )
+        .unwrap();
+        log.append_record(
+            1,
+            LogRecordKind::PageUpdate {
+                page_id: 4,
+                redo_data: &[0; PAGE_SIZE],
+                undo_data: &[11; PAGE_SIZE],
+            },
+        )
+        .unwrap();
+        log.append_record(1, LogRecordKind::LifecycleCancel { target_lsn: reserved }).unwrap();
+        log.append_record(2, LogRecordKind::PageReserve { page_id: 4 }).unwrap();
+        log.append_record(
+            2,
+            LogRecordKind::PageUpdate {
+                page_id: 4,
+                redo_data: &[77; PAGE_SIZE],
+                undo_data: &[0; PAGE_SIZE],
+            },
+        )
+        .unwrap();
+        log.append_record(2, LogRecordKind::Commit).unwrap();
+        log.append_record(1, LogRecordKind::PageReserve { page_id: 5 }).unwrap();
+        log.append_record(
+            1,
+            LogRecordKind::PageUpdate {
+                page_id: 5,
+                redo_data: &[55; PAGE_SIZE],
+                undo_data: &[44; PAGE_SIZE],
+            },
+        )
+        .unwrap();
+        // Crash before extending the file for an appended loser reservation.
+        let end = log.append_record(1, LogRecordKind::PageReserve { page_id: 7 }).unwrap();
+        log.flush_through(end).unwrap();
+        drop(log);
+        for _ in 0..2 {
+            // recovery is idempotent after the checkpoint/WAL replacement
+            recover_from_wal(file.path(), &mut disk).unwrap();
+            let allocator = read_checkpoint(&mut disk).unwrap().unwrap();
+            assert_eq!(allocator.free, BTreeSet::from([5, 7]));
+            assert_eq!(allocator.page_count, 8);
+            for (id, expected) in [(4, 77), (6, 66)] {
+                let mut page = [0; PAGE_SIZE];
+                disk.read_page(id, &mut page).unwrap();
+                assert_eq!(page, [expected; PAGE_SIZE]);
+            }
+        }
+        let scan = read_recovery_log(file.path()).unwrap();
+        assert!(scan.records.is_empty());
+        assert_eq!(scan.last_assigned_lsn, end);
     }
 }
