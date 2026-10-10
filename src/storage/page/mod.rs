@@ -76,24 +76,30 @@ mod tests {
     }
 
     #[test]
-    fn leaf_delete_removes_existing_key() {
+    fn leaf_delete_repacks_remaining_slots() {
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
 
         page.insert_payload_at(0, 5, 5, None, b"alphavalue").unwrap();
-        page.delete(b"alpha").unwrap();
+        page.insert_payload_at(1, 4, 5, None, b"betavalue").unwrap();
+        page.delete_at(0).unwrap();
 
-        assert!(matches!(page.search(b"alpha").unwrap(), SearchResult::InsertAt(0)));
+        assert_eq!(page.slot_count(), 1);
+        let (_, _, _, range) = page.cell_payload_parts(0).unwrap();
+        assert_eq!(&page.bytes()[range], b"betavalue");
     }
 
     #[test]
-    fn leaf_delete_rejects_missing_key() {
+    fn leaf_delete_rejects_missing_slot() {
         let mut bytes = [0; PAGE_SIZE];
         let mut page = Page::<Write<'_>, Leaf>::init(&mut bytes);
 
-        let result = page.delete(b"missing");
+        let result = page.delete_at(0);
 
-        assert!(matches!(result, Err(PageError::KeyNotFound)));
+        assert!(matches!(
+            result,
+            Err(PageError::InvalidSlotIndex { slot_index: 0, slot_count: 0 })
+        ));
     }
 
     #[test]

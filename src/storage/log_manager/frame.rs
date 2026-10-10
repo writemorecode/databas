@@ -12,7 +12,7 @@ use super::{LogManagerError, LogRecord, LogRecordKind, LogTransaction, TxnId};
 
 const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const FOOTER_MAGIC: [u8; 8] = *b"DBWALFTR";
-const WAL_FORMAT_VERSION: u16 = 2;
+const WAL_FORMAT_VERSION: u16 = 3;
 pub(super) const HEADER_LEN: usize = 8 + 2 + 8 + 4 + 8;
 pub(super) const FOOTER_LEN: usize = 8 + 8 + 4;
 pub(super) const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
@@ -23,6 +23,10 @@ const KIND_COMMIT: u8 = 2;
 const KIND_ROLLBACK: u8 = 3;
 const KIND_PAGE_UPDATE: u8 = 4;
 const KIND_PAGE_ALLOC: u8 = 5;
+const KIND_FREELIST_CHECKPOINT: u8 = 6;
+const KIND_PAGE_RESERVE: u8 = 7;
+const KIND_PAGE_RETIRE: u8 = 8;
+const KIND_LIFECYCLE_CANCEL: u8 = 9;
 
 /// Serializes a complete transaction frame to `writer`.
 ///
@@ -200,9 +204,15 @@ fn scan_log_record_payload<R: Read>(
 ) -> Result<(), LogManagerError> {
     match read_crc_u8(reader, digest, remaining)? {
         KIND_BEGIN | KIND_COMMIT | KIND_ROLLBACK => Ok(()),
-        KIND_PAGE_ALLOC => {
+        KIND_PAGE_ALLOC | KIND_PAGE_RESERVE | KIND_PAGE_RETIRE | KIND_LIFECYCLE_CANCEL => {
             read_crc_u64(reader, digest, remaining)?;
             Ok(())
+        }
+        KIND_FREELIST_CHECKPOINT => {
+            read_crc_u64(reader, digest, remaining)?;
+            let count = read_crc_u32(reader, digest, remaining)? as usize;
+            let len = count.checked_mul(8).ok_or(LogManagerError::PayloadLengthOverflow)?;
+            read_crc_discard(reader, digest, remaining, len)
         }
         KIND_PAGE_UPDATE => {
             read_crc_u64(reader, digest, remaining)?;
@@ -398,6 +408,16 @@ pub(crate) fn read_log_record_kinds_for_test(
                     OwnedLogRecordKind::PageUpdate { page_id }
                 }
                 LogRecordKind::PageAlloc { page_id } => OwnedLogRecordKind::PageAlloc { page_id },
+                LogRecordKind::FreelistCheckpoint { page_count, pages } => {
+                    OwnedLogRecordKind::FreelistCheckpoint { page_count, pages }
+                }
+                LogRecordKind::PageReserve { page_id } => {
+                    OwnedLogRecordKind::PageReserve { page_id }
+                }
+                LogRecordKind::PageRetire { page_id } => OwnedLogRecordKind::PageRetire { page_id },
+                LogRecordKind::LifecycleCancel { target_lsn } => {
+                    OwnedLogRecordKind::LifecycleCancel { target_lsn }
+                }
             };
             records.push((record.txn_id, kind));
         }
@@ -429,6 +449,25 @@ fn deserialize_log_record<'a>(
             let page_id = cursor.read_u64()?;
             LogRecordKind::PageAlloc { page_id }
         }
+        KIND_FREELIST_CHECKPOINT => {
+            let page_count = cursor.read_u64()?;
+            let count = cursor.read_u32()? as usize;
+            // Check the encoded size before allocating memory for an untrusted count.
+            let bytes = cursor
+                .read_slice(count.checked_mul(8).ok_or(LogManagerError::PayloadLengthOverflow)?)?;
+            let pages = bytes
+                .chunks_exact(8)
+                .map(|bytes| {
+                    let mut id = [0; 8];
+                    id.copy_from_slice(bytes);
+                    u64::from_le_bytes(id)
+                })
+                .collect();
+            LogRecordKind::FreelistCheckpoint { page_count, pages }
+        }
+        KIND_PAGE_RESERVE => LogRecordKind::PageReserve { page_id: cursor.read_u64()? },
+        KIND_PAGE_RETIRE => LogRecordKind::PageRetire { page_id: cursor.read_u64()? },
+        KIND_LIFECYCLE_CANCEL => LogRecordKind::LifecycleCancel { target_lsn: cursor.read_u64()? },
         kind => return Err(LogManagerError::UnknownRecordKind { kind }),
     };
     Ok(LogRecord { txn_id, kind })
@@ -473,7 +512,15 @@ fn serialized_record_len<'a>(kind: &LogRecordKind<'a>) -> Result<u64, LogManager
             })?;
             Ok(1 + 8 + 4 + 4 + u64::from(redo_len) + u64::from(undo_len))
         }
-        LogRecordKind::PageAlloc { .. } => Ok(1 + 8),
+        LogRecordKind::PageAlloc { .. }
+        | LogRecordKind::PageReserve { .. }
+        | LogRecordKind::PageRetire { .. }
+        | LogRecordKind::LifecycleCancel { .. } => Ok(1 + 8),
+        LogRecordKind::FreelistCheckpoint { pages, .. } => {
+            let count = u32::try_from(pages.len())
+                .map_err(|_overflow| LogManagerError::PayloadLengthOverflow)?;
+            Ok(1 + 8 + 4 + u64::from(count) * 8)
+        }
     }
 }
 
@@ -541,6 +588,28 @@ fn write_log_record_payload<'a, W: Write>(
         LogRecordKind::PageAlloc { page_id } => {
             write_crc_u8(writer, digest, KIND_PAGE_ALLOC)?;
             write_crc_u64(writer, digest, *page_id)?;
+        }
+        LogRecordKind::FreelistCheckpoint { page_count, pages } => {
+            write_crc_u8(writer, digest, KIND_FREELIST_CHECKPOINT)?;
+            write_crc_u64(writer, digest, *page_count)?;
+            let count = u32::try_from(pages.len())
+                .map_err(|_overflow| LogManagerError::PayloadLengthOverflow)?;
+            write_crc_u32(writer, digest, count)?;
+            for page in pages {
+                write_crc_u64(writer, digest, *page)?;
+            }
+        }
+        LogRecordKind::PageReserve { page_id } => {
+            write_crc_u8(writer, digest, KIND_PAGE_RESERVE)?;
+            write_crc_u64(writer, digest, *page_id)?;
+        }
+        LogRecordKind::PageRetire { page_id } => {
+            write_crc_u8(writer, digest, KIND_PAGE_RETIRE)?;
+            write_crc_u64(writer, digest, *page_id)?;
+        }
+        LogRecordKind::LifecycleCancel { target_lsn } => {
+            write_crc_u8(writer, digest, KIND_LIFECYCLE_CANCEL)?;
+            write_crc_u64(writer, digest, *target_lsn)?;
         }
     }
     Ok(())
@@ -628,5 +697,108 @@ impl<'a> FrameReader<'a> {
 
     fn read_u64(&mut self) -> Result<u64, LogManagerError> {
         Ok(u64::from_le_bytes(self.read_array::<8>()?))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::storage::log_manager::RecoveryLogRecordKind;
+
+    #[test]
+    fn lifecycle_payloads_roundtrip_and_truncated_frames_are_rejected() {
+        let records = [
+            LogRecord {
+                txn_id: 0,
+                kind: LogRecordKind::FreelistCheckpoint { page_count: 9, pages: vec![4, 7, 8] },
+            },
+            LogRecord { txn_id: 0, kind: LogRecordKind::PageReserve { page_id: 4 } },
+            LogRecord { txn_id: 0, kind: LogRecordKind::PageRetire { page_id: 5 } },
+            LogRecord { txn_id: 0, kind: LogRecordKind::LifecycleCancel { target_lsn: 19 } },
+        ];
+        let mut bytes = Vec::new();
+        serialize_transaction(&mut bytes, 0, &records).unwrap();
+        let decoded = deserialize_transaction(&bytes).unwrap();
+        let kinds: Vec<_> = decoded
+            .records
+            .into_iter()
+            .map(|record| RecoveryLogRecordKind::from_log_record_kind(record.kind).unwrap())
+            .collect();
+        let expected: Vec<_> = records
+            .into_iter()
+            .map(|record| RecoveryLogRecordKind::from_log_record_kind(record.kind).unwrap())
+            .collect();
+        assert_eq!(kinds, expected);
+        for end in 0..bytes.len() {
+            assert!(deserialize_transaction(&bytes[..end]).is_err(), "cut at {end}");
+        }
+    }
+
+    #[test]
+    fn streaming_scan_accepts_all_lifecycle_payloads_and_checks_frame_integrity() {
+        let records = [
+            LogRecord {
+                txn_id: 0,
+                kind: LogRecordKind::FreelistCheckpoint {
+                    page_count: 2048,
+                    pages: (4..2048).collect(),
+                },
+            },
+            LogRecord { txn_id: 0, kind: LogRecordKind::PageReserve { page_id: 4 } },
+            LogRecord { txn_id: 0, kind: LogRecordKind::PageRetire { page_id: 5 } },
+            LogRecord { txn_id: 0, kind: LogRecordKind::LifecycleCancel { target_lsn: 19 } },
+        ];
+        let mut bytes = Vec::new();
+        serialize_transaction(&mut bytes, 0, &records).unwrap();
+        let mut reader = bytes.as_slice();
+        let frame = scan_transaction_frame(&mut reader).unwrap().unwrap();
+        assert_eq!(frame.txn_id, 0);
+        assert_eq!(frame.record_count, 4);
+        assert!(scan_transaction_frame(&mut reader).unwrap().is_none());
+        for end in 1..bytes.len() {
+            assert!(scan_transaction_frame(&mut &bytes[..end]).is_err(), "cut at {end}");
+        }
+        bytes[HEADER_LEN + 1] ^= 1;
+        assert!(matches!(
+            scan_transaction_frame(&mut bytes.as_slice()),
+            Err(LogManagerError::ChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn streaming_scan_bounds_lifecycle_payloads_by_remaining_bytes() {
+        for kind in [KIND_PAGE_RESERVE, KIND_PAGE_RETIRE, KIND_LIFECYCLE_CANCEL] {
+            let payload = [kind];
+            let mut remaining = payload.len();
+            assert!(matches!(
+                scan_log_record_payload(
+                    &mut payload.as_slice(),
+                    &mut CRC32.digest(),
+                    &mut remaining
+                ),
+                Err(LogManagerError::TruncatedFrame { .. })
+            ));
+        }
+        let mut payload = vec![KIND_FREELIST_CHECKPOINT];
+        payload.extend_from_slice(&9u64.to_le_bytes());
+        payload.extend_from_slice(&u32::MAX.to_le_bytes());
+        let mut remaining = payload.len();
+        assert!(matches!(
+            scan_log_record_payload(&mut payload.as_slice(), &mut CRC32.digest(), &mut remaining),
+            Err(LogManagerError::TruncatedFrame { .. } | LogManagerError::PayloadLengthOverflow)
+        ));
+    }
+
+    #[test]
+    fn snapshot_count_is_bounded_by_payload_before_allocating_memory() {
+        let mut payload = vec![KIND_FREELIST_CHECKPOINT];
+        payload.extend_from_slice(&9u64.to_le_bytes());
+        payload.extend_from_slice(&u32::MAX.to_le_bytes());
+        let result = deserialize_log_record(&mut FrameReader::new(&payload), 0);
+        assert!(matches!(
+            result,
+            Err(LogManagerError::TruncatedFrame { .. } | LogManagerError::PayloadLengthOverflow)
+        ));
     }
 }

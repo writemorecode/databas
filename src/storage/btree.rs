@@ -31,6 +31,7 @@ mod payload;
 mod rebalance;
 mod rebalance_policy;
 mod rebalance_repair;
+mod reclaim;
 mod record;
 mod root;
 mod search;

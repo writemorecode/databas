@@ -13,8 +13,9 @@ use crate::core::{
     error::{InternalError, InvariantViolation, StorageError, StorageResult},
 };
 use crate::storage::{
-    log_manager::{LogManager, LogRecordKind, Lsn, TxnId},
+    log_manager::{LogManager, LogRecord, LogRecordKind, Lsn, TxnId},
     page,
+    page_allocator::{PageAction, PageAllocator, invalid},
 };
 
 #[derive(Debug, Clone)]
@@ -54,6 +55,8 @@ pub(crate) struct TransactionSavepoint {
     pub(crate) txn_id: TxnId,
     /// Undo-log boundary before the statement made any page changes.
     undo_len: usize,
+    /// Logical allocator event boundary; cancellations use stable WAL LSNs.
+    lifecycle_len: usize,
 }
 
 /// WAL metadata returned after a transactional page update is logged.
@@ -80,6 +83,7 @@ pub(crate) struct TransactionManager {
     max_txn_id: TxnId,
     /// Transactions currently accepted by the storage runtime, keyed by id.
     transactions: HashMap<TxnId, ActiveTransaction>,
+    pub(crate) allocator: Option<PageAllocator>,
 }
 
 /// In-memory state for one transaction owned by the storage runtime.
@@ -93,6 +97,7 @@ struct ActiveTransaction {
     /// intermediate images before finally restoring the transaction's original
     /// image.
     undo_pages: Vec<PageUndo>,
+    lifecycle: Vec<Lsn>,
     /// LSN of an appended rollback outcome awaiting or having completed flush.
     ///
     /// `Some` means physical page restoration has finished and rollback
@@ -119,7 +124,7 @@ impl TransactionManager {
     /// recovery and WAL reopening so transaction ids remain monotonic across
     /// process restarts.
     pub(crate) fn new(max_txn_id: TxnId) -> Self {
-        Self { max_txn_id, transactions: HashMap::new() }
+        Self { max_txn_id, transactions: HashMap::new(), allocator: None }
     }
 
     /// Begins a transaction and appends its `Begin` WAL record.
@@ -135,8 +140,9 @@ impl TransactionManager {
         self.transactions.insert(
             txn_id,
             ActiveTransaction {
-                undo_pages: Vec::new(),
                 begin_lsn,
+                undo_pages: Vec::new(),
+                lifecycle: Vec::new(),
                 rollback_lsn: None,
                 poisoned: false,
             },
@@ -144,19 +150,15 @@ impl TransactionManager {
         Ok(txn_id)
     }
 
-    /// Records a page allocation for a transaction, if it exists.
-    ///
-    /// Page allocations outside a transaction are allowed and do not write WAL.
-    /// Allocated page ids are currently not reclaimed during rollback; the WAL
-    /// record exists so crash recovery can make committed allocations visible
-    /// before replaying their updates.
+    /// Records an append allocation for raw storage without a database header.
+    /// Raw allocations outside a transaction do not write WAL; rollback does not
+    /// reclaim them. Database allocations instead use logical reservations.
     pub(crate) fn record_page_alloc(
         &mut self,
         log: &mut LogManager,
         txn_id: TxnId,
         page_id: PageId,
     ) -> StorageResult<Option<Lsn>> {
-        // Allocated page ids are not reclaimed on rollback until a freelist exists.
         if !self.transactions.contains_key(&txn_id) {
             return Ok(None);
         }
@@ -167,6 +169,46 @@ impl TransactionManager {
                 Err(err.into())
             }
         }
+    }
+
+    /// Apply a short independent reservation/retirement operation under the
+    /// transaction-manager latch. Its user owner determines eventual disposition,
+    /// never a physical allocator before-image. Owner 0 is an autocommit operation.
+    pub(crate) fn record_lifecycle(
+        &mut self,
+        log: &mut LogManager,
+        txn_id: Option<TxnId>,
+        page_id: PageId,
+        action: PageAction,
+    ) -> StorageResult<Lsn> {
+        let owner = txn_id.unwrap_or(0);
+        if owner != 0 {
+            self.transaction(owner)?;
+        }
+        let allocator = self.allocator.as_mut().ok_or_else(invalid)?;
+        allocator.validate(owner, page_id, action)?;
+        let kind = match action {
+            PageAction::Reserve => LogRecordKind::PageReserve { page_id },
+            PageAction::Retire => LogRecordKind::PageRetire { page_id },
+        };
+        let lsn = match log.append_record(owner, kind) {
+            Ok(lsn) => lsn,
+            Err(error) => {
+                self.record_failure(owner);
+                return Err(error.into());
+            }
+        };
+        allocator.apply(owner, lsn, page_id, action)?;
+        if owner == 0 {
+            log.flush_through(lsn)?;
+        } else {
+            self.transactions
+                .get_mut(&owner)
+                .ok_or_else(no_active_transaction)?
+                .lifecycle
+                .push(lsn);
+        }
+        Ok(lsn)
     }
 
     /// Appends a full-page update record for a transaction, if any.
@@ -269,6 +311,11 @@ impl TransactionManager {
         };
         self.transactions.remove(&txn_id);
         log.flush_through(commit_lsn)?;
+        // Do not publish frees on an ambiguous commit-flush failure. Recovery
+        // resolves them; keeping reservations quarantined is conservative.
+        if let Some(allocator) = &mut self.allocator {
+            allocator.finish(txn_id, true);
+        }
         Ok(())
     }
 
@@ -276,7 +323,11 @@ impl TransactionManager {
     pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
         let active = self.transaction(txn_id)?;
 
-        Ok(TransactionSavepoint { txn_id, undo_len: active.undo_pages.len() })
+        Ok(TransactionSavepoint {
+            txn_id,
+            undo_len: active.undo_pages.len(),
+            lifecycle_len: active.lifecycle.len(),
+        })
     }
 
     /// Logs compensation records and returns page images that restore a savepoint.
@@ -347,10 +398,13 @@ impl TransactionManager {
     /// the fallback undo state needed by a full transaction rollback.
     pub(crate) fn complete_savepoint_rollback(
         &mut self,
+        log: &mut LogManager,
         savepoint: TransactionSavepoint,
     ) -> StorageResult<()> {
-        let active =
-            self.transactions.get_mut(&savepoint.txn_id).ok_or_else(no_active_transaction)?;
+        let active = self.transaction(savepoint.txn_id)?;
+        if savepoint.lifecycle_len > active.lifecycle.len() {
+            return Err(invalid());
+        }
         if savepoint.undo_len > active.undo_pages.len() {
             return Err(invariant(InvariantViolation::InvalidTransactionSavepoint {
                 txn_id: savepoint.txn_id,
@@ -359,6 +413,29 @@ impl TransactionManager {
             }));
         }
 
+        // Validate against a private candidate, then append the entire batch in
+        // one checksummed frame. Do NOT release even one page while its physical
+        // undo entries remain available to fallback rollback: another writer
+        // could reuse it before a later cancellation append failed.
+        if active.lifecycle.len() > savepoint.lifecycle_len {
+            let mut allocator = self.allocator.clone().ok_or_else(invalid)?;
+            let mut records = Vec::new();
+            for &target_lsn in active.lifecycle[savepoint.lifecycle_len..].iter().rev() {
+                allocator.cancel(savepoint.txn_id, target_lsn)?;
+                records.push(LogRecord {
+                    txn_id: savepoint.txn_id,
+                    kind: LogRecordKind::LifecycleCancel { target_lsn },
+                });
+            }
+            if let Err(error) = log.append_transaction(savepoint.txn_id, &records) {
+                self.record_failure(savepoint.txn_id);
+                return Err(error.into());
+            }
+            self.allocator = Some(allocator);
+        }
+        let active =
+            self.transactions.get_mut(&savepoint.txn_id).ok_or_else(no_active_transaction)?;
+        active.lifecycle.truncate(savepoint.lifecycle_len);
         active.undo_pages.truncate(savepoint.undo_len);
         Ok(())
     }
@@ -403,17 +480,19 @@ impl TransactionManager {
     ) -> StorageResult<()> {
         let active = self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
         active.poisoned = true;
-        if let Some(rollback_lsn) = active.rollback_lsn {
-            log.flush_through(rollback_lsn)?;
-            self.transactions.remove(&txn_id);
-            return Ok(());
-        }
-
-        let rollback_lsn = log.append_record(txn_id, LogRecordKind::Rollback)?;
-        self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?.rollback_lsn =
-            Some(rollback_lsn);
+        let rollback_lsn = match active.rollback_lsn {
+            Some(lsn) => lsn,
+            None => {
+                let lsn = log.append_record(txn_id, LogRecordKind::Rollback)?;
+                active.rollback_lsn = Some(lsn);
+                lsn
+            }
+        };
         log.flush_through(rollback_lsn)?;
         self.transactions.remove(&txn_id);
+        if let Some(allocator) = &mut self.allocator {
+            allocator.finish(txn_id, false);
+        }
         Ok(())
     }
 
@@ -648,7 +727,7 @@ mod tests {
         transactions.record_page_update(&mut log, txn_id, 7, &after_first, &after_second).unwrap();
 
         let restore_pages = transactions.rollback_to_savepoint(&mut log, savepoint).unwrap();
-        transactions.complete_savepoint_rollback(savepoint).unwrap();
+        transactions.complete_savepoint_rollback(&mut log, savepoint).unwrap();
 
         assert_eq!(restore_pages.len(), 1);
         assert_eq!(restore_pages[0].page_id, 7);
@@ -676,7 +755,7 @@ mod tests {
         let mut transactions = TransactionManager::new(0);
 
         let txn_id = transactions.begin(&mut log).unwrap();
-        let savepoint = TransactionSavepoint { txn_id, undo_len: 1 };
+        let savepoint = TransactionSavepoint { txn_id, undo_len: 1, lifecycle_len: 0 };
         let result = transactions.rollback_to_savepoint(&mut log, savepoint);
 
         assert!(matches!(
@@ -837,5 +916,128 @@ mod tests {
                 (txn_id, OwnedLogRecordKind::Commit),
             ]
         );
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+#[allow(clippy::unwrap_used)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::storage::log_manager::read_recovery_log;
+    use crate::storage::page_allocator::replay_lifecycle;
+    use std::collections::BTreeSet;
+
+    fn setup(path: &std::path::Path) -> (TransactionManager, LogManager) {
+        let mut log = LogManager::new(path).unwrap();
+        log.append_record(
+            0,
+            LogRecordKind::FreelistCheckpoint { page_count: 6, pages: vec![4, 5] },
+        )
+        .unwrap();
+        let mut manager = TransactionManager::new(0);
+        manager.allocator = Some(PageAllocator::new(6, &[4, 5]).unwrap());
+        (manager, log)
+    }
+
+    #[test]
+    fn failed_lifecycle_append_poisons_transaction_without_changing_allocator() {
+        for action in [PageAction::Reserve, PageAction::Retire] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let (mut manager, mut log) = setup(file.path());
+            let txn = manager.begin(&mut log).unwrap();
+            if action == PageAction::Retire {
+                manager.record_lifecycle(&mut log, Some(txn), 4, PageAction::Reserve).unwrap();
+            }
+            let before = manager.allocator.as_ref().unwrap().free.clone();
+            log.fail_next_append_after_bytes_for_test(32);
+            assert!(manager.record_lifecycle(&mut log, Some(txn), 4, action).is_err());
+            assert_eq!(manager.allocator.as_ref().unwrap().free, before);
+            assert_eq!(manager.allocator.as_ref().unwrap().page_count, 6);
+            assert!(manager.transaction_is_poisoned(txn).unwrap());
+            assert!(manager.commit(&mut log, txn).is_err());
+        }
+    }
+
+    #[test]
+    fn rejected_lifecycle_operations_do_not_enter_wal_or_change_membership() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let (mut manager, mut log) = setup(file.path());
+        let txn = manager.begin(&mut log).unwrap();
+        let lsn = log.highest_appended_lsn();
+        for (owner, page, action) in [
+            (txn, 3, PageAction::Retire),
+            (txn, 6, PageAction::Retire),
+            (txn + 1, 4, PageAction::Reserve),
+        ] {
+            assert!(manager.record_lifecycle(&mut log, Some(owner), page, action).is_err());
+            assert_eq!(log.highest_appended_lsn(), lsn);
+            assert_eq!(manager.allocator.as_ref().unwrap().free, BTreeSet::from([4, 5]));
+        }
+    }
+
+    #[test]
+    fn interrupted_cancellation_batch_keeps_all_reservations_and_physical_fallback_undo() {
+        for bytes in [0, 1, 30, 40, 50] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let (mut manager, mut log) = setup(file.path());
+            let txn = manager.begin(&mut log).unwrap();
+            let savepoint = manager.statement_savepoint(txn).unwrap();
+            for page in [4, 5] {
+                manager.record_lifecycle(&mut log, Some(txn), page, PageAction::Reserve).unwrap();
+                manager
+                    .record_page_update(&mut log, txn, page, &[0; PAGE_SIZE], &[9; PAGE_SIZE])
+                    .unwrap();
+            }
+            manager.rollback_to_savepoint(&mut log, savepoint).unwrap();
+            log.fail_next_append_after_bytes_for_test(bytes);
+            assert!(manager.complete_savepoint_rollback(&mut log, savepoint).is_err());
+            assert!(manager.allocator.as_ref().unwrap().free.is_empty());
+            let fallback = manager.prepare_rollback_pages(txn).unwrap();
+            assert_eq!(fallback.pages.len(), 2);
+            assert!(fallback.pages.iter().all(|page| page.image == [0; PAGE_SIZE]));
+            assert!(manager.transaction_is_poisoned(txn).unwrap());
+            drop(log);
+            let scan = read_recovery_log(file.path()).unwrap();
+            assert_eq!(
+                replay_lifecycle(&scan.records).unwrap().unwrap().free,
+                BTreeSet::from([4, 5])
+            );
+        }
+    }
+
+    #[test]
+    fn failed_outcome_flush_quarantines_pages_until_retry_or_recovery() {
+        for commit in [false, true] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let (mut manager, mut log) = setup(file.path());
+            let txn = manager.begin(&mut log).unwrap();
+            manager.record_lifecycle(&mut log, Some(txn), 4, PageAction::Reserve).unwrap();
+            // Reserve and then retire the same page: either successful outcome frees it.
+            manager.record_lifecycle(&mut log, Some(txn), 4, PageAction::Retire).unwrap();
+            log.fail_next_flush_for_test();
+            let result = if commit {
+                manager.commit(&mut log, txn)
+            } else {
+                manager.finish_rollback(&mut log, txn)
+            };
+            assert!(result.is_err());
+            assert!(!manager.allocator.as_ref().unwrap().free.contains(&4));
+            assert_eq!(manager.transaction_is_active(txn), !commit);
+            let outcome_lsn = log.highest_appended_lsn();
+            if commit {
+                log.flush_through(outcome_lsn.unwrap()).unwrap();
+            } else {
+                assert!(manager.commit(&mut log, txn).is_err());
+                manager.finish_rollback(&mut log, txn).unwrap();
+                assert_eq!(log.highest_appended_lsn(), outcome_lsn); // retry does not append again
+                assert!(manager.allocator.as_ref().unwrap().free.contains(&4));
+            }
+            drop(log);
+            let scan = read_recovery_log(file.path()).unwrap();
+            assert_eq!(
+                replay_lifecycle(&scan.records).unwrap().unwrap().free,
+                BTreeSet::from([4, 5])
+            );
+        }
     }
 }

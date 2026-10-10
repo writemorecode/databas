@@ -7,7 +7,8 @@ use crate::{
     },
     storage::{
         disk_manager::DiskManager,
-        log_manager::{LogManager, Lsn, TxnId},
+        log_manager::{LogManager, LogRecordKind, Lsn, TxnId},
+        page_allocator::{PageAction, read_checkpoint},
         recovery::recover_from_wal,
         transaction_manager::{
             LoggedPageUpdate, PageRestore, TransactionManager, TransactionRollback,
@@ -42,14 +43,28 @@ impl StorageRuntime {
     pub(crate) fn new(path: PathBuf, mut disk: DiskManager) -> StorageResult<Self> {
         disk.lock_exclusive()?;
         let recovery = recover_from_wal(&path, &mut disk)?;
-        let log = LogManager::new(&path)?;
+        let mut log = LogManager::new(&path)?;
         let max_txn_id = recovery.max_txn_id.max(log.highest_txn_id());
+        let mut transactions = make_transaction_manager(max_txn_id);
+        if let Some(allocator) = read_checkpoint(&mut disk)? {
+            // Trunks can be consumed/overwritten after this snapshot is durable.
+            // Record owner 0 denotes an independent, atomic system operation.
+            let lsn = log.append_record(
+                0,
+                LogRecordKind::FreelistCheckpoint {
+                    page_count: allocator.page_count,
+                    pages: allocator.free.iter().copied().collect(),
+                },
+            )?;
+            log.flush_through(lsn)?;
+            transactions.allocator = Some(allocator);
+        }
         Ok(Self {
             checkpoint: Mutex::new(Checkpointer { path: path.clone() }),
             path,
             disk: Mutex::new(disk),
             log: Mutex::new(log),
-            transactions: Mutex::new(make_transaction_manager(max_txn_id)),
+            transactions: Mutex::new(transactions),
         })
     }
 
@@ -63,8 +78,44 @@ impl StorageRuntime {
         &self.path
     }
 
+    pub(crate) fn has_page_allocator(&self) -> StorageResult<bool> {
+        Ok(Self::lock(&self.transactions, "transaction manager")?.allocator.is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn page_count(&self) -> StorageResult<u64> {
+        Ok(Self::lock(&self.disk, "disk manager")?.page_count())
+    }
+
     pub(crate) fn new_page(&self) -> StorageResult<PageId> {
         Ok(Self::lock(&self.disk, "disk manager")?.new_page()?)
+    }
+
+    /// Reserve before touching page contents; allocator changes do not enter
+    /// the user's full-page undo log. Lock order: transactions, log, disk.
+    pub(crate) fn reserve_page(&self, txn_id: Option<TxnId>) -> StorageResult<PageId> {
+        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let mut log = Self::lock(&self.log, "log manager")?;
+        let page_id = transactions
+            .allocator
+            .as_ref()
+            .ok_or_else(crate::storage::page_allocator::invalid)?
+            .next_page();
+        transactions.record_lifecycle(&mut log, txn_id, page_id, PageAction::Reserve)?;
+        if let Err(error) = Self::lock(&self.disk, "disk manager")?.ensure_page_exists(page_id) {
+            if let Some(txn) = txn_id {
+                transactions.record_failure(txn);
+            }
+            return Err(error.into());
+        }
+        Ok(page_id)
+    }
+
+    pub(crate) fn retire_page(&self, txn_id: Option<TxnId>, page_id: PageId) -> StorageResult<()> {
+        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let mut log = Self::lock(&self.log, "log manager")?;
+        transactions.record_lifecycle(&mut log, txn_id, page_id, PageAction::Retire)?;
+        Ok(())
     }
 
     pub(crate) fn record_page_alloc(
@@ -188,8 +239,9 @@ impl StorageRuntime {
         &self,
         savepoint: TransactionSavepoint,
     ) -> StorageResult<()> {
-        Self::lock(&self.transactions, "transaction manager")?
-            .complete_savepoint_rollback(savepoint)
+        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let mut log = Self::lock(&self.log, "log manager")?;
+        transactions.complete_savepoint_rollback(&mut log, savepoint)
     }
 
     pub(crate) fn prepare_rollback_pages(
@@ -258,6 +310,45 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
+
+    #[test]
+    fn checkpoint_retains_reservations_started_during_cache_flush_for_crash_recovery() {
+        use crate::storage::{
+            database_header::DatabaseHeader,
+            page_allocator::{PageAllocator, write_checkpoint},
+        };
+
+        let file = NamedTempFile::new().unwrap();
+        let mut disk = DiskManager::new(file.path()).unwrap();
+        disk.ensure_page_exists(5).unwrap();
+        disk.write_page(0, &DatabaseHeader::encode_page()).unwrap();
+        write_checkpoint(&mut disk, &PageAllocator::new(6, &[4, 5]).unwrap()).unwrap();
+        disk.sync().unwrap();
+        let runtime = StorageRuntime::new(file.path().to_path_buf(), disk).unwrap();
+        assert_eq!(runtime.reserve_page(None).unwrap(), 4);
+        // Consume the old freelist trunk: recovery must use the WAL baseline.
+        runtime.write_page(4, &[42; PAGE_SIZE]).unwrap();
+
+        let outcome = runtime
+            .checkpoint(|| {
+                // These operations occur after horizon capture but before WAL
+                // publication. The user's pending reservation is a crash loser;
+                // the independent system reservation must remain allocated.
+                let txn = runtime.begin_transaction()?;
+                assert_eq!(runtime.reserve_page(Some(txn))?, 5);
+                assert_eq!(runtime.reserve_page(None)?, 6);
+                Ok(None)
+            })
+            .unwrap();
+        assert_eq!(outcome, CheckpointOutcome::Partial);
+        drop(runtime);
+
+        let disk = DiskManager::new(file.path()).unwrap();
+        let reopened = StorageRuntime::new(file.path().to_path_buf(), disk).unwrap();
+        assert_eq!(reopened.page_count().unwrap(), 7);
+        assert_eq!(reopened.reserve_page(None).unwrap(), 5);
+        assert_eq!(reopened.reserve_page(None).unwrap(), 7);
+    }
 
     #[test]
     fn poisoned_manager_lock_is_reported_as_an_internal_error() {

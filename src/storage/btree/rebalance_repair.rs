@@ -32,6 +32,8 @@ impl TreeCursor {
         *root_guard.page_mut() = child_snapshot;
         drop(root_guard);
 
+        drop(child_pin);
+        self.page_cache.free_page(self.txn_id, child_page_id)?;
         self.clear_root_sibling_links(root_page_id)?;
         self.set_page_state(root_page_id);
         Ok(())

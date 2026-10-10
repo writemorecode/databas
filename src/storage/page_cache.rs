@@ -146,6 +146,7 @@ struct CacheMeta {
 }
 
 struct PageCacheInner {
+    has_freelist: bool,
     runtime: Arc<StorageRuntime>,
     meta: Mutex<CacheMeta>,
     frames: Vec<Frame>,
@@ -191,8 +192,10 @@ impl PageCache {
             .map_err(|source| PageCacheError::FrameAllocationFailed { frame_count, source })?;
         frames.extend((0..frame_count).map(|_| Frame::empty()));
 
+        let has_freelist = runtime.has_page_allocator().map_err(runtime_error)?;
         Ok(Self {
             inner: Arc::new(PageCacheInner {
+                has_freelist,
                 runtime,
                 meta: Mutex::new(CacheMeta {
                     page_table: HashMap::new(),
@@ -223,7 +226,15 @@ impl PageCache {
     /// Cache misses use CLOCK replacement and may evict a dirty page.
     pub(crate) fn fetch_page(&self, page_id: PageId) -> PageCacheResult<PinGuard> {
         let mut meta = self.inner.lock_meta()?;
-        if let Some(frame_id) = self.resident_frame_id(&meta, page_id)? {
+        self.fetch_page_locked(&mut meta, page_id)
+    }
+
+    fn fetch_page_locked(
+        &self,
+        meta: &mut CacheMeta,
+        page_id: PageId,
+    ) -> PageCacheResult<PinGuard> {
+        if let Some(frame_id) = self.resident_frame_id(meta, page_id)? {
             let frame = &self.inner.frames[frame_id];
             let pin_count = frame
                 .pin_count
@@ -235,26 +246,46 @@ impl PageCache {
             return Ok(PinGuard::new(Arc::clone(&self.inner), frame_id, page_id));
         }
 
-        let frame_id =
-            self.select_victim_frame(&mut meta).ok_or(PageCacheError::NoEvictableFrame)?;
-        self.replace_frame(&mut meta, frame_id, page_id)?;
+        let frame_id = self.select_victim_frame(meta).ok_or(PageCacheError::NoEvictableFrame)?;
+        self.replace_frame(meta, frame_id, page_id)?;
         Ok(PinGuard::new(Arc::clone(&self.inner), frame_id, page_id))
     }
 
-    /// Allocates a new on-disk page and returns it pinned in the cache.
+    /// Reserves a free page (or extends the file) and returns it zeroed and pinned.
     ///
-    /// A victim frame is selected before allocation so a full pinned cache
-    /// returns `NoEvictableFrame` without growing the file.
+    /// Keep the residency latch from admission through pinning: a competing fetch
+    /// must not consume the last frame after a reservation has entered the WAL.
+    /// Raw storage without a database header retains append-only allocation.
     pub(crate) fn new_page(&self, txn_id: Option<TxnId>) -> PageCacheResult<(PageId, PinGuard)> {
-        let mut meta = self.inner.lock_meta()?;
-        let frame_id =
+        let pin = {
+            let mut meta = self.inner.lock_meta()?;
             self.select_victim_frame(&mut meta).ok_or(PageCacheError::NoEvictableFrame)?;
-        let page_id = self.inner.runtime.new_page().map_err(runtime_error)?;
-        if let Err(err) = self.inner.runtime.record_page_alloc(txn_id, page_id) {
-            return Err(PageCacheError::Storage(Box::new(err)));
+            let page_id = if self.inner.has_freelist {
+                self.inner.runtime.reserve_page(txn_id).map_err(runtime_error)?
+            } else {
+                let id = self.inner.runtime.new_page().map_err(runtime_error)?;
+                self.inner.runtime.record_page_alloc(txn_id, id).map_err(runtime_error)?;
+                id
+            };
+            // Retired pages may still be resident; the shared fetch path must
+            // preserve a single frame per page id.
+            self.fetch_page_locked(&mut meta, page_id)?
+        };
+        if self.inner.has_freelist {
+            // Physical undo must restore the previous contents before rollback
+            // releases the logical reservation to another writer.
+            pin.write(txn_id)?.page_mut().fill(0);
         }
-        self.replace_frame(&mut meta, frame_id, page_id)?;
-        Ok((page_id, PinGuard::new(Arc::clone(&self.inner), frame_id, page_id)))
+        Ok((pin.page_id, pin))
+    }
+
+    /// Defers reuse until commit. Callers must first unlink all references and
+    /// release page guards; raw storage has no reclamation metadata.
+    pub(crate) fn free_page(&self, txn_id: Option<TxnId>, id: PageId) -> PageCacheResult<()> {
+        if self.inner.has_freelist {
+            self.inner.runtime.retire_page(txn_id, id).map_err(runtime_error)?;
+        }
+        Ok(())
     }
 
     /// Flushes one resident page if dirty.
@@ -1630,6 +1661,64 @@ mod loom_tests {
     }
 
     #[test]
+    fn allocation_and_fetch_race_preserves_capacity_and_reservation_membership() {
+        for reuse in [false, true] {
+            check_model(move || {
+                use crate::storage::{
+                    database_header::DatabaseHeader,
+                    log_manager::{RecoveryLogRecordKind, read_recovery_log},
+                };
+                let file = NamedTempFile::new().unwrap();
+                let mut disk = DiskManager::new(file.path()).unwrap();
+                disk.ensure_page_exists(4).unwrap();
+                disk.write_page(0, &DatabaseHeader::encode_page()).unwrap();
+                disk.write_page(1, &[17; PAGE_SIZE]).unwrap();
+                let runtime = Arc::new(StorageRuntime::new(file.path().to_owned(), disk).unwrap());
+                if reuse {
+                    runtime.retire_page(None, 4).unwrap();
+                }
+                let cache = PageCache::new(Arc::clone(&runtime), 1).unwrap();
+                drop(cache.fetch_page(1).unwrap());
+                let writer = cache.clone();
+                let allocation = thread::spawn(move || match writer.new_page(None) {
+                    Ok((id, pin)) => {
+                        assert_eq!(id, if reuse { 4 } else { 5 });
+                        assert_eq!(pin.read().unwrap().page(), &[0; PAGE_SIZE]);
+                        thread::yield_now();
+                        true
+                    }
+                    Err(PageCacheError::NoEvictableFrame) => false,
+                    Err(error) => panic!("allocation: {error}"),
+                });
+                let reader = cache.clone();
+                let fetch = thread::spawn(move || match reader.fetch_page(1) {
+                    Ok(pin) => {
+                        thread::yield_now();
+                        assert_guard_matches_frame(&pin, 17);
+                    }
+                    Err(PageCacheError::NoEvictableFrame) => {}
+                    Err(error) => panic!("fetch: {error}"),
+                });
+                let allocated = allocation.join().unwrap();
+                fetch.join().unwrap();
+                let scan = read_recovery_log(file.path()).unwrap();
+                assert_eq!(
+                    scan.records
+                        .iter()
+                        .filter(|record| matches!(
+                            record.kind,
+                            RecoveryLogRecordKind::PageReserve { .. }
+                        ))
+                        .count(),
+                    usize::from(allocated)
+                );
+                assert_eq!(runtime.page_count().unwrap(), 5 + u64::from(allocated && !reuse));
+                assert_cache_consistent(&cache);
+            });
+        }
+    }
+
+    #[test]
     fn concurrent_hits_keep_each_live_pin_counted() {
         check_model(|| {
             let (_file, cache) = cache_with_pages(&[17], 1);
@@ -1779,5 +1868,72 @@ mod loom_tests {
             assert!(successes.load(LoomOrdering::Relaxed) >= 1);
             assert_cache_consistent(&cache);
         });
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+#[allow(clippy::unwrap_used)]
+mod allocation_tests {
+    use super::*;
+    use crate::storage::{
+        database_header::DatabaseHeader, disk_manager::DiskManager, log_manager::read_recovery_log,
+    };
+
+    fn cache(path: &std::path::Path, frames: usize) -> PageCache {
+        let mut disk = DiskManager::new(path).unwrap();
+        if disk.page_count() == 0 {
+            disk.ensure_page_exists(4).unwrap();
+            disk.write_page(0, &DatabaseHeader::encode_page()).unwrap();
+            disk.write_page(4, &[91; PAGE_SIZE]).unwrap();
+        }
+        PageCache::new(Arc::new(StorageRuntime::new(path.to_owned(), disk).unwrap()), frames)
+            .unwrap()
+    }
+
+    #[test]
+    fn pinned_cache_rejects_reuse_and_growth_without_a_wal_reservation() {
+        for reuse in [false, true] {
+            for transactional in [false, true] {
+                let file = tempfile::NamedTempFile::new().unwrap();
+                let cache = cache(file.path(), 1);
+                let runtime = &cache.inner.runtime;
+                if reuse {
+                    cache.free_page(None, 4).unwrap();
+                }
+                let txn = transactional.then(|| runtime.begin_transaction().unwrap());
+                let pinned = cache.fetch_page(1).unwrap();
+                let before = read_recovery_log(file.path()).unwrap();
+                for _ in 0..3 {
+                    assert!(matches!(cache.new_page(txn), Err(PageCacheError::NoEvictableFrame)));
+                }
+                assert_eq!(runtime.page_count().unwrap(), 5);
+                assert_eq!(read_recovery_log(file.path()).unwrap(), before);
+                drop(pinned);
+                let (id, pin) = cache.new_page(txn).unwrap();
+                assert_eq!(id, if reuse { 4 } else { 5 });
+                assert_eq!(pin.read().unwrap().page(), &[0; PAGE_SIZE]);
+            }
+        }
+    }
+
+    #[test]
+    fn reused_resident_page_has_one_frame_and_is_zeroed_after_reopen() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        {
+            let cache = cache(file.path(), 2);
+            drop(cache.fetch_page(4).unwrap());
+            cache.free_page(None, 4).unwrap();
+            let (id, pin) = cache.new_page(None).unwrap();
+            assert_eq!(id, 4);
+            let other = cache.fetch_page(id).unwrap();
+            assert_eq!(pin.frame_id, other.frame_id);
+            assert_eq!(other.read().unwrap().page(), &[0; PAGE_SIZE]);
+            drop((pin, other));
+            cache.flush_all().unwrap();
+            cache.inner.runtime.sync_database_file().unwrap();
+        }
+        let cache = cache(file.path(), 1);
+        assert_eq!(cache.fetch_page(4).unwrap().read().unwrap().page(), &[0; PAGE_SIZE]);
+        assert_eq!(cache.new_page(None).unwrap().0, 5);
     }
 }

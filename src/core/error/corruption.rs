@@ -37,6 +37,8 @@ pub enum CorruptionKind {
     InvalidFileSize { size: u64, page_size: usize },
     #[error("missing database header")]
     MissingDatabaseHeader,
+    #[error("invalid page freelist")]
+    InvalidFreelist,
     #[error("invalid database magic: expected {expected:?}, got {actual:?}")]
     InvalidDatabaseMagic { expected: [u8; 8], actual: [u8; 8] },
     #[error("unsupported database version: expected {expected}, got {actual}")]

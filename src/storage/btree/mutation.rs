@@ -201,12 +201,15 @@ impl TreeCursor {
             SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound.into()),
         };
         let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
-        let has_capacity = {
+        let (has_capacity, old_overflow) = {
             let leaf_read_guard = leaf_pin_guard.read()?;
             let page = leaf_read_guard.open::<Leaf>()?;
             let old_len = page.cell_len(slot_index)?;
             let needed = self.leaf_cell_local_size(key, value)?;
-            page.total_reclaimable_space()? + old_len >= needed
+            (
+                page.total_reclaimable_space()? + old_len >= needed,
+                page.cell_payload_parts(slot_index)?.2,
+            )
         };
 
         if has_capacity {
@@ -218,6 +221,7 @@ impl TreeCursor {
                 self.set_positioned_state(leaf_page_id, slot_index);
             }
             drop(leaf_pin_guard);
+            self.free_overflow(old_overflow)?;
             self.refresh_path_separators(&tree_path)?;
             return Ok(());
         }
@@ -232,14 +236,21 @@ impl TreeCursor {
     /// Deletes the record identified by `key`.
     pub fn delete(&mut self, key: &[u8]) -> StorageResult<()> {
         let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
-        {
-            let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
-            let mut leaf_guard = leaf_pin_guard.write(self.txn_id)?;
-            let mut page = leaf_guard.open_mut::<Leaf>()?;
-            page.delete(key)?;
+        let slot = match self.search_leaf_slot(leaf_page_id, key)? {
+            SearchResult::Found(slot) => slot,
+            SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound.into()),
+        };
+        let old_overflow = {
+            let pin = self.page_cache.fetch_page(leaf_page_id)?;
+            let mut guard = pin.write(self.txn_id)?;
+            let mut leaf = guard.open_mut::<Leaf>()?;
+            let overflow = leaf.cell_payload_parts(slot)?.2;
+            leaf.delete_at(slot)?;
             self.mark_tree_mutated();
-        }
+            overflow
+        };
 
+        self.free_overflow(old_overflow)?;
         self.set_page_state(leaf_page_id);
         self.rebalance_after_leaf_delete(leaf_page_id, &tree_path)?;
         self.shrink_root_if_empty()?;

@@ -316,6 +316,7 @@ impl TreeCursor {
         prev_page_id: Option<PageId>,
         next_page_id: Option<PageId>,
     ) -> StorageResult<()> {
+        let old_overflow = self.overflow_heads(page_id)?;
         let pin = self.page_cache.fetch_page(page_id)?;
         let mut guard = pin.write(self.txn_id)?;
         let mut leaf = RawLeaf::<Write<'_>>::initialize(guard.page_mut());
@@ -325,7 +326,9 @@ impl TreeCursor {
             let slot_index = leaf.slot_count();
             self.insert_leaf_payload_at(&mut leaf, slot_index, cell.key(), cell.value())?;
         }
-        Ok(())
+        drop(guard);
+        drop(pin);
+        self.free_overflow(old_overflow)
     }
 
     /// Reinitializes an interior page from ordered `children` and sibling links.
@@ -378,10 +381,13 @@ impl TreeCursor {
             }
         }
 
+        let old_overflow = self.overflow_heads(page_id)?;
         let pin = self.page_cache.fetch_page(page_id)?;
         let mut guard = pin.write(self.txn_id)?;
         *guard.page_mut() = page_image;
-        Ok(())
+        drop(guard);
+        drop(pin);
+        self.free_overflow(old_overflow)
     }
 
     /// Returns whether an interior page already matches refreshed child maxima.
@@ -584,6 +590,7 @@ impl TreeCursor {
             if Self::leaf_cells_fit(cells) {
                 self.merge_leaf_pages(left_page_id, leaf_page_id, cells)?;
                 self.remove_child_from_parent(parent_page_id, leaf_page_id)?;
+                self.free_tree_page(leaf_page_id)?;
                 self.set_page_state(left_page_id);
                 return Ok(true);
             }
@@ -598,6 +605,7 @@ impl TreeCursor {
             if Self::leaf_cells_fit(cells) {
                 self.merge_leaf_pages(leaf_page_id, right_page_id, cells)?;
                 self.remove_child_from_parent(parent_page_id, right_page_id)?;
+                self.free_tree_page(right_page_id)?;
                 self.set_page_state(leaf_page_id);
                 return Ok(true);
             }
@@ -736,6 +744,7 @@ impl TreeCursor {
             if Self::interior_children_fit(children) {
                 self.merge_interior_pages(left_page_id, interior_page_id, children)?;
                 self.remove_child_from_parent(parent_page_id, interior_page_id)?;
+                self.free_tree_page(interior_page_id)?;
                 return Ok(true);
             }
             if let Some(split_index) = Self::choose_interior_fitting_split(children) {
@@ -754,6 +763,7 @@ impl TreeCursor {
             if Self::interior_children_fit(children) {
                 self.merge_interior_pages(interior_page_id, right_page_id, children)?;
                 self.remove_child_from_parent(parent_page_id, right_page_id)?;
+                self.free_tree_page(right_page_id)?;
                 return Ok(true);
             }
             if let Some(split_index) = Self::choose_interior_fitting_split(children) {
