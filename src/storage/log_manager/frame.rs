@@ -204,9 +204,15 @@ fn scan_log_record_payload<R: Read>(
 ) -> Result<(), LogManagerError> {
     match read_crc_u8(reader, digest, remaining)? {
         KIND_BEGIN | KIND_COMMIT | KIND_ROLLBACK => Ok(()),
-        KIND_PAGE_ALLOC => {
+        KIND_PAGE_ALLOC | KIND_PAGE_RESERVE | KIND_PAGE_RETIRE | KIND_LIFECYCLE_CANCEL => {
             read_crc_u64(reader, digest, remaining)?;
             Ok(())
+        }
+        KIND_FREELIST_CHECKPOINT => {
+            read_crc_u64(reader, digest, remaining)?;
+            let count = read_crc_u32(reader, digest, remaining)? as usize;
+            let len = count.checked_mul(8).ok_or(LogManagerError::PayloadLengthOverflow)?;
+            read_crc_discard(reader, digest, remaining, len)
         }
         KIND_PAGE_UPDATE => {
             read_crc_u64(reader, digest, remaining)?;
@@ -727,6 +733,61 @@ mod lifecycle_tests {
         for end in 0..bytes.len() {
             assert!(deserialize_transaction(&bytes[..end]).is_err(), "cut at {end}");
         }
+    }
+
+    #[test]
+    fn streaming_scan_accepts_all_lifecycle_payloads_and_checks_frame_integrity() {
+        let records = [
+            LogRecord {
+                txn_id: 0,
+                kind: LogRecordKind::FreelistCheckpoint {
+                    page_count: 2048,
+                    pages: (4..2048).collect(),
+                },
+            },
+            LogRecord { txn_id: 0, kind: LogRecordKind::PageReserve { page_id: 4 } },
+            LogRecord { txn_id: 0, kind: LogRecordKind::PageRetire { page_id: 5 } },
+            LogRecord { txn_id: 0, kind: LogRecordKind::LifecycleCancel { target_lsn: 19 } },
+        ];
+        let mut bytes = Vec::new();
+        serialize_transaction(&mut bytes, 0, &records).unwrap();
+        let mut reader = bytes.as_slice();
+        let frame = scan_transaction_frame(&mut reader).unwrap().unwrap();
+        assert_eq!(frame.txn_id, 0);
+        assert_eq!(frame.record_count, 4);
+        assert!(scan_transaction_frame(&mut reader).unwrap().is_none());
+        for end in 1..bytes.len() {
+            assert!(scan_transaction_frame(&mut &bytes[..end]).is_err(), "cut at {end}");
+        }
+        bytes[HEADER_LEN + 1] ^= 1;
+        assert!(matches!(
+            scan_transaction_frame(&mut bytes.as_slice()),
+            Err(LogManagerError::ChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn streaming_scan_bounds_lifecycle_payloads_by_remaining_bytes() {
+        for kind in [KIND_PAGE_RESERVE, KIND_PAGE_RETIRE, KIND_LIFECYCLE_CANCEL] {
+            let payload = [kind];
+            let mut remaining = payload.len();
+            assert!(matches!(
+                scan_log_record_payload(
+                    &mut payload.as_slice(),
+                    &mut CRC32.digest(),
+                    &mut remaining
+                ),
+                Err(LogManagerError::TruncatedFrame { .. })
+            ));
+        }
+        let mut payload = vec![KIND_FREELIST_CHECKPOINT];
+        payload.extend_from_slice(&9u64.to_le_bytes());
+        payload.extend_from_slice(&u32::MAX.to_le_bytes());
+        let mut remaining = payload.len();
+        assert!(matches!(
+            scan_log_record_payload(&mut payload.as_slice(), &mut CRC32.digest(), &mut remaining),
+            Err(LogManagerError::TruncatedFrame { .. } | LogManagerError::PayloadLengthOverflow)
+        ));
     }
 
     #[test]
