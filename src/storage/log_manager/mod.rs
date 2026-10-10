@@ -723,6 +723,14 @@ impl RecoveryLogRecordKind {
             Self::Commit => LogRecordKind::Commit,
             Self::Rollback => LogRecordKind::Rollback,
             Self::PageAlloc { page_id } => LogRecordKind::PageAlloc { page_id: *page_id },
+            Self::FreelistCheckpoint { page_count, pages } => {
+                LogRecordKind::FreelistCheckpoint { page_count: *page_count, pages: pages.clone() }
+            }
+            Self::PageReserve { page_id } => LogRecordKind::PageReserve { page_id: *page_id },
+            Self::PageRetire { page_id } => LogRecordKind::PageRetire { page_id: *page_id },
+            Self::LifecycleCancel { target_lsn } => {
+                LogRecordKind::LifecycleCancel { target_lsn: *target_lsn }
+            }
             Self::PageUpdate { page_id, redo_data, undo_data } => LogRecordKind::PageUpdate {
                 page_id: *page_id,
                 redo_data: redo_data.as_ref(),
