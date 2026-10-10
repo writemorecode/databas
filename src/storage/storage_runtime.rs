@@ -312,6 +312,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn checkpoint_retains_reservations_started_during_cache_flush_for_crash_recovery() {
+        use crate::storage::{
+            database_header::DatabaseHeader,
+            page_allocator::{PageAllocator, write_checkpoint},
+        };
+
+        let file = NamedTempFile::new().unwrap();
+        let mut disk = DiskManager::new(file.path()).unwrap();
+        disk.ensure_page_exists(5).unwrap();
+        disk.write_page(0, &DatabaseHeader::encode_page()).unwrap();
+        write_checkpoint(&mut disk, &PageAllocator::new(6, &[4, 5]).unwrap()).unwrap();
+        disk.sync().unwrap();
+        let runtime = StorageRuntime::new(file.path().to_path_buf(), disk).unwrap();
+        assert_eq!(runtime.reserve_page(None).unwrap(), 4);
+        // Consume the old freelist trunk: recovery must use the WAL baseline.
+        runtime.write_page(4, &[42; PAGE_SIZE]).unwrap();
+
+        let outcome = runtime
+            .checkpoint(|| {
+                // These operations occur after horizon capture but before WAL
+                // publication. The user's pending reservation is a crash loser;
+                // the independent system reservation must remain allocated.
+                let txn = runtime.begin_transaction()?;
+                assert_eq!(runtime.reserve_page(Some(txn))?, 5);
+                assert_eq!(runtime.reserve_page(None)?, 6);
+                Ok(None)
+            })
+            .unwrap();
+        assert_eq!(outcome, CheckpointOutcome::Partial);
+        drop(runtime);
+
+        let disk = DiskManager::new(file.path()).unwrap();
+        let reopened = StorageRuntime::new(file.path().to_path_buf(), disk).unwrap();
+        assert_eq!(reopened.page_count().unwrap(), 7);
+        assert_eq!(reopened.reserve_page(None).unwrap(), 5);
+        assert_eq!(reopened.reserve_page(None).unwrap(), 7);
+    }
+
+    #[test]
     fn poisoned_manager_lock_is_reported_as_an_internal_error() {
         let file = NamedTempFile::new().unwrap();
         let disk = DiskManager::new(file.path()).unwrap();

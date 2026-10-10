@@ -20,7 +20,8 @@ pub struct Database {
 /// Result of an attempt to apply the WAL and reclaim its records.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CheckpointOutcome {
-    /// The captured history is durable and only the WAL header remains.
+    /// The captured history is durable. Only the WAL header and, when enabled,
+    /// an allocator membership snapshot remain.
     Completed,
     /// The pass completed, but undo, deferred pages, or newer WAL records still
     /// require retained history. This is normal, successful progress.
