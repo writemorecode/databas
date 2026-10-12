@@ -6,7 +6,7 @@
 //! in-memory undo images accumulated here; crash recovery uses the durable WAL
 //! records written by [`LogManager`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::core::{
     PAGE_SIZE, PageId,
@@ -45,6 +45,9 @@ pub(crate) struct PageRestore {
 pub(crate) struct TransactionRollback {
     /// Restore operations in reverse mutation order.
     pub(crate) pages: Vec<PageRestore>,
+    /// Pages restored by this rollback or an earlier savepoint rollback that
+    /// must reach disk before the rollback record is durable.
+    pub(crate) flush_page_ids: Vec<PageId>,
 }
 
 /// In-memory checkpoint for rolling back one statement inside a transaction.
@@ -93,6 +96,9 @@ struct ActiveTransaction {
     /// intermediate images before finally restoring the transaction's original
     /// image.
     undo_pages: Vec<PageUndo>,
+    /// Savepoint restores whose undo entries were discarded after installation
+    /// in the page cache. A later full rollback must still flush these pages.
+    savepoint_restored_pages: HashSet<PageId>,
     /// LSN of an appended rollback outcome awaiting or having completed flush.
     ///
     /// `Some` means physical page restoration has finished and rollback
@@ -136,6 +142,7 @@ impl TransactionManager {
             txn_id,
             ActiveTransaction {
                 undo_pages: Vec::new(),
+                savepoint_restored_pages: HashSet::new(),
                 begin_lsn,
                 rollback_lsn: None,
                 poisoned: false,
@@ -359,6 +366,9 @@ impl TransactionManager {
             }));
         }
 
+        active
+            .savepoint_restored_pages
+            .extend(active.undo_pages[savepoint.undo_len..].iter().map(|undo| undo.page_id));
         active.undo_pages.truncate(savepoint.undo_len);
         Ok(())
     }
@@ -385,7 +395,12 @@ impl TransactionManager {
             })
             .collect::<Vec<_>>();
         pages.shrink_to_fit();
-        Ok(TransactionRollback { pages })
+        let mut flush_page_ids =
+            active.savepoint_restored_pages.iter().copied().collect::<Vec<_>>();
+        flush_page_ids.extend(pages.iter().map(|page| page.page_id));
+        flush_page_ids.sort_unstable();
+        flush_page_ids.dedup();
+        Ok(TransactionRollback { pages, flush_page_ids })
     }
 
     /// Writes and flushes the `Rollback` record after undo pages reach disk.
