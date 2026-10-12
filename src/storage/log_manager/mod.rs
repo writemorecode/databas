@@ -227,7 +227,7 @@ pub(crate) enum RecoveryLogRecordKind {
 pub(crate) struct RecoveryLogScan {
     /// Complete records decoded from valid WAL frames, in log order.
     pub(crate) records: Vec<RecoveryLogRecord>,
-    /// Whether an incomplete final frame was found and truncated.
+    /// Whether an invalid or incomplete frame and its suffix were truncated.
     pub(crate) truncated_tail: bool,
     /// Largest transaction id observed in complete frames.
     pub(crate) max_txn_id: TxnId,
@@ -550,11 +550,12 @@ enum LogReadMode {
 
 /// Reads complete WAL frames and returns owned records for crash recovery.
 ///
-/// A torn or incomplete final frame is treated as a non-durable tail: it is
-/// truncated from the WAL and reported through [`RecoveryLogScan::truncated_tail`].
-/// A decode failure in the final frame is also treated as a non-durable tail:
-/// crashes can leave the expected file length even when some sectors did not
-/// reach stable storage. Corruption before the final frame remains an error.
+/// The first torn or incomplete frame and all following bytes are treated as
+/// a non-durable suffix, truncated from the WAL and reported through
+/// [`RecoveryLogScan::truncated_tail`]. Later unsynced sectors can survive a
+/// crash even when an earlier frame did not. Successfully synced bytes are
+/// assumed intact. File-header errors, unsupported nonzero frame versions, and
+/// I/O or allocation failures propagate without discarding the suffix.
 pub(crate) fn read_recovery_log(
     db_file_path: impl AsRef<Path>,
 ) -> Result<RecoveryLogScan, LogManagerError> {
@@ -602,15 +603,26 @@ fn read_log(db_file_path: &Path, mode: LogReadMode) -> Result<RecoveryLogScan, L
                 truncated_tail = true;
                 break;
             }
+            Err(LogManagerError::UnsupportedVersion { actual: 0, .. })
+            | Err(LogManagerError::PayloadLengthTooLarge { .. })
+            | Err(LogManagerError::PayloadLengthOverflow)
+                if mode == LogReadMode::Recovery =>
+            {
+                // Incomplete persistence can leave zero version bytes or a
+                // malformed payload length; neither makes a valid frame.
+                truncated_tail = true;
+                break;
+            }
             Err(error) => return Err(error),
         };
 
-        let frame_end =
-            offset.checked_add(frame_len as u64).ok_or(LogManagerError::PayloadLengthOverflow)?;
-        if frame_end > wal_len {
+        // Check against the remaining bytes before adding, so a malformed
+        // length cannot overflow the absolute frame-end offset.
+        if frame_len as u64 > wal_len - offset {
             truncated_tail = true;
             break;
         }
+        let frame_end = offset + frame_len as u64;
 
         let mut frame = Vec::new();
         frame.try_reserve_exact(frame_len).map_err(|source| {
@@ -622,7 +634,11 @@ fn read_log(db_file_path: &Path, mode: LogReadMode) -> Result<RecoveryLogScan, L
 
         let transaction = match deserialize_transaction(&frame) {
             Ok(transaction) => transaction,
-            Err(_) if frame_end == wal_len => {
+            Err(_) if mode == LogReadMode::Recovery || frame_end == wal_len => {
+                // A crash can retain later unsynced sectors after a torn frame.
+                // Nothing after the first invalid frame belongs to the valid
+                // WAL prefix, even when it resembles complete frames. Synced
+                // bytes are assumed intact; this is not media-bitrot repair.
                 truncated_tail = true;
                 break;
             }
@@ -1133,6 +1149,135 @@ mod tests {
             std::fs::metadata(wal_file_path).unwrap().len(),
             (WAL_FILE_HEADER_LEN + valid_frame.len()) as u64
         );
+    }
+
+    #[test]
+    fn recovery_discards_torn_frame_and_later_retained_unsynced_frames() {
+        let file = NamedTempFile::new().unwrap();
+        let prefix = serialize_to_vec(
+            11,
+            &[
+                LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+            ],
+        );
+        let mut torn =
+            serialize_to_vec(12, &[LogRecord { txn_id: 12, kind: LogRecordKind::Begin }]);
+        *torn.last_mut().unwrap() ^= 1;
+        let later = serialize_to_vec(
+            13,
+            &[
+                LogRecord { txn_id: 13, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 13, kind: LogRecordKind::Commit },
+            ],
+        );
+        let path = file.path().with_added_extension("wal");
+        {
+            let _manager = LogManager::new(file.path()).unwrap();
+            let mut wal = OpenOptions::new().append(true).open(&path).unwrap();
+            for bytes in [&prefix, &torn, &later] {
+                wal.write_all(bytes).unwrap();
+            }
+            wal.sync_all().unwrap();
+        }
+        let original = std::fs::read(&path).unwrap();
+        assert!(read_log(file.path(), LogReadMode::Checkpoint).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let scan = read_recovery_log(file.path()).unwrap();
+        assert!(scan.truncated_tail);
+        assert_eq!(scan.records.len(), 2);
+        assert_eq!(scan.max_txn_id, 11);
+        assert_eq!(
+            std::fs::metadata(path).unwrap().len(),
+            u64::try_from(WAL_FILE_HEADER_LEN + prefix.len()).unwrap()
+        );
+    }
+
+    fn assert_recovery_discards_invalid_header_suffix(mutate_header: impl FnOnce(&mut [u8])) {
+        let file = NamedTempFile::new().unwrap();
+        let prefix = serialize_to_vec(
+            11,
+            &[
+                LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+            ],
+        );
+        let mut invalid =
+            serialize_to_vec(12, &[LogRecord { txn_id: 12, kind: LogRecordKind::Begin }]);
+        mutate_header(&mut invalid[..HEADER_LEN]);
+        let later = serialize_to_vec(
+            13,
+            &[
+                LogRecord { txn_id: 13, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 13, kind: LogRecordKind::Commit },
+            ],
+        );
+        let path = file.path().with_added_extension("wal");
+        {
+            let _manager = LogManager::new(file.path()).unwrap();
+            let mut wal = OpenOptions::new().append(true).open(&path).unwrap();
+            for bytes in [&prefix, &invalid, &later] {
+                wal.write_all(bytes).unwrap();
+            }
+            wal.sync_all().unwrap();
+        }
+        let original = std::fs::read(&path).unwrap();
+        assert!(read_checkpoint_log(file.path()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        let scan = read_recovery_log(file.path()).unwrap();
+        assert!(scan.truncated_tail);
+        assert_eq!(
+            scan.records,
+            [
+                RecoveryLogRecord { lsn: 1, txn_id: 11, kind: RecoveryLogRecordKind::Begin },
+                RecoveryLogRecord { lsn: 2, txn_id: 11, kind: RecoveryLogRecordKind::Commit },
+            ]
+        );
+        assert_eq!(scan.max_txn_id, 11);
+        assert_eq!(scan.last_assigned_lsn, 2);
+        assert_eq!(std::fs::read(&path).unwrap(), original[..WAL_FILE_HEADER_LEN + prefix.len()]);
+
+        let second_scan = read_recovery_log(file.path()).unwrap();
+        assert_eq!(second_scan, RecoveryLogScan { truncated_tail: false, ..scan });
+        let manager = LogManager::new(file.path()).unwrap();
+        assert_eq!(manager.next_lsn().unwrap(), 3);
+        assert_eq!(manager.highest_txn_id(), 11);
+    }
+
+    #[test]
+    fn recovery_discards_zero_version_frame_and_later_retained_unsynced_frames() {
+        assert_recovery_discards_invalid_header_suffix(|header| header[8..10].fill(0));
+    }
+
+    #[test]
+    fn recovery_discards_overflowing_length_frame_and_later_retained_unsynced_frames() {
+        for payload_len in [u64::MAX, u64::MAX - (HEADER_LEN + FOOTER_LEN) as u64] {
+            assert_recovery_discards_invalid_header_suffix(|header| {
+                header[HEADER_LEN - 8..].copy_from_slice(&payload_len.to_le_bytes());
+            });
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_wal_with_unsupported_nonzero_frame_version() {
+        let file = NamedTempFile::new().unwrap();
+        let mut frame =
+            serialize_to_vec(11, &[LogRecord { txn_id: 11, kind: LogRecordKind::Begin }]);
+        frame[8..10].copy_from_slice(&3u16.to_le_bytes());
+        let path = file.path().with_added_extension("wal");
+        {
+            let _manager = LogManager::new(file.path()).unwrap();
+            let mut wal = OpenOptions::new().append(true).open(&path).unwrap();
+            wal.write_all(&frame).unwrap();
+            wal.sync_all().unwrap();
+        }
+        let original = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            read_recovery_log(file.path()),
+            Err(LogManagerError::UnsupportedVersion { expected: 2, actual: 3 })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     // Issue: An append I/O error leaves the manager reusable after a partial frame.
