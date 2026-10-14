@@ -379,7 +379,7 @@ impl TransactionManager {
     /// active transaction stays available while callers restore pages so a
     /// failed restoration can still be retried.
     pub(crate) fn prepare_rollback_pages(
-        &mut self,
+        &self,
         txn_id: TxnId,
     ) -> StorageResult<TransactionRollback> {
         let active = self.transaction(txn_id)?;

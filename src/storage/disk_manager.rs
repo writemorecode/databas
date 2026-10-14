@@ -49,7 +49,7 @@ impl DiskManager {
         Self::open_with_options(OpenOptions::new().read(true).write(true).append(false), path)
     }
 
-    fn open_with_options(options: &mut OpenOptions, path: &Path) -> Result<Self, DiskManagerError> {
+    fn open_with_options(options: &OpenOptions, path: &Path) -> Result<Self, DiskManagerError> {
         let file = options.open(path)?;
 
         let file_metadata = file.metadata()?;

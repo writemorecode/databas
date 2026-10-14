@@ -215,11 +215,7 @@ struct Checkpointer {
 }
 
 impl Checkpointer {
-    fn run<F>(
-        &mut self,
-        runtime: &StorageRuntime,
-        flush_cache: F,
-    ) -> StorageResult<CheckpointOutcome>
+    fn run<F>(&self, runtime: &StorageRuntime, flush_cache: F) -> StorageResult<CheckpointOutcome>
     where
         F: FnOnce() -> StorageResult<Option<Lsn>>,
     {

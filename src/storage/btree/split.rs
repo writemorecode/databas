@@ -46,7 +46,7 @@ impl TreeCursor {
 
     /// Inserts one promoted separator into an interior page or reports another split.
     pub(super) fn insert_into_parent(
-        &mut self,
+        &self,
         parent_frame: PathFrame,
         pending: PendingSplit,
     ) -> StorageResult<Option<PendingSplit>> {
@@ -381,7 +381,7 @@ impl TreeCursor {
 
     /// Splits a full interior page while inserting a propagated separator.
     pub(super) fn insert_with_interior_page_split(
-        &mut self,
+        &self,
         parent_frame: PathFrame,
         pending: PendingSplit,
     ) -> StorageResult<PendingSplit> {
