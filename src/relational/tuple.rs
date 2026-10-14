@@ -193,7 +193,7 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn decode<'a>(tag: u8, payload: &'a [u8]) -> io::Result<ValueRef<'a>> {
+fn decode(tag: u8, payload: &[u8]) -> io::Result<ValueRef<'_>> {
     match (tag, payload) {
         (NULL, []) => Ok(ValueRef::Null),
         (STRING, bytes) => std::str::from_utf8(bytes)
