@@ -40,13 +40,13 @@ pub(crate) struct CellMut<'a, N: CellMarker> {
 }
 
 impl<'a> Cell<'a, Interior> {
-    pub(crate) fn new_interior(bytes: &'a [u8], parts: interior::InteriorCellParts) -> Self {
+    pub(crate) fn new_interior(bytes: &'a [u8], parts: &interior::InteriorCellParts) -> Self {
         Self { _bytes: bytes, fields: InteriorCellFields { left_child: parts.left_child } }
     }
 }
 
 impl<'a> CellMut<'a, Interior> {
-    pub(crate) fn new_interior(bytes: &'a mut [u8], parts: interior::InteriorCellParts) -> Self {
+    pub(crate) fn new_interior(bytes: &'a mut [u8], parts: &interior::InteriorCellParts) -> Self {
         Self { bytes, fields: InteriorCellFields { left_child: parts.left_child } }
     }
 }

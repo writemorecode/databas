@@ -169,6 +169,10 @@ mod tests {
         PhysicalPlan::from_parts(nodes, root, output_schema)
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "Test callers construct expected plans inline."
+    )]
     fn assert_physical_plan(catalog: &MemoryCatalog, sql: &str, expected: PhysicalPlan) {
         assert_eq!(plan(catalog, sql).physical, expected, "{sql}");
     }

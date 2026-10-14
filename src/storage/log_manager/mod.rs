@@ -542,7 +542,7 @@ impl LogManager {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum LogReadMode {
     Recovery,
     Checkpoint,
@@ -650,7 +650,7 @@ fn read_log(db_file_path: &Path, mode: LogReadMode) -> Result<RecoveryLogScan, L
             records.push(RecoveryLogRecord {
                 lsn: next_lsn,
                 txn_id: record.txn_id,
-                kind: RecoveryLogRecordKind::from_log_record_kind(record.kind)?,
+                kind: RecoveryLogRecordKind::from_log_record_kind(&record.kind)?,
             });
         }
         offset = frame_end;
@@ -727,17 +727,17 @@ impl RecoveryLogRecordKind {
         }
     }
 
-    fn from_log_record_kind(kind: LogRecordKind<'_>) -> Result<Self, LogManagerError> {
+    fn from_log_record_kind(kind: &LogRecordKind<'_>) -> Result<Self, LogManagerError> {
         match kind {
             LogRecordKind::Begin => Ok(Self::Begin),
             LogRecordKind::Commit => Ok(Self::Commit),
             LogRecordKind::Rollback => Ok(Self::Rollback),
             LogRecordKind::PageUpdate { page_id, redo_data, undo_data } => Ok(Self::PageUpdate {
-                page_id,
+                page_id: *page_id,
                 redo_data: page_image_array(redo_data)?,
                 undo_data: page_image_array(undo_data)?,
             }),
-            LogRecordKind::PageAlloc { page_id } => Ok(Self::PageAlloc { page_id }),
+            LogRecordKind::PageAlloc { page_id } => Ok(Self::PageAlloc { page_id: *page_id }),
         }
     }
 }
