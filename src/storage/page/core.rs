@@ -645,11 +645,15 @@ where
     }
 }
 
-impl Page<Write<'_>, Leaf> {
+#[allow(
+    clippy::elidable_lifetime_names,
+    reason = "The test-only constructor returns the impl lifetime."
+)]
+impl<'a> Page<Write<'a>, Leaf> {
     /// Initializes a fresh empty leaf page in-place.
     #[cfg(test)]
-    pub(crate) fn init(bytes: &mut [u8; PAGE_SIZE]) -> Page<Write<'_>, Leaf> {
-        Page::new(Write { bytes })
+    pub(crate) fn init(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
+        Self::initialize(bytes)
     }
 }
 
