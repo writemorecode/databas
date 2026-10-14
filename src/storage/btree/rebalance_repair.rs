@@ -1,7 +1,10 @@
 //! Root repair and separator maintenance after structural B+-tree changes.
 
 use super::root::read_page_kind;
-use super::*;
+use super::{
+    ChildSlotRef, Interior, Leaf, PageError, PageId, PageKind, PathFrame, PendingSplit,
+    StorageResult, TreeCursor,
+};
 
 impl TreeCursor {
     /// Replaces an empty interior root with its sole child while preserving the root page id.

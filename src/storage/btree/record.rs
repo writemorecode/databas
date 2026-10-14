@@ -2,7 +2,7 @@ use std::fmt;
 use std::ops::Range;
 
 use super::payload::{cell_corruption, materialize_leaf_cell};
-use super::*;
+use super::{CorruptionKind, Leaf, PageCache, PageId, PinGuard, StorageResult};
 
 pub(in crate::storage::btree) enum RecordStorage {
     PageResident { pin: PinGuard, key_range: Range<usize>, value_range: Range<usize> },
@@ -191,7 +191,10 @@ impl fmt::Debug for Record {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use crate::storage::btree::test_support::{cursor, record_bytes};
+    use crate::storage::btree::{
+        PAGE_SIZE,
+        test_support::{cursor, record_bytes},
+    };
 
     #[test]
     fn inline_records_remain_page_resident() {
