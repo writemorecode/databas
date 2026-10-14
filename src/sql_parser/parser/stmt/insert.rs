@@ -21,7 +21,9 @@ impl Display for Values<'_> {
 
 impl<'a> Parser<'a> {
     fn parse_values(&mut self) -> Result<Values<'a>, SQLError<'a>> {
-        Ok(Values(self.parse_comma_separated_list_in_parenthesis(|p| p.parse_expression_list())?))
+        Ok(Values(self.parse_comma_separated_list_in_parenthesis(
+            super::super::Parser::parse_expression_list,
+        )?))
     }
 }
 

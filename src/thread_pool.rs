@@ -113,7 +113,7 @@ impl ThreadPool {
         let pending = Arc::new(AtomicBool::new(false));
         let job = Arc::new(job);
         let timer = thread::spawn(move || {
-            while let Err(RecvTimeoutError::Timeout) = cancellation.recv_timeout(interval) {
+            while cancellation.recv_timeout(interval) == Err(RecvTimeoutError::Timeout) {
                 if task_stopped.load(Ordering::Acquire) {
                     break;
                 }
@@ -137,7 +137,7 @@ impl ThreadPool {
             }
             task_stopped.store(true, Ordering::Release);
         });
-        self.timers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(Timer {
+        self.timers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(Timer {
             cancel: cancel.clone(),
             stopped: Arc::clone(&stopped),
             thread: timer,
@@ -195,7 +195,7 @@ impl ThreadPool {
 
     fn close_and_join(&mut self) -> Result<(), ThreadPoolError> {
         let timers = {
-            let mut timers = self.timers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut timers = self.timers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             std::mem::take(&mut *timers)
         };
         for timer in &timers {
@@ -242,7 +242,7 @@ impl Drop for PeriodicTask {
         let _ = self.cancel.send(());
         if let Some(timers) = self.timers.upgrade() {
             let timer = {
-                let mut timers = timers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut timers = timers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 timers
                     .iter()
                     .position(|timer| Arc::ptr_eq(&timer.stopped, &self.stopped))
