@@ -130,7 +130,7 @@ where
     pub(crate) fn cell(&self, slot_index: SlotId) -> PageResult<Cell<'_, Interior>> {
         let parsed = cell_parts(self, slot_index)?;
         let cell_bytes = &self.bytes()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
-        Ok(Cell::new_interior(cell_bytes, parsed.parts))
+        Ok(Cell::new_interior(cell_bytes, &parsed.parts))
     }
 
     /// Returns full payload metadata and the page-relative inline payload range for one cell.
@@ -165,7 +165,7 @@ where
         let parsed = cell_parts(self, slot_index)?;
         let cell_bytes =
             &mut self.bytes_mut()[parsed.cell_offset..parsed.cell_offset + parsed.cell_len];
-        Ok(CellMut::new_interior(cell_bytes, parsed.parts))
+        Ok(CellMut::new_interior(cell_bytes, &parsed.parts))
     }
 
     /// Inserts an interior cell whose separator key may continue in an overflow chain.

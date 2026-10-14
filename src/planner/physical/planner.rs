@@ -268,7 +268,7 @@ fn lower_sort_terms(
     terms
         .into_iter()
         .map(|term| {
-            Ok(SortTerm { column: lower_column(term.column, schema)?, direction: term.direction })
+            Ok(SortTerm { column: lower_column(&term.column, schema)?, direction: term.direction })
         })
         .collect()
 }
@@ -276,7 +276,7 @@ fn lower_sort_terms(
 fn lower_expression(expression: BoundExpr, schema: &PlanSchema) -> PlannerResult<ExecExpr> {
     match expression {
         BoundExpr::Literal(value) => Ok(ExecExpr::Literal(value)),
-        BoundExpr::Column(column) => lower_column(column, schema).map(ExecExpr::Column),
+        BoundExpr::Column(column) => lower_column(&column, schema).map(ExecExpr::Column),
         BoundExpr::Unary { op, expr } => {
             Ok(ExecExpr::Unary { op, expr: Box::new(lower_expression(*expr, schema)?) })
         }
@@ -289,11 +289,11 @@ fn lower_expression(expression: BoundExpr, schema: &PlanSchema) -> PlannerResult
 }
 
 fn lower_column(
-    column: crate::planner::BoundColumn,
+    column: &crate::planner::BoundColumn,
     schema: &PlanSchema,
 ) -> PlannerResult<ExecColumn> {
     let slot = schema
-        .slot_for(&column)
+        .slot_for(column)
         .ok_or_else(|| PlannerError::ColumnNotInInput { column: column.to_string() })?;
     Ok(ExecColumn { slot, name: column.to_string(), data_type: column.data_type })
 }

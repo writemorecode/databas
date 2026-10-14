@@ -805,6 +805,10 @@ mod tests {
         );
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "Test callers construct expected rows inline."
+    )]
     fn assert_index_catalog_row(indexes: &mut TableCursor, expected: IndexCatalogRow) {
         let record =
             indexes.get(expected.index_id).unwrap().expect("index catalog row should exist");
@@ -812,6 +816,10 @@ mod tests {
         assert_eq!(IndexCatalogRow::decode(&tuple).unwrap(), expected);
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "Test callers construct expected rows inline."
+    )]
     fn assert_column_catalog_row(columns: &mut TableCursor, expected: ColumnCatalogRow) {
         let record =
             columns.get(expected.column_id).unwrap().expect("column catalog row should exist");

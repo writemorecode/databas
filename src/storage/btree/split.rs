@@ -20,7 +20,7 @@ impl TreeCursor {
             }
         }
 
-        self.install_new_root(pending)
+        self.install_new_root(&pending)
     }
 
     /// Re-points the parent-side child reference after inserting a separator.
@@ -440,7 +440,7 @@ impl TreeCursor {
     }
 
     /// Installs a new interior root in the existing root page after the old root split.
-    pub(super) fn install_new_root(&mut self, pending: PendingSplit) -> StorageResult<()> {
+    pub(super) fn install_new_root(&mut self, pending: &PendingSplit) -> StorageResult<()> {
         let root_page_id = self.root_page_id();
         debug_assert_eq!(
             pending.left_page_id, root_page_id,

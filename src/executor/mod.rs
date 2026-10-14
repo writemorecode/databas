@@ -378,21 +378,26 @@ where
             }
             PhysicalPlanNode::Values { rows } => execute_values(rows),
             PhysicalPlanNode::InsertValues { table, columns, values } => {
-                execute_insert_values(self.transaction, table, columns, values)
+                execute_insert_values(self.transaction, &table, &columns, values)
             }
             PhysicalPlanNode::Update { relation, table, assignments, input } => {
                 let output_inner = self.execute_node(nodes, input)?;
                 execute_update(
                     self.transaction,
                     relation,
-                    table,
-                    assignments,
+                    &table,
+                    &assignments,
                     output_inner.into_rows("UPDATE")?,
                 )
             }
             PhysicalPlanNode::Delete { relation, table, input } => {
                 let output_inner = self.execute_node(nodes, input)?;
-                execute_delete(self.transaction, relation, table, output_inner.into_rows("DELETE")?)
+                execute_delete(
+                    self.transaction,
+                    relation,
+                    &table,
+                    output_inner.into_rows("DELETE")?,
+                )
             }
             PhysicalPlanNode::OneRow => Ok(ExecutionOutput::Rows {
                 columns: Vec::new(),

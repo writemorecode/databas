@@ -109,17 +109,17 @@ impl<'db> Session<'db> {
         item: SqlItem<'sql>,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
         match item {
-            SqlItem::Statement(statement) => self.execute_statement(statement),
+            SqlItem::Statement(statement) => self.execute_statement(&statement),
             SqlItem::Command(command) => self.execute_command(command),
         }
     }
 
     fn execute_statement<'sql>(
         &mut self,
-        statement: Statement<'sql>,
+        statement: &Statement<'sql>,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        let transaction_mode = statement_transaction_mode(&statement);
-        let plan = Planner::new(self.database).plan_physical_statement(&statement)?;
+        let transaction_mode = statement_transaction_mode(statement);
+        let plan = Planner::new(self.database).plan_physical_statement(statement)?;
         let table_locks = plan_table_locks(&plan);
 
         if let Some(txn_id) = self.active_txn {
@@ -136,7 +136,7 @@ impl<'db> Session<'db> {
             };
             self.execute_explicit_transaction_statement(txn_id, leases, plan)
         } else {
-            self.execute_implicit_transaction(plan, table_locks, transaction_mode)
+            self.execute_implicit_transaction(plan, &table_locks, transaction_mode)
         }
     }
 
@@ -228,11 +228,11 @@ impl<'db> Session<'db> {
     fn execute_implicit_transaction<'sql>(
         &self,
         plan: PhysicalPlan,
-        table_locks: Vec<(TableId, LockMode)>,
+        table_locks: &[(TableId, LockMode)],
         mode: StatementTransactionMode,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
         let txn_id = self.database.begin_statement_transaction(mode)?;
-        let leases = match self.database.acquire_table_leases(txn_id, &table_locks) {
+        let leases = match self.database.acquire_table_leases(txn_id, table_locks) {
             Ok(leases) => leases,
             Err(error) => {
                 self.database.rollback_transaction(txn_id)?;

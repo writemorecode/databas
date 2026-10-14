@@ -54,8 +54,8 @@ pub(super) fn offset_rows(mut rows: RowStream, mut remaining: usize) -> RowStrea
 /// handed to storage for validation and insertion.
 pub(super) fn execute_insert_values(
     transaction: &impl RelationalAccess,
-    table: TableSchema,
-    columns: Vec<BoundColumn>,
+    table: &TableSchema,
+    columns: &[BoundColumn],
     values: Vec<Vec<ExecExpr>>,
 ) -> ExecutorResult<ExecutionOutput> {
     let mut affected = 0;
@@ -83,7 +83,7 @@ pub(super) fn execute_insert_values(
             })?;
             *slot = value;
         }
-        transaction.insert_table_row(&table, row_values)?;
+        transaction.insert_table_row(table, row_values)?;
         affected += 1;
     }
 
@@ -94,8 +94,8 @@ pub(super) fn execute_insert_values(
 pub(super) fn execute_update(
     transaction: &impl RelationalAccess,
     relation: RelationId,
-    table: TableSchema,
-    assignments: Vec<UpdateAssignment>,
+    table: &TableSchema,
+    assignments: &[UpdateAssignment],
     target_rows: RowStream,
 ) -> ExecutorResult<ExecutionOutput> {
     let mut affected = 0;
@@ -109,7 +109,7 @@ pub(super) fn execute_update(
             .map_err(ExecutorError::InvalidTuple)?
             .into_values();
 
-        for assignment in &assignments {
+        for assignment in assignments {
             let len = values.len();
             let value = evaluate_value(&assignment.expression, &context)?;
             let slot = values.get_mut(assignment.column.ordinal).ok_or_else(|| {
@@ -122,7 +122,7 @@ pub(super) fn execute_update(
             *slot = value;
         }
 
-        transaction.update_table_row(&table, owned_row, values)?;
+        transaction.update_table_row(table, owned_row, values)?;
         affected += 1;
     }
 
@@ -133,7 +133,7 @@ pub(super) fn execute_update(
 pub(super) fn execute_delete(
     transaction: &impl RelationalAccess,
     relation: RelationId,
-    table: TableSchema,
+    table: &TableSchema,
     target_rows: RowStream,
 ) -> ExecutorResult<ExecutionOutput> {
     let mut affected = 0;
@@ -143,7 +143,7 @@ pub(super) fn execute_delete(
         let owned_row =
             row.locator(relation).ok_or(ExecutorError::MissingRowLocator { relation })?.record();
 
-        transaction.delete_table_row(&table, owned_row)?;
+        transaction.delete_table_row(table, owned_row)?;
         affected += 1;
     }
 

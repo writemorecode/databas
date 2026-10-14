@@ -88,7 +88,7 @@ impl TreeCursor {
             let Some(pending) = self.refresh_subtree_separators_once(root_page_id)? else {
                 return Ok(());
             };
-            self.install_new_root(pending)?;
+            self.install_new_root(&pending)?;
         }
     }
 
