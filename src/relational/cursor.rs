@@ -469,7 +469,7 @@ mod tests {
         let record = cursor.get_record(42).unwrap().expect("record should exist");
 
         assert_eq!(record.table_key(), 42);
-        assert_eq!(record.with_record(|bytes| bytes.to_vec()).unwrap(), b"record bytes");
+        assert_eq!(record.with_record(<[u8]>::to_vec).unwrap(), b"record bytes");
         assert_eq!(
             record.to_owned_record().unwrap(),
             OwnedTableRecord { table_key: 42, record: Box::from(&b"record bytes"[..]) }
@@ -487,7 +487,7 @@ mod tests {
         assert!(cursor.seek_to_first().unwrap());
         let first = cursor.current_record().unwrap().expect("first record should exist");
         assert_eq!(first.table_key(), 10);
-        assert_eq!(first.with_record(|bytes| bytes.to_vec()).unwrap(), b"ten");
+        assert_eq!(first.with_record(<[u8]>::to_vec).unwrap(), b"ten");
 
         assert_eq!(
             cursor.next_record().unwrap().map(|record| record.to_owned_record().unwrap()),
@@ -535,7 +535,7 @@ mod tests {
             cursor.get_entry(b"email:ada@example.test").unwrap().expect("entry should exist");
 
         assert_eq!(entry.table_key(), 7);
-        assert_eq!(entry.with_key(|key| key.to_vec()).unwrap(), b"email:ada@example.test");
+        assert_eq!(entry.with_key(<[u8]>::to_vec).unwrap(), b"email:ada@example.test");
         assert_eq!(
             entry.to_owned_entry().unwrap(),
             OwnedIndexEntry { key: Box::from(&b"email:ada@example.test"[..]), table_key: 7 }
@@ -553,7 +553,7 @@ mod tests {
         assert!(cursor.seek_to_first().unwrap());
         let first = cursor.current_entry().unwrap().expect("first entry should exist");
         assert_eq!(first.table_key(), 10);
-        assert_eq!(first.with_key(|key| key.to_vec()).unwrap(), b"alpha");
+        assert_eq!(first.with_key(<[u8]>::to_vec).unwrap(), b"alpha");
         assert_eq!(
             first.with_view(|entry| (entry.key().to_vec(), entry.table_key())).unwrap(),
             (b"alpha".to_vec(), 10)
@@ -642,13 +642,13 @@ mod tests {
         table.insert(500, &large_record).unwrap();
         let record = table.get_record(500).unwrap().expect("large table record should exist");
         assert_eq!(record.table_key(), 500);
-        assert_eq!(record.with_record(|bytes| bytes.to_vec()).unwrap(), large_record);
+        assert_eq!(record.with_record(<[u8]>::to_vec).unwrap(), large_record);
 
         let mut index = temp_index_cursor(16);
         let large_key = vec![0xbb; PAGE_SIZE * 2];
         index.insert(&large_key, 900).unwrap();
         let entry = index.get_entry(&large_key).unwrap().expect("large index entry should exist");
         assert_eq!(entry.table_key(), 900);
-        assert_eq!(entry.with_key(|key| key.to_vec()).unwrap(), large_key);
+        assert_eq!(entry.with_key(<[u8]>::to_vec).unwrap(), large_key);
     }
 }

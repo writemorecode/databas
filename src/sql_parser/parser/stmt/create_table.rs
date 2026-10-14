@@ -89,7 +89,8 @@ impl<'a> Parser<'a> {
 
         self.lexer.expect_token(TokenKind::LeftParen)?;
 
-        let columns = self.parse_comma_separated_list(|p| p.parse_column_definition())?;
+        let columns =
+            self.parse_comma_separated_list(super::super::Parser::parse_column_definition)?;
         validate_primary_key(&columns, self.lexer.position)?;
 
         self.lexer.expect_token(TokenKind::RightParen)?;

@@ -160,7 +160,8 @@ impl<'a> Iterator for Lexer<'a> {
                 Some(Ok(token))
             }
             quote @ (Started::SingleQuotedString | Started::DoubleQuotedString) => {
-                let terminator = if let Started::SingleQuotedString = quote { '\'' } else { '"' };
+                let terminator =
+                    if matches!(quote, Started::SingleQuotedString) { '\'' } else { '"' };
                 let Some((literal, rest)) = self.rest.split_once(terminator) else {
                     return Some(Err(SQLError::new(SQLErrorKind::UnterminatedString, c_at)));
                 };

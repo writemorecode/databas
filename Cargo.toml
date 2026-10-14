@@ -44,8 +44,8 @@ map_err_ignore = "deny"
 # Enable these incrementally while the existing codebase is brought into compliance.
 needless_pass_by_ref_mut = "deny"
 needless_pass_by_value = "allow"
-redundant_closure_for_method_calls = "allow"
-equatable_if_let = "allow"
+redundant_closure_for_method_calls = "deny"
+equatable_if_let = "deny"
 unnecessary_wraps = "allow"
 
 redundant_pub_crate = "allow"

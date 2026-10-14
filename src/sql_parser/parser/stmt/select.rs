@@ -108,7 +108,7 @@ impl<'a> Parser<'a> {
         };
         self.lexer.next();
         self.lexer.expect_token(TokenKind::Keyword(Keyword::By))?;
-        let terms = self.parse_comma_separated_list(|p| p.parse_order_by_term())?;
+        let terms = self.parse_comma_separated_list(super::super::Parser::parse_order_by_term)?;
 
         Ok(Some(OrderBy { terms }))
     }

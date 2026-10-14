@@ -124,7 +124,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_identifier_list(&mut self) -> Result<IdentifierList<'a>, SQLError<'a>> {
-        Ok(IdentifierList(self.parse_comma_separated_list(|p| p.parse_identifier())?))
+        Ok(IdentifierList(self.parse_comma_separated_list(Parser::parse_identifier)?))
     }
 
     fn parse_identifier(&mut self) -> Result<&'a str, SQLError<'a>> {

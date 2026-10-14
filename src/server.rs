@@ -47,7 +47,7 @@ struct Cancellation {
 impl Cancellation {
     fn register(&self, stream: &TcpStream) -> io::Result<Arc<TcpStream>> {
         let socket = Arc::new(stream.try_clone()?);
-        let mut sockets = self.sockets.lock().unwrap_or_else(|error| error.into_inner());
+        let mut sockets = self.sockets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         sockets.retain(|socket| socket.strong_count() != 0);
         if self.stopped.load(Ordering::Acquire) {
             socket.shutdown(Shutdown::Both)?;
@@ -59,7 +59,7 @@ impl Cancellation {
 
     fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
-        let mut sockets = self.sockets.lock().unwrap_or_else(|error| error.into_inner());
+        let mut sockets = self.sockets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for socket in sockets.drain(..).filter_map(|socket| socket.upgrade()) {
             let _ = socket.shutdown(Shutdown::Both);
         }
@@ -126,7 +126,7 @@ impl Server {
     /// Returns if accepting a connection fails, a worker stops, or a worker
     /// encounters a critical database error.
     pub fn serve(self) -> Result<(), ServerError> {
-        let worker_count = thread::available_parallelism().map_or(1, |count| count.get());
+        let worker_count = thread::available_parallelism().map_or(1, std::num::NonZero::get);
         self.serve_with_worker_count(worker_count)
     }
 
