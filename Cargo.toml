@@ -53,4 +53,4 @@ wildcard_imports = "allow"
 
 significant_drop_tightening = "allow"
 
-elidable_lifetime_names = "allow"
+elidable_lifetime_names = "deny"

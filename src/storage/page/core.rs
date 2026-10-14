@@ -645,11 +645,11 @@ where
     }
 }
 
-impl<'a> Page<Write<'a>, Leaf> {
+impl Page<Write<'_>, Leaf> {
     /// Initializes a fresh empty leaf page in-place.
     #[cfg(test)]
-    pub(crate) fn init(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
-        Self::initialize(bytes)
+    pub(crate) fn init(bytes: &mut [u8; PAGE_SIZE]) -> Page<Write<'_>, Leaf> {
+        Page::new(Write { bytes })
     }
 }
 

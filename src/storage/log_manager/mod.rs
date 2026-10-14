@@ -425,10 +425,10 @@ impl LogManager {
     /// Returns the LSN assigned to the appended record. The record is appended
     /// to the operating system file handle but is not forced to durable storage;
     /// use [`Self::flush_through`] for durability.
-    pub(crate) fn append_record<'a>(
+    pub(crate) fn append_record(
         &mut self,
         txn_id: TxnId,
-        kind: LogRecordKind<'a>,
+        kind: LogRecordKind<'_>,
     ) -> Result<Lsn, LogManagerError> {
         self.append_transaction(txn_id, &[LogRecord { txn_id, kind }])
     }
@@ -439,10 +439,10 @@ impl LogManager {
     /// frame order, and the return value is the highest LSN assigned by this
     /// append. Empty frames are allowed for serializer symmetry and return the
     /// current highest appended LSN without advancing it.
-    pub(crate) fn append_transaction<'a>(
+    pub(crate) fn append_transaction(
         &mut self,
         txn_id: TxnId,
-        records: &[LogRecord<'a>],
+        records: &[LogRecord<'_>],
     ) -> Result<Lsn, LogManagerError> {
         if self.poisoned {
             return Err(LogManagerError::Poisoned);

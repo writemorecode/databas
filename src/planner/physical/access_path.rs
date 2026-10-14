@@ -166,10 +166,7 @@ fn index_comparison_for_column<'a>(
 ///
 /// Comparisons written with the literal on the left are normalized so the
 /// returned comparison always describes the column relative to the literal.
-fn index_comparison<'a>(
-    relation: RelationId,
-    comparison: &'a BoundExpr,
-) -> Option<IndexComparison<'a>> {
+fn index_comparison(relation: RelationId, comparison: &BoundExpr) -> Option<IndexComparison<'_>> {
     let BoundExpr::Binary { left, op, right } = comparison else {
         return None;
     };

@@ -29,10 +29,10 @@ const KIND_PAGE_ALLOC: u8 = 5;
 /// The frame includes the header, all payload records, and a footer containing
 /// the transaction id and CRC32 of the payload bytes. It does not assign or
 /// persist LSNs; callers derive LSNs from record position in append order.
-pub(super) fn serialize_transaction<'a, W: Write>(
+pub(super) fn serialize_transaction<W: Write>(
     mut writer: W,
     txn_id: TxnId,
-    records: &[LogRecord<'a>],
+    records: &[LogRecord<'_>],
 ) -> Result<(), LogManagerError> {
     validate_record_txn_ids(txn_id, records)?;
     let entry_count = u32::try_from(records.len())
@@ -434,9 +434,9 @@ fn deserialize_log_record<'a>(
     Ok(LogRecord { txn_id, kind })
 }
 
-pub(super) fn validate_record_txn_ids<'a>(
+pub(super) fn validate_record_txn_ids(
     txn_id: TxnId,
-    records: &[LogRecord<'a>],
+    records: &[LogRecord<'_>],
 ) -> Result<(), LogManagerError> {
     for record in records {
         if record.txn_id != txn_id {
@@ -449,7 +449,7 @@ pub(super) fn validate_record_txn_ids<'a>(
     Ok(())
 }
 
-fn serialized_records_len<'a>(records: &[LogRecord<'a>]) -> Result<u64, LogManagerError> {
+fn serialized_records_len(records: &[LogRecord<'_>]) -> Result<u64, LogManagerError> {
     let mut len = 0u64;
     for record in records {
         len = len
@@ -459,7 +459,7 @@ fn serialized_records_len<'a>(records: &[LogRecord<'a>]) -> Result<u64, LogManag
     Ok(len)
 }
 
-fn serialized_record_len<'a>(kind: &LogRecordKind<'a>) -> Result<u64, LogManagerError> {
+fn serialized_record_len(kind: &LogRecordKind<'_>) -> Result<u64, LogManagerError> {
     match kind {
         LogRecordKind::Begin | LogRecordKind::Commit | LogRecordKind::Rollback => Ok(1),
         LogRecordKind::PageUpdate { redo_data, undo_data, .. } => {
@@ -512,10 +512,10 @@ fn write_frame_footer<W: Write>(
     writer.write_all(&payload_crc32.to_le_bytes())
 }
 
-fn write_log_record_payload<'a, W: Write>(
+fn write_log_record_payload<W: Write>(
     writer: &mut W,
     digest: &mut Digest<'_, u32>,
-    kind: &LogRecordKind<'a>,
+    kind: &LogRecordKind<'_>,
 ) -> Result<(), LogManagerError> {
     match kind {
         LogRecordKind::Begin => write_crc_u8(writer, digest, KIND_BEGIN)?,
