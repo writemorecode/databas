@@ -135,7 +135,7 @@ mod tests {
         page.insert_payload_at(0, 7, b"middle".len(), None, b"middle").unwrap();
 
         let cell = page.cell(0).unwrap();
-        assert_eq!(cell.left_child().unwrap(), 7);
+        assert_eq!(cell.left_child(), 7);
     }
 
     #[test]
@@ -146,10 +146,10 @@ mod tests {
         page.insert_payload_at(0, 7, b"middle".len(), None, b"middle").unwrap();
         let slot_index = 0;
         let mut cell = page.cell_mut(slot_index).unwrap();
-        cell.set_left_child(11).unwrap();
+        cell.set_left_child(11);
 
         let cell = page.cell(slot_index).unwrap();
-        assert_eq!(cell.left_child().unwrap(), 11);
+        assert_eq!(cell.left_child(), 11);
     }
 
     #[test]

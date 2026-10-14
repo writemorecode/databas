@@ -1,6 +1,6 @@
 use crate::core::PageId;
 
-use super::{PageResult, core::Interior, interior};
+use super::{core::Interior, interior};
 
 #[derive(Debug)]
 #[doc(hidden)]
@@ -53,16 +53,15 @@ impl<'a> CellMut<'a, Interior> {
 
 impl Cell<'_, Interior> {
     /// Returns the left-child page id referenced by this interior cell.
-    pub(crate) fn left_child(&self) -> PageResult<PageId> {
-        Ok(self.fields.left_child)
+    pub(crate) fn left_child(&self) -> PageId {
+        self.fields.left_child
     }
 }
 
 impl CellMut<'_, Interior> {
     /// Updates the left-child page id stored in this interior cell.
-    pub(crate) fn set_left_child(&mut self, page_id: PageId) -> PageResult<()> {
+    pub(crate) fn set_left_child(&mut self, page_id: PageId) {
         interior::write_left_child(self.bytes, page_id);
         self.fields.left_child = page_id;
-        Ok(())
     }
 }

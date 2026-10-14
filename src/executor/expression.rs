@@ -19,12 +19,12 @@ pub fn evaluate_expression(
 }
 
 /// Executes a `VALUES` plan as a stream of evaluated literal rows.
-pub(super) fn execute_values(rows: Vec<Vec<ExecExpr>>) -> ExecutorResult<ExecutionOutput> {
+pub(super) fn execute_values(rows: Vec<Vec<ExecExpr>>) -> ExecutionOutput {
     let rows = rows.into_iter().map(|expressions| {
         let input = empty_record();
         evaluate_values(&expressions, &input).map(ExecutorRow::from_values)
     });
-    Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
+    ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) }
 }
 
 /// Skips rows from a child stream while still surfacing skipped-row errors.

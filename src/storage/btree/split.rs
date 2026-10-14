@@ -35,7 +35,7 @@ impl TreeCursor {
                 let updated_slot_index =
                     if inserted_slot_index <= slot_index { slot_index + 1 } else { slot_index };
                 let mut cell = interior_page.cell_mut(updated_slot_index)?;
-                cell.set_left_child(child_page_id)?;
+                cell.set_left_child(child_page_id);
             }
             ChildSlotRef::Rightmost => {
                 interior_page.set_rightmost_child(child_page_id);

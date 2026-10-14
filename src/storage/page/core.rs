@@ -616,6 +616,10 @@ where
     N: NodeMarker,
 {
     /// Opens an immutable typed page view over an initialized buffer.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "Typed page views share the fallible page-view API."
+    )]
     pub(crate) fn open(bytes: &'a [u8; PAGE_SIZE]) -> PageResult<Self> {
         Ok(Self::new(Read { bytes }))
     }
@@ -626,6 +630,10 @@ where
     N: NodeMarker,
 {
     /// Opens a mutable typed page view over an initialized buffer.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "Typed page views share the fallible page-view API."
+    )]
     pub(crate) fn open(bytes: &'a mut [u8; PAGE_SIZE]) -> PageResult<Self> {
         Ok(Self::new(Write { bytes }))
     }
