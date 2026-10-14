@@ -300,7 +300,7 @@ impl TreeCursor {
                         if interior.slot_count() == 0 {
                             interior.rightmost_child()
                         } else {
-                            interior.cell(0)?.left_child()?
+                            interior.cell(0)?.left_child()
                         }
                     }
                 }

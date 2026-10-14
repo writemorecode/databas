@@ -76,7 +76,7 @@ mod test_support {
                     if interior.slot_count() == 0 {
                         interior.rightmost_child()
                     } else {
-                        interior.cell(0).unwrap().left_child().unwrap()
+                        interior.cell(0).unwrap().left_child()
                     }
                 }
             };

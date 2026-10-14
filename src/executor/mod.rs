@@ -376,7 +376,7 @@ where
                 self.transaction.create_index(&name, &table.name, &column_names)?;
                 Ok(ExecutionOutput::SchemaAffected)
             }
-            PhysicalPlanNode::Values { rows } => execute_values(rows),
+            PhysicalPlanNode::Values { rows } => Ok(execute_values(rows)),
             PhysicalPlanNode::InsertValues { table, columns, values } => {
                 execute_insert_values(self.transaction, &table, &columns, values)
             }

@@ -48,7 +48,7 @@ impl<'catalog> Binder<'catalog> {
     ) -> PlannerResult<NodeId> {
         match statement {
             Statement::Explain(statement) => self.plan_explain(statement, nodes),
-            Statement::CreateTable(query) => self.plan_create_table(query, nodes),
+            Statement::CreateTable(query) => Ok(self.plan_create_table(query, nodes)),
             Statement::CreateIndex(query) => self.plan_create_index(query, nodes),
             Statement::Insert(query) => self.plan_insert(query, nodes),
             Statement::Update(query) => self.plan_update(query, nodes),
@@ -79,14 +79,14 @@ impl<'catalog> Binder<'catalog> {
         &self,
         query: &CreateTableQuery<'_>,
         nodes: &mut Vec<LogicalPlanNode>,
-    ) -> PlannerResult<NodeId> {
-        Ok(push_logical_node(
+    ) -> NodeId {
+        push_logical_node(
             nodes,
             LogicalPlanNode::CreateTable {
                 name: query.table_name.to_owned(),
                 schema: TupleSchema::from_create_table_query(query),
             },
-        ))
+        )
     }
 
     fn plan_create_index(
