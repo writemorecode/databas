@@ -190,7 +190,7 @@ impl<'db> Session<'db> {
     }
 
     fn execute_explicit_transaction_statement<'sql>(
-        &mut self,
+        &self,
         txn_id: u64,
         leases: Vec<TableLease>,
         plan: PhysicalPlan,

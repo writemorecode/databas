@@ -657,7 +657,7 @@ impl TreeCursor {
 
     /// Splits an existing interior page after refreshed separators no longer fit.
     pub(super) fn split_existing_interior_page(
-        &mut self,
+        &self,
         page_id: PageId,
         children: &[ChildEntry],
     ) -> StorageResult<PendingSplit> {

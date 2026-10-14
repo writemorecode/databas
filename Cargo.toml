@@ -42,7 +42,7 @@ cast_sign_loss = "deny"
 map_err_ignore = "deny"
 
 # Enable these incrementally while the existing codebase is brought into compliance.
-needless_pass_by_ref_mut = "allow"
+needless_pass_by_ref_mut = "deny"
 needless_pass_by_value = "allow"
 redundant_closure_for_method_calls = "allow"
 equatable_if_let = "allow"
