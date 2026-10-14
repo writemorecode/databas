@@ -4,13 +4,13 @@
 //! substitution here lets the concurrent implementation use one code path.
 
 #[cfg(all(test, loom))]
-pub(crate) use loom::sync::{
+pub use loom::sync::{
     Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 
 #[cfg(not(all(test, loom)))]
-pub(crate) use std::sync::{
+pub use std::sync::{
     Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };

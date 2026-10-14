@@ -4,14 +4,12 @@ use std::sync::Arc as StdArc;
 
 use loom::model::Builder;
 
-pub(crate) mod thread {
-    pub(crate) use loom::thread::yield_now;
+pub mod thread {
+    pub use loom::thread::yield_now;
 
     const STACK_SIZE: usize = 256 * 1024;
 
-    pub(crate) fn spawn<T>(
-        function: impl FnOnce() -> T + Send + 'static,
-    ) -> loom::thread::JoinHandle<T>
+    pub fn spawn<T>(function: impl FnOnce() -> T + Send + 'static) -> loom::thread::JoinHandle<T>
     where
         T: Send + 'static,
     {
@@ -20,7 +18,7 @@ pub(crate) mod thread {
 }
 
 /// Explores a focused two-thread race with bounded scheduling choices.
-pub(crate) fn check_model(model: impl Fn() + Send + Sync + 'static) {
+pub fn check_model(model: impl Fn() + Send + Sync + 'static) {
     let model = StdArc::new(model);
     let mut builder = Builder::new();
     builder.preemption_bound = Some(2);

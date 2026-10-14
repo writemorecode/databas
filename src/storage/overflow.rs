@@ -6,14 +6,14 @@ use crate::storage::{
     page_cache::PageCache,
 };
 
-pub(crate) const OVERFLOW_PAYLOAD_SIZE: usize = PAGE_SIZE - OVERFLOW_NEXT_PAGE_ID_SIZE;
+pub const OVERFLOW_PAYLOAD_SIZE: usize = PAGE_SIZE - OVERFLOW_NEXT_PAGE_ID_SIZE;
 
 fn write_next_page_id(page: &mut [u8; PAGE_SIZE], next_page_id: Option<PageId>) {
     format::write_optional_u64(page, 0, next_page_id);
 }
 
 /// Writes `payload` into a newly allocated overflow chain.
-pub(crate) fn write_chain(
+pub fn write_chain(
     page_cache: &PageCache,
     txn_id: Option<TxnId>,
     payload: &[u8],

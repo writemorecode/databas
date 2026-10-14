@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::core::{PAGE_SIZE, PageId};
 
 #[derive(Debug, Error)]
-pub(crate) enum DiskManagerError {
+pub enum DiskManagerError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("invalid page id: {page_id}")]
@@ -18,7 +18,7 @@ pub(crate) enum DiskManagerError {
     InvalidFileSize { size: u64 },
 }
 
-pub(crate) type DiskManagerResult<T> = Result<T, DiskManagerError>;
+pub type DiskManagerResult<T> = Result<T, DiskManagerError>;
 
 /// Reads and writes pages to and from a database file.
 pub struct DiskManager {

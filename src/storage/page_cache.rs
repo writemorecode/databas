@@ -41,7 +41,7 @@ use crate::storage::{
 };
 
 #[derive(Debug, Error)]
-pub(crate) enum PageCacheError {
+pub enum PageCacheError {
     #[error("storage runtime error: {0}")]
     Storage(Box<StorageError>),
     #[error("no evictable frame available")]
@@ -66,7 +66,7 @@ pub(crate) enum PageCacheError {
     Poisoned { lock: &'static str },
 }
 
-pub(crate) type PageCacheResult<T> = Result<T, PageCacheError>;
+pub type PageCacheResult<T> = Result<T, PageCacheError>;
 
 fn runtime_error(error: StorageError) -> PageCacheError {
     PageCacheError::Storage(Box::new(error))
@@ -100,7 +100,7 @@ fn try_write_page_data(
     }
 }
 
-pub(crate) type FrameId = usize;
+pub type FrameId = usize;
 
 #[derive(Debug)]
 struct Frame {
@@ -166,7 +166,7 @@ impl PageCacheInner {
 /// cache operations. Use [`PinGuard`] to keep pages resident and use
 /// [`PageReadGuard`] or [`PageWriteGuard`] for temporary access to the page
 /// bytes.
-pub(crate) struct PageCache {
+pub struct PageCache {
     inner: Arc<PageCacheInner>,
 }
 
@@ -441,7 +441,7 @@ impl PageCache {
 /// borrow the page contents temporarily.
 ///
 /// Dropping the guard decrements the frame pin count.
-pub(crate) struct PinGuard {
+pub struct PinGuard {
     page_cache: Arc<PageCacheInner>,
     frame_id: FrameId,
     page_id: PageId,
@@ -525,7 +525,7 @@ impl Drop for PinGuard {
 /// not affect eviction on its own; the associated [`PinGuard`] must remain alive
 /// for the page to stay resident. Use this guard for raw byte inspection or to
 /// construct typed read-only page views.
-pub(crate) struct PageReadGuard<'a> {
+pub struct PageReadGuard<'a> {
     page: RwLockReadGuard<'a, [u8; PAGE_SIZE]>,
 }
 
@@ -549,7 +549,7 @@ impl PageReadGuard<'_> {
 /// `PageWriteGuard` owns the active mutable borrow of the page bytes. Only one
 /// write guard may exist for a frame at a time, and no read guards may coexist
 /// with it. Creating a write guard marks the frame dirty immediately.
-pub(crate) struct PageWriteGuard<'a> {
+pub struct PageWriteGuard<'a> {
     page: RwLockWriteGuard<'a, [u8; PAGE_SIZE]>,
     before: [u8; PAGE_SIZE],
     was_dirty: bool,

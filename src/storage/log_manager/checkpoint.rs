@@ -5,7 +5,7 @@ use super::{
 };
 use crate::core::error::StorageResult;
 
-pub(crate) struct CheckpointProgress {
+pub struct CheckpointProgress {
     pub(crate) remaining_records: usize,
 }
 

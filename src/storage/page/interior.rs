@@ -18,7 +18,7 @@ const LEFT_CHILD_OFFSET: usize = FIRST_OVERFLOW_PAGE_ID_OFFSET + CELL_OVERFLOW_P
 const KEY_LENGTH_OFFSET: usize = LEFT_CHILD_OFFSET + PAGE_ID_SIZE;
 
 #[derive(Debug, Clone)]
-pub(crate) struct InteriorCellParts {
+pub struct InteriorCellParts {
     pub(crate) payload_len: usize,
     pub(crate) first_overflow_page_id: Option<PageId>,
     pub(crate) inline_payload_range: Range<usize>,
@@ -26,13 +26,13 @@ pub(crate) struct InteriorCellParts {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ParsedInteriorCell {
+pub struct ParsedInteriorCell {
     pub(crate) cell_offset: usize,
     pub(crate) cell_len: usize,
     pub(crate) parts: InteriorCellParts,
 }
 
-pub(crate) fn cell_len_at(
+pub fn cell_len_at(
     bytes: &[u8; PAGE_SIZE],
     slot_index: SlotId,
     cell_offset: usize,
@@ -64,10 +64,7 @@ pub(crate) fn cell_len_at(
     Ok(cell_len)
 }
 
-pub(crate) fn cell_parts<A>(
-    page: &Page<A, Interior>,
-    slot_index: SlotId,
-) -> PageResult<ParsedInteriorCell>
+pub fn cell_parts<A>(page: &Page<A, Interior>, slot_index: SlotId) -> PageResult<ParsedInteriorCell>
 where
     A: PageAccess,
 {
@@ -91,7 +88,7 @@ where
     })
 }
 
-pub(crate) fn write_cell_with_payload(
+pub fn write_cell_with_payload(
     bytes: &mut [u8; PAGE_SIZE],
     cell_offset: usize,
     left_child: PageId,
@@ -112,7 +109,7 @@ pub(crate) fn write_cell_with_payload(
     bytes[payload_start..payload_start + inline_payload.len()].copy_from_slice(inline_payload);
 }
 
-pub(crate) fn write_left_child(bytes: &mut [u8], page_id: PageId) {
+pub fn write_left_child(bytes: &mut [u8], page_id: PageId) {
     bytes[LEFT_CHILD_OFFSET..LEFT_CHILD_OFFSET + PAGE_ID_SIZE]
         .copy_from_slice(&page_id.to_le_bytes());
 }

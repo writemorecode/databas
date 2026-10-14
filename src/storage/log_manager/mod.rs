@@ -28,6 +28,7 @@ use std::{
 
 use thiserror::Error;
 
+#[allow(clippy::redundant_pub_crate)] // Lsn is intentionally crate-private.
 pub(crate) use crate::core::{Lsn, TxnId};
 use crate::core::{PAGE_SIZE, PageId};
 
@@ -41,20 +42,20 @@ use fault_injection::FaultInjectingWriter;
 #[cfg(test)]
 use frame::FOOTER_LEN;
 #[cfg(test)]
-pub(crate) use frame::read_log_record_kinds_for_test;
+pub use frame::read_log_record_kinds_for_test;
 use frame::{
     CRC32, HEADER_LEN, deserialize_transaction, scan_transaction_frame, serialize_transaction,
     transaction_frame_len, validate_record_txn_ids, wal_open_error,
 };
 
 /// Sentinel LSN used for pages that do not reflect any logged update.
-pub(crate) const ZERO_LSN: Lsn = 0;
+pub const ZERO_LSN: Lsn = 0;
 
 const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const WAL_FILE_HEADER_VERSION: u16 = 2;
-pub(crate) const WAL_FILE_HEADER_LEN: usize = 32;
+pub const WAL_FILE_HEADER_LEN: usize = 32;
 const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
 
 trait DurableWrite: Write {
@@ -150,7 +151,7 @@ pub enum LogManagerError {
 
 /// Errors raised while forcing appended WAL bytes to durable storage.
 #[derive(Debug, Error)]
-pub(crate) enum LogManagerFlushError {
+pub enum LogManagerFlushError {
     /// The filesystem sync failed.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -166,7 +167,7 @@ pub(crate) enum LogManagerFlushError {
 
 /// Borrowed WAL record used while serializing a transaction frame.
 #[derive(Debug)]
-pub(crate) struct LogRecord<'a> {
+pub struct LogRecord<'a> {
     /// Transaction that owns this record.
     pub(crate) txn_id: TxnId,
     /// Record payload.
@@ -175,7 +176,7 @@ pub(crate) struct LogRecord<'a> {
 
 /// Borrowed WAL record payload.
 #[derive(Debug)]
-pub(crate) enum LogRecordKind<'a> {
+pub enum LogRecordKind<'a> {
     /// Transaction start marker.
     Begin,
     /// Transaction commit marker.
@@ -198,7 +199,7 @@ pub(crate) enum LogRecordKind<'a> {
 /// Unlike [`LogRecord`], this form owns page images and includes the LSN
 /// assigned from the record's position in the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RecoveryLogRecord {
+pub struct RecoveryLogRecord {
     /// Logical LSN assigned to this record.
     pub(crate) lsn: Lsn,
     /// Transaction that owns this record.
@@ -209,7 +210,7 @@ pub(crate) struct RecoveryLogRecord {
 
 /// Owned WAL record payload used by crash recovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RecoveryLogRecordKind {
+pub enum RecoveryLogRecordKind {
     /// Transaction start marker.
     Begin,
     /// Transaction commit marker.
@@ -224,7 +225,7 @@ pub(crate) enum RecoveryLogRecordKind {
 
 /// Result of scanning the WAL for recovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RecoveryLogScan {
+pub struct RecoveryLogScan {
     /// Complete records decoded from valid WAL frames, in log order.
     pub(crate) records: Vec<RecoveryLogRecord>,
     /// Whether an invalid or incomplete frame and its suffix were truncated.
@@ -237,7 +238,7 @@ pub(crate) struct RecoveryLogScan {
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OwnedLogRecordKind {
+pub enum OwnedLogRecordKind {
     Begin,
     Commit,
     Rollback,
@@ -246,7 +247,7 @@ pub(crate) enum OwnedLogRecordKind {
 }
 
 #[derive(Debug)]
-pub(crate) struct LogTransaction<'a> {
+pub struct LogTransaction<'a> {
     /// Transaction id shared by all records in this frame.
     pub(crate) txn_id: TxnId,
     /// Records decoded from the frame payload.
@@ -332,7 +333,7 @@ fn write_wal_file_header(
 /// code uses that distinction to enforce the write-ahead rule before writing a
 /// dirty page whose page header references a logged LSN.
 #[derive(Debug)]
-pub(crate) struct LogManager {
+pub struct LogManager {
     wal_writer: ActiveWalWriter,
 
     highest_txn_id: TxnId,
@@ -556,13 +557,13 @@ enum LogReadMode {
 /// crash even when an earlier frame did not. Successfully synced bytes are
 /// assumed intact. File-header errors, unsupported nonzero frame versions, and
 /// I/O or allocation failures propagate without discarding the suffix.
-pub(crate) fn read_recovery_log(
+pub fn read_recovery_log(
     db_file_path: impl AsRef<Path>,
 ) -> Result<RecoveryLogScan, LogManagerError> {
     read_log(db_file_path.as_ref(), LogReadMode::Recovery)
 }
 
-pub(crate) fn read_checkpoint_log(path: &Path) -> Result<RecoveryLogScan, LogManagerError> {
+pub fn read_checkpoint_log(path: &Path) -> Result<RecoveryLogScan, LogManagerError> {
     read_log(path, LogReadMode::Checkpoint)
 }
 
@@ -668,7 +669,7 @@ fn read_log(db_file_path: &Path, mode: LogReadMode) -> Result<RecoveryLogScan, L
 }
 
 /// Removes all WAL contents after recovery has made the database file consistent.
-pub(crate) fn truncate_wal(
+pub fn truncate_wal(
     db_file_path: impl AsRef<Path>,
     last_assigned_lsn: Lsn,
     max_txn_id: TxnId,

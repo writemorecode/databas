@@ -31,7 +31,7 @@ struct PageUndo {
 
 /// Page image to install while rolling back in memory.
 #[derive(Debug, Clone)]
-pub(crate) struct PageRestore {
+pub struct PageRestore {
     /// Page to restore.
     pub(crate) page_id: PageId,
     /// Full page image to install.
@@ -42,7 +42,7 @@ pub(crate) struct PageRestore {
 
 /// Physical rollback work for the active transaction.
 #[derive(Debug, Clone)]
-pub(crate) struct TransactionRollback {
+pub struct TransactionRollback {
     /// Restore operations in reverse mutation order.
     pub(crate) pages: Vec<PageRestore>,
     /// Pages restored by this rollback or an earlier savepoint rollback that
@@ -52,7 +52,7 @@ pub(crate) struct TransactionRollback {
 
 /// In-memory checkpoint for rolling back one statement inside a transaction.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct TransactionSavepoint {
+pub struct TransactionSavepoint {
     /// Transaction that created this savepoint, used to reject stale handles.
     pub(crate) txn_id: TxnId,
     /// Undo-log boundary before the statement made any page changes.
@@ -64,7 +64,7 @@ pub(crate) struct TransactionSavepoint {
 /// The returned redo image is the caller's `after` image with the assigned LSN
 /// stamped into the page header when the page format supports an LSN field.
 #[derive(Debug)]
-pub(crate) struct LoggedPageUpdate {
+pub struct LoggedPageUpdate {
     /// LSN assigned to the WAL update record.
     pub(crate) lsn: Lsn,
     /// Full page image that should be installed into the cache after logging.
@@ -78,7 +78,7 @@ pub(crate) struct LoggedPageUpdate {
 /// rollback, and marks a transaction as poisoned after an error that may have
 /// left its effects only partially logged.
 #[derive(Debug)]
-pub(crate) struct TransactionManager {
+pub struct TransactionManager {
     /// Greatest transaction ID issued by this manager or observed during open.
     max_txn_id: TxnId,
     /// Transactions currently accepted by the storage runtime, keyed by id.

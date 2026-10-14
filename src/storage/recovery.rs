@@ -23,14 +23,11 @@ struct RecoveryPageUpdate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RecoveryResult {
+pub struct RecoveryResult {
     pub(crate) max_txn_id: TxnId,
 }
 
-pub(crate) fn recover_from_wal(
-    path: &Path,
-    disk: &mut DiskManager,
-) -> StorageResult<RecoveryResult> {
+pub fn recover_from_wal(path: &Path, disk: &mut DiskManager) -> StorageResult<RecoveryResult> {
     let scan = read_recovery_log(path)?;
     let max_txn_id = scan.max_txn_id;
     if scan.records.is_empty() {

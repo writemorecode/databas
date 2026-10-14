@@ -6,11 +6,11 @@ pub type PageId = u64;
 pub type CatalogId = i32;
 /// Integer primary key used by table B+-trees.
 pub type TableKey = i32;
-pub(crate) type SlotId = u16;
+pub type SlotId = u16;
 /// Monotonic identifier for a database transaction.
 pub type TxnId = u64;
 /// Log sequence number assigned to one write-ahead-log record.
-pub(crate) type Lsn = u64;
+pub type Lsn = u64;
 
 /// Inclusive or exclusive bound over encoded secondary-index B+-tree keys.
 #[derive(Debug, Clone, PartialEq, Eq)]

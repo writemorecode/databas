@@ -17,7 +17,7 @@ const KEY_LENGTH_OFFSET: usize = FIRST_OVERFLOW_PAGE_ID_OFFSET + CELL_OVERFLOW_P
 const VALUE_LENGTH_OFFSET: usize = KEY_LENGTH_OFFSET + KEY_LENGTH_SIZE;
 
 #[derive(Debug, Clone)]
-pub(crate) struct LeafCellParts {
+pub struct LeafCellParts {
     pub(crate) payload_len: usize,
     pub(crate) first_overflow_page_id: Option<PageId>,
     pub(crate) inline_payload_range: Range<usize>,
@@ -25,12 +25,12 @@ pub(crate) struct LeafCellParts {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ParsedLeafCell {
+pub struct ParsedLeafCell {
     pub(crate) cell_offset: usize,
     pub(crate) parts: LeafCellParts,
 }
 
-pub(crate) fn cell_len_at(
+pub fn cell_len_at(
     bytes: &[u8; PAGE_SIZE],
     slot_index: SlotId,
     cell_offset: usize,
@@ -63,7 +63,7 @@ pub(crate) fn cell_len_at(
     Ok(cell_len)
 }
 
-pub(crate) fn cell_parts<A>(page: &Page<A, Leaf>, slot_index: SlotId) -> PageResult<ParsedLeafCell>
+pub fn cell_parts<A>(page: &Page<A, Leaf>, slot_index: SlotId) -> PageResult<ParsedLeafCell>
 where
     A: PageAccess,
 {
@@ -88,7 +88,7 @@ where
     })
 }
 
-pub(crate) fn write_cell_with_payload(
+pub fn write_cell_with_payload(
     bytes: &mut [u8; PAGE_SIZE],
     cell_offset: usize,
     payload_len: u16,

@@ -3,14 +3,14 @@ use crate::core::{
     error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
 };
 
-pub(crate) const DATABASE_HEADER_PAGE_ID: PageId = 0;
+pub const DATABASE_HEADER_PAGE_ID: PageId = 0;
 
 const MAGIC: &[u8; 8] = b"DATABAS\0";
 const FORMAT_VERSION: u16 = 2;
 const HEADER_LEN: usize = 12;
 
 /// Fixed-format database file header stored on page 0.
-pub(crate) struct DatabaseHeader;
+pub struct DatabaseHeader;
 
 impl DatabaseHeader {
     pub(crate) fn encode_page() -> [u8; PAGE_SIZE] {
@@ -55,7 +55,7 @@ impl DatabaseHeader {
     }
 }
 
-pub(crate) fn missing_header() -> StorageError {
+pub fn missing_header() -> StorageError {
     corrupt_header(CorruptionKind::MissingDatabaseHeader)
 }
 

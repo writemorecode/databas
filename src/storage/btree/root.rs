@@ -5,7 +5,7 @@ use super::{
 };
 
 /// Allocates and initializes a brand-new empty raw root leaf page.
-pub(crate) fn initialize_empty_root(
+pub fn initialize_empty_root(
     page_cache: &PageCache,
     txn_id: Option<TxnId>,
 ) -> StorageResult<PageId> {
@@ -16,7 +16,7 @@ pub(crate) fn initialize_empty_root(
 }
 
 /// Validates every B+-tree page reachable from `root_page_id`.
-pub(crate) fn validate_tree_page_formats(
+pub fn validate_tree_page_formats(
     page_cache: &PageCache,
     root_page_id: PageId,
 ) -> StorageResult<()> {

@@ -16,14 +16,14 @@ use super::{
 
 /// Marker type for leaf pages that store raw key/value cells.
 #[derive(Debug)]
-pub(crate) enum Leaf {}
+pub enum Leaf {}
 
 /// Marker type for interior pages that store separators and child pointers.
 #[derive(Debug)]
-pub(crate) enum Interior {}
+pub enum Interior {}
 
 /// Associates a typed page marker with its encoded [`format::PageKind`].
-pub(crate) trait NodeMarker {
+pub trait NodeMarker {
     /// The structural node kind represented by this marker.
     const KIND: format::NodeKind;
 }
@@ -38,24 +38,24 @@ impl NodeMarker for Interior {
 
 /// Shared immutable access to a page-sized byte buffer.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Read<'a> {
+pub struct Read<'a> {
     pub(crate) bytes: &'a [u8; PAGE_SIZE],
 }
 
 /// Shared mutable access to a page-sized byte buffer.
 #[derive(Debug)]
-pub(crate) struct Write<'a> {
+pub struct Write<'a> {
     pub(crate) bytes: &'a mut [u8; PAGE_SIZE],
 }
 
 /// Abstraction over page access modes that can expose immutable bytes.
-pub(crate) trait PageAccess {
+pub trait PageAccess {
     /// Returns the underlying fixed-size page buffer.
     fn bytes(&self) -> &[u8; PAGE_SIZE];
 }
 
 /// Extension of [`PageAccess`] for access modes that can mutate the page buffer.
-pub(crate) trait PageAccessMut: PageAccess {
+pub trait PageAccessMut: PageAccess {
     /// Returns the underlying page buffer mutably.
     fn bytes_mut(&mut self) -> &mut [u8; PAGE_SIZE];
 }
@@ -83,14 +83,14 @@ impl PageAccessMut for Write<'_> {
 /// `A` controls the access mode ([`Read`] or [`Write`]) and `N` controls the
 /// node kind ([`Leaf`] or [`Interior`]).
 #[derive(Debug)]
-pub(crate) struct Page<A, N> {
+pub struct Page<A, N> {
     access: A,
     _marker: PhantomData<N>,
 }
 
 /// Result of searching a sorted slot directory by key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SearchResult {
+pub enum SearchResult {
     /// The key already exists at the returned slot index.
     Found(SlotId),
     /// The key is absent and should be inserted at the returned slot index.
@@ -99,7 +99,7 @@ pub(crate) enum SearchResult {
 
 /// Result of locating a bound within a sorted slot directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BoundResult {
+pub enum BoundResult {
     /// The bound resolves to an existing slot index.
     At(SlotId),
     /// The bound lies past the last slot on the page.
@@ -107,7 +107,7 @@ pub(crate) enum BoundResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Freeblock {
+pub struct Freeblock {
     pub(crate) offset: u16,
     pub(crate) size: u16,
     pub(crate) next: Option<u16>,
@@ -125,7 +125,7 @@ fn encode_page_u16(value: usize) -> PageResult<u16> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct FreeblockIter<'a> {
+pub struct FreeblockIter<'a> {
     bytes: &'a [u8; PAGE_SIZE],
     content_start: u16,
     next: Option<u16>,
@@ -682,7 +682,7 @@ impl<'a> Page<Write<'a>, Interior> {
     }
 }
 
-pub(crate) fn validate_btree_page(bytes: &[u8; PAGE_SIZE]) -> PageResult<()> {
+pub fn validate_btree_page(bytes: &[u8; PAGE_SIZE]) -> PageResult<()> {
     let Some(actual_kind) = format::PageKind::from_raw(bytes[KIND_OFFSET]) else {
         return Err(PageError::UnknownPageKind { actual: bytes[KIND_OFFSET] });
     };
