@@ -1,5 +1,8 @@
 //! Crash-safe WAL prefix reclamation after covered database pages are synced.
-use super::*;
+use super::{
+    BufWriter, LogManager, LogRecord, Lsn, OpenOptions, Path, WAL_WRITE_BUFFER_LEN, Write,
+    read_checkpoint_log, serialize_transaction, sync_parent_directory, write_wal_file_header,
+};
 use crate::core::error::StorageResult;
 
 pub(crate) struct CheckpointProgress {
