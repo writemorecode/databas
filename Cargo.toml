@@ -48,7 +48,7 @@ redundant_closure_for_method_calls = "deny"
 equatable_if_let = "deny"
 unnecessary_wraps = "deny"
 
-redundant_pub_crate = "allow"
+redundant_pub_crate = "deny"
 wildcard_imports = "deny"
 
 significant_drop_tightening = "allow"

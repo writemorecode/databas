@@ -30,7 +30,7 @@ fn make_transaction_manager(max_txn_id: TxnId) -> ActiveTransactionManager {
 /// writes, and future transaction code can share the same log manager.
 /// Operations that need both transaction and log state always lock transactions
 /// before the log.
-pub(crate) struct StorageRuntime {
+pub struct StorageRuntime {
     path: PathBuf,
     checkpoint: Mutex<Checkpointer>,
     disk: Mutex<DiskManager>,

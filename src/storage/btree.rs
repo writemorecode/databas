@@ -173,7 +173,7 @@ mod loom_tests {
 }
 
 pub use record::Record;
-pub(crate) use root::{initialize_empty_root, validate_tree_page_formats};
+pub use root::{initialize_empty_root, validate_tree_page_formats};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorState {

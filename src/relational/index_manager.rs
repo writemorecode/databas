@@ -5,7 +5,7 @@ use crate::core::{
 use crate::relational::{catalog_manager::CatalogManager, cursor::encode_index_entry_key};
 
 /// Creates and backfills a secondary index.
-pub(crate) fn create_index(
+pub fn create_index(
     catalog: &CatalogManager,
     name: &str,
     table_name: &str,
@@ -17,7 +17,7 @@ pub(crate) fn create_index(
     Ok(index)
 }
 
-pub(crate) fn insert_index_entries(
+pub fn insert_index_entries(
     catalog: &CatalogManager,
     txn_id: Option<TxnId>,
     table: &TableSchema,
@@ -32,7 +32,7 @@ pub(crate) fn insert_index_entries(
     Ok(())
 }
 
-pub(crate) fn delete_index_entries(
+pub fn delete_index_entries(
     catalog: &CatalogManager,
     txn_id: Option<TxnId>,
     table: &TableSchema,
@@ -79,7 +79,7 @@ fn index_cursor(
 /// manager-to-operation migration.
 #[cfg(test)]
 #[derive(Clone)]
-pub(crate) struct IndexManager {
+pub struct IndexManager {
     catalog: CatalogManager,
 }
 
@@ -99,7 +99,7 @@ impl IndexManager {
     }
 }
 
-pub(crate) fn index_key_from_record(
+pub fn index_key_from_record(
     table: &TableSchema,
     index: &IndexSchema,
     record: &OwnedTableRecord,

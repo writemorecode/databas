@@ -28,7 +28,7 @@ pub enum CheckpointOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StatementTransactionMode {
+pub enum StatementTransactionMode {
     Ordinary,
     Ddl,
 }

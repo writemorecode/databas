@@ -23,14 +23,14 @@ use crate::{
 use super::Database;
 
 /// An active transaction's concrete relational gateway.
-pub(crate) struct Transaction<'db> {
+pub struct Transaction<'db> {
     database: &'db Database,
     txn_id: TxnId,
     leases: Vec<TableLease>,
 }
 
 /// Converts page-backed cursor records to owned executor records as they are read.
-pub(crate) struct OwnedScan<I>(I);
+pub struct OwnedScan<I>(I);
 
 impl<I> Iterator for OwnedScan<I>
 where

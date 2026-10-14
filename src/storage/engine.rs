@@ -34,7 +34,7 @@ impl Default for StorageOptions {
 /// `Storage` owns the disk manager and page cache indirectly, and is responsible
 /// only for producing raw B+-tree cursors rooted at specific page ids.
 #[derive(Clone)]
-pub(crate) struct Storage {
+pub struct Storage {
     runtime: Arc<StorageRuntime>,
     page_cache: PageCache,
     opened_page_count: u64,

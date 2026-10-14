@@ -14,16 +14,16 @@
 //! crate-private: callers use the database facade rather than assembling
 //! storage components directly.
 
-pub(crate) mod btree;
-pub(crate) mod database_header;
-pub(crate) mod disk_manager;
-pub(crate) mod engine;
+pub mod btree;
+pub mod database_header;
+pub mod disk_manager;
+pub mod engine;
 mod error;
-pub(crate) mod log_manager;
-pub(crate) mod overflow;
-pub(crate) mod page;
-pub(crate) mod page_cache;
-pub(crate) mod page_replacement;
-pub(crate) mod recovery;
-pub(crate) mod storage_runtime;
-pub(crate) mod transaction_manager;
+pub mod log_manager;
+pub mod overflow;
+pub mod page;
+pub mod page_cache;
+pub mod page_replacement;
+pub mod recovery;
+pub mod storage_runtime;
+pub mod transaction_manager;

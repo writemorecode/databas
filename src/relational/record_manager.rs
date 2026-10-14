@@ -13,12 +13,12 @@ use crate::relational::{
 /// Compatibility wrapper retained for focused relational tests.
 #[cfg(test)]
 #[derive(Clone)]
-pub(crate) struct RecordManager {
+pub struct RecordManager {
     catalog: CatalogManager,
 }
 
 /// Iterator over records in one table.
-pub(crate) struct TableScan {
+pub struct TableScan {
     cursor: TableCursor,
     range: TableKeyRange,
     last_table_key: Option<TableKey>,
@@ -28,7 +28,7 @@ pub(crate) struct TableScan {
 }
 
 /// Iterator over table rows referenced by matching secondary-index entries.
-pub(crate) struct IndexScan {
+pub struct IndexScan {
     table_name: String,
     table_cursor: TableCursor,
     index_cursor: IndexCursor,
@@ -37,7 +37,7 @@ pub(crate) struct IndexScan {
     done: bool,
 }
 
-pub(crate) fn scan_table(
+pub fn scan_table(
     catalog: &CatalogManager,
     txn_id: Option<TxnId>,
     table: &TableSchema,
@@ -45,7 +45,7 @@ pub(crate) fn scan_table(
     scan_table_range(catalog, txn_id, table, TableKeyRange::unbounded())
 }
 
-pub(crate) fn scan_table_range(
+pub fn scan_table_range(
     catalog: &CatalogManager,
     txn_id: Option<TxnId>,
     table: &TableSchema,
@@ -63,7 +63,7 @@ pub(crate) fn scan_table_range(
     })
 }
 
-pub(crate) fn scan_index(
+pub fn scan_index(
     catalog: &CatalogManager,
     txn_id: Option<TxnId>,
     table: &TableSchema,
@@ -80,7 +80,7 @@ pub(crate) fn scan_index(
     })
 }
 
-pub(crate) fn insert_table_row(
+pub fn insert_table_row(
     catalog: &CatalogManager,
     txn_id: Option<TxnId>,
     table: &TableSchema,
@@ -98,7 +98,7 @@ pub(crate) fn insert_table_row(
     Ok(record)
 }
 
-pub(crate) fn delete_table_row(
+pub fn delete_table_row(
     catalog: &CatalogManager,
     txn_id: Option<TxnId>,
     table: &TableSchema,
@@ -109,7 +109,7 @@ pub(crate) fn delete_table_row(
     table_cursor.delete(record.table_key)
 }
 
-pub(crate) fn update_table_row(
+pub fn update_table_row(
     catalog: &CatalogManager,
     txn_id: Option<TxnId>,
     table: &TableSchema,
@@ -380,7 +380,7 @@ fn range_start(lower: Option<TableKeyBound>) -> RangeStart {
     }
 }
 
-pub(crate) fn validate_table_row(table: &TableSchema, values: &[Value]) -> StorageResult<()> {
+pub fn validate_table_row(table: &TableSchema, values: &[Value]) -> StorageResult<()> {
     if values.len() != table.row.columns.len() {
         return Err(StorageError::InvalidArgument(InvalidArgumentError::TableRowValueCount {
             table: table.name.clone(),
@@ -411,10 +411,7 @@ pub(crate) fn validate_table_row(table: &TableSchema, values: &[Value]) -> Stora
     Ok(())
 }
 
-pub(crate) fn table_key_from_values(
-    table: &TableSchema,
-    values: &[Value],
-) -> StorageResult<TableKey> {
+pub fn table_key_from_values(table: &TableSchema, values: &[Value]) -> StorageResult<TableKey> {
     match values.first() {
         Some(Value::Integer(value)) => Ok(*value),
         Some(Value::Null) => Err(StorageError::Constraint(ConstraintError::NullValue {

@@ -16,30 +16,30 @@
 mod cell;
 mod core;
 mod error;
-pub(crate) mod format;
+pub mod format;
 mod interior;
 mod leaf;
 
 use crate::core::PAGE_SIZE;
 
 /// Page handles, marker types, access traits, and search helpers for typed page access.
-pub(crate) use core::{
+pub use core::{
     BoundResult, Interior, Leaf, NodeMarker, Page, Read, SearchResult, Write, validate_btree_page,
 };
 /// Errors returned while validating or manipulating encoded pages and cells.
-pub(crate) use error::{CellCorruption, PageCorruption, PageError, PageResult};
+pub use error::{CellCorruption, PageCorruption, PageError, PageResult};
 
 /// Raw B+-tree leaf page storing byte keys and byte values.
-pub(crate) type RawLeaf<A> = Page<A, Leaf>;
+pub type RawLeaf<A> = Page<A, Leaf>;
 /// Raw B+-tree interior page storing separator byte keys and child pointers.
-pub(crate) type RawInterior<A> = Page<A, Interior>;
+pub type RawInterior<A> = Page<A, Interior>;
 
-pub(crate) fn is_current_btree_page(bytes: &[u8; PAGE_SIZE]) -> bool {
+pub fn is_current_btree_page(bytes: &[u8; PAGE_SIZE]) -> bool {
     format::PageKind::from_raw(bytes[format::KIND_OFFSET]).is_some()
         && bytes[format::VERSION_OFFSET] == format::FORMAT_VERSION
 }
 
-pub(crate) fn is_overflow_page(bytes: &[u8; PAGE_SIZE]) -> bool {
+pub fn is_overflow_page(bytes: &[u8; PAGE_SIZE]) -> bool {
     !is_current_btree_page(bytes)
 }
 

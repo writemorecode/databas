@@ -42,7 +42,7 @@ impl BitSet {
 }
 
 #[derive(Debug)]
-pub(crate) struct ClockPolicy {
+pub struct ClockPolicy {
     hand: FrameId,
     reference_bits: BitSet,
 }

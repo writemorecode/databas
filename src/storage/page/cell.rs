@@ -4,7 +4,7 @@ use super::{core::Interior, interior};
 
 #[derive(Debug)]
 #[doc(hidden)]
-pub(crate) struct InteriorCellFields {
+pub struct InteriorCellFields {
     left_child: PageId,
 }
 
@@ -16,7 +16,7 @@ mod private {
     impl Sealed for Interior {}
 }
 
-pub(crate) trait CellMarker: private::Sealed {
+pub trait CellMarker: private::Sealed {
     #[doc(hidden)]
     type Fields;
 }
@@ -27,14 +27,14 @@ impl CellMarker for Interior {
 
 /// A typed immutable view over a single page cell.
 #[derive(Debug)]
-pub(crate) struct Cell<'a, N: CellMarker> {
+pub struct Cell<'a, N: CellMarker> {
     _bytes: &'a [u8],
     fields: N::Fields,
 }
 
 /// A typed mutable view over a single page cell.
 #[derive(Debug)]
-pub(crate) struct CellMut<'a, N: CellMarker> {
+pub struct CellMut<'a, N: CellMarker> {
     bytes: &'a mut [u8],
     fields: N::Fields,
 }

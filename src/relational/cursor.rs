@@ -27,7 +27,7 @@ fn encode_index_table_key(table_key: TableKey) -> [u8; TABLE_KEY_SIZE] {
     encode_table_key(table_key)
 }
 
-pub(crate) fn encode_index_entry_key(index_key: &[u8], table_key: TableKey) -> Vec<u8> {
+pub fn encode_index_entry_key(index_key: &[u8], table_key: TableKey) -> Vec<u8> {
     let mut key = Vec::with_capacity(index_key.len() + TABLE_KEY_SIZE);
     key.extend_from_slice(index_key);
     key.extend_from_slice(&encode_table_key(table_key));
