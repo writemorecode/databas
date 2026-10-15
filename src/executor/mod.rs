@@ -336,7 +336,7 @@ where
     R: RelationalAccess,
 {
     /// Creates an executor scoped to an active transaction.
-    pub(crate) fn in_transaction(transaction: &'txn R) -> Self {
+    pub fn in_transaction(transaction: &'txn R) -> Self {
         Self { transaction }
     }
 
@@ -434,7 +434,7 @@ where
                 let relation = scan.relation;
                 let rows = self
                     .transaction
-                    .scan_index(&scan.table, &scan.index, scan.key_range)?
+                    .scan_index(&scan.table, &scan.index, scan.value_range)?
                     .map(move |record| {
                         let record = record.map_err(ExecutorError::from)?;
                         ExecutorRow::from_table_record(relation, table_id, record)

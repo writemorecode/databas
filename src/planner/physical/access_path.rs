@@ -1,22 +1,16 @@
 //! Predicate analysis and scan-range derivation for physical table access.
 
 use crate::relational::DataType;
-use crate::relational::IndexKeyBound;
-use crate::relational::IndexKeyRange;
 use crate::relational::IndexSchema;
 use crate::relational::TableKey;
 use crate::relational::TableKeyBound;
 use crate::relational::TableKeyRange;
 use crate::relational::TableSchema;
-use crate::relational::TupleRef;
 use crate::relational::Value;
-use crate::relational::ValueRef;
-use crate::relational::cursor::encode_index_entry_key;
 use crate::sql_parser::parser::op::Op;
 
 use crate::planner::BoundColumn;
 use crate::planner::BoundExpr;
-use crate::planner::IndexValueBound;
 use crate::planner::IndexValueRange;
 use crate::planner::RelationId;
 
@@ -38,8 +32,6 @@ pub(super) struct IndexPredicate {
     pub(super) column: BoundColumn,
     /// The range of logical values accepted by the predicate.
     pub(super) value_range: IndexValueRange,
-    /// The encoded index-key range used to seek and scan the index.
-    pub(super) key_range: IndexKeyRange,
 }
 
 /// Derives a table-key range from a predicate on an integer primary key.
@@ -78,18 +70,12 @@ pub(super) fn secondary_index_predicate(
             continue;
         };
         let mut value_range = IndexValueRange::default();
-        let mut key_range = IndexKeyRange::default();
 
         for conjunct in &conjuncts {
             if let Some(comparison) =
                 index_comparison_for_column(relation, conjunct, &candidate.column)
             {
-                combine_index_ranges(
-                    &mut value_range,
-                    &mut key_range,
-                    comparison.value,
-                    comparison.kind,
-                )?;
+                combine_index_ranges(&mut value_range, comparison.value, comparison.kind)?;
             }
         }
 
@@ -97,7 +83,6 @@ pub(super) fn secondary_index_predicate(
             index: candidate.index,
             column: candidate.column,
             value_range,
-            key_range,
         });
     }
 
@@ -255,113 +240,28 @@ fn secondary_index_comparison_is_order_compatible(
 /// Intersects one index comparison into the value and encoded-key ranges.
 fn combine_index_ranges(
     value_range: &mut IndexValueRange,
-    key_range: &mut IndexKeyRange,
     value: &Value,
     kind: IndexComparisonKind,
 ) -> Option<()> {
     match kind {
         IndexComparisonKind::Equals => {
-            combine_index_lower_bound(value_range, key_range, value.clone(), true)?;
-            combine_index_upper_bound(value_range, key_range, value.clone(), true)?;
+            value_range.intersect_lower(value.clone(), true).ok()?;
+            value_range.intersect_upper(value.clone(), true).ok()?;
         }
         IndexComparisonKind::GreaterThan => {
-            combine_index_lower_bound(value_range, key_range, value.clone(), false)?;
+            value_range.intersect_lower(value.clone(), false).ok()?;
         }
         IndexComparisonKind::GreaterThanOrEqual => {
-            combine_index_lower_bound(value_range, key_range, value.clone(), true)?;
+            value_range.intersect_lower(value.clone(), true).ok()?;
         }
         IndexComparisonKind::LessThan => {
-            combine_index_upper_bound(value_range, key_range, value.clone(), false)?;
+            value_range.intersect_upper(value.clone(), false).ok()?;
         }
         IndexComparisonKind::LessThanOrEqual => {
-            combine_index_upper_bound(value_range, key_range, value.clone(), true)?;
+            value_range.intersect_upper(value.clone(), true).ok()?;
         }
     }
     Some(())
-}
-
-/// Applies a lower bound if it is tighter than the current lower bound.
-fn combine_index_lower_bound(
-    value_range: &mut IndexValueRange,
-    key_range: &mut IndexKeyRange,
-    value: Value,
-    inclusive: bool,
-) -> Option<()> {
-    let key = index_lower_key(&value, inclusive)?;
-    let value_bound = if inclusive {
-        IndexValueBound::Inclusive(value)
-    } else {
-        IndexValueBound::Exclusive(value)
-    };
-    let key_bound =
-        if inclusive { IndexKeyBound::Inclusive(key) } else { IndexKeyBound::Exclusive(key) };
-
-    if index_lower_is_tighter(key_range.lower.as_ref(), &key_bound) {
-        value_range.lower = Some(value_bound);
-        key_range.lower = Some(key_bound);
-    }
-    Some(())
-}
-
-/// Applies an upper bound if it is tighter than the current upper bound.
-fn combine_index_upper_bound(
-    value_range: &mut IndexValueRange,
-    key_range: &mut IndexKeyRange,
-    value: Value,
-    inclusive: bool,
-) -> Option<()> {
-    let key = index_upper_key(&value, inclusive)?;
-    let value_bound = if inclusive {
-        IndexValueBound::Inclusive(value)
-    } else {
-        IndexValueBound::Exclusive(value)
-    };
-    let key_bound =
-        if inclusive { IndexKeyBound::Inclusive(key) } else { IndexKeyBound::Exclusive(key) };
-
-    if index_upper_is_tighter(key_range.upper.as_ref(), &key_bound) {
-        value_range.upper = Some(value_bound);
-        key_range.upper = Some(key_bound);
-    }
-    Some(())
-}
-
-/// Encodes the first index entry key allowed by a lower value bound.
-fn index_lower_key(value: &Value, inclusive: bool) -> Option<Vec<u8>> {
-    let prefix = TupleRef::new(&[ValueRef::from(value)]).to_bytes().ok()?;
-    let table_key = if inclusive { TableKey::MIN } else { TableKey::MAX };
-    Some(encode_index_entry_key(&prefix, table_key))
-}
-
-/// Encodes the last index entry key allowed by an upper value bound.
-fn index_upper_key(value: &Value, inclusive: bool) -> Option<Vec<u8>> {
-    let prefix = TupleRef::new(&[ValueRef::from(value)]).to_bytes().ok()?;
-    let table_key = if inclusive { TableKey::MAX } else { TableKey::MIN };
-    Some(encode_index_entry_key(&prefix, table_key))
-}
-
-/// Reports whether a candidate lower key bound narrows the current bound.
-fn index_lower_is_tighter(current: Option<&IndexKeyBound>, candidate: &IndexKeyBound) -> bool {
-    match current {
-        None => true,
-        Some(current) => {
-            candidate.key() > current.key()
-                || (candidate.key() == current.key()
-                    && matches!(candidate, IndexKeyBound::Exclusive(_)))
-        }
-    }
-}
-
-/// Reports whether a candidate upper key bound narrows the current bound.
-fn index_upper_is_tighter(current: Option<&IndexKeyBound>, candidate: &IndexKeyBound) -> bool {
-    match current {
-        None => true,
-        Some(current) => {
-            candidate.key() < current.key()
-                || (candidate.key() == current.key()
-                    && matches!(candidate, IndexKeyBound::Exclusive(_)))
-        }
-    }
 }
 
 /// Reports whether an index belongs to the table and exactly covers a column.

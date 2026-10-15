@@ -1,5 +1,5 @@
-use crate::relational::IndexKeyRange;
 use crate::relational::IndexSchema;
+use crate::relational::IndexValueRange;
 use crate::relational::OwnedTableRecord;
 use crate::relational::TableKeyRange;
 use crate::relational::TableSchema;
@@ -38,7 +38,7 @@ pub trait RelationalAccess {
         &self,
         table: &TableSchema,
         index: &IndexSchema,
-        range: IndexKeyRange,
+        range: IndexValueRange,
     ) -> StorageResult<Self::IndexScan>;
     fn insert_table_row(
         &self,

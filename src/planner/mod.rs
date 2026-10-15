@@ -66,8 +66,7 @@ mod tests {
     use crate::relational::ColumnSchema;
     use crate::relational::DataType;
     use crate::relational::IndexColumnSchema;
-    use crate::relational::IndexKeyBound;
-    use crate::relational::IndexKeyRange;
+
     use crate::relational::IndexSchema;
     use crate::relational::InvalidArgumentError;
     use crate::relational::StorageError;
@@ -77,8 +76,7 @@ mod tests {
     use crate::relational::TupleSchema;
     use crate::relational::Value;
     use crate::relational::access::CatalogRead;
-    use crate::relational::cursor::encode_index_entry_key;
-    use crate::relational::tuple::Tuple;
+
     use crate::sql_parser::parser::Parser;
     use crate::sql_parser::parser::op::Op;
     use crate::sql_parser::parser::stmt::Statement;
@@ -213,21 +211,6 @@ mod tests {
         lower: Option<(Value, bool)>,
         upper: Option<(Value, bool)>,
     ) -> PhysicalPlanNode {
-        let key_bound = |value: &Value, inclusive, table_key| {
-            let value = Tuple::new(vec![value.clone()]).to_bytes().unwrap();
-            let bound = encode_index_entry_key(&value, table_key);
-            if inclusive {
-                IndexKeyBound::Inclusive(bound)
-            } else {
-                IndexKeyBound::Exclusive(bound)
-            }
-        };
-        let lower_key = lower.as_ref().map(|(value, inclusive)| {
-            key_bound(value, *inclusive, if *inclusive { i32::MIN } else { i32::MAX })
-        });
-        let upper_key = upper.as_ref().map(|(value, inclusive)| {
-            key_bound(value, *inclusive, if *inclusive { i32::MAX } else { i32::MIN })
-        });
         let value_bound = |(value, inclusive): (Value, bool)| {
             if inclusive {
                 IndexValueBound::Inclusive(value)
@@ -245,7 +228,6 @@ mod tests {
                     lower: lower.map(value_bound),
                     upper: upper.map(value_bound),
                 },
-                key_range: IndexKeyRange { lower: lower_key, upper: upper_key },
             },
         }
     }
@@ -447,7 +429,6 @@ mod tests {
         let catalog = MemoryCatalog::with_indexes(&[("users_name", 1)]);
         let relation = RelationId::new(0);
         let indexed_value = Value::String("Ada".into());
-        let encoded_value = Tuple::new(vec![indexed_value.clone()]).to_bytes().unwrap();
         let indexed_column = BoundColumn {
             relation,
             table: "u".into(),
@@ -469,16 +450,6 @@ mod tests {
                             value_range: IndexValueRange {
                                 lower: Some(IndexValueBound::Inclusive(indexed_value.clone())),
                                 upper: Some(IndexValueBound::Inclusive(indexed_value.clone())),
-                            },
-                            key_range: IndexKeyRange {
-                                lower: Some(IndexKeyBound::Inclusive(encode_index_entry_key(
-                                    &encoded_value,
-                                    i32::MIN,
-                                ))),
-                                upper: Some(IndexKeyBound::Inclusive(encode_index_entry_key(
-                                    &encoded_value,
-                                    i32::MAX,
-                                ))),
                             },
                         },
                     },

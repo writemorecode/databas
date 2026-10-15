@@ -1,6 +1,5 @@
 //! Public orchestration of the binding and physical-planning phases.
 
-use crate::relational::Database;
 use crate::relational::access::CatalogRead;
 use crate::sql_parser::parser::stmt::Statement;
 
@@ -19,12 +18,12 @@ pub struct Planner<'catalog> {
 
 impl<'catalog> Planner<'catalog> {
     /// Creates a planner that resolves names through `database`.
-    pub fn new(database: &'catalog Database) -> Self {
+    pub fn new(database: &'catalog dyn CatalogRead) -> Self {
         Self::with_schema(database)
     }
 
     /// Creates a planner over an arbitrary catalog implementation.
-    pub(crate) fn with_schema(catalog: &'catalog dyn CatalogRead) -> Self {
+    pub fn with_schema(catalog: &'catalog dyn CatalogRead) -> Self {
         Self { catalog }
     }
 
