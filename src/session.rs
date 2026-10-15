@@ -30,7 +30,7 @@ use crate::sql_parser::parser::Command;
 use crate::sql_parser::parser::Parser;
 use crate::sql_parser::parser::SqlItem;
 use crate::sql_parser::parser::stmt::Statement;
-use crate::storage::transaction_manager::TransactionSavepoint;
+use crate::storage::TransactionSavepoint;
 
 /// Errors raised by session-level transaction control.
 #[derive(Debug, Error)]

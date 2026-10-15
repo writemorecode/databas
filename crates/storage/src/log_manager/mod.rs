@@ -1,0 +1,1495 @@
+//! Write-ahead log (WAL) serialization, append, flush, and recovery scanning.
+//!
+//! The WAL is stored next to the database file using the same path with an
+//! additional `.wal` extension. Records are physically grouped into transaction
+//! frames:
+//!
+//! ```text
+//! WAL file header | transaction frame...
+//!
+//! transaction frame:
+//!   header magic | format version | transaction id | record count | payload length
+//!   payload records...
+//!   footer magic | transaction id | payload CRC32
+//! ```
+//!
+//! LSNs are not stored explicitly in transaction frames. The WAL file header
+//! stores the durable high-water LSN before the current WAL segment, and records
+//! in complete frames are assigned logical LSNs after that value. Appending
+//! advances the highest appended LSN, while [`LogManager::flush_through`] is
+//! responsible for making appended bytes durable before pages protected by
+//! those LSNs are written to the database file.
+
+use std::{
+    fs::{File, OpenOptions},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+};
+
+use thiserror::Error;
+
+#[allow(clippy::redundant_pub_crate)] // Lsn is intentionally crate-private.
+pub(crate) use crate::Lsn;
+use crate::PAGE_SIZE;
+use crate::PageId;
+pub use crate::TxnId;
+
+mod checkpoint;
+#[cfg(any(test, feature = "test-support"))]
+mod fault_injection;
+mod frame;
+
+#[cfg(any(test, feature = "test-support"))]
+use fault_injection::FaultInjectingWriter;
+#[cfg(test)]
+use frame::FOOTER_LEN;
+#[cfg(test)]
+pub use frame::read_log_record_kinds_for_test;
+use frame::{
+    CRC32, HEADER_LEN, deserialize_transaction, scan_transaction_frame, serialize_transaction,
+    transaction_frame_len, validate_record_txn_ids, wal_open_error,
+};
+
+/// Sentinel LSN used for pages that do not reflect any logged update.
+pub const ZERO_LSN: Lsn = 0;
+
+const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
+const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
+const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
+const WAL_FILE_HEADER_VERSION: u16 = 2;
+pub const WAL_FILE_HEADER_LEN: usize = 32;
+const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
+
+trait DurableWrite: Write {
+    fn sync_all(&mut self) -> std::io::Result<()>;
+}
+
+impl DurableWrite for BufWriter<File> {
+    fn sync_all(&mut self) -> std::io::Result<()> {
+        self.get_ref().sync_all()
+    }
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+type ActiveWalWriter = BufWriter<File>;
+#[cfg(any(test, feature = "test-support"))]
+type ActiveWalWriter = FaultInjectingWriter<BufWriter<File>>;
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn make_wal_writer(file: File) -> ActiveWalWriter {
+    BufWriter::with_capacity(WAL_WRITE_BUFFER_LEN, file)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn make_wal_writer(file: File) -> ActiveWalWriter {
+    FaultInjectingWriter::new(BufWriter::with_capacity(WAL_WRITE_BUFFER_LEN, file))
+}
+
+/// Errors raised while opening, writing, or decoding WAL frames.
+#[derive(Debug, Error)]
+pub enum LogManagerError {
+    /// Underlying filesystem operation failed.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// The supplied database path could not be transformed into a WAL path.
+    #[error("invalid database file path: {db_file_path}")]
+    InvalidDbFilePath { db_file_path: PathBuf },
+    /// A frame did not start with the expected WAL header marker.
+    #[error("invalid WAL header magic: {actual:?}")]
+    InvalidHeaderMagic { actual: [u8; 8] },
+    /// A frame did not end with the expected WAL footer marker.
+    #[error("invalid WAL footer magic: {actual:?}")]
+    InvalidFooterMagic { actual: [u8; 8] },
+    /// The WAL was produced by an incompatible format version.
+    #[error("unsupported WAL format version: expected {expected}, got {actual}")]
+    UnsupportedVersion { expected: u16, actual: u16 },
+    /// A frame ended before the number of bytes promised by its header.
+    #[error("truncated WAL frame: needed {needed} bytes, remaining {remaining}")]
+    TruncatedFrame { needed: usize, remaining: usize },
+    /// A payload length from disk cannot fit in this process's address space.
+    #[error("WAL payload length does not fit in memory: {payload_len}")]
+    PayloadLengthTooLarge { payload_len: u64 },
+    /// Frame length arithmetic overflowed while sizing a WAL payload.
+    #[error("WAL payload length overflow")]
+    PayloadLengthOverflow,
+    /// A frame payload failed CRC validation.
+    #[error("WAL checksum mismatch: expected {expected}, got {actual}")]
+    ChecksumMismatch { expected: u32, actual: u32 },
+    /// A payload contained an unrecognized record-kind tag.
+    #[error("unknown WAL log record kind: {kind}")]
+    UnknownRecordKind { kind: u8 },
+    /// The footer transaction id did not match the frame header.
+    #[error("WAL footer txn id mismatch: expected {expected}, got {actual}")]
+    FooterTxnIdMismatch { expected: TxnId, actual: TxnId },
+    /// A record was appended in a transaction frame for a different transaction.
+    #[error("WAL record txn id mismatch: expected {expected}, got {actual}")]
+    RecordTxnIdMismatch { expected: TxnId, actual: TxnId },
+    /// The decoded payload record count differed from the header count.
+    #[error("WAL record count mismatch: expected {expected}, got {actual}")]
+    RecordCountMismatch { expected: u32, actual: usize },
+    /// A transaction frame contains more records than the format can encode.
+    #[error("too many WAL records in transaction: {count}")]
+    TooManyRecords { count: usize },
+    /// The next LSN would exceed the numeric range of [`Lsn`].
+    #[error("WAL LSN exhausted")]
+    LsnExhausted,
+    /// A page update record did not contain full `PAGE_SIZE` images.
+    #[error("WAL full-page image has invalid length: expected {expected}, got {actual}")]
+    InvalidPageImageLength { expected: usize, actual: usize },
+    /// The WAL file header failed its integrity checksum.
+    #[error("WAL file header checksum mismatch: expected {expected}, got {actual}")]
+    FileHeaderChecksumMismatch { expected: u32, actual: u32 },
+    /// A previous append may have left a partial frame in this WAL stream.
+    #[error("WAL manager is poisoned after a failed append")]
+    Poisoned,
+    /// A WAL frame buffer could not be allocated during recovery.
+    #[error("failed to allocate {byte_count} bytes for a WAL frame: {source}")]
+    FrameAllocationFailed {
+        byte_count: usize,
+        #[source]
+        source: std::collections::TryReserveError,
+    },
+}
+
+/// Errors raised while forcing appended WAL bytes to durable storage.
+#[derive(Debug, Error)]
+pub enum LogManagerFlushError {
+    /// The filesystem sync failed.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// The caller requested durability for an LSN that has not been appended.
+    #[error(
+        "requested WAL flush through LSN {requested_lsn}, but highest appended LSN is {highest_appended_lsn:?}"
+    )]
+    LsnNotAppended { requested_lsn: Lsn, highest_appended_lsn: Option<Lsn> },
+    /// A previous append may have left a partial frame in this WAL stream.
+    #[error("WAL manager is poisoned after a failed append")]
+    Poisoned,
+}
+
+/// Borrowed WAL record used while serializing a transaction frame.
+#[derive(Debug)]
+pub struct LogRecord<'a> {
+    /// Transaction that owns this record.
+    pub(crate) txn_id: TxnId,
+    /// Record payload.
+    pub(crate) kind: LogRecordKind<'a>,
+}
+
+/// Borrowed WAL record payload.
+#[derive(Debug)]
+pub enum LogRecordKind<'a> {
+    /// Transaction start marker.
+    Begin,
+    /// Transaction commit marker.
+    Commit,
+    /// Transaction rollback-complete marker.
+    Rollback,
+    /// Full-page physical update.
+    ///
+    /// `redo_data` is the complete page image to install while redoing a
+    /// committed transaction. `undo_data` is the complete page image to restore
+    /// while undoing an incomplete transaction during recovery or explicit
+    /// rollback.
+    PageUpdate { page_id: PageId, redo_data: &'a [u8], undo_data: &'a [u8] },
+    /// Allocation of a database page by a transaction.
+    PageAlloc { page_id: PageId },
+}
+
+/// Owned WAL record returned by recovery scans.
+///
+/// Unlike [`LogRecord`], this form owns page images and includes the LSN
+/// assigned from the record's position in the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryLogRecord {
+    /// Logical LSN assigned to this record.
+    pub(crate) lsn: Lsn,
+    /// Transaction that owns this record.
+    pub(crate) txn_id: TxnId,
+    /// Owned record payload.
+    pub(crate) kind: RecoveryLogRecordKind,
+}
+
+/// Owned WAL record payload used by crash recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryLogRecordKind {
+    /// Transaction start marker.
+    Begin,
+    /// Transaction commit marker.
+    Commit,
+    /// Transaction rollback-complete marker.
+    Rollback,
+    /// Full-page physical update with owned redo and undo page images.
+    PageUpdate { page_id: PageId, redo_data: Box<[u8; PAGE_SIZE]>, undo_data: Box<[u8; PAGE_SIZE]> },
+    /// Allocation of a database page by a transaction.
+    PageAlloc { page_id: PageId },
+}
+
+/// Result of scanning the WAL for recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryLogScan {
+    /// Complete records decoded from valid WAL frames, in log order.
+    pub(crate) records: Vec<RecoveryLogRecord>,
+    /// Whether an invalid or incomplete frame and its suffix were truncated.
+    pub(crate) truncated_tail: bool,
+    /// Largest transaction id observed in complete frames.
+    pub(crate) max_txn_id: TxnId,
+    /// Highest LSN assigned before this WAL segment plus all complete records.
+    pub(crate) last_assigned_lsn: Lsn,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnedLogRecordKind {
+    Begin,
+    Commit,
+    Rollback,
+    PageUpdate { page_id: PageId },
+    PageAlloc { page_id: PageId },
+}
+
+#[derive(Debug)]
+pub struct LogTransaction<'a> {
+    /// Transaction id shared by all records in this frame.
+    pub(crate) txn_id: TxnId,
+    /// Records decoded from the frame payload.
+    pub(crate) records: Vec<LogRecord<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalFileHeader {
+    last_assigned_lsn: Lsn,
+    max_txn_id: TxnId,
+}
+
+fn ensure_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
+    if wal_file.metadata()?.len() < WAL_FILE_HEADER_LEN as u64 {
+        write_wal_file_header(wal_file, ZERO_LSN, 0)?;
+        wal_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
+        wal_file.sync_all()?;
+        return Ok(WalFileHeader { last_assigned_lsn: ZERO_LSN, max_txn_id: 0 });
+    }
+    read_wal_file_header(wal_file)
+}
+
+fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
+    let mut header = [0; WAL_FILE_HEADER_LEN];
+    wal_file.seek(SeekFrom::Start(0))?;
+    wal_file.read_exact(&mut header)?;
+
+    let mut magic = [0; 8];
+    magic.copy_from_slice(&header[..8]);
+    if magic != WAL_FILE_HEADER_MAGIC {
+        return Err(LogManagerError::InvalidHeaderMagic { actual: magic });
+    }
+
+    let mut version_bytes = [0; 2];
+    version_bytes.copy_from_slice(&header[8..10]);
+    let version = u16::from_le_bytes(version_bytes);
+    if version != WAL_FILE_HEADER_VERSION {
+        return Err(LogManagerError::UnsupportedVersion {
+            expected: WAL_FILE_HEADER_VERSION,
+            actual: version,
+        });
+    }
+
+    let mut checksum_bytes = [0; 4];
+    checksum_bytes.copy_from_slice(&header[WAL_FILE_HEADER_CHECKSUM_RANGE]);
+    let expected = u32::from_le_bytes(checksum_bytes);
+    header[WAL_FILE_HEADER_CHECKSUM_RANGE].fill(0);
+    let actual = CRC32.checksum(&header);
+    if actual != expected {
+        return Err(LogManagerError::FileHeaderChecksumMismatch { expected, actual });
+    }
+
+    let mut last_assigned_lsn_bytes = [0; 8];
+    last_assigned_lsn_bytes.copy_from_slice(&header[16..24]);
+    let last_assigned_lsn = u64::from_le_bytes(last_assigned_lsn_bytes);
+    let mut max_txn_id_bytes = [0; 8];
+    max_txn_id_bytes.copy_from_slice(&header[24..32]);
+    let max_txn_id = u64::from_le_bytes(max_txn_id_bytes);
+    Ok(WalFileHeader { last_assigned_lsn, max_txn_id })
+}
+
+fn write_wal_file_header(
+    wal_file: &mut File,
+    last_assigned_lsn: Lsn,
+    max_txn_id: TxnId,
+) -> Result<(), LogManagerError> {
+    let mut header = [0; WAL_FILE_HEADER_LEN];
+    header[0..8].copy_from_slice(&WAL_FILE_HEADER_MAGIC);
+    header[8..10].copy_from_slice(&WAL_FILE_HEADER_VERSION.to_le_bytes());
+    header[16..24].copy_from_slice(&last_assigned_lsn.to_le_bytes());
+    header[24..32].copy_from_slice(&max_txn_id.to_le_bytes());
+    let checksum = CRC32.checksum(&header);
+    header[WAL_FILE_HEADER_CHECKSUM_RANGE].copy_from_slice(&checksum.to_le_bytes());
+    wal_file.seek(SeekFrom::Start(0))?;
+    wal_file.write_all(&header)?;
+    Ok(())
+}
+
+/// Append-only manager for the database write-ahead log.
+///
+/// `LogManager` tracks two positions: the highest LSN appended to the WAL file
+/// and the highest LSN known to be durable after a successful flush. Page-cache
+/// code uses that distinction to enforce the write-ahead rule before writing a
+/// dirty page whose page header references a logged LSN.
+#[derive(Debug)]
+pub struct LogManager {
+    wal_writer: ActiveWalWriter,
+
+    highest_txn_id: TxnId,
+    highest_appended_lsn: Option<Lsn>,
+    highest_durable_lsn: Option<Lsn>,
+    poisoned: bool,
+}
+
+impl LogManager {
+    pub(crate) fn flush_all(&mut self) -> Result<(), LogManagerFlushError> {
+        self.flush_through(self.highest_appended_lsn.unwrap_or(ZERO_LSN))
+    }
+
+    pub(crate) fn poison(&mut self) {
+        self.poisoned = true;
+    }
+
+    /// Opens or creates the WAL file associated with `db_file_path`.
+    ///
+    /// Existing complete frames are scanned to reconstruct the highest appended
+    /// LSN and highest transaction id. Opening does not mark existing bytes as
+    /// durable in this process; callers must still use [`Self::flush_through`]
+    /// before relying on a newly appended record.
+    pub(crate) fn new(db_file_path: impl AsRef<Path>) -> std::io::Result<Self> {
+        let db_file_path = db_file_path.as_ref().to_path_buf();
+        let wal_file_path = db_file_path.with_added_extension("wal");
+        let wal_was_created = !wal_file_path.try_exists()?;
+        let mut wal_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&wal_file_path)?;
+        let wal_header = ensure_wal_file_header(&mut wal_file).map_err(wal_open_error)?;
+        if wal_was_created {
+            sync_parent_directory(&wal_file_path)?;
+        }
+
+        let mut highest_appended_lsn = if wal_header.last_assigned_lsn == ZERO_LSN {
+            None
+        } else {
+            Some(wal_header.last_assigned_lsn)
+        };
+        let mut highest_txn_id = wal_header.max_txn_id;
+        wal_file.seek(SeekFrom::Start(WAL_FILE_HEADER_LEN as u64))?;
+        {
+            let mut wal_reader = BufReader::with_capacity(WAL_READ_BUFFER_LEN, &mut wal_file);
+            while let Some(frame) =
+                scan_transaction_frame(&mut wal_reader).map_err(wal_open_error)?
+            {
+                highest_txn_id = highest_txn_id.max(frame.txn_id);
+                if frame.record_count > 0 {
+                    let next_lsn = highest_appended_lsn
+                        .unwrap_or(ZERO_LSN)
+                        .checked_add(u64::from(frame.record_count))
+                        .ok_or(LogManagerError::LsnExhausted)
+                        .map_err(wal_open_error)?;
+                    highest_appended_lsn = Some(next_lsn);
+                }
+            }
+        }
+        wal_file.seek(SeekFrom::End(0))?;
+
+        let wal_writer = make_wal_writer(wal_file);
+
+        Ok(Self {
+            wal_writer,
+            highest_txn_id,
+            highest_durable_lsn: None,
+            highest_appended_lsn,
+            poisoned: false,
+        })
+    }
+
+    /// Returns the largest transaction id observed in the WAL.
+    pub(crate) fn highest_txn_id(&self) -> TxnId {
+        self.highest_txn_id
+    }
+
+    /// Returns the LSN that would be assigned to the next appended record.
+    pub(crate) fn next_lsn(&self) -> Result<Lsn, LogManagerError> {
+        self.highest_appended_lsn
+            .unwrap_or(ZERO_LSN)
+            .checked_add(1)
+            .ok_or(LogManagerError::LsnExhausted)
+    }
+
+    /// Appends one WAL record as a single-record transaction frame.
+    ///
+    /// Returns the LSN assigned to the appended record. The record is appended
+    /// to the operating system file handle but is not forced to durable storage;
+    /// use [`Self::flush_through`] for durability.
+    pub(crate) fn append_record(
+        &mut self,
+        txn_id: TxnId,
+        kind: LogRecordKind<'_>,
+    ) -> Result<Lsn, LogManagerError> {
+        self.append_transaction(txn_id, &[LogRecord { txn_id, kind }])
+    }
+
+    /// Appends a transaction frame containing `records`.
+    ///
+    /// All records must belong to `txn_id`. LSNs are assigned one per record in
+    /// frame order, and the return value is the highest LSN assigned by this
+    /// append. Empty frames are allowed for serializer symmetry and return the
+    /// current highest appended LSN without advancing it.
+    pub(crate) fn append_transaction(
+        &mut self,
+        txn_id: TxnId,
+        records: &[LogRecord<'_>],
+    ) -> Result<Lsn, LogManagerError> {
+        if self.poisoned {
+            return Err(LogManagerError::Poisoned);
+        }
+        validate_record_txn_ids(txn_id, records)?;
+
+        let record_count = u64::try_from(records.len())
+            .map_err(|_out_of_range| LogManagerError::TooManyRecords { count: records.len() })?;
+        let lsn = self
+            .highest_appended_lsn
+            .unwrap_or(ZERO_LSN)
+            .checked_add(record_count)
+            .ok_or(LogManagerError::LsnExhausted)?;
+
+        if let Err(error) = serialize_transaction(&mut self.wal_writer, txn_id, records) {
+            // Serialization validates and sizes the complete transaction before emitting bytes,
+            // so only an I/O error can leave a partial frame in the WAL stream.
+            if matches!(&error, LogManagerError::Io(_)) {
+                self.poisoned = true;
+            }
+            return Err(error);
+        }
+
+        self.highest_txn_id = self.highest_txn_id.max(txn_id);
+        if record_count > 0 {
+            self.highest_appended_lsn = Some(lsn);
+        }
+        Ok(lsn)
+    }
+
+    /// Forces WAL bytes through `requested_lsn` to durable storage.
+    ///
+    /// This is the durability half of the write-ahead rule. The call is a no-op
+    /// for [`ZERO_LSN`] and for LSNs already known durable. On success, the
+    /// manager conservatively marks all currently appended records durable
+    /// because the underlying file sync covers the whole WAL file.
+    pub(crate) fn flush_through(&mut self, requested_lsn: Lsn) -> Result<(), LogManagerFlushError> {
+        if self.poisoned {
+            return Err(LogManagerFlushError::Poisoned);
+        }
+        if requested_lsn == ZERO_LSN {
+            return Ok(());
+        }
+
+        if self.highest_durable_lsn.unwrap_or(ZERO_LSN) >= requested_lsn {
+            return Ok(());
+        }
+
+        let Some(highest_appended_lsn) = self.highest_appended_lsn else {
+            return Err(LogManagerFlushError::LsnNotAppended {
+                requested_lsn,
+                highest_appended_lsn: None,
+            });
+        };
+
+        if highest_appended_lsn < requested_lsn {
+            return Err(LogManagerFlushError::LsnNotAppended {
+                requested_lsn,
+                highest_appended_lsn: Some(highest_appended_lsn),
+            });
+        }
+
+        self.wal_writer.flush()?;
+        self.wal_writer.sync_all()?;
+        self.highest_durable_lsn = Some(highest_appended_lsn);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn highest_appended_lsn(&self) -> Option<Lsn> {
+        self.highest_appended_lsn
+    }
+
+    #[cfg(test)]
+    pub(crate) fn highest_durable_lsn(&self) -> Option<Lsn> {
+        self.highest_durable_lsn
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_next_lsn_exhausted_for_test(&mut self) {
+        self.highest_appended_lsn = Some(Lsn::MAX);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn fail_next_flush_for_test(&mut self) {
+        self.wal_writer.fail_next_sync();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_append_after_bytes_for_test(&mut self, byte_count: usize) {
+        self.wal_writer.fail_next_write_all_after(byte_count);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flush_buffer_for_test(&mut self) -> std::io::Result<()> {
+        self.wal_writer.flush()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum LogReadMode {
+    Recovery,
+    Checkpoint,
+}
+
+/// Reads complete WAL frames and returns owned records for crash recovery.
+///
+/// The first torn or incomplete frame and all following bytes are treated as
+/// a non-durable suffix, truncated from the WAL and reported through
+/// [`RecoveryLogScan::truncated_tail`]. Later unsynced sectors can survive a
+/// crash even when an earlier frame did not. Successfully synced bytes are
+/// assumed intact. File-header errors, unsupported nonzero frame versions, and
+/// I/O or allocation failures propagate without discarding the suffix.
+pub fn read_recovery_log(
+    db_file_path: impl AsRef<Path>,
+) -> Result<RecoveryLogScan, LogManagerError> {
+    read_log(db_file_path.as_ref(), LogReadMode::Recovery)
+}
+
+pub fn read_checkpoint_log(path: &Path) -> Result<RecoveryLogScan, LogManagerError> {
+    read_log(path, LogReadMode::Checkpoint)
+}
+
+fn read_log(db_file_path: &Path, mode: LogReadMode) -> Result<RecoveryLogScan, LogManagerError> {
+    let wal_file_path = db_file_path.with_added_extension("wal");
+    let wal_was_created = !wal_file_path.try_exists()?;
+    let mut wal_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&wal_file_path)?;
+    let wal_header = ensure_wal_file_header(&mut wal_file)?;
+    if wal_was_created {
+        sync_parent_directory(&wal_file_path)?;
+    }
+    let wal_len = wal_file.metadata()?.len();
+    wal_file.seek(SeekFrom::Start(WAL_FILE_HEADER_LEN as u64))?;
+
+    let mut offset = WAL_FILE_HEADER_LEN as u64;
+    let mut max_txn_id = wal_header.max_txn_id;
+    let mut truncated_tail = false;
+    let mut next_lsn = wal_header.last_assigned_lsn;
+    let mut records = Vec::new();
+
+    while offset < wal_len {
+        if wal_len - offset < HEADER_LEN as u64 {
+            truncated_tail = true;
+            break;
+        }
+
+        let mut frame_header = [0; HEADER_LEN];
+        wal_file.read_exact(&mut frame_header)?;
+        let frame_len = match transaction_frame_len(&frame_header) {
+            Ok(frame_len) => frame_len,
+            Err(LogManagerError::TruncatedFrame { .. })
+            | Err(LogManagerError::InvalidHeaderMagic { .. }) => {
+                truncated_tail = true;
+                break;
+            }
+            Err(LogManagerError::UnsupportedVersion { actual: 0, .. })
+            | Err(LogManagerError::PayloadLengthTooLarge { .. })
+            | Err(LogManagerError::PayloadLengthOverflow)
+                if mode == LogReadMode::Recovery =>
+            {
+                // Incomplete persistence can leave zero version bytes or a
+                // malformed payload length; neither makes a valid frame.
+                truncated_tail = true;
+                break;
+            }
+            Err(error) => return Err(error),
+        };
+
+        // Check against the remaining bytes before adding, so a malformed
+        // length cannot overflow the absolute frame-end offset.
+        if frame_len as u64 > wal_len - offset {
+            truncated_tail = true;
+            break;
+        }
+        let frame_end = offset + frame_len as u64;
+
+        let mut frame = Vec::new();
+        frame.try_reserve_exact(frame_len).map_err(|source| {
+            LogManagerError::FrameAllocationFailed { byte_count: frame_len, source }
+        })?;
+        frame.extend_from_slice(&frame_header);
+        frame.resize(frame_len, 0);
+        wal_file.read_exact(&mut frame[HEADER_LEN..])?;
+
+        let transaction = match deserialize_transaction(&frame) {
+            Ok(transaction) => transaction,
+            Err(_) if mode == LogReadMode::Recovery || frame_end == wal_len => {
+                // A crash can retain later unsynced sectors after a torn frame.
+                // Nothing after the first invalid frame belongs to the valid
+                // WAL prefix, even when it resembles complete frames. Synced
+                // bytes are assumed intact; this is not media-bitrot repair.
+                truncated_tail = true;
+                break;
+            }
+            Err(error) => return Err(error),
+        };
+        max_txn_id = max_txn_id.max(transaction.txn_id);
+        for record in transaction.records {
+            next_lsn = next_lsn.checked_add(1).ok_or(LogManagerError::LsnExhausted)?;
+            records.push(RecoveryLogRecord {
+                lsn: next_lsn,
+                txn_id: record.txn_id,
+                kind: RecoveryLogRecordKind::from_log_record_kind(&record.kind)?,
+            });
+        }
+        offset = frame_end;
+    }
+
+    if truncated_tail {
+        if mode == LogReadMode::Checkpoint {
+            return Err(LogManagerError::TruncatedFrame { needed: 1, remaining: 0 });
+        }
+        wal_file.set_len(offset)?;
+        wal_file.sync_all()?;
+    }
+
+    Ok(RecoveryLogScan { records, truncated_tail, max_txn_id, last_assigned_lsn: next_lsn })
+}
+
+/// Removes all WAL contents after recovery has made the database file consistent.
+pub fn truncate_wal(
+    db_file_path: impl AsRef<Path>,
+    last_assigned_lsn: Lsn,
+    max_txn_id: TxnId,
+) -> Result<(), LogManagerError> {
+    let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
+    let checkpoint_file_path = wal_file_path.with_added_extension("checkpoint");
+    write_wal_checkpoint_file(&checkpoint_file_path, last_assigned_lsn, max_txn_id)?;
+    std::fs::rename(checkpoint_file_path, &wal_file_path)?;
+    sync_parent_directory(&wal_file_path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn write_wal_checkpoint_file(
+    checkpoint_file_path: &Path,
+    last_assigned_lsn: Lsn,
+    max_txn_id: TxnId,
+) -> Result<(), LogManagerError> {
+    let mut checkpoint_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(checkpoint_file_path)?;
+    write_wal_file_header(&mut checkpoint_file, last_assigned_lsn, max_txn_id)?;
+    checkpoint_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
+    checkpoint_file.sync_all()?;
+    Ok(())
+}
+
+impl RecoveryLogRecordKind {
+    fn as_log_record_kind(&self) -> LogRecordKind<'_> {
+        match self {
+            Self::Begin => LogRecordKind::Begin,
+            Self::Commit => LogRecordKind::Commit,
+            Self::Rollback => LogRecordKind::Rollback,
+            Self::PageAlloc { page_id } => LogRecordKind::PageAlloc { page_id: *page_id },
+            Self::PageUpdate { page_id, redo_data, undo_data } => LogRecordKind::PageUpdate {
+                page_id: *page_id,
+                redo_data: redo_data.as_ref(),
+                undo_data: undo_data.as_ref(),
+            },
+        }
+    }
+
+    fn from_log_record_kind(kind: &LogRecordKind<'_>) -> Result<Self, LogManagerError> {
+        match kind {
+            LogRecordKind::Begin => Ok(Self::Begin),
+            LogRecordKind::Commit => Ok(Self::Commit),
+            LogRecordKind::Rollback => Ok(Self::Rollback),
+            LogRecordKind::PageUpdate { page_id, redo_data, undo_data } => Ok(Self::PageUpdate {
+                page_id: *page_id,
+                redo_data: page_image_array(redo_data)?,
+                undo_data: page_image_array(undo_data)?,
+            }),
+            LogRecordKind::PageAlloc { page_id } => Ok(Self::PageAlloc { page_id: *page_id }),
+        }
+    }
+}
+
+fn page_image_array(image: &[u8]) -> Result<Box<[u8; PAGE_SIZE]>, LogManagerError> {
+    let image = image.try_into().map_err(|_wrong_length| {
+        LogManagerError::InvalidPageImageLength { expected: PAGE_SIZE, actual: image.len() }
+    })?;
+    Ok(Box::new(image))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+
+    use tempfile::NamedTempFile;
+
+    use super::*;
+    use crate::engine::Storage;
+    use crate::error::StorageError;
+
+    fn serialize_to_vec(txn_id: TxnId, records: &[LogRecord<'_>]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        serialize_transaction(&mut buf, txn_id, records).unwrap();
+        buf
+    }
+
+    #[test]
+    fn serializes_and_deserializes_empty_transaction() {
+        let records = [];
+        let buf = serialize_to_vec(42, &records);
+        let transaction = deserialize_transaction(&buf).unwrap();
+
+        assert_eq!(transaction.txn_id, 42);
+        assert!(transaction.records.is_empty());
+    }
+
+    #[test]
+    fn serializes_and_deserializes_transaction_with_all_record_kinds() {
+        let redo = [1; PAGE_SIZE];
+        let undo = [9; PAGE_SIZE];
+        let records = [
+            LogRecord { txn_id: 7, kind: LogRecordKind::Begin },
+            LogRecord { txn_id: 7, kind: LogRecordKind::PageAlloc { page_id: 99 } },
+            LogRecord {
+                txn_id: 7,
+                kind: LogRecordKind::PageUpdate {
+                    page_id: 100,
+                    redo_data: &redo,
+                    undo_data: &undo,
+                },
+            },
+            LogRecord { txn_id: 7, kind: LogRecordKind::Rollback },
+            LogRecord { txn_id: 7, kind: LogRecordKind::Commit },
+        ];
+
+        let buf = serialize_to_vec(7, &records);
+        let transaction = deserialize_transaction(&buf).unwrap();
+
+        assert_eq!(transaction.txn_id, 7);
+        assert_eq!(transaction.records.len(), records.len());
+        assert!(matches!(transaction.records[0].kind, LogRecordKind::Begin));
+        assert!(matches!(transaction.records[1].kind, LogRecordKind::PageAlloc { page_id: 99 }));
+        match &transaction.records[2].kind {
+            LogRecordKind::PageUpdate { page_id, redo_data, undo_data } => {
+                assert_eq!(*page_id, 100);
+                assert_eq!(*redo_data, redo);
+                assert_eq!(*undo_data, undo);
+            }
+            kind => panic!("unexpected record kind: {kind:?}"),
+        }
+        assert!(matches!(transaction.records[3].kind, LogRecordKind::Rollback));
+        assert!(matches!(transaction.records[4].kind, LogRecordKind::Commit));
+    }
+
+    #[test]
+    fn rejects_record_with_mismatched_transaction_id() {
+        let records = [LogRecord { txn_id: 8, kind: LogRecordKind::Begin }];
+        let err = serialize_transaction(Vec::new(), 7, &records).unwrap_err();
+
+        assert!(matches!(err, LogManagerError::RecordTxnIdMismatch { expected: 7, actual: 8 }));
+    }
+
+    #[test]
+    fn rejects_page_update_without_full_page_images() {
+        let redo = [1, 2, 3, 4];
+        let undo = [9; PAGE_SIZE];
+        let records = [LogRecord {
+            txn_id: 7,
+            kind: LogRecordKind::PageUpdate { page_id: 100, redo_data: &redo, undo_data: &undo },
+        }];
+
+        let err = serialize_transaction(Vec::new(), 7, &records).unwrap_err();
+
+        assert!(matches!(
+            err,
+            LogManagerError::InvalidPageImageLength { expected: PAGE_SIZE, actual: 4 }
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_header_magic() {
+        let records = [LogRecord { txn_id: 1, kind: LogRecordKind::Begin }];
+        let mut buf = serialize_to_vec(1, &records);
+        buf[0] = b'X';
+
+        assert!(matches!(
+            deserialize_transaction(&buf),
+            Err(LogManagerError::InvalidHeaderMagic { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_footer_magic() {
+        let records = [LogRecord { txn_id: 1, kind: LogRecordKind::Begin }];
+        let mut buf = serialize_to_vec(1, &records);
+        let footer_start = buf.len() - FOOTER_LEN;
+        buf[footer_start] = b'X';
+
+        assert!(matches!(
+            deserialize_transaction(&buf),
+            Err(LogManagerError::InvalidFooterMagic { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_version() {
+        let records = [LogRecord { txn_id: 1, kind: LogRecordKind::Begin }];
+        let mut buf = serialize_to_vec(1, &records);
+        buf[8..10].copy_from_slice(&3u16.to_le_bytes());
+
+        assert!(matches!(
+            deserialize_transaction(&buf),
+            Err(LogManagerError::UnsupportedVersion { expected: 2, actual: 3 })
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_record_kind() {
+        let records = [LogRecord { txn_id: 1, kind: LogRecordKind::Begin }];
+        let mut buf = serialize_to_vec(1, &records);
+        buf[HEADER_LEN] = 99;
+        rewrite_crc(&mut buf);
+
+        assert!(matches!(
+            deserialize_transaction(&buf),
+            Err(LogManagerError::UnknownRecordKind { kind: 99 })
+        ));
+    }
+
+    #[test]
+    fn rejects_truncated_header() {
+        let buf = [0; HEADER_LEN - 1];
+
+        assert!(matches!(
+            deserialize_transaction(&buf),
+            Err(LogManagerError::TruncatedFrame { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_truncated_payload() {
+        let records = [LogRecord { txn_id: 1, kind: LogRecordKind::PageAlloc { page_id: 3 } }];
+        let mut buf = serialize_to_vec(1, &records);
+        buf.truncate(buf.len() - FOOTER_LEN - 1);
+
+        assert!(matches!(
+            deserialize_transaction(&buf),
+            Err(LogManagerError::TruncatedFrame { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_mismatched_footer_txn_id() {
+        let records = [LogRecord { txn_id: 1, kind: LogRecordKind::Begin }];
+        let mut buf = serialize_to_vec(1, &records);
+        let footer_txn_id_start = buf.len() - FOOTER_LEN + 8;
+        buf[footer_txn_id_start..footer_txn_id_start + 8].copy_from_slice(&2u64.to_le_bytes());
+
+        assert!(matches!(
+            deserialize_transaction(&buf),
+            Err(LogManagerError::FooterTxnIdMismatch { expected: 1, actual: 2 })
+        ));
+    }
+
+    #[test]
+    fn rejects_bad_crc() {
+        let records = [LogRecord { txn_id: 1, kind: LogRecordKind::Begin }];
+        let mut buf = serialize_to_vec(1, &records);
+        let crc_start = buf.len() - 4;
+        buf[crc_start] ^= 1;
+
+        assert!(matches!(
+            deserialize_transaction(&buf),
+            Err(LogManagerError::ChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_record_count() {
+        let records = [LogRecord { txn_id: 1, kind: LogRecordKind::Begin }];
+        let mut buf = serialize_to_vec(1, &records);
+        let entry_count_start = 8 + 2 + 8;
+        buf[entry_count_start..entry_count_start + 4].copy_from_slice(&2u32.to_le_bytes());
+
+        assert!(matches!(
+            deserialize_transaction(&buf),
+            Err(LogManagerError::RecordCountMismatch { expected: 2, actual: 1 })
+        ));
+    }
+
+    #[test]
+    fn rejects_trailing_bytes_after_frame() {
+        let records = [LogRecord { txn_id: 1, kind: LogRecordKind::Begin }];
+        let mut buf = serialize_to_vec(1, &records);
+        buf.push(0);
+
+        assert!(matches!(
+            deserialize_transaction(&buf),
+            Err(LogManagerError::TruncatedFrame { needed: 0, remaining: 1 })
+        ));
+    }
+
+    #[test]
+    fn append_transaction_writes_frame_without_marking_it_durable() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+        let records = [
+            LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+            LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+        ];
+
+        let lsn = manager.append_transaction(11, &records).unwrap();
+
+        assert_eq!(lsn, 2);
+        assert_eq!(manager.highest_appended_lsn(), Some(2));
+        assert_eq!(manager.highest_durable_lsn(), None);
+
+        manager.flush_buffer_for_test().unwrap();
+        assert_eq!(manager.highest_durable_lsn(), None);
+
+        let mut wal_file = File::open(file.path().with_added_extension("wal")).unwrap();
+        let mut buf = Vec::new();
+        wal_file.read_to_end(&mut buf).unwrap();
+        let transaction = deserialize_transaction(&buf[WAL_FILE_HEADER_LEN..]).unwrap();
+
+        assert_eq!(transaction.txn_id, 11);
+        assert_eq!(transaction.records.len(), 2);
+        assert!(matches!(transaction.records[0].kind, LogRecordKind::Begin));
+        assert!(matches!(transaction.records[1].kind, LogRecordKind::Commit));
+    }
+
+    #[test]
+    fn append_transaction_assigns_one_lsn_per_record() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+        let first_records = [
+            LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+            LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+        ];
+        let second_records = [
+            LogRecord { txn_id: 12, kind: LogRecordKind::Begin },
+            LogRecord { txn_id: 12, kind: LogRecordKind::PageAlloc { page_id: 7 } },
+            LogRecord { txn_id: 12, kind: LogRecordKind::Commit },
+        ];
+
+        assert_eq!(manager.append_transaction(11, &first_records).unwrap(), 2);
+        assert_eq!(manager.append_transaction(12, &second_records).unwrap(), 5);
+        assert_eq!(manager.highest_appended_lsn(), Some(5));
+        assert_eq!(manager.highest_durable_lsn(), None);
+    }
+
+    #[test]
+    fn read_recovery_log_assigns_lsns_across_complete_frames() {
+        let file = NamedTempFile::new().unwrap();
+        let redo = [1; PAGE_SIZE];
+        let undo = [9; PAGE_SIZE];
+        {
+            let mut manager = LogManager::new(file.path()).unwrap();
+            manager
+                .append_transaction(
+                    11,
+                    &[
+                        LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+                        LogRecord {
+                            txn_id: 11,
+                            kind: LogRecordKind::PageUpdate {
+                                page_id: 100,
+                                redo_data: &redo,
+                                undo_data: &undo,
+                            },
+                        },
+                        LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+                    ],
+                )
+                .unwrap();
+            manager
+                .append_transaction(
+                    12,
+                    &[
+                        LogRecord { txn_id: 12, kind: LogRecordKind::Begin },
+                        LogRecord { txn_id: 12, kind: LogRecordKind::Rollback },
+                    ],
+                )
+                .unwrap();
+        }
+
+        let scan = read_recovery_log(file.path()).unwrap();
+
+        assert!(!scan.truncated_tail);
+        assert_eq!(scan.max_txn_id, 12);
+        assert_eq!(
+            scan.records.iter().map(|record| record.lsn).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+        assert!(matches!(scan.records[0].kind, RecoveryLogRecordKind::Begin));
+        match &scan.records[1].kind {
+            RecoveryLogRecordKind::PageUpdate { page_id, redo_data, undo_data } => {
+                assert_eq!(*page_id, 100);
+                assert_eq!(redo_data.as_ref(), &redo);
+                assert_eq!(undo_data.as_ref(), &undo);
+            }
+            kind => panic!("unexpected record kind: {kind:?}"),
+        }
+        assert!(matches!(scan.records[2].kind, RecoveryLogRecordKind::Commit));
+        assert!(matches!(scan.records[3].kind, RecoveryLogRecordKind::Begin));
+        assert!(matches!(scan.records[4].kind, RecoveryLogRecordKind::Rollback));
+    }
+
+    #[test]
+    fn read_recovery_log_truncates_incomplete_final_frame_tail() {
+        let file = NamedTempFile::new().unwrap();
+        let valid_frame = serialize_to_vec(
+            11,
+            &[
+                LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+            ],
+        );
+        let wal_file_path = file.path().with_added_extension("wal");
+        {
+            let _manager = LogManager::new(file.path()).unwrap();
+            let mut wal_file = OpenOptions::new().append(true).open(&wal_file_path).unwrap();
+            wal_file.write_all(&valid_frame).unwrap();
+            wal_file.write_all(b"DBWAL").unwrap();
+        }
+
+        let scan = read_recovery_log(file.path()).unwrap();
+
+        assert!(scan.truncated_tail);
+        assert_eq!(scan.max_txn_id, 11);
+        assert_eq!(scan.records.len(), 2);
+        assert_eq!(
+            std::fs::metadata(wal_file_path).unwrap().len(),
+            (WAL_FILE_HEADER_LEN + valid_frame.len()) as u64
+        );
+    }
+
+    // Issue: Opening the same database twice can destroy the WAL. Each `LogManager`
+    // independently scans, seeks to EOF, and buffers writes without file locking or
+    // `O_APPEND`; writers can overwrite frames and allocate colliding LSNs and txn ids.
+    #[test]
+    fn second_database_handle_is_rejected_while_the_first_is_open() {
+        let file = NamedTempFile::new().unwrap();
+        let _first = Storage::open_or_create(file.path()).unwrap();
+
+        let second = Storage::open(file.path());
+
+        assert!(matches!(
+            second,
+            Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
+    // Issue: A full-length torn final WAL frame prevents recovery. A crash can leave
+    // the expected file length while a sector contains stale or partial data, but a
+    // checksum, magic, or footer failure in that final frame is treated as corruption.
+    #[test]
+    fn read_recovery_log_truncates_full_length_torn_final_frame() {
+        let file = NamedTempFile::new().unwrap();
+        let valid_frame = serialize_to_vec(
+            11,
+            &[
+                LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+            ],
+        );
+        let mut torn_frame = serialize_to_vec(
+            12,
+            &[
+                LogRecord { txn_id: 12, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 12, kind: LogRecordKind::Commit },
+            ],
+        );
+        *torn_frame.last_mut().unwrap() ^= 1;
+        let wal_file_path = file.path().with_added_extension("wal");
+        {
+            let _manager = LogManager::new(file.path()).unwrap();
+            let mut wal_file = OpenOptions::new().append(true).open(&wal_file_path).unwrap();
+            wal_file.write_all(&valid_frame).unwrap();
+            wal_file.write_all(&torn_frame).unwrap();
+            wal_file.sync_all().unwrap();
+        }
+
+        let scan = read_recovery_log(file.path()).unwrap();
+
+        assert!(scan.truncated_tail);
+        assert_eq!(scan.records.len(), 2);
+        assert_eq!(
+            std::fs::metadata(wal_file_path).unwrap().len(),
+            (WAL_FILE_HEADER_LEN + valid_frame.len()) as u64
+        );
+    }
+
+    #[test]
+    fn recovery_discards_torn_frame_and_later_retained_unsynced_frames() {
+        let file = NamedTempFile::new().unwrap();
+        let prefix = serialize_to_vec(
+            11,
+            &[
+                LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+            ],
+        );
+        let mut torn =
+            serialize_to_vec(12, &[LogRecord { txn_id: 12, kind: LogRecordKind::Begin }]);
+        *torn.last_mut().unwrap() ^= 1;
+        let later = serialize_to_vec(
+            13,
+            &[
+                LogRecord { txn_id: 13, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 13, kind: LogRecordKind::Commit },
+            ],
+        );
+        let path = file.path().with_added_extension("wal");
+        {
+            let _manager = LogManager::new(file.path()).unwrap();
+            let mut wal = OpenOptions::new().append(true).open(&path).unwrap();
+            for bytes in [&prefix, &torn, &later] {
+                wal.write_all(bytes).unwrap();
+            }
+            wal.sync_all().unwrap();
+        }
+        let original = std::fs::read(&path).unwrap();
+        assert!(read_log(file.path(), LogReadMode::Checkpoint).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let scan = read_recovery_log(file.path()).unwrap();
+        assert!(scan.truncated_tail);
+        assert_eq!(scan.records.len(), 2);
+        assert_eq!(scan.max_txn_id, 11);
+        assert_eq!(
+            std::fs::metadata(path).unwrap().len(),
+            u64::try_from(WAL_FILE_HEADER_LEN + prefix.len()).unwrap()
+        );
+    }
+
+    fn assert_recovery_discards_invalid_header_suffix(mutate_header: impl FnOnce(&mut [u8])) {
+        let file = NamedTempFile::new().unwrap();
+        let prefix = serialize_to_vec(
+            11,
+            &[
+                LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+            ],
+        );
+        let mut invalid =
+            serialize_to_vec(12, &[LogRecord { txn_id: 12, kind: LogRecordKind::Begin }]);
+        mutate_header(&mut invalid[..HEADER_LEN]);
+        let later = serialize_to_vec(
+            13,
+            &[
+                LogRecord { txn_id: 13, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 13, kind: LogRecordKind::Commit },
+            ],
+        );
+        let path = file.path().with_added_extension("wal");
+        {
+            let _manager = LogManager::new(file.path()).unwrap();
+            let mut wal = OpenOptions::new().append(true).open(&path).unwrap();
+            for bytes in [&prefix, &invalid, &later] {
+                wal.write_all(bytes).unwrap();
+            }
+            wal.sync_all().unwrap();
+        }
+        let original = std::fs::read(&path).unwrap();
+        assert!(read_checkpoint_log(file.path()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        let scan = read_recovery_log(file.path()).unwrap();
+        assert!(scan.truncated_tail);
+        assert_eq!(
+            scan.records,
+            [
+                RecoveryLogRecord { lsn: 1, txn_id: 11, kind: RecoveryLogRecordKind::Begin },
+                RecoveryLogRecord { lsn: 2, txn_id: 11, kind: RecoveryLogRecordKind::Commit },
+            ]
+        );
+        assert_eq!(scan.max_txn_id, 11);
+        assert_eq!(scan.last_assigned_lsn, 2);
+        assert_eq!(std::fs::read(&path).unwrap(), original[..WAL_FILE_HEADER_LEN + prefix.len()]);
+
+        let second_scan = read_recovery_log(file.path()).unwrap();
+        assert_eq!(second_scan, RecoveryLogScan { truncated_tail: false, ..scan });
+        let manager = LogManager::new(file.path()).unwrap();
+        assert_eq!(manager.next_lsn().unwrap(), 3);
+        assert_eq!(manager.highest_txn_id(), 11);
+    }
+
+    #[test]
+    fn recovery_discards_zero_version_frame_and_later_retained_unsynced_frames() {
+        assert_recovery_discards_invalid_header_suffix(|header| header[8..10].fill(0));
+    }
+
+    #[test]
+    fn recovery_discards_overflowing_length_frame_and_later_retained_unsynced_frames() {
+        for payload_len in [u64::MAX, u64::MAX - (HEADER_LEN + FOOTER_LEN) as u64] {
+            assert_recovery_discards_invalid_header_suffix(|header| {
+                header[HEADER_LEN - 8..].copy_from_slice(&payload_len.to_le_bytes());
+            });
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_wal_with_unsupported_nonzero_frame_version() {
+        let file = NamedTempFile::new().unwrap();
+        let mut frame =
+            serialize_to_vec(11, &[LogRecord { txn_id: 11, kind: LogRecordKind::Begin }]);
+        frame[8..10].copy_from_slice(&3u16.to_le_bytes());
+        let path = file.path().with_added_extension("wal");
+        {
+            let _manager = LogManager::new(file.path()).unwrap();
+            let mut wal = OpenOptions::new().append(true).open(&path).unwrap();
+            wal.write_all(&frame).unwrap();
+            wal.sync_all().unwrap();
+        }
+        let original = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            read_recovery_log(file.path()),
+            Err(LogManagerError::UnsupportedVersion { expected: 2, actual: 3 })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    // Issue: An append I/O error leaves the manager reusable after a partial frame.
+    // Serialization writes incrementally while bookkeeping advances only after success,
+    // so later successful appends can follow an unrecoverable partial frame.
+    #[test]
+    fn failed_frame_append_poisons_the_log_manager() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+        let records = [
+            LogRecord { txn_id: 1, kind: LogRecordKind::Begin },
+            LogRecord { txn_id: 1, kind: LogRecordKind::Commit },
+        ];
+        manager.fail_next_append_after_bytes_for_test(HEADER_LEN + 1);
+
+        assert!(matches!(manager.append_transaction(1, &records), Err(LogManagerError::Io(_))));
+        assert!(matches!(manager.append_transaction(2, &records), Err(LogManagerError::Poisoned)));
+        drop(manager);
+
+        let scan = read_recovery_log(file.path()).unwrap();
+        assert!(scan.truncated_tail);
+        assert!(scan.records.is_empty());
+    }
+
+    #[test]
+    fn serialization_error_does_not_poison_the_log_manager() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+        let invalid_redo = [1, 2, 3, 4];
+        let undo = [9; PAGE_SIZE];
+        let invalid_records = [LogRecord {
+            txn_id: 1,
+            kind: LogRecordKind::PageUpdate {
+                page_id: 7,
+                redo_data: &invalid_redo,
+                undo_data: &undo,
+            },
+        }];
+
+        assert!(matches!(
+            manager.append_transaction(1, &invalid_records),
+            Err(LogManagerError::InvalidPageImageLength { expected: PAGE_SIZE, actual: 4 })
+        ));
+
+        let valid_records = [LogRecord { txn_id: 1, kind: LogRecordKind::Begin }];
+        assert_eq!(manager.append_transaction(1, &valid_records).unwrap(), 1);
+        drop(manager);
+
+        let scan = read_recovery_log(file.path()).unwrap();
+        assert!(!scan.truncated_tail);
+        assert_eq!(scan.records.len(), 1);
+        assert!(matches!(scan.records[0].kind, RecoveryLogRecordKind::Begin));
+    }
+
+    // Issue: The WAL header is an unprotected single point of failure.
+    // `last_assigned_lsn` has no checksum or redundant copy, so an undetected bit flip
+    // can cause LSN reuse and skipped redo. A crash leaving 1–23 header bytes produces
+    // `UnexpectedEof`, making the database unopenable instead of recognizing an
+    // incomplete new WAL.
+    #[test]
+    fn read_recovery_log_rejects_corrupted_header_lsn() {
+        let file = NamedTempFile::new().unwrap();
+        let wal_file_path = file.path().with_added_extension("wal");
+        {
+            let _manager = LogManager::new(file.path()).unwrap();
+            let mut wal_file = OpenOptions::new().write(true).open(&wal_file_path).unwrap();
+            wal_file.seek(SeekFrom::Start(23)).unwrap();
+            wal_file.write_all(&[1]).unwrap();
+            wal_file.sync_all().unwrap();
+        }
+
+        assert!(read_recovery_log(file.path()).is_err());
+    }
+
+    // Issue: The WAL header is an unprotected single point of failure.
+    // A crash leaving 1–23 header bytes produces `UnexpectedEof`, making a database
+    // with an incomplete newly-created WAL unopenable.
+    #[test]
+    fn incomplete_new_wal_header_is_reinitialized() {
+        let file = NamedTempFile::new().unwrap();
+        let wal_file_path = file.path().with_added_extension("wal");
+        std::fs::write(&wal_file_path, b"DBWAL").unwrap();
+
+        let scan = read_recovery_log(file.path()).unwrap();
+
+        assert!(scan.records.is_empty());
+        assert_eq!(std::fs::metadata(wal_file_path).unwrap().len(), WAL_FILE_HEADER_LEN as u64);
+    }
+
+    // Issue: WAL checkpoint/truncation is not crash-atomic. A crash can persist the
+    // truncation without the new LSN high-water mark. The next run can reuse old LSNs
+    // and skip committed redo when a page contains a numerically larger old LSN.
+    #[test]
+    fn staged_wal_checkpoint_does_not_modify_the_live_wal() {
+        let file = NamedTempFile::new().unwrap();
+        let records = [
+            LogRecord { txn_id: 41, kind: LogRecordKind::Begin },
+            LogRecord { txn_id: 41, kind: LogRecordKind::Commit },
+        ];
+        {
+            let mut manager = LogManager::new(file.path()).unwrap();
+            let lsn = manager.append_transaction(41, &records).unwrap();
+            manager.flush_through(lsn).unwrap();
+        }
+        let wal_file_path = file.path().with_added_extension("wal");
+        let checkpoint_file_path = wal_file_path.with_added_extension("checkpoint");
+        let original_wal = std::fs::read(&wal_file_path).unwrap();
+
+        write_wal_checkpoint_file(&checkpoint_file_path, 2, 41).unwrap();
+
+        assert_eq!(std::fs::read(wal_file_path).unwrap(), original_wal);
+        let scan = read_recovery_log(file.path()).unwrap();
+        assert_eq!(scan.records.len(), 2);
+        assert_eq!(scan.max_txn_id, 41);
+    }
+
+    #[test]
+    fn new_scans_existing_wal_frames_without_marking_them_durable() {
+        let file = NamedTempFile::new().unwrap();
+        {
+            let mut manager = LogManager::new(file.path()).unwrap();
+            let first_records = [
+                LogRecord { txn_id: 11, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 11, kind: LogRecordKind::Commit },
+            ];
+            let second_records = [
+                LogRecord { txn_id: 12, kind: LogRecordKind::Begin },
+                LogRecord { txn_id: 12, kind: LogRecordKind::PageAlloc { page_id: 7 } },
+                LogRecord { txn_id: 12, kind: LogRecordKind::Commit },
+            ];
+            manager.append_transaction(11, &first_records).unwrap();
+            manager.append_transaction(12, &second_records).unwrap();
+        }
+
+        let manager = LogManager::new(file.path()).unwrap();
+
+        assert_eq!(manager.highest_txn_id(), 12);
+        assert_eq!(manager.highest_appended_lsn(), Some(5));
+        assert_eq!(manager.highest_durable_lsn(), None);
+    }
+
+    #[test]
+    fn flush_through_zero_lsn_is_noop() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+
+        manager.flush_through(ZERO_LSN).unwrap();
+
+        assert_eq!(manager.highest_appended_lsn(), None);
+        assert_eq!(manager.highest_durable_lsn(), None);
+    }
+
+    #[test]
+    fn flush_through_already_durable_lsn_is_noop() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+        let records = [LogRecord { txn_id: 11, kind: LogRecordKind::Begin }];
+        let lsn = manager.append_transaction(11, &records).unwrap();
+        manager.flush_through(lsn).unwrap();
+
+        manager.flush_through(lsn).unwrap();
+
+        assert_eq!(manager.highest_appended_lsn(), Some(lsn));
+        assert_eq!(manager.highest_durable_lsn(), Some(lsn));
+    }
+
+    #[test]
+    fn flush_through_non_appended_lsn_returns_error() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+
+        let result = manager.flush_through(9);
+
+        assert!(matches!(
+            result,
+            Err(LogManagerFlushError::LsnNotAppended {
+                requested_lsn: 9,
+                highest_appended_lsn: None
+            })
+        ));
+    }
+
+    #[test]
+    fn flush_through_syncs_wal_and_marks_appended_lsn_durable() {
+        let file = NamedTempFile::new().unwrap();
+        let mut manager = LogManager::new(file.path()).unwrap();
+        let records = [LogRecord { txn_id: 11, kind: LogRecordKind::Begin }];
+        let lsn = manager.append_transaction(11, &records).unwrap();
+        manager.highest_durable_lsn = None;
+
+        manager.flush_through(lsn).unwrap();
+
+        assert_eq!(manager.highest_appended_lsn(), Some(lsn));
+        assert_eq!(manager.highest_durable_lsn(), Some(lsn));
+    }
+
+    fn rewrite_crc(buf: &mut [u8]) {
+        let payload_len_start = 8 + 2 + 8 + 4;
+        let payload_len = usize::try_from(u64::from_le_bytes(
+            buf[payload_len_start..payload_len_start + 8]
+                .try_into()
+                .expect("payload length slice has fixed width"),
+        ))
+        .unwrap();
+        let payload_start = HEADER_LEN;
+        let payload_end = payload_start + payload_len;
+        let crc = CRC32.checksum(&buf[payload_start..payload_end]);
+        let crc_start = buf.len() - 4;
+        buf[crc_start..].copy_from_slice(&crc.to_le_bytes());
+    }
+}

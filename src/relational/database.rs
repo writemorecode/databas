@@ -9,9 +9,9 @@ use crate::relational::error::StorageResult;
 use crate::relational::lock_manager::LockManager;
 use crate::relational::lock_manager::LockMode;
 use crate::relational::lock_manager::TableLease;
-use crate::storage::engine::Storage;
-use crate::storage::log_manager::TxnId;
-use crate::storage::transaction_manager::TransactionSavepoint;
+use crate::storage::Storage;
+use crate::storage::TransactionSavepoint;
+use crate::storage::TxnId;
 
 /// Public database handle for one database file.
 pub struct Database {

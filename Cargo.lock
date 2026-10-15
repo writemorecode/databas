@@ -88,8 +88,8 @@ checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 name = "databas"
 version = "0.1.0"
 dependencies = [
- "crc",
  "databas-sql-parser",
+ "databas-storage",
  "fastrand",
  "loom",
  "proptest",
@@ -101,6 +101,18 @@ dependencies = [
 [[package]]
 name = "databas-sql-parser"
 version = "0.1.0"
+
+[[package]]
+name = "databas-storage"
+version = "0.1.0"
+dependencies = [
+ "crc",
+ "fastrand",
+ "loom",
+ "proptest",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "errno"
