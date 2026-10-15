@@ -18,7 +18,7 @@ pub mod btree;
 pub mod database_header;
 pub mod disk_manager;
 pub mod engine;
-mod error;
+pub mod error;
 pub mod log_manager;
 pub mod overflow;
 pub mod page;
@@ -27,3 +27,7 @@ pub mod page_replacement;
 pub mod recovery;
 pub mod storage_runtime;
 pub mod transaction_manager;
+
+mod types;
+pub use types::{CheckpointOutcome, Lsn, PageId, SlotId, TxnId};
+pub(crate) use types::{PAGE_SIZE, PAGE_SIZE_U16};

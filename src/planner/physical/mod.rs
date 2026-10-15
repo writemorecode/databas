@@ -2,7 +2,12 @@
 
 use std::fmt;
 
-use crate::core::{IndexKeyRange, IndexSchema, TableKeyRange, TableSchema, TupleSchema, Value};
+use crate::relational::IndexKeyRange;
+use crate::relational::IndexSchema;
+use crate::relational::TableKeyRange;
+use crate::relational::TableSchema;
+use crate::relational::TupleSchema;
+use crate::relational::Value;
 
 use super::{BoundColumn, ExecExpr, NodeId, PlanSchema, RelationId, SortTerm, UpdateAssignment};
 
@@ -364,7 +369,7 @@ fn display_list<T: fmt::Display>(values: &[T]) -> String {
 /// Inclusive or exclusive display bound for a secondary-index scan value.
 ///
 /// These bounds are used for formatted plans and tests. The storage-facing byte
-/// bounds live in [`crate::core::IndexKeyBound`] values inside
+/// bounds live in [`crate::relational::IndexKeyBound`] values inside
 /// [`SecondaryIndexScanPlan`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum IndexValueBound {

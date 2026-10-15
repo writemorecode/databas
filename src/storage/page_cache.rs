@@ -21,24 +21,33 @@ use std::{
     sync::TryLockError,
 };
 
-use crate::{
-    core::Lsn,
-    sync::{
-        Arc, AtomicBool, AtomicU32, AtomicU64, Mutex, MutexGuard, Ordering, RwLock,
-        RwLockReadGuard, RwLockWriteGuard,
-    },
-};
+use crate::storage::Lsn;
+use crate::sync::Arc;
+use crate::sync::AtomicBool;
+use crate::sync::AtomicU32;
+use crate::sync::AtomicU64;
+use crate::sync::Mutex;
+use crate::sync::MutexGuard;
+use crate::sync::Ordering;
+use crate::sync::RwLock;
+use crate::sync::RwLockReadGuard;
+use crate::sync::RwLockWriteGuard;
 
 use thiserror::Error;
 
-use crate::core::{PAGE_SIZE, PageId, TxnId, error::StorageError};
-use crate::storage::{
-    log_manager::ZERO_LSN,
-    page::{NodeMarker, Page, PageResult, Read, Write},
-    page_replacement::ClockPolicy,
-    storage_runtime::StorageRuntime,
-    transaction_manager::PageRestore,
-};
+use crate::storage::PAGE_SIZE;
+use crate::storage::PageId;
+use crate::storage::TxnId;
+use crate::storage::error::StorageError;
+use crate::storage::log_manager::ZERO_LSN;
+use crate::storage::page::NodeMarker;
+use crate::storage::page::Page;
+use crate::storage::page::PageResult;
+use crate::storage::page::Read;
+use crate::storage::page::Write;
+use crate::storage::page_replacement::ClockPolicy;
+use crate::storage::storage_runtime::StorageRuntime;
+use crate::storage::transaction_manager::PageRestore;
 
 #[derive(Debug, Error)]
 pub enum PageCacheError {
@@ -620,11 +629,16 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::storage::disk_manager::{DiskManager, DiskManagerError};
-    use crate::storage::log_manager::{Lsn, OwnedLogRecordKind, read_log_record_kinds_for_test};
+    use crate::storage::disk_manager::DiskManager;
+    use crate::storage::disk_manager::DiskManagerError;
+    use crate::storage::log_manager::Lsn;
+    use crate::storage::log_manager::OwnedLogRecordKind;
+    use crate::storage::log_manager::read_log_record_kinds_for_test;
     use crate::storage::page;
+    use crate::storage::page::Leaf;
+    use crate::storage::page::Page;
+    use crate::storage::page::Write;
     use crate::storage::page::format::PageKind;
-    use crate::storage::page::{Leaf, Page, Write};
     use crate::storage::storage_runtime::StorageRuntime;
 
     /// Generates a deterministic page payload from a seed byte.
@@ -1351,7 +1365,7 @@ mod tests {
                 if matches!(
                     *error,
                     StorageError::InvalidArgument(
-                        crate::core::error::InvalidArgumentError::InvalidPageId { page_id: 99 }
+                        crate::storage::error::InvalidArgumentError::InvalidPageId { page_id: 99 }
                     )
                 )
         ));
@@ -1591,10 +1605,10 @@ mod loom_tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::{
-        loom_support::{check_model, thread},
-        storage::{disk_manager::DiskManager, storage_runtime::StorageRuntime},
-    };
+    use crate::loom_support::check_model;
+    use crate::loom_support::thread;
+    use crate::storage::disk_manager::DiskManager;
+    use crate::storage::storage_runtime::StorageRuntime;
 
     fn cache_with_pages(patterns: &[u8], frame_count: usize) -> (NamedTempFile, PageCache) {
         let file = NamedTempFile::new().unwrap();

@@ -1,18 +1,22 @@
 //! Translation from storage-internal failures to the public storage error.
 
-use crate::core::{
-    PAGE_SIZE,
-    error::{
-        ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InternalError,
-        InvalidArgumentError, InvariantViolation, LimitExceededError, StorageError,
-    },
-};
-use crate::storage::{
-    disk_manager::DiskManagerError,
-    log_manager::{LogManagerError, LogManagerFlushError},
-    page::{CellCorruption, PageCorruption, PageError},
-    page_cache::PageCacheError,
-};
+use crate::storage::PAGE_SIZE;
+use crate::storage::disk_manager::DiskManagerError;
+use crate::storage::error::ConstraintError;
+use crate::storage::error::CorruptionComponent;
+use crate::storage::error::CorruptionError;
+use crate::storage::error::CorruptionKind;
+use crate::storage::error::InternalError;
+use crate::storage::error::InvalidArgumentError;
+use crate::storage::error::InvariantViolation;
+use crate::storage::error::LimitExceededError;
+use crate::storage::error::StorageError;
+use crate::storage::log_manager::LogManagerError;
+use crate::storage::log_manager::LogManagerFlushError;
+use crate::storage::page::CellCorruption;
+use crate::storage::page::PageCorruption;
+use crate::storage::page::PageError;
+use crate::storage::page_cache::PageCacheError;
 
 impl From<DiskManagerError> for StorageError {
     fn from(error: DiskManagerError) -> Self {
@@ -174,12 +178,6 @@ fn map_cell_corruption(kind: CellCorruption) -> CorruptionKind {
     match kind {
         CellCorruption::LengthTooSmall => CorruptionKind::CellLengthTooSmall,
         CellCorruption::LengthOutOfBounds => CorruptionKind::CellLengthOutOfBounds,
-        CellCorruption::InvalidTableKeyLength { actual } => {
-            CorruptionKind::InvalidTableKeyLength { actual }
-        }
-        CellCorruption::InvalidIndexTableKeyValueLength { actual } => {
-            CorruptionKind::InvalidIndexTableKeyValueLength { actual }
-        }
     }
 }
 

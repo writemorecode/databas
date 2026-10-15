@@ -254,10 +254,10 @@ fn substitute_expression(
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        core::DataType,
-        planner::{BoundColumn, PlanColumn, RelationId},
-    };
+    use crate::planner::BoundColumn;
+    use crate::planner::PlanColumn;
+    use crate::planner::RelationId;
+    use crate::relational::DataType;
 
     use super::*;
 
@@ -319,8 +319,8 @@ mod tests {
     #[test]
     fn combines_adjacent_filters_in_evaluation_order() {
         let schema = PlanSchema::default();
-        let inner_predicate = BoundExpr::Literal(crate::core::Value::Boolean(true));
-        let outer_predicate = BoundExpr::Literal(crate::core::Value::Boolean(false));
+        let inner_predicate = BoundExpr::Literal(crate::relational::Value::Boolean(true));
+        let outer_predicate = BoundExpr::Literal(crate::relational::Value::Boolean(false));
         let mut plan = LogicalPlan::new(LogicalPlanNode::OneRow { output: schema.clone() });
         let input = plan.root_id();
         let inner = plan.push(LogicalPlanNode::Filter {

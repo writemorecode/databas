@@ -39,10 +39,14 @@ use std::{
     fmt,
 };
 
-use crate::sync::{Arc, Condvar, Mutex, MutexGuard};
+use crate::sync::Arc;
+use crate::sync::Condvar;
+use crate::sync::Mutex;
+use crate::sync::MutexGuard;
 use thiserror::Error;
 
-use crate::core::{CatalogId, TxnId};
+use crate::relational::CatalogId;
+use crate::relational::TxnId;
 
 /// Stable identity of a user-table lock resource.
 ///
@@ -1732,7 +1736,8 @@ mod loom_tests {
     };
 
     use super::*;
-    use crate::loom_support::{check_model, thread};
+    use crate::loom_support::check_model;
+    use crate::loom_support::thread;
 
     fn rollback(manager: &LockManager, txn_id: TxnId) {
         manager.begin_rollback(txn_id).unwrap();

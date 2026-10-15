@@ -1,23 +1,33 @@
 use std::{cell::RefCell, collections::BTreeMap};
 
 use super::*;
-use crate::{
-    core::{
-        DataType, IndexColumnSchema, IndexKeyRange, IndexSchema, InvalidArgumentError,
-        StorageResult, TableKey, TableKeyRange, TableSchema, TupleSchema, Value,
-        access::{CatalogRead, RelationalAccess},
-        error::{ConstraintError, StorageError},
-    },
-    error::DatabaseError,
-    planner::{ExecExpr, PhysicalPlan, PhysicalPlanNode, Planner},
-    relational::{
-        catalog_manager::validate_user_table_schema,
-        cursor::encode_index_entry_key,
-        index_manager::index_key_from_record,
-        record_manager::{table_key_from_values, validate_table_row},
-    },
-    sql_parser::parser::{Parser, op::Op},
-};
+use crate::error::DatabaseError;
+use crate::planner::ExecExpr;
+use crate::planner::PhysicalPlan;
+use crate::planner::PhysicalPlanNode;
+use crate::planner::Planner;
+use crate::relational::DataType;
+use crate::relational::IndexColumnSchema;
+use crate::relational::IndexKeyRange;
+use crate::relational::IndexSchema;
+use crate::relational::InvalidArgumentError;
+use crate::relational::StorageResult;
+use crate::relational::TableKey;
+use crate::relational::TableKeyRange;
+use crate::relational::TableSchema;
+use crate::relational::TupleSchema;
+use crate::relational::Value;
+use crate::relational::access::CatalogRead;
+use crate::relational::access::RelationalAccess;
+use crate::relational::catalog_manager::validate_user_table_schema;
+use crate::relational::cursor::encode_index_entry_key;
+use crate::relational::error::ConstraintError;
+use crate::relational::error::StorageError;
+use crate::relational::index_manager::index_key_from_record;
+use crate::relational::record_manager::table_key_from_values;
+use crate::relational::record_manager::validate_table_row;
+use crate::sql_parser::parser::Parser;
+use crate::sql_parser::parser::op::Op;
 
 #[derive(Clone)]
 struct MemoryTable {

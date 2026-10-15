@@ -1,4 +1,4 @@
-use crate::core::PageId;
+use crate::storage::PageId;
 
 use super::{core::Interior, interior};
 

@@ -1,7 +1,11 @@
-use crate::core::{
-    PAGE_SIZE, PAGE_SIZE_U16, PageId,
-    error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
-};
+use crate::storage::PAGE_SIZE;
+use crate::storage::PAGE_SIZE_U16;
+use crate::storage::PageId;
+use crate::storage::error::CorruptionComponent;
+use crate::storage::error::CorruptionError;
+use crate::storage::error::CorruptionKind;
+use crate::storage::error::StorageError;
+use crate::storage::error::StorageResult;
 
 pub const DATABASE_HEADER_PAGE_ID: PageId = 0;
 

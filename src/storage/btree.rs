@@ -6,25 +6,38 @@
 
 use std::{borrow::Cow, cmp::Ordering};
 
-use crate::sync::{Arc, AtomicU64, Ordering as AtomicOrdering};
+use crate::sync::Arc;
+use crate::sync::AtomicU64;
+use crate::sync::Ordering as AtomicOrdering;
 
-use crate::core::{
-    PAGE_SIZE, PageId, TxnId,
-    error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
-};
-use crate::storage::{
-    overflow,
-    page::{
-        self, BoundResult, Interior, Leaf, PageError, RawInterior, RawLeaf, Read, SearchResult,
-        Write,
-        format::{
-            INTERIOR_CELL_PREFIX_SIZE, KIND_OFFSET, LEAF_CELL_PREFIX_SIZE,
-            MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, NO_OVERFLOW_PAGE_ID, OVERFLOW_NEXT_PAGE_ID_SIZE,
-            PageKind,
-        },
-    },
-    page_cache::{PageCache, PinGuard},
-};
+use crate::storage::PAGE_SIZE;
+use crate::storage::PageId;
+use crate::storage::TxnId;
+use crate::storage::error::CorruptionComponent;
+use crate::storage::error::CorruptionError;
+use crate::storage::error::CorruptionKind;
+use crate::storage::error::StorageError;
+use crate::storage::error::StorageResult;
+use crate::storage::overflow;
+use crate::storage::page;
+use crate::storage::page::BoundResult;
+use crate::storage::page::Interior;
+use crate::storage::page::Leaf;
+use crate::storage::page::PageError;
+use crate::storage::page::RawInterior;
+use crate::storage::page::RawLeaf;
+use crate::storage::page::Read;
+use crate::storage::page::SearchResult;
+use crate::storage::page::Write;
+use crate::storage::page::format::INTERIOR_CELL_PREFIX_SIZE;
+use crate::storage::page::format::KIND_OFFSET;
+use crate::storage::page::format::LEAF_CELL_PREFIX_SIZE;
+use crate::storage::page::format::MAX_INLINE_OVERFLOW_PAYLOAD_BYTES;
+use crate::storage::page::format::NO_OVERFLOW_PAGE_ID;
+use crate::storage::page::format::OVERFLOW_NEXT_PAGE_ID_SIZE;
+use crate::storage::page::format::PageKind;
+use crate::storage::page_cache::PageCache;
+use crate::storage::page_cache::PinGuard;
 
 mod mutation;
 mod payload;
@@ -45,7 +58,8 @@ mod test_support {
     use tempfile::NamedTempFile;
 
     use super::{root::read_page_kind, *};
-    use crate::storage::{disk_manager::DiskManager, storage_runtime::StorageRuntime};
+    use crate::storage::disk_manager::DiskManager;
+    use crate::storage::storage_runtime::StorageRuntime;
 
     pub const TARGET_HEIGHT: usize = 4;
     pub const MAX_RECORDS: usize = 50_000;
@@ -150,10 +164,11 @@ mod test_support {
 #[allow(clippy::unwrap_used)]
 mod loom_tests {
     use super::search::advance_mutation_epoch;
-    use crate::{
-        loom_support::{check_model, thread},
-        sync::{Arc, AtomicU64, Ordering},
-    };
+    use crate::loom_support::check_model;
+    use crate::loom_support::thread;
+    use crate::sync::Arc;
+    use crate::sync::AtomicU64;
+    use crate::sync::Ordering;
 
     #[test]
     fn concurrent_mutations_each_advance_the_shared_epoch() {

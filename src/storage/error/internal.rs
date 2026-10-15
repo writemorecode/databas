@@ -2,7 +2,9 @@ use std::collections::TryReserveError;
 
 use thiserror::Error;
 
-use crate::core::{Lsn, PageId, TxnId};
+use crate::storage::Lsn;
+use crate::storage::PageId;
+use crate::storage::TxnId;
 
 /// Failure of an internal invariant or allocation.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -50,8 +52,6 @@ pub enum InvariantViolation {
     TransactionIdExhausted,
     #[error("transaction {txn_id} failed before commit")]
     TransactionPoisoned { txn_id: TxnId },
-    #[error("catalog table {table} cursor had no current record after positioning")]
-    CatalogCursorMissingRecord { table: String },
     #[error("leaf split has no left-hand cells")]
     EmptyLeafSplit,
     #[error("leaf split target key is missing")]

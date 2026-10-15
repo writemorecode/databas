@@ -1,6 +1,6 @@
 //! Elimination of constant-false and otherwise empty relational subplans.
 
-use crate::core::Value;
+use crate::relational::Value;
 
 use super::super::{
     BoundExpr, LogicalPlan, LogicalPlanNode, NodeId, PlanSchema, PlannerError, PlannerResult,

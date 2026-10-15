@@ -1,6 +1,6 @@
 //! Predicate pushdown through relational operators.
 
-use crate::core::Value;
+use crate::relational::Value;
 
 use super::{
     super::{
@@ -293,11 +293,12 @@ fn predicate_input(predicate: &BoundExpr, left: &PlanSchema, right: &PlanSchema)
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        core::{DataType, Value},
-        planner::{BoundColumn, PlanColumn, RelationId},
-        sql_parser::parser::op::Op,
-    };
+    use crate::planner::BoundColumn;
+    use crate::planner::PlanColumn;
+    use crate::planner::RelationId;
+    use crate::relational::DataType;
+    use crate::relational::Value;
+    use crate::sql_parser::parser::op::Op;
 
     use super::*;
 

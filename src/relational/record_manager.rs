@@ -1,14 +1,27 @@
-use crate::core::{
-    CorruptionComponent, CorruptionError, CorruptionKind, DataType, IndexEntry, IndexKeyRange,
-    IndexSchema, OwnedTableRecord, TableKey, TableKeyBound, TableKeyRange, TableRecord,
-    TableSchema, Tuple, TxnId, Value,
-    error::{ConstraintError, InvalidArgumentError, StorageError, StorageResult},
-};
-use crate::relational::{
-    catalog_manager::CatalogManager,
-    cursor::{IndexCursor, TableCursor},
-    index_manager,
-};
+use crate::relational::CorruptionComponent;
+use crate::relational::CorruptionError;
+use crate::relational::CorruptionKind;
+use crate::relational::DataType;
+use crate::relational::IndexEntry;
+use crate::relational::IndexKeyRange;
+use crate::relational::IndexSchema;
+use crate::relational::OwnedTableRecord;
+use crate::relational::TableKey;
+use crate::relational::TableKeyBound;
+use crate::relational::TableKeyRange;
+use crate::relational::TableRecord;
+use crate::relational::TableSchema;
+use crate::relational::Tuple;
+use crate::relational::TxnId;
+use crate::relational::Value;
+use crate::relational::catalog_manager::CatalogManager;
+use crate::relational::cursor::IndexCursor;
+use crate::relational::cursor::TableCursor;
+use crate::relational::error::ConstraintError;
+use crate::relational::error::InvalidArgumentError;
+use crate::relational::error::StorageError;
+use crate::relational::error::StorageResult;
+use crate::relational::index_manager;
 
 /// Compatibility wrapper retained for focused relational tests.
 #[cfg(test)]
@@ -469,12 +482,14 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::{ColumnSchema, TableKeyBound, TableKeyRange, TupleSchema};
-    use crate::relational::{
-        catalog_manager::CatalogManager,
-        cursor::{IndexCursor, encode_index_entry_key},
-        index_manager::IndexManager,
-    };
+    use crate::relational::ColumnSchema;
+    use crate::relational::TableKeyBound;
+    use crate::relational::TableKeyRange;
+    use crate::relational::TupleSchema;
+    use crate::relational::catalog_manager::CatalogManager;
+    use crate::relational::cursor::IndexCursor;
+    use crate::relational::cursor::encode_index_entry_key;
+    use crate::relational::index_manager::IndexManager;
     use crate::storage::engine::Storage;
 
     fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, RecordManager)> {

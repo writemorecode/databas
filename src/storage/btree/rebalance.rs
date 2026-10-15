@@ -823,21 +823,18 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::{
-        core::error::LimitExceededError,
-        storage::{
-            btree::{
-                MAX_INLINE_OVERFLOW_PAYLOAD_BYTES,
-                root::initialize_empty_root,
-                test_support::{
-                    assert_matches, cursor, oversized_key, page_cache, random_record, scan,
-                },
-            },
-            disk_manager::DiskManager,
-            page_cache::PageCache,
-            storage_runtime::StorageRuntime,
-        },
-    };
+    use crate::storage::btree::MAX_INLINE_OVERFLOW_PAYLOAD_BYTES;
+    use crate::storage::btree::root::initialize_empty_root;
+    use crate::storage::btree::test_support::assert_matches;
+    use crate::storage::btree::test_support::cursor;
+    use crate::storage::btree::test_support::oversized_key;
+    use crate::storage::btree::test_support::page_cache;
+    use crate::storage::btree::test_support::random_record;
+    use crate::storage::btree::test_support::scan;
+    use crate::storage::disk_manager::DiskManager;
+    use crate::storage::error::LimitExceededError;
+    use crate::storage::page_cache::PageCache;
+    use crate::storage::storage_runtime::StorageRuntime;
 
     #[ignore = "slow because of fsync"]
     #[test]

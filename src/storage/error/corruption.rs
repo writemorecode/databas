@@ -2,7 +2,7 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::core::{PageId, TableKey};
+use crate::storage::PageId;
 
 /// Corruption detected in an encoded database component.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -20,7 +20,6 @@ pub struct CorruptionError {
 /// Logical component in which corruption was detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CorruptionComponent {
-    Catalog,
     DatabaseFile,
     DiskPage,
     OverflowPage,
@@ -77,28 +76,15 @@ pub enum CorruptionKind {
     CellLengthTooSmall,
     #[error("cell length runs past the usable page bounds")]
     CellLengthOutOfBounds,
-    #[error("table key has invalid length {actual}")]
-    InvalidTableKeyLength { actual: usize },
-    #[error("index table-key value has invalid length {actual}")]
-    InvalidIndexTableKeyValueLength { actual: usize },
     #[error("overflow chain ended before {expected} bytes could be read")]
     OverflowChainTooShort { expected: usize, actual: usize },
     #[error("overflow chain has extra pages after {expected} bytes were read")]
     OverflowChainTooLong { expected: usize },
-    #[error("missing system catalog root page {page_id}")]
-    MissingSystemCatalogRoot { page_id: PageId },
-    #[error("unexpected system catalog root page: expected {expected}, got {actual}")]
-    UnexpectedSystemCatalogRoot { expected: PageId, actual: PageId },
-    #[error("invalid catalog row in {table}: {reason}")]
-    InvalidCatalogRow { table: &'static str, reason: String },
-    #[error("invalid table record in {table} key {table_key}: {reason}")]
-    InvalidTableRecord { table: String, table_key: TableKey, reason: String },
 }
 
 impl fmt::Display for CorruptionComponent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Catalog => write!(f, "catalog"),
             Self::DatabaseFile => write!(f, "database file"),
             Self::DiskPage => write!(f, "disk page"),
             Self::OverflowPage => write!(f, "overflow page"),

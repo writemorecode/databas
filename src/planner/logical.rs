@@ -1,9 +1,8 @@
 //! Catalog-bound logical plan representation.
 
-use crate::{
-    core::{TableSchema, TupleSchema},
-    sql_parser::parser::stmt::select::JoinType,
-};
+use crate::relational::TableSchema;
+use crate::relational::TupleSchema;
+use crate::sql_parser::parser::stmt::select::JoinType;
 
 use super::{
     BoundColumn, BoundExpr, BoundSortTerm, BoundUpdateAssignment, NodeId, PlanSchema, RelationId,

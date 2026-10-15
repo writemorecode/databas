@@ -1,22 +1,23 @@
 use std::path::Path;
 
-use crate::storage::{
-    btree::{TreeCursor, initialize_empty_root, validate_tree_page_formats},
-    database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header},
-    disk_manager::DiskManager,
-    log_manager::TxnId,
-    page_cache::PageCache,
-    storage_runtime::StorageRuntime,
-    transaction_manager::TransactionSavepoint,
-};
-use crate::{
-    core::{PageId, error::StorageResult},
-    sync::Arc,
-};
+use crate::storage::PageId;
+use crate::storage::btree::TreeCursor;
+use crate::storage::btree::initialize_empty_root;
+use crate::storage::btree::validate_tree_page_formats;
+use crate::storage::database_header::DATABASE_HEADER_PAGE_ID;
+use crate::storage::database_header::DatabaseHeader;
+use crate::storage::database_header::missing_header;
+use crate::storage::disk_manager::DiskManager;
+use crate::storage::error::StorageResult;
+use crate::storage::log_manager::TxnId;
+use crate::storage::page_cache::PageCache;
+use crate::storage::storage_runtime::StorageRuntime;
+use crate::storage::transaction_manager::TransactionSavepoint;
+use crate::sync::Arc;
 
 const DEFAULT_PAGE_CACHE_SIZE: usize = 16384;
 
-/// Configuration for [`crate::core::Database`].
+/// Configuration for [`crate::storage::Database`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StorageOptions {
     /// Number of frames to preallocate in the page cache.
@@ -124,7 +125,7 @@ impl Storage {
         Ok(())
     }
 
-    pub(crate) fn checkpoint(&self) -> StorageResult<crate::core::CheckpointOutcome> {
+    pub(crate) fn checkpoint(&self) -> StorageResult<crate::storage::CheckpointOutcome> {
         self.runtime.checkpoint(|| Ok(self.page_cache.flush_checkpoint()?))
     }
 
@@ -219,7 +220,7 @@ fn validate_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
         return Err(missing_header());
     }
 
-    let mut page = [0u8; crate::core::PAGE_SIZE];
+    let mut page = [0u8; crate::storage::PAGE_SIZE];
     disk_manager.read_page(DATABASE_HEADER_PAGE_ID, &mut page)?;
     DatabaseHeader::validate_page(&page)
 }
@@ -251,11 +252,11 @@ mod tests {
     fn full_rollback_flushes_savepoint_restores_before_reopen() {
         use std::io::{Seek, SeekFrom, Write};
 
-        use crate::core::PAGE_SIZE;
-        use crate::storage::{
-            log_manager::{OwnedLogRecordKind, read_log_record_kinds_for_test},
-            page::{format, validate_btree_page},
-        };
+        use crate::storage::PAGE_SIZE;
+        use crate::storage::log_manager::OwnedLogRecordKind;
+        use crate::storage::log_manager::read_log_record_kinds_for_test;
+        use crate::storage::page::format;
+        use crate::storage::page::validate_btree_page;
 
         let file = NamedTempFile::new().unwrap();
         let storage = Storage::open_or_create(file.path()).unwrap();

@@ -599,7 +599,9 @@ impl TreeCursor {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use crate::storage::btree::test_support::{cursor, oversized_key, record_bytes};
+    use crate::storage::btree::test_support::cursor;
+    use crate::storage::btree::test_support::oversized_key;
+    use crate::storage::btree::test_support::record_bytes;
 
     #[test]
     fn binary_search_ignores_an_inline_keys_overflow_value() {

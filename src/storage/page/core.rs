@@ -1,7 +1,9 @@
 use core::marker::PhantomData;
 use std::cmp::Ordering;
 
-use crate::core::{PAGE_SIZE, PageId, SlotId};
+use crate::storage::PAGE_SIZE;
+use crate::storage::PageId;
+use crate::storage::SlotId;
 use crate::storage::log_manager::ZERO_LSN;
 
 use super::{

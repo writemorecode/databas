@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
-use crate::core::error::{InternalError, InvariantViolation};
+use crate::storage::error::InternalError;
+use crate::storage::error::InvariantViolation;
 
 use super::payload::{cell_corruption, materialize_payload};
 use super::root::read_page_kind;
@@ -518,10 +519,15 @@ mod tests {
     use fastrand::Rng;
 
     use super::*;
-    use crate::storage::btree::test_support::{
-        MAX_RECORDS, TARGET_HEIGHT, assert_matches, cursor, height, oversized_key, random_record,
-        record_bytes, scan,
-    };
+    use crate::storage::btree::test_support::MAX_RECORDS;
+    use crate::storage::btree::test_support::TARGET_HEIGHT;
+    use crate::storage::btree::test_support::assert_matches;
+    use crate::storage::btree::test_support::cursor;
+    use crate::storage::btree::test_support::height;
+    use crate::storage::btree::test_support::oversized_key;
+    use crate::storage::btree::test_support::random_record;
+    use crate::storage::btree::test_support::record_bytes;
+    use crate::storage::btree::test_support::scan;
 
     #[ignore = "slow because of fsync"]
     #[test]

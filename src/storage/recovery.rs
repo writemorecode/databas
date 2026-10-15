@@ -1,10 +1,14 @@
 use std::{collections::HashMap, path::Path};
 
-use crate::core::{PAGE_SIZE, PageId, error::StorageResult};
-use crate::storage::{
-    disk_manager::DiskManager,
-    log_manager::{Lsn, RecoveryLogRecordKind, TxnId, read_recovery_log, truncate_wal},
-};
+use crate::storage::PAGE_SIZE;
+use crate::storage::PageId;
+use crate::storage::disk_manager::DiskManager;
+use crate::storage::error::StorageResult;
+use crate::storage::log_manager::Lsn;
+use crate::storage::log_manager::RecoveryLogRecordKind;
+use crate::storage::log_manager::TxnId;
+use crate::storage::log_manager::read_recovery_log;
+use crate::storage::log_manager::truncate_wal;
 
 #[derive(Debug, Default)]
 struct TransactionRecovery {
@@ -130,12 +134,14 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::storage::{
-        log_manager::{LogManager, LogRecord, LogRecordKind, WAL_FILE_HEADER_LEN, ZERO_LSN},
-        page,
-        page::format::PageKind,
-        storage_runtime::StorageRuntime,
-    };
+    use crate::storage::log_manager::LogManager;
+    use crate::storage::log_manager::LogRecord;
+    use crate::storage::log_manager::LogRecordKind;
+    use crate::storage::log_manager::WAL_FILE_HEADER_LEN;
+    use crate::storage::log_manager::ZERO_LSN;
+    use crate::storage::page;
+    use crate::storage::page::format::PageKind;
+    use crate::storage::storage_runtime::StorageRuntime;
 
     fn formatted_page(seed: u8, lsn: Lsn) -> [u8; PAGE_SIZE] {
         let mut page = [seed; PAGE_SIZE];

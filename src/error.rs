@@ -2,10 +2,11 @@ use std::io;
 
 use thiserror::Error;
 
-use crate::{
-    core::error::StorageError, executor::ExecutorError, planner::PlannerError,
-    session::SessionError, sql_parser::error::SQLError,
-};
+use crate::executor::ExecutorError;
+use crate::planner::PlannerError;
+use crate::relational::error::StorageError;
+use crate::session::SessionError;
+use crate::sql_parser::error::SQLError;
 
 #[derive(Debug, Error)]
 pub enum DatabaseError<'a> {

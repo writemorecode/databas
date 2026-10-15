@@ -1,20 +1,34 @@
 use std::path::Path;
 
-use crate::core::{
-    CatalogId, IndexSchema, PageId, TableRecord, TableSchema, Tuple, TupleSchema, TxnId,
-    error::{
-        ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InternalError,
-        InvalidArgumentError, InvariantViolation, StorageError, StorageResult,
-    },
-};
-use crate::relational::{
-    catalog::{
-        CatalogError, CatalogObjectKind, ColumnCatalogRow, ColumnSchema, IndexCatalogRow,
-        IndexColumnSchema, SYS_COLUMNS_ROOT_PAGE_ID, SYS_INDEXES_ROOT_PAGE_ID,
-        SYS_TABLES_ROOT_PAGE_ID, TableCatalogRow, system_column_rows, system_table_schemas,
-    },
-    cursor::{IndexCursor, TableCursor},
-};
+use crate::relational::CatalogId;
+use crate::relational::IndexSchema;
+use crate::relational::PageId;
+use crate::relational::TableRecord;
+use crate::relational::TableSchema;
+use crate::relational::Tuple;
+use crate::relational::TupleSchema;
+use crate::relational::TxnId;
+use crate::relational::catalog::CatalogError;
+use crate::relational::catalog::CatalogObjectKind;
+use crate::relational::catalog::ColumnCatalogRow;
+use crate::relational::catalog::ColumnSchema;
+use crate::relational::catalog::IndexCatalogRow;
+use crate::relational::catalog::IndexColumnSchema;
+use crate::relational::catalog::SYS_COLUMNS_ROOT_PAGE_ID;
+use crate::relational::catalog::SYS_INDEXES_ROOT_PAGE_ID;
+use crate::relational::catalog::SYS_TABLES_ROOT_PAGE_ID;
+use crate::relational::catalog::TableCatalogRow;
+use crate::relational::catalog::system_column_rows;
+use crate::relational::catalog::system_table_schemas;
+use crate::relational::cursor::IndexCursor;
+use crate::relational::cursor::TableCursor;
+use crate::relational::error::ConstraintError;
+use crate::relational::error::CorruptionComponent;
+use crate::relational::error::CorruptionError;
+use crate::relational::error::CorruptionKind;
+use crate::relational::error::InvalidArgumentError;
+use crate::relational::error::StorageError;
+use crate::relational::error::StorageResult;
 use crate::storage::engine::Storage;
 
 /// Internal catalog manager for one database file.
@@ -46,7 +60,7 @@ impl CatalogManager {
 
     /// Flushes all dirty, currently unpinned pages to disk.
     pub fn flush(&self) -> StorageResult<()> {
-        self.storage.flush()
+        self.storage.flush().map_err(Into::into)
     }
 
     pub(crate) fn storage(&self) -> &Storage {
@@ -172,7 +186,7 @@ impl CatalogManager {
 
     pub(crate) fn transaction_table_cursor_by_name(
         &self,
-        txn_id: crate::core::TxnId,
+        txn_id: crate::relational::TxnId,
         name: &str,
     ) -> StorageResult<TableCursor> {
         let schema = self.table_schema_by_name(name)?;
@@ -187,7 +201,7 @@ impl CatalogManager {
 
     pub(crate) fn transaction_index_cursor_by_name(
         &self,
-        txn_id: crate::core::TxnId,
+        txn_id: crate::relational::TxnId,
         name: &str,
     ) -> StorageResult<IndexCursor> {
         let schema = self.index_schema_by_name(name)?;
@@ -196,7 +210,7 @@ impl CatalogManager {
 
     fn initialize_or_validate_system_catalog(&self) -> StorageResult<()> {
         match self.storage.opened_page_count() {
-            0 => Err(crate::storage::database_header::missing_header()),
+            0 => Err(crate::storage::database_header::missing_header().into()),
             1 => self.initialize_system_catalog(),
             2..=3 => Err(missing_system_catalog_root(self.storage.opened_page_count())),
             _ => Ok(()),
@@ -389,11 +403,10 @@ impl CatalogManager {
         }
 
         let mut record = cursor.current_record()?.ok_or_else(|| {
-            StorageError::Internal(InternalError::InvariantViolation(
-                InvariantViolation::CatalogCursorMissingRecord {
-                    table: catalog_table_name.to_owned(),
-                },
-            ))
+            invalid_catalog_row(
+                catalog_table_name,
+                std::io::Error::other("cursor had no current record after positioning"),
+            )
         })?;
         loop {
             rows.push(decode_catalog_record(catalog_table_name, &record, &decode)?);
@@ -444,7 +457,7 @@ pub fn validate_user_table_schema(name: &str, row: &TupleSchema) -> StorageResul
         }));
     };
 
-    if primary_key.data_type != crate::core::DataType::Integer {
+    if primary_key.data_type != crate::relational::DataType::Integer {
         return Err(StorageError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
             table: name.to_owned(),
             reason: "primary key must use INT type".to_owned(),
@@ -536,12 +549,20 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::{CatalogId, Tuple, TupleSchema};
-    use crate::relational::catalog::{
-        ColumnCatalogRow, ColumnSchema, DataType, IndexCatalogRow, SYS_COLUMNS_TABLE_ID,
-        SYS_INDEXES_TABLE_ID, SYS_TABLES_TABLE_ID, TableCatalogRow, system_column_rows,
-    };
-    use crate::storage::{database_header::DatabaseHeader, disk_manager::DiskManager};
+    use crate::relational::CatalogId;
+    use crate::relational::Tuple;
+    use crate::relational::TupleSchema;
+    use crate::relational::catalog::ColumnCatalogRow;
+    use crate::relational::catalog::ColumnSchema;
+    use crate::relational::catalog::DataType;
+    use crate::relational::catalog::IndexCatalogRow;
+    use crate::relational::catalog::SYS_COLUMNS_TABLE_ID;
+    use crate::relational::catalog::SYS_INDEXES_TABLE_ID;
+    use crate::relational::catalog::SYS_TABLES_TABLE_ID;
+    use crate::relational::catalog::TableCatalogRow;
+    use crate::relational::catalog::system_column_rows;
+    use crate::storage::database_header::DatabaseHeader;
+    use crate::storage::disk_manager::DiskManager;
 
     fn open(path: impl AsRef<Path>) -> StorageResult<CatalogManager> {
         CatalogManager::from_storage(Storage::open_or_create(path)?)

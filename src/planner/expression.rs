@@ -2,10 +2,10 @@
 
 use std::fmt;
 
-use crate::{
-    core::{DataType, Value},
-    sql_parser::parser::{op::Op, stmt::select::Ordering},
-};
+use crate::relational::DataType;
+use crate::relational::Value;
+use crate::sql_parser::parser::op::Op;
+use crate::sql_parser::parser::stmt::select::Ordering;
 
 use super::RelationId;
 
