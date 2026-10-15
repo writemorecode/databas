@@ -5,8 +5,8 @@
 //! storage mutations still use the legacy ambient transaction during the
 //! migration.
 
-use crate::relational::IndexKeyRange;
 use crate::relational::IndexSchema;
+use crate::relational::IndexValueRange;
 use crate::relational::OwnedTableRecord;
 use crate::relational::TableKeyRange;
 use crate::relational::TableSchema;
@@ -82,7 +82,7 @@ impl RelationalAccess for Transaction<'_> {
         &self,
         table: &TableSchema,
         index: &IndexSchema,
-        range: IndexKeyRange,
+        range: IndexValueRange,
     ) -> StorageResult<Self::IndexScan> {
         Ok(OwnedScan(Transaction::scan_index(self, table, index, range)?))
     }
@@ -181,7 +181,7 @@ impl Transaction<'_> {
         &self,
         table: &TableSchema,
         index: &IndexSchema,
-        key_range: IndexKeyRange,
+        key_range: IndexValueRange,
     ) -> StorageResult<IndexScan> {
         self.require_table(table, LockMode::Shared)?;
         record_manager::scan_index(
@@ -189,7 +189,7 @@ impl Transaction<'_> {
             Some(self.txn_id),
             table,
             index,
-            key_range,
+            key_range.encode()?,
         )
     }
 

@@ -40,3 +40,6 @@ pub use error::{
 };
 pub use lock_manager::{LockError, LockMode, TableId};
 pub use types::{CatalogId, IndexKeyBound, IndexKeyRange, TableKey, TableKeyBound, TableKeyRange};
+
+mod index_range;
+pub use index_range::{IndexValueBound, IndexValueRange};

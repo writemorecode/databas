@@ -2,12 +2,10 @@
 
 use std::fmt;
 
-use crate::relational::IndexKeyRange;
 use crate::relational::IndexSchema;
 use crate::relational::TableKeyRange;
 use crate::relational::TableSchema;
 use crate::relational::TupleSchema;
-use crate::relational::Value;
 
 use super::{BoundColumn, ExecExpr, NodeId, PlanSchema, RelationId, SortTerm, UpdateAssignment};
 
@@ -259,8 +257,6 @@ pub struct SecondaryIndexScanPlan {
     pub column: BoundColumn,
     /// Human-readable indexed value range.
     pub value_range: IndexValueRange,
-    /// Encoded index-key range to scan.
-    pub key_range: IndexKeyRange,
 }
 
 impl PartialEq<PhysicalPlanNode> for PhysicalPlan {
@@ -366,47 +362,4 @@ fn display_list<T: fmt::Display>(values: &[T]) -> String {
     values.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
 }
 
-/// Inclusive or exclusive display bound for a secondary-index scan value.
-///
-/// These bounds are used for formatted plans and tests. The storage-facing byte
-/// bounds live in [`crate::relational::IndexKeyBound`] values inside
-/// [`SecondaryIndexScanPlan`].
-#[derive(Debug, Clone, PartialEq)]
-pub enum IndexValueBound {
-    /// The scan includes this value.
-    Inclusive(Value),
-    /// The scan excludes this value.
-    Exclusive(Value),
-}
-
-impl fmt::Display for IndexValueBound {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Inclusive(value) => write!(f, "{value} inclusive"),
-            Self::Exclusive(value) => write!(f, "{value} exclusive"),
-        }
-    }
-}
-
-/// Human-readable range over values in a single-column secondary index.
-///
-/// This mirrors the encoded [`IndexKeyRange`] selected for storage, but keeps
-/// the original SQL value type visible for debugging and `EXPLAIN` output.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct IndexValueRange {
-    /// Optional lower value bound.
-    pub lower: Option<IndexValueBound>,
-    /// Optional upper value bound.
-    pub upper: Option<IndexValueBound>,
-}
-
-impl fmt::Display for IndexValueRange {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.lower, &self.upper) {
-            (None, None) => write!(f, "unbounded"),
-            (Some(lower), None) => write!(f, "lower={lower}"),
-            (None, Some(upper)) => write!(f, "upper={upper}"),
-            (Some(lower), Some(upper)) => write!(f, "lower={lower} upper={upper}"),
-        }
-    }
-}
+pub use crate::relational::{IndexValueBound, IndexValueRange};

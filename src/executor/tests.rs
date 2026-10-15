@@ -8,8 +8,8 @@ use crate::planner::PhysicalPlanNode;
 use crate::planner::Planner;
 use crate::relational::DataType;
 use crate::relational::IndexColumnSchema;
-use crate::relational::IndexKeyRange;
 use crate::relational::IndexSchema;
+use crate::relational::IndexValueRange;
 use crate::relational::InvalidArgumentError;
 use crate::relational::StorageResult;
 use crate::relational::TableKey;
@@ -210,8 +210,9 @@ impl RelationalAccess for MemoryStore {
         &self,
         table: &TableSchema,
         index: &IndexSchema,
-        range: IndexKeyRange,
+        range: IndexValueRange,
     ) -> StorageResult<Self::IndexScan> {
+        let range = range.encode()?;
         let state = self.state.borrow();
         let index = state.indexes.get(&index.index_id).ok_or_else(|| {
             StorageError::InvalidArgument(InvalidArgumentError::IndexNotFound {

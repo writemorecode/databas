@@ -151,7 +151,6 @@ impl<'catalog> PhysicalPlanner<'catalog> {
                                             index: index_predicate.index,
                                             column: index_predicate.column,
                                             value_range: index_predicate.value_range,
-                                            key_range: index_predicate.key_range,
                                         },
                                     },
                                     None => PhysicalPlanNode::FullTableScan { relation, table },
