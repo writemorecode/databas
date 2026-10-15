@@ -4,7 +4,7 @@
 
 use std::io;
 
-use crate::core::error::TupleAllocationError;
+use crate::relational::error::TupleAllocationError;
 
 const STRING: u8 = 1;
 const BOOLEAN: u8 = 2;

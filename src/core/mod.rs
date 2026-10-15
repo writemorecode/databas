@@ -1,36 +1,10 @@
-//! Public database facade and shared relational primitives.
-//!
-//! [`Database`] is the facade that assembles the catalog, record, index, and
-//! transaction managers. The dependency-neutral identifiers and scan-range
-//! types live in the private `types` module and are re-exported here so lower
-//! layers can share them without depending on the facade implementation.
-//! Storage failures exposed by the facade are defined in [`error`]; conversion
-//! from storage-internal failures remains in the storage layer.
-
-pub(crate) mod access;
-pub(crate) mod database;
-pub mod error;
-pub mod lock_manager;
-pub(crate) mod transaction;
-mod types;
-
-pub use crate::relational::catalog::{
-    ColumnSchema, DataType, IndexColumnSchema, IndexSchema, TableSchema, TupleSchema,
+//! Compatibility facade. Implementations live in the relational and storage layers.
+pub use crate::relational::{
+    CatalogId, CheckpointOutcome, ColumnSchema, ConstraintError, CorruptionComponent,
+    CorruptionError, CorruptionKind, DataType, Database, IndexColumnSchema, IndexEntry,
+    IndexEntryView, IndexKeyBound, IndexKeyRange, IndexSchema, InternalError, InvalidArgumentError,
+    LimitExceededError, LockError, LockMode, OwnedIndexEntry, OwnedTableRecord, PageId,
+    StorageError, StorageResult, TableId, TableKey, TableKeyBound, TableKeyRange, TableRecord,
+    TableRecordView, TableSchema, Tuple, TupleRef, TupleSchema, TupleView, TxnId, Value, ValueRef,
+    error, lock_manager,
 };
-pub use crate::relational::cursor::{
-    IndexEntry, IndexEntryView, OwnedIndexEntry, OwnedTableRecord, TableRecord, TableRecordView,
-};
-pub use crate::relational::tuple::{Tuple, TupleRef, TupleView, Value, ValueRef};
-pub use database::{CheckpointOutcome, Database};
-pub use error::{
-    ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InternalError,
-    InvalidArgumentError, LimitExceededError, StorageError, StorageResult,
-};
-pub use lock_manager::{LockError, LockMode, TableId};
-pub use types::{
-    CatalogId, IndexKeyBound, IndexKeyRange, PageId, TableKey, TableKeyBound, TableKeyRange, TxnId,
-};
-pub(crate) use types::{Lsn, SlotId};
-
-pub(crate) const PAGE_SIZE_U16: u16 = 4096;
-pub(crate) const PAGE_SIZE: usize = PAGE_SIZE_U16 as usize;

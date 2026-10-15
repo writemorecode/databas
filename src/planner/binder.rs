@@ -2,28 +2,27 @@
 
 use std::collections::HashSet;
 
-use crate::{
-    core::{
-        ColumnSchema, DataType, TableSchema, TupleSchema, Value,
-        access::CatalogRead,
-        error::{InvalidArgumentError, StorageError},
-    },
-    sql_parser::{
-        NumberKind,
-        parser::{
-            expr::{ColumnReference, Expression, Literal},
-            stmt::{
-                Statement,
-                create_index::CreateIndexQuery,
-                create_table::{ColumnConstraint, ColumnType, CreateTableQuery},
-                delete::DeleteQuery,
-                insert::InsertQuery,
-                select::SelectQuery,
-                update::UpdateQuery,
-            },
-        },
-    },
-};
+use crate::relational::ColumnSchema;
+use crate::relational::DataType;
+use crate::relational::TableSchema;
+use crate::relational::TupleSchema;
+use crate::relational::Value;
+use crate::relational::access::CatalogRead;
+use crate::relational::error::InvalidArgumentError;
+use crate::relational::error::StorageError;
+use crate::sql_parser::NumberKind;
+use crate::sql_parser::parser::expr::ColumnReference;
+use crate::sql_parser::parser::expr::Expression;
+use crate::sql_parser::parser::expr::Literal;
+use crate::sql_parser::parser::stmt::Statement;
+use crate::sql_parser::parser::stmt::create_index::CreateIndexQuery;
+use crate::sql_parser::parser::stmt::create_table::ColumnConstraint;
+use crate::sql_parser::parser::stmt::create_table::ColumnType;
+use crate::sql_parser::parser::stmt::create_table::CreateTableQuery;
+use crate::sql_parser::parser::stmt::delete::DeleteQuery;
+use crate::sql_parser::parser::stmt::insert::InsertQuery;
+use crate::sql_parser::parser::stmt::select::SelectQuery;
+use crate::sql_parser::parser::stmt::update::UpdateQuery;
 
 use super::{
     BoundColumn, BoundExpr, BoundSortTerm, BoundUpdateAssignment, LogicalPlan, LogicalPlanNode,
@@ -588,11 +587,13 @@ fn unsupported_expr(expression: &Expression<'_>) -> PlannerError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        core::{DataType, IndexSchema, TupleSchema},
-        planner::Planner,
-        sql_parser::parser::{Parser, op::Op, stmt::select::JoinType},
-    };
+    use crate::planner::Planner;
+    use crate::relational::DataType;
+    use crate::relational::IndexSchema;
+    use crate::relational::TupleSchema;
+    use crate::sql_parser::parser::Parser;
+    use crate::sql_parser::parser::op::Op;
+    use crate::sql_parser::parser::stmt::select::JoinType;
 
     fn table(table_id: i32, name: &str, columns: &[&str]) -> TableSchema {
         TableSchema {

@@ -3,17 +3,19 @@
 use std::collections::TryReserveError;
 use thiserror::Error;
 
-use crate::core::{PageId, lock_manager::LockError};
+use crate::relational::PageId;
+use crate::relational::lock_manager::LockError;
 
 mod corruption;
-mod internal;
 
+pub use crate::storage::error::{InternalError, InvariantViolation, LimitExceededError};
 pub use corruption::{CorruptionComponent, CorruptionError, CorruptionKind};
-pub use internal::{InternalError, InvariantViolation};
 
-/// Top-level error returned by storage and relational operations.
+/// Errors returned by relational operations.
 #[derive(Debug, Error)]
-pub enum StorageError {
+pub enum RelationalError {
+    #[error(transparent)]
+    Storage(crate::storage::error::StorageError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("corruption: {0}")]
@@ -31,7 +33,7 @@ pub enum StorageError {
 }
 
 /// Result type returned by storage and relational operations.
-pub type StorageResult<T> = Result<T, StorageError>;
+pub type RelationalResult<T> = Result<T, RelationalError>;
 
 /// Constraint violation caused by data or schema changes.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -45,7 +47,11 @@ pub enum ConstraintError {
     #[error("column {column} does not accept NULL values")]
     NullValue { column: String },
     #[error("column {column} expects {expected:?}, got {actual}")]
-    ColumnTypeMismatch { column: String, expected: crate::core::DataType, actual: &'static str },
+    ColumnTypeMismatch {
+        column: String,
+        expected: crate::relational::DataType,
+        actual: &'static str,
+    },
 }
 
 /// Invalid argument supplied to a storage or relational operation.
@@ -71,17 +77,6 @@ pub enum InvalidArgumentError {
     PrimaryKeyUpdate { table: String, column: String },
 }
 
-/// Resource or encoding limit exceeded by an operation.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum LimitExceededError {
-    #[error("page full: need {needed} bytes, only {available} available")]
-    PageFull { needed: usize, available: usize },
-    #[error("cell too large: {len} bytes exceeds max {max}")]
-    CellTooLarge { len: usize, max: usize },
-    #[error("cache capacity exhausted")]
-    CacheCapacityExhausted,
-}
-
 /// Allocation failure encountered while constructing or decoding a tuple.
 #[derive(Debug, Error)]
 pub enum TupleAllocationError {
@@ -91,4 +86,35 @@ pub enum TupleAllocationError {
         #[source]
         source: TryReserveError,
     },
+}
+
+/// Compatibility names for callers of the original facade.
+pub type StorageError = RelationalError;
+pub type StorageResult<T> = RelationalResult<T>;
+
+impl RelationalError {
+    /// Whether the database must be taken out of service after this failure.
+    pub fn is_fatal(&self) -> bool {
+        match self {
+            Self::Storage(error) => error.is_fatal(),
+            Self::Io(_) | Self::Corruption(_) | Self::Internal(_) => true,
+            _ => false,
+        }
+    }
+}
+
+impl From<crate::storage::error::StorageError> for RelationalError {
+    fn from(error: crate::storage::error::StorageError) -> Self {
+        use crate::storage::error::{InvalidArgumentError as A, StorageError as E};
+        match error {
+            E::Io(error) => Self::Io(error),
+            E::Constraint(_) => Self::Constraint(ConstraintError::DuplicateKey),
+            E::InvalidArgument(A::KeyNotFound) => {
+                Self::InvalidArgument(InvalidArgumentError::KeyNotFound)
+            }
+            E::LimitExceeded(error) => Self::LimitExceeded(error),
+            E::Internal(error) => Self::Internal(error),
+            error => Self::Storage(error),
+        }
+    }
 }

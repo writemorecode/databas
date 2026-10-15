@@ -10,7 +10,7 @@
 //! During logical planning, table and column names are resolved against the
 //! catalog, wildcard projections are expanded, duplicate target columns are
 //! rejected, and scalar expressions are converted into [`BoundExpr`] trees.
-//! The resulting plan carries [`TableSchema`](crate::core::TableSchema) and
+//! The resulting plan carries [`TableSchema`](crate::relational::TableSchema) and
 //! [`BoundColumn`] values
 //! so later stages can work with ordinals and storage types instead of repeating
 //! name lookup. Logical optimization folds constant scalar expressions,
@@ -62,19 +62,27 @@ pub use schema::{PlanColumn, PlanSchema};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        core::{
-            CatalogId, ColumnSchema, DataType, IndexColumnSchema, IndexKeyBound, IndexKeyRange,
-            IndexSchema, InvalidArgumentError, StorageError, TableKeyBound, TableKeyRange,
-            TableSchema, TupleSchema, Value, access::CatalogRead,
-        },
-        relational::{cursor::encode_index_entry_key, tuple::Tuple},
-        sql_parser::parser::{
-            Parser,
-            op::Op,
-            stmt::{Statement, select::Ordering},
-        },
-    };
+    use crate::relational::CatalogId;
+    use crate::relational::ColumnSchema;
+    use crate::relational::DataType;
+    use crate::relational::IndexColumnSchema;
+    use crate::relational::IndexKeyBound;
+    use crate::relational::IndexKeyRange;
+    use crate::relational::IndexSchema;
+    use crate::relational::InvalidArgumentError;
+    use crate::relational::StorageError;
+    use crate::relational::TableKeyBound;
+    use crate::relational::TableKeyRange;
+    use crate::relational::TableSchema;
+    use crate::relational::TupleSchema;
+    use crate::relational::Value;
+    use crate::relational::access::CatalogRead;
+    use crate::relational::cursor::encode_index_entry_key;
+    use crate::relational::tuple::Tuple;
+    use crate::sql_parser::parser::Parser;
+    use crate::sql_parser::parser::op::Op;
+    use crate::sql_parser::parser::stmt::Statement;
+    use crate::sql_parser::parser::stmt::select::Ordering;
 
     fn parse(sql: &str) -> Statement<'_> {
         Parser::new(sql).stmt().unwrap()

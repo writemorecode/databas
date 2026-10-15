@@ -10,14 +10,24 @@ use std::{
 
 use thiserror::Error;
 
-use crate::{
-    core::Value,
-    protocol::{
-        self, COMPLETE, COMPLETE_COMMAND_OK, COMPLETE_EXPLAIN, COMPLETE_ROWS,
-        COMPLETE_ROWS_AFFECTED, COMPLETE_SCHEMA_AFFECTED, ERROR, ErrorCode, Frame, QUERY, READY,
-        ROW, ROW_DESCRIPTION, STARTUP, TRANSACTION_STATUS, TRANSACTION_STATUS_REQUEST,
-    },
-};
+use crate::protocol;
+use crate::protocol::COMPLETE;
+use crate::protocol::COMPLETE_COMMAND_OK;
+use crate::protocol::COMPLETE_EXPLAIN;
+use crate::protocol::COMPLETE_ROWS;
+use crate::protocol::COMPLETE_ROWS_AFFECTED;
+use crate::protocol::COMPLETE_SCHEMA_AFFECTED;
+use crate::protocol::ERROR;
+use crate::protocol::ErrorCode;
+use crate::protocol::Frame;
+use crate::protocol::QUERY;
+use crate::protocol::READY;
+use crate::protocol::ROW;
+use crate::protocol::ROW_DESCRIPTION;
+use crate::protocol::STARTUP;
+use crate::protocol::TRANSACTION_STATUS;
+use crate::protocol::TRANSACTION_STATUS_REQUEST;
+use crate::relational::Value;
 
 /// A server-reported database error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

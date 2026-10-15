@@ -9,7 +9,7 @@ use std::io::{self, Read, Write};
 
 use thiserror::Error;
 
-use crate::core::Value;
+use crate::relational::Value;
 
 pub(crate) const MAGIC: [u8; 4] = *b"DBAS";
 pub(crate) const VERSION: u16 = 1;

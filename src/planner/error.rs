@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::core::error::StorageError;
+use crate::relational::error::StorageError;
 
 pub type PlannerResult<T> = Result<T, PlannerError>;
 

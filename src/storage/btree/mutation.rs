@@ -260,12 +260,13 @@ mod tests {
     use fastrand::Rng;
 
     use super::*;
-    use crate::storage::btree::{
-        PAGE_SIZE,
-        test_support::{
-            assert_matches, cursor, random_bytes, random_key, random_record, record_bytes,
-        },
-    };
+    use crate::storage::btree::PAGE_SIZE;
+    use crate::storage::btree::test_support::assert_matches;
+    use crate::storage::btree::test_support::cursor;
+    use crate::storage::btree::test_support::random_bytes;
+    use crate::storage::btree::test_support::random_key;
+    use crate::storage::btree::test_support::random_record;
+    use crate::storage::btree::test_support::record_bytes;
 
     #[test]
     fn mutations_advance_the_shared_epoch_only_when_successful() {

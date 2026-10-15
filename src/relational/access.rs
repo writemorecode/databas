@@ -1,7 +1,11 @@
-use crate::core::{
-    IndexKeyRange, IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
-    error::StorageResult,
-};
+use crate::relational::IndexKeyRange;
+use crate::relational::IndexSchema;
+use crate::relational::OwnedTableRecord;
+use crate::relational::TableKeyRange;
+use crate::relational::TableSchema;
+use crate::relational::TupleSchema;
+use crate::relational::Value;
+use crate::relational::error::StorageResult;
 
 /// Minimal catalog seam used by the planner and its lightweight tests.
 pub trait CatalogRead {

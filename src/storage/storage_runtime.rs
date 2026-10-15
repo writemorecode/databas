@@ -1,21 +1,23 @@
 use std::path::PathBuf;
 
-use crate::{
-    core::{
-        CheckpointOutcome, PAGE_SIZE, PageId,
-        error::{InternalError, StorageError, StorageResult},
-    },
-    storage::{
-        disk_manager::DiskManager,
-        log_manager::{LogManager, Lsn, TxnId},
-        recovery::recover_from_wal,
-        transaction_manager::{
-            LoggedPageUpdate, PageRestore, TransactionManager, TransactionRollback,
-            TransactionSavepoint,
-        },
-    },
-    sync::{Mutex, MutexGuard},
-};
+use crate::storage::CheckpointOutcome;
+use crate::storage::PAGE_SIZE;
+use crate::storage::PageId;
+use crate::storage::disk_manager::DiskManager;
+use crate::storage::error::InternalError;
+use crate::storage::error::StorageError;
+use crate::storage::error::StorageResult;
+use crate::storage::log_manager::LogManager;
+use crate::storage::log_manager::Lsn;
+use crate::storage::log_manager::TxnId;
+use crate::storage::recovery::recover_from_wal;
+use crate::storage::transaction_manager::LoggedPageUpdate;
+use crate::storage::transaction_manager::PageRestore;
+use crate::storage::transaction_manager::TransactionManager;
+use crate::storage::transaction_manager::TransactionRollback;
+use crate::storage::transaction_manager::TransactionSavepoint;
+use crate::sync::Mutex;
+use crate::sync::MutexGuard;
 
 type ActiveTransactionManager = TransactionManager;
 
@@ -285,10 +287,9 @@ mod loom_tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::{
-        loom_support::{check_model, thread},
-        storage::log_manager::ZERO_LSN,
-    };
+    use crate::loom_support::check_model;
+    use crate::loom_support::thread;
+    use crate::storage::log_manager::ZERO_LSN;
 
     #[test]
     fn wal_flush_and_transaction_begin_share_log_safely() {

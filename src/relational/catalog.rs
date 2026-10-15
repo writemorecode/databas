@@ -2,7 +2,12 @@
 
 use std::fmt;
 
-use crate::core::{CatalogId, PageId, Tuple, TupleRef, Value, ValueRef};
+use crate::relational::CatalogId;
+use crate::relational::PageId;
+use crate::relational::Tuple;
+use crate::relational::TupleRef;
+use crate::relational::Value;
+use crate::relational::ValueRef;
 
 /// Root page id of the `sys_tables` catalog table.
 pub const SYS_TABLES_ROOT_PAGE_ID: PageId = 1;

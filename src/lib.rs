@@ -7,7 +7,7 @@ pub mod executor;
 pub(crate) mod loom_support;
 pub mod planner;
 pub mod protocol;
-pub(crate) mod relational;
+pub mod relational;
 pub mod server;
 pub mod session;
 pub use databas_sql_parser as sql_parser;

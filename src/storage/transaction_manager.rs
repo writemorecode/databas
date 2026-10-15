@@ -8,14 +8,17 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::core::{
-    PAGE_SIZE, PageId,
-    error::{InternalError, InvariantViolation, StorageError, StorageResult},
-};
-use crate::storage::{
-    log_manager::{LogManager, LogRecordKind, Lsn, TxnId},
-    page,
-};
+use crate::storage::PAGE_SIZE;
+use crate::storage::PageId;
+use crate::storage::error::InternalError;
+use crate::storage::error::InvariantViolation;
+use crate::storage::error::StorageError;
+use crate::storage::error::StorageResult;
+use crate::storage::log_manager::LogManager;
+use crate::storage::log_manager::LogRecordKind;
+use crate::storage::log_manager::Lsn;
+use crate::storage::log_manager::TxnId;
+use crate::storage::page;
 
 #[derive(Debug, Clone)]
 struct PageUndo {
@@ -476,11 +479,13 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::error::{InternalError, InvariantViolation};
-    use crate::storage::log_manager::{
-        LogManager, OwnedLogRecordKind, RecoveryLogRecordKind, read_log_record_kinds_for_test,
-        read_recovery_log,
-    };
+    use crate::storage::error::InternalError;
+    use crate::storage::error::InvariantViolation;
+    use crate::storage::log_manager::LogManager;
+    use crate::storage::log_manager::OwnedLogRecordKind;
+    use crate::storage::log_manager::RecoveryLogRecordKind;
+    use crate::storage::log_manager::read_log_record_kinds_for_test;
+    use crate::storage::log_manager::read_recovery_log;
 
     #[test]
     fn page_alloc_without_active_transaction_does_not_write_wal() {

@@ -3,7 +3,7 @@ use super::{
     BufWriter, LogManager, LogRecord, Lsn, OpenOptions, Path, WAL_WRITE_BUFFER_LEN, Write,
     read_checkpoint_log, serialize_transaction, sync_parent_directory, write_wal_file_header,
 };
-use crate::core::error::StorageResult;
+use crate::storage::error::StorageResult;
 
 pub struct CheckpointProgress {
     pub(crate) remaining_records: usize,

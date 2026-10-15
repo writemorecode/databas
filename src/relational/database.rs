@@ -1,15 +1,17 @@
 use std::path::Path;
 
-use crate::core::{
-    IndexSchema, TableId, TableSchema,
-    access::CatalogRead,
-    error::StorageResult,
-    lock_manager::{LockManager, LockMode, TableLease},
-};
+use crate::relational::IndexSchema;
+use crate::relational::TableId;
+use crate::relational::TableSchema;
+use crate::relational::access::CatalogRead;
 use crate::relational::catalog_manager::CatalogManager;
-use crate::storage::{
-    engine::Storage, log_manager::TxnId, transaction_manager::TransactionSavepoint,
-};
+use crate::relational::error::StorageResult;
+use crate::relational::lock_manager::LockManager;
+use crate::relational::lock_manager::LockMode;
+use crate::relational::lock_manager::TableLease;
+use crate::storage::engine::Storage;
+use crate::storage::log_manager::TxnId;
+use crate::storage::transaction_manager::TransactionSavepoint;
 
 /// Public database handle for one database file.
 pub struct Database {
@@ -17,15 +19,7 @@ pub struct Database {
     locks: LockManager,
 }
 
-/// Result of an attempt to apply the WAL and reclaim its records.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CheckpointOutcome {
-    /// The captured history is durable and only the WAL header remains.
-    Completed,
-    /// The pass completed, but undo, deferred pages, or newer WAL records still
-    /// require retained history. This is normal, successful progress.
-    Partial,
-}
+pub use crate::storage::CheckpointOutcome;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatementTransactionMode {
@@ -95,7 +89,7 @@ impl Database {
     /// Returns an error if flushing, replay, or WAL replacement fails. A failure
     /// during replacement disables further WAL writes; reopen the database.
     pub fn checkpoint(&self) -> StorageResult<CheckpointOutcome> {
-        self.catalog.storage().checkpoint()
+        self.catalog.storage().checkpoint().map_err(Into::into)
     }
 
     /// Disables new lock requests and cancels pending waits after a fatal error.
@@ -145,8 +139,8 @@ impl Database {
         &self,
         txn_id: TxnId,
         leases: Vec<TableLease>,
-    ) -> crate::core::transaction::Transaction<'_> {
-        crate::core::transaction::Transaction::new(self, txn_id, leases)
+    ) -> crate::relational::transaction::Transaction<'_> {
+        crate::relational::transaction::Transaction::new(self, txn_id, leases)
     }
 
     pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
@@ -155,18 +149,18 @@ impl Database {
             self.locks.begin_commit(txn_id)?;
             self.locks.finish_transaction(txn_id)?;
         }
-        result
+        result.map_err(Into::into)
     }
 
     pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
-        self.catalog.storage().statement_savepoint(txn_id)
+        self.catalog.storage().statement_savepoint(txn_id).map_err(Into::into)
     }
 
     pub(crate) fn rollback_to_savepoint(
         &self,
         savepoint: TransactionSavepoint,
     ) -> StorageResult<()> {
-        self.catalog.storage().rollback_to_savepoint(savepoint)
+        self.catalog.storage().rollback_to_savepoint(savepoint).map_err(Into::into)
     }
 
     pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
@@ -177,11 +171,11 @@ impl Database {
     }
 
     pub(crate) fn transaction_is_active(&self, txn_id: TxnId) -> StorageResult<bool> {
-        self.catalog.storage().transaction_is_active(txn_id)
+        self.catalog.storage().transaction_is_active(txn_id).map_err(Into::into)
     }
 
     pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
-        self.catalog.storage().transaction_is_poisoned(txn_id)
+        self.catalog.storage().transaction_is_poisoned(txn_id).map_err(Into::into)
     }
 
     #[cfg(test)]
@@ -209,10 +203,8 @@ mod tests {
     use tempfile::{NamedTempFile, tempdir};
 
     use super::*;
-    use crate::core::{
-        LockError,
-        error::{CorruptionError, CorruptionKind, StorageError},
-    };
+    use crate::relational::LockError;
+    use crate::relational::error::StorageError;
 
     #[test]
     fn database_handle_is_send_and_sync() {
@@ -273,14 +265,15 @@ mod tests {
 
     #[test]
     fn open_rejects_empty_file_without_header() {
+        use crate::storage::error::{CorruptionError, CorruptionKind, StorageError as EngineError};
         let file = NamedTempFile::new().unwrap();
 
         assert!(matches!(
             Database::open(file.path()),
-            Err(StorageError::Corruption(CorruptionError {
+            Err(StorageError::Storage(EngineError::Corruption(CorruptionError {
                 kind: CorruptionKind::MissingDatabaseHeader,
                 ..
-            }))
+            })))
         ));
     }
 }

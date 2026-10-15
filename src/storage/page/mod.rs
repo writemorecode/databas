@@ -20,7 +20,7 @@ pub mod format;
 mod interior;
 mod leaf;
 
-use crate::core::PAGE_SIZE;
+use crate::storage::PAGE_SIZE;
 
 /// Page handles, marker types, access traits, and search helpers for typed page access.
 pub use core::{
@@ -46,7 +46,7 @@ pub fn is_overflow_page(bytes: &[u8; PAGE_SIZE]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::PAGE_SIZE;
+    use crate::storage::PAGE_SIZE;
 
     #[test]
     fn leaf_insert_payload_can_be_read() {

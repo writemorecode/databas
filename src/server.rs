@@ -17,19 +17,31 @@ use std::{
 
 use thiserror::Error;
 
-use crate::{
-    core::{Database, error::StorageError},
-    error::DatabaseError,
-    executor::{ExecutionOutput, ExecutorError},
-    planner::PlannerError,
-    protocol::{
-        self, COMPLETE, COMPLETE_COMMAND_OK, COMPLETE_EXPLAIN, COMPLETE_ROWS,
-        COMPLETE_ROWS_AFFECTED, COMPLETE_SCHEMA_AFFECTED, ERROR, ErrorCode, QUERY, READY, ROW,
-        ROW_DESCRIPTION, STARTUP, TRANSACTION_STATUS, TRANSACTION_STATUS_REQUEST,
-    },
-    session::Session,
-    thread_pool::{ThreadPool, ThreadPoolError},
-};
+use crate::error::DatabaseError;
+use crate::executor::ExecutionOutput;
+use crate::executor::ExecutorError;
+use crate::planner::PlannerError;
+use crate::protocol;
+use crate::protocol::COMPLETE;
+use crate::protocol::COMPLETE_COMMAND_OK;
+use crate::protocol::COMPLETE_EXPLAIN;
+use crate::protocol::COMPLETE_ROWS;
+use crate::protocol::COMPLETE_ROWS_AFFECTED;
+use crate::protocol::COMPLETE_SCHEMA_AFFECTED;
+use crate::protocol::ERROR;
+use crate::protocol::ErrorCode;
+use crate::protocol::QUERY;
+use crate::protocol::READY;
+use crate::protocol::ROW;
+use crate::protocol::ROW_DESCRIPTION;
+use crate::protocol::STARTUP;
+use crate::protocol::TRANSACTION_STATUS;
+use crate::protocol::TRANSACTION_STATUS_REQUEST;
+use crate::relational::Database;
+use crate::relational::error::StorageError;
+use crate::session::Session;
+use crate::thread_pool::ThreadPool;
+use crate::thread_pool::ThreadPoolError;
 
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -497,10 +509,7 @@ fn send_database_error(
 }
 
 fn send_storage_error(stream: &mut TcpStream, error: StorageError) -> Result<(), ConnectionError> {
-    if matches!(
-        error,
-        StorageError::Io(_) | StorageError::Corruption(_) | StorageError::Internal(_)
-    ) {
+    if error.is_fatal() {
         return Err(error.into());
     }
     send_error(stream, storage_error_code(&error), &error.to_string())?;
@@ -528,6 +537,7 @@ fn executor_error_code(error: &ExecutorError) -> ErrorCode {
 
 fn storage_error_code(error: &StorageError) -> ErrorCode {
     match error {
+        StorageError::Storage(error) => engine_error_code(error),
         StorageError::Io(_) => ErrorCode::StorageIoError,
         StorageError::Corruption(_) => ErrorCode::DatabaseCorruption,
         StorageError::Constraint(_) => ErrorCode::ConstraintViolation,
@@ -545,10 +555,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{
-        client::{Client, ClientError, QueryResult},
-        core::Value,
-    };
+    use crate::client::Client;
+    use crate::client::ClientError;
+    use crate::client::QueryResult;
+    use crate::relational::Value;
 
     #[test]
     fn fatal_error_closes_other_connections_and_joins_workers() {
@@ -801,5 +811,17 @@ mod tests {
             })
         ));
         server_thread.join().unwrap();
+    }
+}
+
+fn engine_error_code(error: &crate::storage::error::StorageError) -> ErrorCode {
+    use crate::storage::error::StorageError as E;
+    match error {
+        E::Io(_) => ErrorCode::StorageIoError,
+        E::Corruption(_) => ErrorCode::DatabaseCorruption,
+        E::Constraint(_) => ErrorCode::ConstraintViolation,
+        E::InvalidArgument(_) => ErrorCode::InvalidArgument,
+        E::LimitExceeded(_) => ErrorCode::LimitExceeded,
+        E::Internal(_) => ErrorCode::InternalError,
     }
 }

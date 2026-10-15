@@ -1,8 +1,18 @@
-use crate::core::{
-    IndexSchema, OwnedTableRecord, TableKey, TableRecord, TableSchema, TupleRef, TupleView, TxnId,
-    error::{CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult},
-};
-use crate::relational::{catalog_manager::CatalogManager, cursor::encode_index_entry_key};
+use crate::relational::IndexSchema;
+use crate::relational::OwnedTableRecord;
+use crate::relational::TableKey;
+use crate::relational::TableRecord;
+use crate::relational::TableSchema;
+use crate::relational::TupleRef;
+use crate::relational::TupleView;
+use crate::relational::TxnId;
+use crate::relational::catalog_manager::CatalogManager;
+use crate::relational::cursor::encode_index_entry_key;
+use crate::relational::error::CorruptionComponent;
+use crate::relational::error::CorruptionError;
+use crate::relational::error::CorruptionKind;
+use crate::relational::error::StorageError;
+use crate::relational::error::StorageResult;
 
 /// Creates and backfills a secondary index.
 pub fn create_index(
@@ -159,8 +169,13 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::{ColumnSchema, DataType, Tuple, TupleSchema, Value};
-    use crate::relational::{catalog_manager::CatalogManager, record_manager::RecordManager};
+    use crate::relational::ColumnSchema;
+    use crate::relational::DataType;
+    use crate::relational::Tuple;
+    use crate::relational::TupleSchema;
+    use crate::relational::Value;
+    use crate::relational::catalog_manager::CatalogManager;
+    use crate::relational::record_manager::RecordManager;
     use crate::storage::engine::Storage;
 
     fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, IndexManager)> {

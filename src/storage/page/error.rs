@@ -1,4 +1,4 @@
-use crate::core::SlotId;
+use crate::storage::SlotId;
 use thiserror::Error;
 
 use super::format::PageKind;
@@ -89,10 +89,4 @@ pub enum CellCorruption {
     /// The encoded cell length runs past the usable page region.
     #[error("cell length runs past the usable page bounds")]
     LengthOutOfBounds,
-    /// A table key had the wrong encoded length.
-    #[error("table key has invalid length {actual}")]
-    InvalidTableKeyLength { actual: usize },
-    /// An index table key value had the wrong encoded length.
-    #[error("index table-key value has invalid length {actual}")]
-    InvalidIndexTableKeyValueLength { actual: usize },
 }

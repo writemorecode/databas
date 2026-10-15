@@ -5,20 +5,26 @@
 //! storage mutations still use the legacy ambient transaction during the
 //! migration.
 
-use crate::{
-    core::{
-        IndexKeyRange, IndexSchema, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema,
-        Value,
-        access::RelationalAccess,
-        error::{StorageError, StorageResult},
-        lock_manager::{LockError, LockMode, TableId, TableLease},
-    },
-    relational::{
-        index_manager,
-        record_manager::{self, IndexScan, TableScan},
-    },
-    storage::{log_manager::TxnId, transaction_manager::TransactionSavepoint},
-};
+use crate::relational::IndexKeyRange;
+use crate::relational::IndexSchema;
+use crate::relational::OwnedTableRecord;
+use crate::relational::TableKeyRange;
+use crate::relational::TableSchema;
+use crate::relational::TupleSchema;
+use crate::relational::Value;
+use crate::relational::access::RelationalAccess;
+use crate::relational::error::StorageError;
+use crate::relational::error::StorageResult;
+use crate::relational::index_manager;
+use crate::relational::lock_manager::LockError;
+use crate::relational::lock_manager::LockMode;
+use crate::relational::lock_manager::TableId;
+use crate::relational::lock_manager::TableLease;
+use crate::relational::record_manager;
+use crate::relational::record_manager::IndexScan;
+use crate::relational::record_manager::TableScan;
+use crate::storage::log_manager::TxnId;
+use crate::storage::transaction_manager::TransactionSavepoint;
 
 use super::Database;
 
@@ -34,7 +40,7 @@ pub struct OwnedScan<I>(I);
 
 impl<I> Iterator for OwnedScan<I>
 where
-    I: Iterator<Item = StorageResult<crate::core::TableRecord>>,
+    I: Iterator<Item = StorageResult<crate::relational::TableRecord>>,
 {
     type Item = StorageResult<OwnedTableRecord>;
 

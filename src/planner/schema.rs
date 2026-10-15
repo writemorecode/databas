@@ -1,6 +1,7 @@
 //! Output schemas carried by logical relational operators.
 
-use crate::core::{DataType, TableSchema};
+use crate::relational::DataType;
+use crate::relational::TableSchema;
 
 use super::{BoundColumn, BoundExpr, RelationId};
 

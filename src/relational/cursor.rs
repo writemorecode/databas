@@ -2,11 +2,15 @@
 
 use std::fmt::{self, Display};
 
-use crate::core::{TableKey, Tuple, error::StorageResult};
-use crate::storage::{
-    btree::{CursorState, Record, TreeCursor},
-    page::{CellCorruption, PageError},
+use crate::relational::TableKey;
+use crate::relational::Tuple;
+use crate::relational::error::StorageResult;
+use crate::relational::error::{
+    CorruptionComponent, CorruptionError, CorruptionKind, StorageError,
 };
+use crate::storage::btree::CursorState;
+use crate::storage::btree::Record;
+use crate::storage::btree::TreeCursor;
 
 const TABLE_KEY_SIZE: usize = size_of::<TableKey>();
 
@@ -15,11 +19,13 @@ fn encode_table_key(table_key: TableKey) -> [u8; TABLE_KEY_SIZE] {
 }
 
 fn decode_table_key(key: &[u8]) -> StorageResult<TableKey> {
-    let bytes: [u8; TABLE_KEY_SIZE] =
-        key.try_into().map_err(|_wrong_length| PageError::CorruptCell {
-            slot_index: 0,
-            kind: CellCorruption::InvalidTableKeyLength { actual: key.len() },
-        })?;
+    let bytes: [u8; TABLE_KEY_SIZE] = key.try_into().map_err(|_wrong_length| {
+        StorageError::Corruption(CorruptionError {
+            component: CorruptionComponent::Catalog,
+            page_id: None,
+            kind: CorruptionKind::InvalidTableKeyLength { actual: key.len() },
+        })
+    })?;
     Ok(TableKey::from_be_bytes(bytes) ^ TableKey::MIN)
 }
 
@@ -35,11 +41,13 @@ pub fn encode_index_entry_key(index_key: &[u8], table_key: TableKey) -> Vec<u8> 
 }
 
 fn decode_index_table_key(value: &[u8]) -> StorageResult<TableKey> {
-    let bytes: [u8; TABLE_KEY_SIZE] =
-        value.try_into().map_err(|_wrong_length| PageError::CorruptCell {
-            slot_index: 0,
-            kind: CellCorruption::InvalidIndexTableKeyValueLength { actual: value.len() },
-        })?;
+    let bytes: [u8; TABLE_KEY_SIZE] = value.try_into().map_err(|_wrong_length| {
+        StorageError::Corruption(CorruptionError {
+            component: CorruptionComponent::Catalog,
+            page_id: None,
+            kind: CorruptionKind::InvalidIndexTableKeyValueLength { actual: value.len() },
+        })
+    })?;
     Ok(TableKey::from_be_bytes(bytes) ^ TableKey::MIN)
 }
 
@@ -158,7 +166,7 @@ impl TableCursor {
     }
 
     /// Returns the root page id that anchors this table tree.
-    pub(crate) fn root_page_id(&self) -> crate::core::PageId {
+    pub(crate) fn root_page_id(&self) -> crate::relational::PageId {
         self.inner.root_page_id()
     }
 
@@ -174,34 +182,42 @@ impl TableCursor {
 
     /// Positions the cursor on the first table record.
     pub fn seek_to_first(&mut self) -> StorageResult<bool> {
-        self.inner.seek_to_first()
+        self.inner.seek_to_first().map_err(Into::into)
     }
 
     /// Positions the cursor on the first table record whose key is greater than
     /// or equal to `table_key`.
     pub fn seek_to_table_key(&mut self, table_key: TableKey) -> StorageResult<bool> {
-        self.inner.seek_to_key(&encode_table_key(table_key))
+        self.inner.seek_to_key(&encode_table_key(table_key)).map_err(Into::into)
     }
 
     /// Positions the cursor on the first table record whose key is strictly
     /// greater than `table_key`.
     pub fn seek_after_table_key(&mut self, table_key: TableKey) -> StorageResult<bool> {
-        self.inner.seek_after_key(&encode_table_key(table_key))
+        self.inner.seek_after_key(&encode_table_key(table_key)).map_err(Into::into)
     }
 
     /// Reads the currently selected table record, if any.
     pub fn current_record(&self) -> StorageResult<Option<TableRecord>> {
-        self.inner.current()?.map(|record| self.table_record_from_raw(record)).transpose()
+        self.inner
+            .current()?
+            .map(|record| self.table_record_from_raw(record))
+            .transpose()
+            .map_err(Into::into)
     }
 
     /// Advances to the next table record in table key order.
     pub fn next_record(&mut self) -> StorageResult<Option<TableRecord>> {
-        self.inner.next_record()?.map(|record| self.table_record_from_raw(record)).transpose()
+        self.inner
+            .next_record()?
+            .map(|record| self.table_record_from_raw(record))
+            .transpose()
+            .map_err(Into::into)
     }
 
     /// Inserts a table record keyed by `table_key`.
     pub fn insert(&mut self, table_key: TableKey, record: &[u8]) -> StorageResult<()> {
-        self.inner.insert(&encode_table_key(table_key), record)
+        self.inner.insert(&encode_table_key(table_key), record).map_err(Into::into)
     }
 
     /// Looks up a table record by table key.
@@ -225,12 +241,12 @@ impl TableCursor {
 
     /// Replaces the encoded record bytes stored for an existing `table_key`.
     pub fn update(&mut self, table_key: TableKey, record: &[u8]) -> StorageResult<()> {
-        self.inner.update(&encode_table_key(table_key), record)
+        self.inner.update(&encode_table_key(table_key), record).map_err(Into::into)
     }
 
     /// Deletes the table record identified by `table_key`.
     pub fn delete(&mut self, table_key: TableKey) -> StorageResult<()> {
-        self.inner.delete(&encode_table_key(table_key))
+        self.inner.delete(&encode_table_key(table_key)).map_err(Into::into)
     }
 
     fn table_record_from_raw(&self, raw: Record) -> StorageResult<TableRecord> {
@@ -246,7 +262,7 @@ impl IndexCursor {
     }
 
     /// Returns the root page id that anchors this index tree.
-    pub(crate) fn root_page_id(&self) -> crate::core::PageId {
+    pub(crate) fn root_page_id(&self) -> crate::relational::PageId {
         self.inner.root_page_id()
     }
 
@@ -257,28 +273,28 @@ impl IndexCursor {
 
     /// Positions the cursor on the first index entry.
     pub fn seek_to_first(&mut self) -> StorageResult<bool> {
-        self.inner.seek_to_first()
+        self.inner.seek_to_first().map_err(Into::into)
     }
 
     /// Positions the cursor on the first index entry whose key is greater than
     /// or equal to `key`.
     pub fn seek_to_key(&mut self, key: &[u8]) -> StorageResult<bool> {
-        self.inner.seek_to_key(key)
+        self.inner.seek_to_key(key).map_err(Into::into)
     }
 
     /// Reads the currently selected index entry, if any.
     pub fn current_entry(&self) -> StorageResult<Option<IndexEntry>> {
-        self.inner.current()?.map(IndexEntry::try_from).transpose()
+        self.inner.current()?.map(IndexEntry::try_from).transpose().map_err(Into::into)
     }
 
     /// Advances to the next index entry in key order.
     pub fn next_entry(&mut self) -> StorageResult<Option<IndexEntry>> {
-        self.inner.next_record()?.map(IndexEntry::try_from).transpose()
+        self.inner.next_record()?.map(IndexEntry::try_from).transpose().map_err(Into::into)
     }
 
     /// Inserts an index entry from `key` to `table_key`.
     pub fn insert(&mut self, key: &[u8], table_key: TableKey) -> StorageResult<()> {
-        self.inner.insert(key, &encode_index_table_key(table_key))
+        self.inner.insert(key, &encode_index_table_key(table_key)).map_err(Into::into)
     }
 
     /// Looks up an index entry by key.
@@ -294,19 +310,19 @@ impl IndexCursor {
     #[cfg(test)]
     #[cfg_attr(all(test, loom), allow(dead_code))]
     pub fn get_entry(&mut self, key: &[u8]) -> StorageResult<Option<IndexEntry>> {
-        self.inner.get(key)?.map(IndexEntry::try_from).transpose()
+        self.inner.get(key)?.map(IndexEntry::try_from).transpose().map_err(Into::into)
     }
 
     /// Replaces the table key stored for an existing index `key`.
     #[cfg(test)]
     #[cfg_attr(all(test, loom), allow(dead_code))]
     pub fn update(&mut self, key: &[u8], table_key: TableKey) -> StorageResult<()> {
-        self.inner.update(key, &encode_index_table_key(table_key))
+        self.inner.update(key, &encode_index_table_key(table_key)).map_err(Into::into)
     }
 
     /// Deletes the index entry identified by `key`.
     pub fn delete(&mut self, key: &[u8]) -> StorageResult<()> {
-        self.inner.delete(key)
+        self.inner.delete(key).map_err(Into::into)
     }
 }
 
@@ -318,20 +334,24 @@ impl TableRecord {
 
     /// Executes `f` with a borrowed table record view.
     pub fn with_view<R>(&self, f: impl FnOnce(TableRecordView<'_>) -> R) -> StorageResult<R> {
-        self.raw.with_value(|record| f(TableRecordView::new(self.table_key, record)))
+        self.raw
+            .with_value(|record| f(TableRecordView::new(self.table_key, record)))
+            .map_err(Into::into)
     }
 
     /// Executes `f` with a borrowed view of the encoded table record bytes.
     pub fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
-        self.raw.with_value(f)
+        self.raw.with_value(f).map_err(Into::into)
     }
 
     /// Returns a stable, owned snapshot of this table record.
     pub fn to_owned_record(&self) -> StorageResult<OwnedTableRecord> {
-        self.raw.with_value(|record| OwnedTableRecord {
-            table_key: self.table_key,
-            record: record.into(),
-        })
+        self.raw
+            .with_value(|record| OwnedTableRecord {
+                table_key: self.table_key,
+                record: record.into(),
+            })
+            .map_err(Into::into)
     }
 }
 
@@ -343,12 +363,12 @@ impl IndexEntry {
 
     /// Executes `f` with a borrowed secondary-index entry view.
     pub fn with_view<R>(&self, f: impl FnOnce(IndexEntryView<'_>) -> R) -> StorageResult<R> {
-        self.raw.with_key(|key| f(IndexEntryView::new(key, self.table_key)))
+        self.raw.with_key(|key| f(IndexEntryView::new(key, self.table_key))).map_err(Into::into)
     }
 
     /// Executes `f` with a borrowed view of the encoded secondary-index key bytes.
     pub fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
-        self.raw.with_key(f)
+        self.raw.with_key(f).map_err(Into::into)
     }
 
     /// Returns a stable, owned snapshot of this index entry.
@@ -396,7 +416,7 @@ impl fmt::Debug for IndexEntry {
 }
 
 impl TryFrom<Record> for IndexEntry {
-    type Error = crate::core::error::StorageError;
+    type Error = crate::relational::error::StorageError;
 
     fn try_from(raw: Record) -> Result<Self, Self::Error> {
         let table_key = raw.with_value(decode_index_table_key)??;
@@ -412,14 +432,14 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::{
-        PAGE_SIZE,
-        error::{ConstraintError, InvalidArgumentError, StorageError},
-    };
-    use crate::storage::{
-        btree::initialize_empty_root, disk_manager::DiskManager, page_cache::PageCache,
-        storage_runtime::StorageRuntime,
-    };
+    use crate::relational::error::ConstraintError;
+    use crate::relational::error::InvalidArgumentError;
+    use crate::relational::error::StorageError;
+    use crate::storage::PAGE_SIZE;
+    use crate::storage::btree::initialize_empty_root;
+    use crate::storage::disk_manager::DiskManager;
+    use crate::storage::page_cache::PageCache;
+    use crate::storage::storage_runtime::StorageRuntime;
 
     fn temp_page_cache(cache_frames: usize) -> PageCache {
         let file = NamedTempFile::new().unwrap();

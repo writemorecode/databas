@@ -10,22 +10,27 @@ use std::collections::BTreeMap;
 
 use thiserror::Error;
 
+use crate::error::DatabaseError;
+use crate::executor::ExecutionOutput;
+use crate::executor::Executor;
+use crate::planner::PhysicalPlan;
+use crate::planner::PhysicalPlanNode;
+use crate::planner::Planner;
+use crate::relational::Database;
+use crate::relational::LockMode;
+use crate::relational::TableId;
+use crate::relational::database::StatementTransactionMode;
+use crate::relational::error::InternalError;
+use crate::relational::error::InvariantViolation;
+use crate::relational::error::StorageError;
+use crate::relational::lock_manager::TableLease;
+use crate::sql_parser::error::SQLError;
+use crate::sql_parser::error::SQLErrorKind;
+use crate::sql_parser::parser::Command;
+use crate::sql_parser::parser::Parser;
+use crate::sql_parser::parser::SqlItem;
+use crate::sql_parser::parser::stmt::Statement;
 use crate::storage::transaction_manager::TransactionSavepoint;
-use crate::{
-    core::{
-        Database, LockMode, TableId,
-        database::StatementTransactionMode,
-        error::{InternalError, InvariantViolation, StorageError},
-        lock_manager::TableLease,
-    },
-    error::DatabaseError,
-    executor::{ExecutionOutput, Executor},
-    planner::{PhysicalPlan, PhysicalPlanNode, Planner},
-    sql_parser::{
-        error::{SQLError, SQLErrorKind},
-        parser::{Command, Parser, SqlItem, stmt::Statement},
-    },
-};
 
 /// Errors raised by session-level transaction control.
 #[derive(Debug, Error)]
@@ -320,7 +325,7 @@ fn plan_table_locks(plan: &PhysicalPlan) -> Vec<(TableId, LockMode)> {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use crate::core::access::CatalogRead;
+    use crate::relational::access::CatalogRead;
 
     #[test]
     fn plans_request_the_strongest_table_mode_and_explain_requests_none() {

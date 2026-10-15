@@ -29,8 +29,10 @@ use std::{
 use thiserror::Error;
 
 #[allow(clippy::redundant_pub_crate)] // Lsn is intentionally crate-private.
-pub(crate) use crate::core::{Lsn, TxnId};
-use crate::core::{PAGE_SIZE, PageId};
+pub(crate) use crate::storage::Lsn;
+use crate::storage::PAGE_SIZE;
+use crate::storage::PageId;
+pub use crate::storage::TxnId;
 
 mod checkpoint;
 #[cfg(test)]
@@ -757,7 +759,8 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::core::{Database, error::StorageError};
+    use crate::storage::engine::Storage;
+    use crate::storage::error::StorageError;
 
     fn serialize_to_vec(txn_id: TxnId, records: &[LogRecord<'_>]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -1102,9 +1105,9 @@ mod tests {
     #[test]
     fn second_database_handle_is_rejected_while_the_first_is_open() {
         let file = NamedTempFile::new().unwrap();
-        let _first = Database::open_or_create(file.path()).unwrap();
+        let _first = Storage::open_or_create(file.path()).unwrap();
 
-        let second = Database::open(file.path());
+        let second = Storage::open(file.path());
 
         assert!(matches!(
             second,

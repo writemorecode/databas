@@ -1,9 +1,8 @@
 //! Public orchestration of the binding and physical-planning phases.
 
-use crate::{
-    core::{Database, access::CatalogRead},
-    sql_parser::parser::stmt::Statement,
-};
+use crate::relational::Database;
+use crate::relational::access::CatalogRead;
+use crate::sql_parser::parser::stmt::Statement;
 
 use super::{
     LogicalPlan, PhysicalPlan, Plan, PlannerResult, binder::Binder, optimizer,

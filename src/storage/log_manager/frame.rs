@@ -4,7 +4,7 @@ use std::{fs::File, path::Path};
 
 use crc::{CRC_32_ISO_HDLC, Crc, Digest};
 
-use crate::core::PAGE_SIZE;
+use crate::storage::PAGE_SIZE;
 
 #[cfg(test)]
 use super::OwnedLogRecordKind;
