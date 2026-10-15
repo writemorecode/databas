@@ -1,14 +1,14 @@
 use std::path::Path;
 
-use crate::relational::IndexSchema;
-use crate::relational::TableId;
-use crate::relational::TableSchema;
-use crate::relational::access::CatalogRead;
-use crate::relational::catalog_manager::CatalogManager;
-use crate::relational::error::StorageResult;
-use crate::relational::lock_manager::LockManager;
-use crate::relational::lock_manager::LockMode;
-use crate::relational::lock_manager::TableLease;
+use crate::IndexSchema;
+use crate::TableId;
+use crate::TableSchema;
+use crate::access::CatalogRead;
+use crate::catalog_manager::CatalogManager;
+use crate::error::RelationalResult;
+use crate::lock_manager::LockManager;
+use crate::lock_manager::LockMode;
+use crate::lock_manager::TableLease;
 use crate::storage::Storage;
 use crate::storage::TransactionSavepoint;
 use crate::storage::TxnId;
@@ -34,7 +34,7 @@ impl Database {
     ///
     /// Returns an error when the file already exists, cannot be initialized,
     /// or its initial catalog and write-ahead log cannot be written.
-    pub fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
+    pub fn create(path: impl AsRef<Path>) -> RelationalResult<Self> {
         let storage = Storage::create(path)?;
         Self::from_storage(storage)
     }
@@ -45,7 +45,7 @@ impl Database {
     ///
     /// Returns an error when the file cannot be opened, its format is invalid,
     /// or recovery cannot restore it to a consistent state.
-    pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
+    pub fn open(path: impl AsRef<Path>) -> RelationalResult<Self> {
         let storage = Storage::open(path)?;
         Self::from_storage(storage)
     }
@@ -56,12 +56,12 @@ impl Database {
     ///
     /// Returns an error when the file cannot be opened or initialized, its
     /// format is invalid, or recovery cannot restore it to a consistent state.
-    pub fn open_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
+    pub fn open_or_create(path: impl AsRef<Path>) -> RelationalResult<Self> {
         let storage = Storage::open_or_create(path)?;
         Self::from_storage(storage)
     }
 
-    fn from_storage(storage: Storage) -> StorageResult<Self> {
+    fn from_storage(storage: Storage) -> RelationalResult<Self> {
         let catalog = CatalogManager::from_storage(storage)?;
         Ok(Self { catalog, locks: LockManager::default() })
     }
@@ -77,7 +77,7 @@ impl Database {
     ///
     /// Returns an error when a dirty page cannot be written or when an active
     /// page pin prevents a consistent flush.
-    pub fn flush(&self) -> StorageResult<()> {
+    pub fn flush(&self) -> RelationalResult<()> {
         self.catalog.flush()
     }
 
@@ -88,12 +88,12 @@ impl Database {
     /// # Errors
     /// Returns an error if flushing, replay, or WAL replacement fails. A failure
     /// during replacement disables further WAL writes; reopen the database.
-    pub fn checkpoint(&self) -> StorageResult<CheckpointOutcome> {
+    pub fn checkpoint(&self) -> RelationalResult<CheckpointOutcome> {
         self.catalog.storage().checkpoint().map_err(Into::into)
     }
 
     /// Disables new lock requests and cancels pending waits after a fatal error.
-    pub fn stop(&self) -> StorageResult<()> {
+    pub fn stop(&self) -> RelationalResult<()> {
         self.locks.stop().map_err(Into::into)
     }
 
@@ -101,19 +101,19 @@ impl Database {
     pub fn begin(
         &self,
         mode: StatementTransactionMode,
-    ) -> StorageResult<super::ActiveTransaction<'_>> {
+    ) -> RelationalResult<super::ActiveTransaction<'_>> {
         let id = self.begin_statement_transaction(mode)?;
         Ok(super::ActiveTransaction::new(self, id))
     }
 
-    pub(crate) fn acquire_ddl_gate(&self, txn_id: TxnId) -> StorageResult<()> {
+    pub(crate) fn acquire_ddl_gate(&self, txn_id: TxnId) -> RelationalResult<()> {
         self.locks.acquire_ddl_gate(txn_id).map_err(Into::into)
     }
 
     pub(crate) fn begin_statement_transaction(
         &self,
         mode: StatementTransactionMode,
-    ) -> StorageResult<TxnId> {
+    ) -> RelationalResult<TxnId> {
         let txn_id = self.catalog.storage().begin_transaction()?;
         let admission = match mode {
             StatementTransactionMode::Ordinary => self.locks.begin_transaction(txn_id),
@@ -130,7 +130,7 @@ impl Database {
         &self,
         txn_id: TxnId,
         table_locks: &[(TableId, LockMode)],
-    ) -> StorageResult<Vec<TableLease>> {
+    ) -> RelationalResult<Vec<TableLease>> {
         table_locks
             .iter()
             .map(|&(table_id, mode)| {
@@ -145,11 +145,11 @@ impl Database {
         txn_id: TxnId,
         leases: Vec<TableLease>,
         ddl: bool,
-    ) -> crate::relational::transaction::Transaction<'_> {
-        crate::relational::transaction::Transaction::new(self, txn_id, leases, ddl)
+    ) -> crate::transaction::Transaction<'_> {
+        crate::transaction::Transaction::new(self, txn_id, leases, ddl)
     }
 
-    pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
+    pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> RelationalResult<()> {
         let result = self.catalog.storage().commit_transaction(txn_id);
         if !self.catalog.storage().transaction_is_active(txn_id)? {
             self.locks.begin_commit(txn_id)?;
@@ -158,35 +158,39 @@ impl Database {
         result.map_err(Into::into)
     }
 
-    pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
+    pub(crate) fn statement_savepoint(
+        &self,
+        txn_id: TxnId,
+    ) -> RelationalResult<TransactionSavepoint> {
         self.catalog.storage().statement_savepoint(txn_id).map_err(Into::into)
     }
 
     pub(crate) fn rollback_to_savepoint(
         &self,
         savepoint: TransactionSavepoint,
-    ) -> StorageResult<()> {
+    ) -> RelationalResult<()> {
         self.catalog.storage().rollback_to_savepoint(savepoint).map_err(Into::into)
     }
 
-    pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
+    pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> RelationalResult<()> {
         self.locks.begin_rollback(txn_id)?;
         self.catalog.storage().rollback_transaction(txn_id)?;
         self.locks.finish_transaction(txn_id)?;
         Ok(())
     }
 
-    pub(crate) fn transaction_is_active(&self, txn_id: TxnId) -> StorageResult<bool> {
+    pub(crate) fn transaction_is_active(&self, txn_id: TxnId) -> RelationalResult<bool> {
         self.catalog.storage().transaction_is_active(txn_id).map_err(Into::into)
     }
 
-    pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
+    pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> RelationalResult<bool> {
         self.catalog.storage().transaction_is_poisoned(txn_id).map_err(Into::into)
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_next_wal_flush_for_test(&self) {
-        self.catalog.storage().fail_next_wal_flush_for_test().unwrap();
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn fail_next_wal_flush_for_test(&self) -> RelationalResult<()> {
+        self.catalog.storage().fail_next_wal_flush_for_test().map_err(Into::into)
     }
 
     pub(super) fn catalog(&self) -> &CatalogManager {
@@ -195,11 +199,11 @@ impl Database {
 }
 
 impl CatalogRead for Database {
-    fn table_schema_by_name(&self, name: &str) -> StorageResult<TableSchema> {
+    fn table_schema_by_name(&self, name: &str) -> RelationalResult<TableSchema> {
         self.catalog.table_schema_by_name(name)
     }
 
-    fn index_schemas_for_table(&self, table: &TableSchema) -> StorageResult<Vec<IndexSchema>> {
+    fn index_schemas_for_table(&self, table: &TableSchema) -> RelationalResult<Vec<IndexSchema>> {
         self.catalog.index_schemas_for_table(table)
     }
 }
@@ -209,8 +213,8 @@ mod tests {
     use tempfile::{NamedTempFile, tempdir};
 
     use super::*;
-    use crate::relational::LockError;
-    use crate::relational::error::StorageError;
+    use crate::LockError;
+    use crate::error::RelationalError;
 
     #[test]
     fn database_handle_is_send_and_sync() {
@@ -257,7 +261,7 @@ mod tests {
 
         assert!(matches!(
             database.begin_statement_transaction(StatementTransactionMode::Ordinary),
-            Err(StorageError::Lock(LockError::DdlBusy { txn_id }))
+            Err(RelationalError::Lock(LockError::DdlBusy { txn_id }))
                 if txn_id == rejected_txn
         ));
         assert!(!database.catalog.storage().transaction_is_active(rejected_txn).unwrap());
@@ -276,7 +280,7 @@ mod tests {
 
         assert!(matches!(
             Database::open(file.path()),
-            Err(StorageError::Storage(EngineError::Corruption(CorruptionError {
+            Err(RelationalError::Storage(EngineError::Corruption(CorruptionError {
                 kind: CorruptionKind::MissingDatabaseHeader,
                 ..
             })))

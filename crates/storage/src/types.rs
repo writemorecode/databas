@@ -5,8 +5,8 @@ pub type SlotId = u16;
 pub type TxnId = u64;
 /// Log sequence number.
 pub type Lsn = u64;
-pub(crate) const PAGE_SIZE_U16: u16 = 4096;
-pub(crate) const PAGE_SIZE: usize = PAGE_SIZE_U16 as usize;
+pub const PAGE_SIZE_U16: u16 = 4096;
+pub const PAGE_SIZE: usize = PAGE_SIZE_U16 as usize;
 
 /// Progress of a WAL checkpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

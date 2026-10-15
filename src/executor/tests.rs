@@ -19,13 +19,13 @@ use crate::relational::TupleSchema;
 use crate::relational::Value;
 use crate::relational::access::CatalogRead;
 use crate::relational::access::RelationalAccess;
-use crate::relational::catalog_manager::validate_user_table_schema;
-use crate::relational::cursor::encode_index_entry_key;
 use crate::relational::error::ConstraintError;
 use crate::relational::error::StorageError;
-use crate::relational::index_manager::index_key_from_record;
-use crate::relational::record_manager::table_key_from_values;
-use crate::relational::record_manager::validate_table_row;
+use crate::relational::testing::encode_index_entry_key;
+use crate::relational::testing::index_key_from_record;
+use crate::relational::testing::table_key_from_values;
+use crate::relational::testing::validate_table_row;
+use crate::relational::testing::validate_user_table_schema;
 use crate::sql_parser::parser::Parser;
 use crate::sql_parser::parser::op::Op;
 
@@ -113,12 +113,7 @@ impl RelationalAccess for MemoryStore {
         }
         let id = state.next_id;
         state.next_id += 1;
-        let schema = TableSchema {
-            table_id: id,
-            name: name.into(),
-            root_page_id: u64::from(id.unsigned_abs()),
-            row,
-        };
+        let schema = TableSchema { table_id: id, name: name.into(), row };
         state.tables.insert(id, MemoryTable { schema: schema.clone(), rows: BTreeMap::new() });
         Ok(schema)
     }
@@ -166,7 +161,7 @@ impl RelationalAccess for MemoryStore {
             index_id: id,
             name: name.into(),
             table_id: table.table_id,
-            root_page_id: u64::from(id.unsigned_abs()),
+
             unique: false,
             columns: index_columns,
         };
@@ -212,7 +207,7 @@ impl RelationalAccess for MemoryStore {
         index: &IndexSchema,
         range: IndexValueRange,
     ) -> StorageResult<Self::IndexScan<'_>> {
-        let range = range.encode()?;
+        let range = crate::relational::testing::encode_range(&range)?;
         let state = self.state.borrow();
         let index = state.indexes.get(&index.index_id).ok_or_else(|| {
             StorageError::InvalidArgument(InvalidArgumentError::IndexNotFound {
@@ -224,7 +219,7 @@ impl RelationalAccess for MemoryStore {
         let records = index
             .entries
             .iter()
-            .filter(|(key, _)| range.contains(key))
+            .filter(|(key, _)| crate::relational::testing::contains(&range, key))
             .map(|(_, key)| {
                 table_data
                     .rows

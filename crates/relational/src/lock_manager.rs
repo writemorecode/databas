@@ -45,8 +45,8 @@ use crate::sync::Mutex;
 use crate::sync::MutexGuard;
 use thiserror::Error;
 
-use crate::relational::CatalogId;
-use crate::relational::TxnId;
+use crate::CatalogId;
+use crate::TxnId;
 
 /// Stable identity of a user-table lock resource.
 ///
@@ -440,7 +440,7 @@ struct LockManagerInner {
 /// # Example
 ///
 /// ```
-/// use databas::core::{TxnId, lock_manager::{LockManager, TableId}};
+/// use databas_relational::{TxnId, lock_manager::{LockManager, TableId}};
 ///
 /// let locks = LockManager::new();
 /// let txn_id: TxnId = 1;
@@ -451,7 +451,7 @@ struct LockManagerInner {
 /// locks.begin_commit(txn_id)?;
 /// // Persist and flush the commit outcome before releasing locks.
 /// locks.finish_transaction(txn_id)?;
-/// # Ok::<(), databas::core::lock_manager::LockError>(())
+/// # Ok::<(), databas_relational::lock_manager::LockError>(())
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct LockManager {

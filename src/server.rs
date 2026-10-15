@@ -548,6 +548,18 @@ fn storage_error_code(error: &StorageError) -> ErrorCode {
     }
 }
 
+fn engine_error_code(error: &crate::storage::error::StorageError) -> ErrorCode {
+    use crate::storage::error::StorageError as E;
+    match error {
+        E::Io(_) => ErrorCode::StorageIoError,
+        E::Corruption(_) => ErrorCode::DatabaseCorruption,
+        E::Constraint(_) => ErrorCode::ConstraintViolation,
+        E::InvalidArgument(_) => ErrorCode::InvalidArgument,
+        E::LimitExceeded(_) => ErrorCode::LimitExceeded,
+        E::Internal(_) => ErrorCode::InternalError,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{sync::mpsc, thread};
@@ -578,7 +590,7 @@ mod tests {
         assert!(failing.execute("SELECT FROM;").is_err());
         idle.execute("BEGIN;").unwrap();
         idle.execute("ROLLBACK;").unwrap();
-        database.fail_next_wal_flush_for_test();
+        database.fail_next_wal_flush_for_test().unwrap();
         assert!(failing.execute("CREATE TABLE broken (id INT PRIMARY KEY);").is_err());
         assert!(matches!(
             done_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
@@ -603,7 +615,7 @@ mod tests {
         let mut client = Client::connect(address, "main").unwrap();
         let mut idle = Client::connect(address, "main").unwrap();
         client.execute("BEGIN;").unwrap();
-        database.fail_next_wal_flush_for_test();
+        database.fail_next_wal_flush_for_test().unwrap();
         drop(client);
         assert!(matches!(
             done_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
@@ -620,11 +632,10 @@ mod tests {
         let mut session = Session::new(&database);
         session.execute_sql("BEGIN;").unwrap();
         let txn_id = session.active_transaction_id_for_test().unwrap();
-        database.fail_next_wal_flush_for_test();
+        database.fail_next_wal_flush_for_test().unwrap();
         assert!(matches!(session.close(), Err(StorageError::Io(_))));
         // Drop must not silently retry and mask the failed rollback outcome.
-        assert!(database.transaction_is_active(txn_id).unwrap());
-        database.rollback_transaction(txn_id).unwrap();
+        assert!(crate::relational::testing::transaction_is_active(&database, txn_id).unwrap());
         Session::new(&database).close().unwrap();
     }
 
@@ -811,17 +822,5 @@ mod tests {
             })
         ));
         server_thread.join().unwrap();
-    }
-}
-
-fn engine_error_code(error: &crate::storage::error::StorageError) -> ErrorCode {
-    use crate::storage::error::StorageError as E;
-    match error {
-        E::Io(_) => ErrorCode::StorageIoError,
-        E::Corruption(_) => ErrorCode::DatabaseCorruption,
-        E::Constraint(_) => ErrorCode::ConstraintViolation,
-        E::InvalidArgument(_) => ErrorCode::InvalidArgument,
-        E::LimitExceeded(_) => ErrorCode::LimitExceeded,
-        E::Internal(_) => ErrorCode::InternalError,
     }
 }

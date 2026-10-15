@@ -90,7 +90,7 @@ mod tests {
         TableSchema {
             table_id: 4,
             name: "users".into(),
-            root_page_id: 4,
+
             row: TupleSchema {
                 columns: vec![
                     ColumnSchema {
@@ -133,7 +133,7 @@ mod tests {
                         index_id,
                         name: name.into(),
                         table_id: table.table_id,
-                        root_page_id: index_id.try_into().unwrap(),
+
                         unique: false,
                         columns: vec![IndexColumnSchema {
                             source_column_ordinal: ordinal,

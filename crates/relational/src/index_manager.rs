@@ -1,18 +1,17 @@
-use crate::relational::IndexSchema;
-use crate::relational::OwnedTableRecord;
-use crate::relational::TableKey;
-use crate::relational::TableRecord;
-use crate::relational::TableSchema;
-use crate::relational::TupleRef;
-use crate::relational::TupleView;
-use crate::relational::TxnId;
-use crate::relational::catalog_manager::CatalogManager;
-use crate::relational::cursor::encode_index_entry_key;
-use crate::relational::error::CorruptionComponent;
-use crate::relational::error::CorruptionError;
-use crate::relational::error::CorruptionKind;
-use crate::relational::error::StorageError;
-use crate::relational::error::StorageResult;
+use crate::IndexSchema;
+use crate::OwnedTableRecord;
+use crate::TableKey;
+use crate::TableRecord;
+use crate::TableSchema;
+use crate::TupleRef;
+use crate::TupleView;
+use crate::catalog_manager::CatalogManager;
+use crate::cursor::encode_index_entry_key;
+use crate::error::CorruptionComponent;
+use crate::error::CorruptionError;
+use crate::error::CorruptionKind;
+use crate::error::RelationalError;
+use crate::error::RelationalResult;
 
 /// Creates and backfills a secondary index.
 pub fn create_index(
@@ -20,23 +19,22 @@ pub fn create_index(
     name: &str,
     table_name: &str,
     columns: &[&str],
-) -> StorageResult<IndexSchema> {
+) -> RelationalResult<IndexSchema> {
     let table = catalog.table_schema_by_name(table_name)?;
     let index = catalog.create_index(name, table_name, columns)?;
-    backfill_index(catalog, None, &table, &index)?;
+    backfill_index(catalog, &table, &index)?;
     Ok(index)
 }
 
 pub fn insert_index_entries(
     catalog: &CatalogManager,
-    txn_id: Option<TxnId>,
     table: &TableSchema,
     record: &OwnedTableRecord,
-) -> StorageResult<()> {
+) -> RelationalResult<()> {
     for index in catalog.index_schemas_for_table(table)? {
         let key = index_key_from_record(table, &index, record)?;
         let key = encode_index_entry_key(&key, record.table_key);
-        let mut index_cursor = index_cursor(catalog, txn_id, &index.name)?;
+        let mut index_cursor = index_cursor(catalog, &index.name)?;
         index_cursor.insert(&key, record.table_key)?;
     }
     Ok(())
@@ -44,14 +42,13 @@ pub fn insert_index_entries(
 
 pub fn delete_index_entries(
     catalog: &CatalogManager,
-    txn_id: Option<TxnId>,
     table: &TableSchema,
     record: &OwnedTableRecord,
-) -> StorageResult<()> {
+) -> RelationalResult<()> {
     for index in catalog.index_schemas_for_table(table)? {
         let key = index_key_from_record(table, &index, record)?;
         let key = encode_index_entry_key(&key, record.table_key);
-        let mut index_cursor = index_cursor(catalog, txn_id, &index.name)?;
+        let mut index_cursor = index_cursor(catalog, &index.name)?;
         index_cursor.delete(&key)?;
     }
     Ok(())
@@ -59,12 +56,11 @@ pub fn delete_index_entries(
 
 fn backfill_index(
     catalog: &CatalogManager,
-    txn_id: Option<TxnId>,
     table: &TableSchema,
     index: &IndexSchema,
-) -> StorageResult<()> {
+) -> RelationalResult<()> {
     let mut table_cursor = catalog.table_cursor_by_name(&table.name)?;
-    let mut index_cursor = index_cursor(catalog, txn_id, &index.name)?;
+    let mut index_cursor = index_cursor(catalog, &index.name)?;
     while let Some(record) = table_cursor.next_record()? {
         let key = index_key_from_table_record(table, index, &record)?;
         let table_key = record.table_key();
@@ -76,13 +72,9 @@ fn backfill_index(
 
 fn index_cursor(
     catalog: &CatalogManager,
-    txn_id: Option<TxnId>,
     name: &str,
-) -> StorageResult<crate::relational::cursor::IndexCursor> {
-    match txn_id {
-        Some(txn_id) => catalog.transaction_index_cursor_by_name(txn_id, name),
-        None => catalog.index_cursor_by_name(name),
-    }
+) -> RelationalResult<crate::cursor::IndexCursor> {
+    catalog.index_cursor_by_name(name)
 }
 
 /// Compatibility wrapper retained only for focused module tests during the
@@ -104,7 +96,7 @@ impl IndexManager {
         name: &str,
         table_name: &str,
         columns: &[&str],
-    ) -> StorageResult<IndexSchema> {
+    ) -> RelationalResult<IndexSchema> {
         create_index(&self.catalog, name, table_name, columns)
     }
 }
@@ -113,7 +105,7 @@ pub fn index_key_from_record(
     table: &TableSchema,
     index: &IndexSchema,
     record: &OwnedTableRecord,
-) -> StorageResult<Vec<u8>> {
+) -> RelationalResult<Vec<u8>> {
     index_key_from_record_bytes(table, index, record.table_key, &record.record)
 }
 
@@ -121,7 +113,7 @@ fn index_key_from_table_record(
     table: &TableSchema,
     index: &IndexSchema,
     record: &TableRecord,
-) -> StorageResult<Vec<u8>> {
+) -> RelationalResult<Vec<u8>> {
     record
         .with_record(|bytes| index_key_from_record_bytes(table, index, record.table_key(), bytes))?
 }
@@ -131,7 +123,7 @@ fn index_key_from_record_bytes(
     index: &IndexSchema,
     table_key: TableKey,
     record: &[u8],
-) -> StorageResult<Vec<u8>> {
+) -> RelationalResult<Vec<u8>> {
     let tuple = TupleView::parse(record).map_err(|error| {
         invalid_table_record(table, table_key, format!("invalid tuple bytes: {error}"))
     })?;
@@ -153,11 +145,15 @@ fn index_key_from_record_bytes(
         values.push(value);
     }
 
-    TupleRef::new(&values).to_bytes().map_err(StorageError::from)
+    TupleRef::new(&values).to_bytes().map_err(RelationalError::from)
 }
 
-fn invalid_table_record(table: &TableSchema, table_key: TableKey, reason: String) -> StorageError {
-    StorageError::Corruption(CorruptionError {
+fn invalid_table_record(
+    table: &TableSchema,
+    table_key: TableKey,
+    reason: String,
+) -> RelationalError {
+    RelationalError::Corruption(CorruptionError {
         component: CorruptionComponent::Catalog,
         page_id: None,
         kind: CorruptionKind::InvalidTableRecord { table: table.name.clone(), table_key, reason },
@@ -169,16 +165,16 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::relational::ColumnSchema;
-    use crate::relational::DataType;
-    use crate::relational::Tuple;
-    use crate::relational::TupleSchema;
-    use crate::relational::Value;
-    use crate::relational::catalog_manager::CatalogManager;
-    use crate::relational::record_manager::RecordManager;
+    use crate::ColumnSchema;
+    use crate::DataType;
+    use crate::Tuple;
+    use crate::TupleSchema;
+    use crate::Value;
+    use crate::catalog_manager::CatalogManager;
+    use crate::record_manager::RecordManager;
     use crate::storage::Storage;
 
-    fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, IndexManager)> {
+    fn open(path: impl AsRef<std::path::Path>) -> RelationalResult<(CatalogManager, IndexManager)> {
         let catalog = CatalogManager::from_storage(Storage::open_or_create(path)?)?;
         let indexes = IndexManager::new(catalog.clone());
         Ok((catalog, indexes))

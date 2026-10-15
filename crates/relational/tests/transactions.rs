@@ -1,9 +1,10 @@
-use databas::relational::{
+use databas_relational::{
     ColumnSchema, DataType, Database, LockMode, StatementTransactionMode as Mode, StorageResult,
     TableSchema, TupleSchema, Value,
     access::{CatalogRead, RelationalAccess},
 };
 
+#[allow(clippy::unwrap_used)]
 fn create_table(database: &Database) -> TableSchema {
     let mut transaction = database.begin(Mode::Ddl).unwrap();
     let table = transaction

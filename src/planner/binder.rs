@@ -414,7 +414,7 @@ impl<'catalog> Binder<'catalog> {
         scope: &BindingScope<'_>,
     ) -> PlannerResult<BoundExpr> {
         match expression {
-            Expression::Literal(literal) => Ok(BoundExpr::Literal(Value::from(literal))),
+            Expression::Literal(literal) => Ok(BoundExpr::Literal(value_from_literal(literal))),
             Expression::ColumnReference(reference) => {
                 bind_column_reference(scope, reference).map(BoundExpr::Column)
             }
@@ -558,19 +558,17 @@ fn bound_column(table: &TableSchema, ordinal: usize, column: &ColumnSchema) -> B
 
 fn literal_expression(expression: &Expression<'_>) -> Option<BoundExpr> {
     match expression {
-        Expression::Literal(literal) => Some(BoundExpr::Literal(Value::from(literal))),
+        Expression::Literal(literal) => Some(BoundExpr::Literal(value_from_literal(literal))),
         _ => None,
     }
 }
 
-impl From<&Literal<'_>> for Value {
-    fn from(literal: &Literal) -> Self {
-        match literal {
-            Literal::String(value) => Value::String((*value).to_owned()),
-            Literal::Number(NumberKind::Integer(value)) => Value::Integer(*value),
-            Literal::Number(NumberKind::Float(value)) => Value::Float(*value),
-            Literal::Boolean(value) => Value::Boolean(*value),
-        }
+fn value_from_literal(literal: &Literal<'_>) -> Value {
+    match literal {
+        Literal::String(value) => Value::String((*value).to_owned()),
+        Literal::Number(NumberKind::Integer(value)) => Value::Integer(*value),
+        Literal::Number(NumberKind::Float(value)) => Value::Float(*value),
+        Literal::Boolean(value) => Value::Boolean(*value),
     }
 }
 
@@ -581,6 +579,26 @@ fn unsupported_expr(expression: &Expression<'_>) -> PlannerError {
         }
         Expression::Wildcard => PlannerError::UnsupportedWildcardPosition,
         _ => PlannerError::UnsupportedExpression { expression: expression.to_string() },
+    }
+}
+
+/// SQL syntax is translated here; relational schemas are language-independent.
+fn schema_from_sql(query: &CreateTableQuery<'_>) -> TupleSchema {
+    TupleSchema {
+        columns: query
+            .columns
+            .iter()
+            .map(|column| ColumnSchema {
+                name: column.name.to_owned(),
+                data_type: match column.column_type {
+                    ColumnType::Int => DataType::Integer,
+                    ColumnType::Float => DataType::Float,
+                    ColumnType::Text => DataType::Text,
+                },
+                nullable: column.constraints.contains(&ColumnConstraint::Nullable),
+                primary_key: column.constraints.contains(&ColumnConstraint::PrimaryKey),
+            })
+            .collect(),
     }
 }
 
@@ -599,7 +617,7 @@ mod tests {
         TableSchema {
             table_id,
             name: name.into(),
-            root_page_id: u64::try_from(table_id).unwrap(),
+
             row: TupleSchema {
                 columns: columns
                     .iter()
@@ -1017,25 +1035,5 @@ mod tests {
             }),
             Err(PlannerError::DuplicateTableQualifier { qualifier }) if qualifier == "source"
         ));
-    }
-}
-
-/// SQL syntax is translated here; relational schemas are language-independent.
-fn schema_from_sql(query: &CreateTableQuery<'_>) -> TupleSchema {
-    TupleSchema {
-        columns: query
-            .columns
-            .iter()
-            .map(|column| ColumnSchema {
-                name: column.name.to_owned(),
-                data_type: match column.column_type {
-                    ColumnType::Int => DataType::Integer,
-                    ColumnType::Float => DataType::Float,
-                    ColumnType::Text => DataType::Text,
-                },
-                nullable: column.constraints.contains(&ColumnConstraint::Nullable),
-                primary_key: column.constraints.contains(&ColumnConstraint::PrimaryKey),
-            })
-            .collect(),
     }
 }

@@ -1,8 +1,6 @@
 //! Logical index ranges and their private persisted-key encoding.
-use crate::relational::cursor::encode_index_entry_key;
-use crate::relational::{
-    IndexKeyBound, IndexKeyRange, StorageResult, TableKey, TupleRef, Value, ValueRef,
-};
+use crate::cursor::encode_index_entry_key;
+use crate::{IndexKeyBound, IndexKeyRange, RelationalResult, TableKey, TupleRef, Value, ValueRef};
 use std::fmt;
 
 /// Inclusive or exclusive logical bound for a secondary-index scan.
@@ -44,7 +42,7 @@ impl fmt::Display for IndexValueRange {
 }
 
 impl IndexValueBound {
-    fn encode(&self, lower: bool) -> StorageResult<IndexKeyBound> {
+    fn encode(&self, lower: bool) -> RelationalResult<IndexKeyBound> {
         let (value, inclusive) = match self {
             Self::Inclusive(v) => (v, true),
             Self::Exclusive(v) => (v, false),
@@ -59,7 +57,7 @@ impl IndexValueBound {
 }
 impl IndexValueRange {
     /// Intersects a lower bound using the index's persisted ordering.
-    pub fn intersect_lower(&mut self, value: Value, inclusive: bool) -> StorageResult<()> {
+    pub fn intersect_lower(&mut self, value: Value, inclusive: bool) -> RelationalResult<()> {
         let candidate = if inclusive {
             IndexValueBound::Inclusive(value)
         } else {
@@ -72,7 +70,7 @@ impl IndexValueRange {
         Ok(())
     }
     /// Intersects an upper bound using the index's persisted ordering.
-    pub fn intersect_upper(&mut self, value: Value, inclusive: bool) -> StorageResult<()> {
+    pub fn intersect_upper(&mut self, value: Value, inclusive: bool) -> RelationalResult<()> {
         let candidate = if inclusive {
             IndexValueBound::Inclusive(value)
         } else {
@@ -84,7 +82,7 @@ impl IndexValueRange {
         }
         Ok(())
     }
-    pub(crate) fn encode(&self) -> StorageResult<IndexKeyRange> {
+    pub(crate) fn encode(&self) -> RelationalResult<IndexKeyRange> {
         Ok(IndexKeyRange {
             lower: self.lower.as_ref().map(|v| v.encode(true)).transpose()?,
             upper: self.upper.as_ref().map(|v| v.encode(false)).transpose()?,
@@ -92,14 +90,14 @@ impl IndexValueRange {
     }
 }
 /// Encodes the first index entry key allowed by a lower value bound.
-fn index_lower_key(value: &Value, inclusive: bool) -> StorageResult<Vec<u8>> {
+fn index_lower_key(value: &Value, inclusive: bool) -> RelationalResult<Vec<u8>> {
     let prefix = TupleRef::new(&[ValueRef::from(value)]).to_bytes()?;
     let table_key = if inclusive { TableKey::MIN } else { TableKey::MAX };
     Ok(encode_index_entry_key(&prefix, table_key))
 }
 
 /// Encodes the last index entry key allowed by an upper value bound.
-fn index_upper_key(value: &Value, inclusive: bool) -> StorageResult<Vec<u8>> {
+fn index_upper_key(value: &Value, inclusive: bool) -> RelationalResult<Vec<u8>> {
     let prefix = TupleRef::new(&[ValueRef::from(value)]).to_bytes()?;
     let table_key = if inclusive { TableKey::MAX } else { TableKey::MIN };
     Ok(encode_index_entry_key(&prefix, table_key))
