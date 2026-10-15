@@ -1,24 +1,15 @@
 //! Scoped relational operations. Scans cannot outlive the statement access handle.
 
-use crate::IndexSchema;
-use crate::IndexValueRange;
-use crate::OwnedTableRecord;
-use crate::TableKeyRange;
-use crate::TableSchema;
-use crate::TupleSchema;
-use crate::Value;
 use crate::access::RelationalAccess;
-use crate::error::RelationalError;
-use crate::error::RelationalResult;
+use crate::error::{RelationalError, RelationalResult};
 use crate::index_manager;
-use crate::lock_manager::LockError;
-use crate::lock_manager::LockMode;
-use crate::lock_manager::TableId;
-use crate::lock_manager::TableLease;
+use crate::lock_manager::{LockError, LockMode, TableId, TableLease};
 use crate::record_manager;
-use crate::record_manager::IndexScan;
-use crate::record_manager::TableScan;
+use crate::record_manager::{IndexScan, TableScan};
 use crate::storage::TxnId;
+use crate::{
+    IndexSchema, IndexValueRange, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
+};
 
 use super::Database;
 
@@ -136,6 +127,12 @@ impl<'db> Transaction<'db> {
     }
 
     fn require_table(&self, table: &TableSchema, mode: LockMode) -> RelationalResult<()> {
+        let actual = self.database.catalog().table_schema_by_name(&table.name)?;
+        if actual != *table {
+            return Err(RelationalError::InvalidArgument(
+                crate::InvalidArgumentError::SchemaMismatch { name: table.name.clone() },
+            ));
+        }
         let table_id = TableId::from(table.table_id);
         if self.leases.iter().any(|lease| lease.authorize_mode(self.txn_id, table_id, mode).is_ok())
         {
@@ -198,6 +195,11 @@ impl Transaction<'_> {
         key_range: &IndexValueRange,
     ) -> RelationalResult<IndexScan> {
         self.require_table(table, LockMode::Shared)?;
+        if !self.database.catalog().index_schemas_for_table(table)?.contains(index) {
+            return Err(RelationalError::InvalidArgument(
+                crate::InvalidArgumentError::SchemaMismatch { name: index.name.clone() },
+            ));
+        }
         record_manager::scan_index(
             &self.database.catalog().for_transaction(self.txn_id),
             table,

@@ -1,7 +1,6 @@
 //! Simplification of scalar expressions in logical plans.
 
-use crate::relational::DataType;
-use crate::relational::Value;
+use crate::relational::{DataType, Value};
 use crate::sql_parser::parser::op::Op;
 
 use super::super::{BoundExpr, LogicalPlan, LogicalPlanNode};

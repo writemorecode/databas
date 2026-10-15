@@ -1,17 +1,11 @@
 use std::path::Path;
 
-use crate::IndexSchema;
-use crate::TableId;
-use crate::TableSchema;
 use crate::access::CatalogRead;
 use crate::catalog_manager::CatalogManager;
 use crate::error::RelationalResult;
-use crate::lock_manager::LockManager;
-use crate::lock_manager::LockMode;
-use crate::lock_manager::TableLease;
-use crate::storage::Storage;
-use crate::storage::TransactionSavepoint;
-use crate::storage::TxnId;
+use crate::lock_manager::{LockManager, LockMode, TableLease};
+use crate::storage::{Storage, TransactionSavepoint, TxnId};
+use crate::{IndexSchema, TableId, TableSchema};
 
 /// Public database handle for one database file.
 pub struct Database {
@@ -131,11 +125,21 @@ impl Database {
         txn_id: TxnId,
         table_locks: &[(TableId, LockMode)],
     ) -> RelationalResult<Vec<TableLease>> {
-        table_locks
-            .iter()
-            .map(|&(table_id, mode)| {
-                self.locks.acquire_mode(txn_id, table_id, mode).map_err(Into::into)
-            })
+        // The relational API, rather than its SQL caller, owns lock ordering.
+        let mut ordered = std::collections::BTreeMap::new();
+        for &(table, mode) in table_locks {
+            ordered
+                .entry(table)
+                .and_modify(|held| {
+                    if mode == LockMode::Exclusive {
+                        *held = mode;
+                    }
+                })
+                .or_insert(mode);
+        }
+        ordered
+            .into_iter()
+            .map(|(table, mode)| self.locks.acquire_mode(txn_id, table, mode).map_err(Into::into))
             .collect()
     }
 

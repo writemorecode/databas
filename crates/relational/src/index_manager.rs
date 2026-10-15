@@ -1,17 +1,11 @@
-use crate::IndexSchema;
-use crate::OwnedTableRecord;
-use crate::TableKey;
-use crate::TableRecord;
-use crate::TableSchema;
-use crate::TupleRef;
-use crate::TupleView;
 use crate::catalog_manager::CatalogManager;
 use crate::cursor::encode_index_entry_key;
-use crate::error::CorruptionComponent;
-use crate::error::CorruptionError;
-use crate::error::CorruptionKind;
-use crate::error::RelationalError;
-use crate::error::RelationalResult;
+use crate::error::{
+    CorruptionComponent, CorruptionError, CorruptionKind, RelationalError, RelationalResult,
+};
+use crate::{
+    IndexSchema, OwnedTableRecord, TableKey, TableRecord, TableSchema, TupleRef, TupleView,
+};
 
 /// Creates and backfills a secondary index.
 pub fn create_index(
@@ -165,14 +159,10 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::ColumnSchema;
-    use crate::DataType;
-    use crate::Tuple;
-    use crate::TupleSchema;
-    use crate::Value;
     use crate::catalog_manager::CatalogManager;
     use crate::record_manager::RecordManager;
     use crate::storage::Storage;
+    use crate::{ColumnSchema, DataType, Tuple, TupleSchema, Value};
 
     fn open(path: impl AsRef<std::path::Path>) -> RelationalResult<(CatalogManager, IndexManager)> {
         let catalog = CatalogManager::from_storage(Storage::open_or_create(path)?)?;

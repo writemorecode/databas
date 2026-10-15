@@ -825,12 +825,9 @@ mod tests {
     use super::*;
     use crate::btree::MAX_INLINE_OVERFLOW_PAYLOAD_BYTES;
     use crate::btree::root::initialize_empty_root;
-    use crate::btree::test_support::assert_matches;
-    use crate::btree::test_support::cursor;
-    use crate::btree::test_support::oversized_key;
-    use crate::btree::test_support::page_cache;
-    use crate::btree::test_support::random_record;
-    use crate::btree::test_support::scan;
+    use crate::btree::test_support::{
+        assert_matches, cursor, oversized_key, page_cache, random_record, scan,
+    };
     use crate::disk_manager::DiskManager;
     use crate::error::LimitExceededError;
     use crate::page_cache::PageCache;

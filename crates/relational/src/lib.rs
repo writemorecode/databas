@@ -13,24 +13,14 @@ pub mod transaction;
 pub(crate) mod tuple;
 mod types;
 
-pub use crate::catalog::ColumnSchema;
-pub use crate::catalog::DataType;
-pub use crate::catalog::IndexColumnSchema;
-pub use crate::catalog::IndexSchema;
-pub use crate::catalog::TableSchema;
-pub use crate::catalog::TupleSchema;
-pub use crate::cursor::IndexEntry;
-pub use crate::cursor::IndexEntryView;
-pub use crate::cursor::OwnedIndexEntry;
-pub use crate::cursor::OwnedTableRecord;
-pub use crate::cursor::TableRecord;
-pub use crate::cursor::TableRecordView;
+pub use crate::catalog::{
+    ColumnSchema, DataType, IndexColumnSchema, IndexSchema, TableSchema, TupleSchema,
+};
+pub use crate::cursor::{
+    IndexEntry, IndexEntryView, OwnedIndexEntry, OwnedTableRecord, TableRecord, TableRecordView,
+};
 pub use crate::storage::{CheckpointOutcome, PageId, TxnId};
-pub use crate::tuple::Tuple;
-pub use crate::tuple::TupleRef;
-pub use crate::tuple::TupleView;
-pub use crate::tuple::Value;
-pub use crate::tuple::ValueRef;
+pub use crate::tuple::{Tuple, TupleRef, TupleView, Value, ValueRef};
 
 pub use database::{Database, StatementTransactionMode};
 pub use error::{

@@ -1,7 +1,6 @@
 //! Inference of column-to-literal predicates from inner-join equalities.
 
-use crate::relational::DataType;
-use crate::relational::Value;
+use crate::relational::{DataType, Value};
 use crate::sql_parser::parser::op::Op;
 
 use super::{

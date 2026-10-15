@@ -2,10 +2,7 @@
 
 use std::fmt;
 
-use crate::relational::IndexSchema;
-use crate::relational::TableKeyRange;
-use crate::relational::TableSchema;
-use crate::relational::TupleSchema;
+use crate::relational::{IndexSchema, TableKeyRange, TableSchema, TupleSchema};
 
 use super::{BoundColumn, ExecExpr, NodeId, PlanSchema, RelationId, SortTerm, UpdateAssignment};
 

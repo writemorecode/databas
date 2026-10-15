@@ -1,14 +1,9 @@
 use std::{collections::HashMap, path::Path};
 
-use crate::PAGE_SIZE;
-use crate::PageId;
 use crate::disk_manager::DiskManager;
 use crate::error::StorageResult;
-use crate::log_manager::Lsn;
-use crate::log_manager::RecoveryLogRecordKind;
-use crate::log_manager::TxnId;
-use crate::log_manager::read_recovery_log;
-use crate::log_manager::truncate_wal;
+use crate::log_manager::{Lsn, RecoveryLogRecordKind, TxnId, read_recovery_log, truncate_wal};
+use crate::{PAGE_SIZE, PageId};
 
 #[derive(Debug, Default)]
 struct TransactionRecovery {
@@ -134,11 +129,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::log_manager::LogManager;
-    use crate::log_manager::LogRecord;
-    use crate::log_manager::LogRecordKind;
-    use crate::log_manager::WAL_FILE_HEADER_LEN;
-    use crate::log_manager::ZERO_LSN;
+    use crate::log_manager::{LogManager, LogRecord, LogRecordKind, WAL_FILE_HEADER_LEN, ZERO_LSN};
     use crate::page;
     use crate::page::format::PageKind;
     use crate::storage_runtime::StorageRuntime;

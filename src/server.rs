@@ -18,30 +18,18 @@ use std::{
 use thiserror::Error;
 
 use crate::error::DatabaseError;
-use crate::executor::ExecutionOutput;
-use crate::executor::ExecutorError;
+use crate::executor::{ExecutionOutput, ExecutorError};
 use crate::planner::PlannerError;
 use crate::protocol;
-use crate::protocol::COMPLETE;
-use crate::protocol::COMPLETE_COMMAND_OK;
-use crate::protocol::COMPLETE_EXPLAIN;
-use crate::protocol::COMPLETE_ROWS;
-use crate::protocol::COMPLETE_ROWS_AFFECTED;
-use crate::protocol::COMPLETE_SCHEMA_AFFECTED;
-use crate::protocol::ERROR;
-use crate::protocol::ErrorCode;
-use crate::protocol::QUERY;
-use crate::protocol::READY;
-use crate::protocol::ROW;
-use crate::protocol::ROW_DESCRIPTION;
-use crate::protocol::STARTUP;
-use crate::protocol::TRANSACTION_STATUS;
-use crate::protocol::TRANSACTION_STATUS_REQUEST;
+use crate::protocol::{
+    COMPLETE, COMPLETE_COMMAND_OK, COMPLETE_EXPLAIN, COMPLETE_ROWS, COMPLETE_ROWS_AFFECTED,
+    COMPLETE_SCHEMA_AFFECTED, ERROR, ErrorCode, QUERY, READY, ROW, ROW_DESCRIPTION, STARTUP,
+    TRANSACTION_STATUS, TRANSACTION_STATUS_REQUEST,
+};
 use crate::relational::Database;
 use crate::relational::error::StorageError;
 use crate::session::Session;
-use crate::thread_pool::ThreadPool;
-use crate::thread_pool::ThreadPoolError;
+use crate::thread_pool::{ThreadPool, ThreadPoolError};
 
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -567,9 +555,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::client::Client;
-    use crate::client::ClientError;
-    use crate::client::QueryResult;
+    use crate::client::{Client, ClientError, QueryResult};
     use crate::relational::Value;
 
     #[test]

@@ -6,8 +6,7 @@ use std::{
 
 use thiserror::Error;
 
-use crate::PAGE_SIZE;
-use crate::PageId;
+use crate::{PAGE_SIZE, PageId};
 
 #[derive(Debug, Error)]
 pub enum DiskManagerError {

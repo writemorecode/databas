@@ -2,30 +2,17 @@ use std::{cell::RefCell, collections::BTreeMap};
 
 use super::*;
 use crate::error::DatabaseError;
-use crate::planner::ExecExpr;
-use crate::planner::PhysicalPlan;
-use crate::planner::PhysicalPlanNode;
-use crate::planner::Planner;
-use crate::relational::DataType;
-use crate::relational::IndexColumnSchema;
-use crate::relational::IndexSchema;
-use crate::relational::IndexValueRange;
-use crate::relational::InvalidArgumentError;
-use crate::relational::StorageResult;
-use crate::relational::TableKey;
-use crate::relational::TableKeyRange;
-use crate::relational::TableSchema;
-use crate::relational::TupleSchema;
-use crate::relational::Value;
-use crate::relational::access::CatalogRead;
-use crate::relational::access::RelationalAccess;
-use crate::relational::error::ConstraintError;
-use crate::relational::error::StorageError;
-use crate::relational::testing::encode_index_entry_key;
-use crate::relational::testing::index_key_from_record;
-use crate::relational::testing::table_key_from_values;
-use crate::relational::testing::validate_table_row;
-use crate::relational::testing::validate_user_table_schema;
+use crate::planner::{ExecExpr, PhysicalPlan, PhysicalPlanNode, Planner};
+use crate::relational::access::{CatalogRead, RelationalAccess};
+use crate::relational::error::{ConstraintError, StorageError};
+use crate::relational::testing::{
+    encode_index_entry_key, index_key_from_record, table_key_from_values, validate_table_row,
+    validate_user_table_schema,
+};
+use crate::relational::{
+    DataType, IndexColumnSchema, IndexSchema, IndexValueRange, InvalidArgumentError, StorageResult,
+    TableKey, TableKeyRange, TableSchema, TupleSchema, Value,
+};
 use crate::sql_parser::parser::Parser;
 use crate::sql_parser::parser::op::Op;
 

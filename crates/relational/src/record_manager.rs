@@ -1,26 +1,12 @@
-use crate::CorruptionComponent;
-use crate::CorruptionError;
-use crate::CorruptionKind;
-use crate::DataType;
-use crate::IndexEntry;
-use crate::IndexKeyRange;
-use crate::IndexSchema;
-use crate::OwnedTableRecord;
-use crate::TableKey;
-use crate::TableKeyBound;
-use crate::TableKeyRange;
-use crate::TableRecord;
-use crate::TableSchema;
-use crate::Tuple;
-use crate::Value;
 use crate::catalog_manager::CatalogManager;
-use crate::cursor::IndexCursor;
-use crate::cursor::TableCursor;
-use crate::error::ConstraintError;
-use crate::error::InvalidArgumentError;
-use crate::error::RelationalError;
-use crate::error::RelationalResult;
+use crate::cursor::{IndexCursor, TableCursor};
+use crate::error::{ConstraintError, InvalidArgumentError, RelationalError, RelationalResult};
 use crate::index_manager;
+use crate::{
+    CorruptionComponent, CorruptionError, CorruptionKind, DataType, IndexEntry, IndexKeyRange,
+    IndexSchema, OwnedTableRecord, TableKey, TableKeyBound, TableKeyRange, TableRecord,
+    TableSchema, Tuple, Value,
+};
 
 /// Compatibility wrapper retained for focused relational tests.
 #[cfg(test)]
@@ -458,15 +444,11 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::ColumnSchema;
-    use crate::TableKeyBound;
-    use crate::TableKeyRange;
-    use crate::TupleSchema;
     use crate::catalog_manager::CatalogManager;
-    use crate::cursor::IndexCursor;
-    use crate::cursor::encode_index_entry_key;
+    use crate::cursor::{IndexCursor, encode_index_entry_key};
     use crate::index_manager::IndexManager;
     use crate::storage::Storage;
+    use crate::{ColumnSchema, TableKeyBound, TableKeyRange, TupleSchema};
 
     fn open(
         path: impl AsRef<std::path::Path>,

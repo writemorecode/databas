@@ -9,20 +9,10 @@
 //! against slot-addressed row values and shaping inserted values into the target
 //! table layout before handing the write to storage.
 
-use crate::planner::NodeId;
-use crate::planner::PhysicalPlan;
-use crate::planner::PhysicalPlanNode;
-use crate::planner::RelationId;
-use crate::relational::CatalogId;
-use crate::relational::OwnedTableRecord;
-use crate::relational::TableKey;
-use crate::relational::Tuple;
-use crate::relational::TupleRef;
-use crate::relational::Value;
-use crate::relational::ValueRef;
+use crate::planner::{NodeId, PhysicalPlan, PhysicalPlanNode, RelationId};
 use crate::relational::access::RelationalAccess;
-use crate::relational::error::StorageError;
-use crate::relational::error::StorageResult;
+use crate::relational::error::{StorageError, StorageResult};
+use crate::relational::{CatalogId, OwnedTableRecord, TableKey, Tuple, TupleRef, Value, ValueRef};
 use crate::sql_parser::parser::op::Op;
 
 mod expression;

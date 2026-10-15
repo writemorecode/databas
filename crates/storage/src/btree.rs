@@ -6,38 +6,21 @@
 
 use std::{borrow::Cow, cmp::Ordering};
 
-use crate::sync::Arc;
-use crate::sync::AtomicU64;
-use crate::sync::Ordering as AtomicOrdering;
+use crate::sync::{Arc, AtomicU64, Ordering as AtomicOrdering};
 
-use crate::PAGE_SIZE;
-use crate::PageId;
-use crate::TxnId;
-use crate::error::CorruptionComponent;
-use crate::error::CorruptionError;
-use crate::error::CorruptionKind;
-use crate::error::StorageError;
-use crate::error::StorageResult;
-use crate::overflow;
-use crate::page;
-use crate::page::BoundResult;
-use crate::page::Interior;
-use crate::page::Leaf;
-use crate::page::PageError;
-use crate::page::RawInterior;
-use crate::page::RawLeaf;
-use crate::page::Read;
-use crate::page::SearchResult;
-use crate::page::Write;
-use crate::page::format::INTERIOR_CELL_PREFIX_SIZE;
-use crate::page::format::KIND_OFFSET;
-use crate::page::format::LEAF_CELL_PREFIX_SIZE;
-use crate::page::format::MAX_INLINE_OVERFLOW_PAYLOAD_BYTES;
-use crate::page::format::NO_OVERFLOW_PAGE_ID;
-use crate::page::format::OVERFLOW_NEXT_PAGE_ID_SIZE;
-use crate::page::format::PageKind;
-use crate::page_cache::PageCache;
-use crate::page_cache::PinGuard;
+use crate::error::{
+    CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult,
+};
+use crate::page::format::{
+    INTERIOR_CELL_PREFIX_SIZE, KIND_OFFSET, LEAF_CELL_PREFIX_SIZE,
+    MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, NO_OVERFLOW_PAGE_ID, OVERFLOW_NEXT_PAGE_ID_SIZE, PageKind,
+};
+use crate::page::{
+    BoundResult, Interior, Leaf, PageError, RawInterior, RawLeaf, Read, SearchResult, Write,
+};
+use crate::page_cache::{PageCache, PinGuard};
+use crate::{PAGE_SIZE, PageId, TxnId};
+use crate::{overflow, page};
 
 mod mutation;
 mod payload;
@@ -164,11 +147,8 @@ mod test_support {
 #[allow(clippy::unwrap_used)]
 mod loom_tests {
     use super::search::advance_mutation_epoch;
-    use crate::loom_support::check_model;
-    use crate::loom_support::thread;
-    use crate::sync::Arc;
-    use crate::sync::AtomicU64;
-    use crate::sync::Ordering;
+    use crate::loom_support::{check_model, thread};
+    use crate::sync::{Arc, AtomicU64, Ordering};
 
     #[test]
     fn concurrent_mutations_each_advance_the_shared_epoch() {

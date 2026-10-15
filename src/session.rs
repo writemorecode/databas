@@ -11,22 +11,14 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::error::DatabaseError;
-use crate::executor::ExecutionOutput;
-use crate::executor::Executor;
-use crate::planner::PhysicalPlan;
-use crate::planner::PhysicalPlanNode;
-use crate::planner::Planner;
-use crate::relational::Database;
-use crate::relational::LockMode;
-use crate::relational::TableId;
+use crate::executor::{ExecutionOutput, Executor};
+use crate::planner::{PhysicalPlan, PhysicalPlanNode, Planner};
 use crate::relational::error::StorageError;
 use crate::relational::{ActiveTransaction, StatementTransactionMode};
-use crate::sql_parser::error::SQLError;
-use crate::sql_parser::error::SQLErrorKind;
-use crate::sql_parser::parser::Command;
-use crate::sql_parser::parser::Parser;
-use crate::sql_parser::parser::SqlItem;
+use crate::relational::{Database, LockMode, TableId};
+use crate::sql_parser::error::{SQLError, SQLErrorKind};
 use crate::sql_parser::parser::stmt::Statement;
+use crate::sql_parser::parser::{Command, Parser, SqlItem};
 
 /// Errors raised by session-level transaction control.
 #[derive(Debug, Error)]
