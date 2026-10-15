@@ -57,6 +57,8 @@ pub enum ConstraintError {
 /// Invalid argument supplied to a storage or relational operation.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum InvalidArgumentError {
+    #[error("schema changes require a DDL statement")]
+    DdlRequired,
     #[error("invalid page id: {page_id}")]
     InvalidPageId { page_id: PageId },
     #[error("key not found")]

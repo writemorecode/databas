@@ -100,8 +100,8 @@ impl CatalogRead for MemoryStore {
 }
 
 impl RelationalAccess for MemoryStore {
-    type TableScan = std::vec::IntoIter<StorageResult<OwnedTableRecord>>;
-    type IndexScan = std::vec::IntoIter<StorageResult<OwnedTableRecord>>;
+    type TableScan<'txn> = std::vec::IntoIter<StorageResult<OwnedTableRecord>>;
+    type IndexScan<'txn> = std::vec::IntoIter<StorageResult<OwnedTableRecord>>;
 
     fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
         validate_user_table_schema(name, &row)?;
@@ -184,7 +184,7 @@ impl RelationalAccess for MemoryStore {
         Ok(schema)
     }
 
-    fn scan_table(&self, table: &TableSchema) -> StorageResult<Self::TableScan> {
+    fn scan_table(&self, table: &TableSchema) -> StorageResult<Self::TableScan<'_>> {
         self.scan_table_range(table, TableKeyRange::unbounded())
     }
 
@@ -192,7 +192,7 @@ impl RelationalAccess for MemoryStore {
         &self,
         table: &TableSchema,
         range: TableKeyRange,
-    ) -> StorageResult<Self::TableScan> {
+    ) -> StorageResult<Self::TableScan<'_>> {
         let state = self.state.borrow();
         let records = state
             .tables
@@ -211,7 +211,7 @@ impl RelationalAccess for MemoryStore {
         table: &TableSchema,
         index: &IndexSchema,
         range: IndexValueRange,
-    ) -> StorageResult<Self::IndexScan> {
+    ) -> StorageResult<Self::IndexScan<'_>> {
         let range = range.encode()?;
         let state = self.state.borrow();
         let index = state.indexes.get(&index.index_id).ok_or_else(|| {

@@ -1,9 +1,4 @@
-//! Transaction-scoped access to relational operations.
-//!
-//! This type is the concrete boundary between session/execution policy and the
-//! relational engine. Transaction identity is retained here even though lower
-//! storage mutations still use the legacy ambient transaction during the
-//! migration.
+//! Scoped relational operations. Scans cannot outlive the statement access handle.
 
 use crate::relational::IndexSchema;
 use crate::relational::IndexValueRange;
@@ -23,7 +18,6 @@ use crate::relational::lock_manager::TableLease;
 use crate::relational::record_manager;
 use crate::relational::record_manager::IndexScan;
 use crate::relational::record_manager::TableScan;
-use crate::storage::TransactionSavepoint;
 use crate::storage::TxnId;
 
 use super::Database;
@@ -33,12 +27,13 @@ pub struct Transaction<'db> {
     database: &'db Database,
     txn_id: TxnId,
     leases: Vec<TableLease>,
+    ddl: bool,
 }
 
 /// Converts page-backed cursor records to owned executor records as they are read.
-pub struct OwnedScan<I>(I);
+pub struct OwnedScan<'txn, I>(I, std::marker::PhantomData<&'txn ()>);
 
-impl<I> Iterator for OwnedScan<I>
+impl<I> Iterator for OwnedScan<'_, I>
 where
     I: Iterator<Item = StorageResult<crate::relational::TableRecord>>,
 {
@@ -50,8 +45,14 @@ where
 }
 
 impl RelationalAccess for Transaction<'_> {
-    type TableScan = OwnedScan<TableScan>;
-    type IndexScan = OwnedScan<IndexScan>;
+    type TableScan<'txn>
+        = OwnedScan<'txn, TableScan>
+    where
+        Self: 'txn;
+    type IndexScan<'txn>
+        = OwnedScan<'txn, IndexScan>
+    where
+        Self: 'txn;
 
     fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
         Transaction::create_table(self, name, row)
@@ -66,16 +67,16 @@ impl RelationalAccess for Transaction<'_> {
         Transaction::create_index(self, name, table_name, columns)
     }
 
-    fn scan_table(&self, table: &TableSchema) -> StorageResult<Self::TableScan> {
-        Ok(OwnedScan(Transaction::scan_table(self, table)?))
+    fn scan_table(&self, table: &TableSchema) -> StorageResult<Self::TableScan<'_>> {
+        Ok(OwnedScan(Transaction::scan_table(self, table)?, std::marker::PhantomData))
     }
 
     fn scan_table_range(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
-    ) -> StorageResult<Self::TableScan> {
-        Ok(OwnedScan(Transaction::scan_table_range(self, table, range)?))
+    ) -> StorageResult<Self::TableScan<'_>> {
+        Ok(OwnedScan(Transaction::scan_table_range(self, table, range)?, std::marker::PhantomData))
     }
 
     fn scan_index(
@@ -83,8 +84,8 @@ impl RelationalAccess for Transaction<'_> {
         table: &TableSchema,
         index: &IndexSchema,
         range: IndexValueRange,
-    ) -> StorageResult<Self::IndexScan> {
-        Ok(OwnedScan(Transaction::scan_index(self, table, index, range)?))
+    ) -> StorageResult<Self::IndexScan<'_>> {
+        Ok(OwnedScan(Transaction::scan_index(self, table, index, range)?, std::marker::PhantomData))
     }
 
     fn insert_table_row(
@@ -114,21 +115,21 @@ impl RelationalAccess for Transaction<'_> {
 }
 
 impl<'db> Transaction<'db> {
-    pub(super) fn new(database: &'db Database, txn_id: TxnId, leases: Vec<TableLease>) -> Self {
-        Self { database, txn_id, leases }
+    pub(super) fn new(
+        database: &'db Database,
+        txn_id: TxnId,
+        leases: Vec<TableLease>,
+        ddl: bool,
+    ) -> Self {
+        Self { database, txn_id, leases, ddl }
     }
 
-    /// Returns the storage transaction identity associated with this gateway.
-    pub(crate) fn id(&self) -> TxnId {
-        self.txn_id
-    }
-
-    pub(crate) fn statement_savepoint(&self) -> StorageResult<TransactionSavepoint> {
-        self.database.statement_savepoint(self.txn_id)
-    }
-
-    pub(crate) fn is_poisoned(&self) -> StorageResult<bool> {
-        self.database.transaction_is_poisoned(self.txn_id)
+    fn require_ddl(&self) -> StorageResult<()> {
+        if self.ddl {
+            Ok(())
+        } else {
+            Err(StorageError::InvalidArgument(crate::relational::InvalidArgumentError::DdlRequired))
+        }
     }
 
     fn require_table(&self, table: &TableSchema, mode: LockMode) -> StorageResult<()> {
@@ -144,6 +145,7 @@ impl<'db> Transaction<'db> {
 
 impl Transaction<'_> {
     pub(crate) fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
+        self.require_ddl()?;
         self.database.catalog().for_transaction(self.txn_id).create_table(name, row)
     }
 
@@ -153,6 +155,7 @@ impl Transaction<'_> {
         table_name: &str,
         columns: &[&str],
     ) -> StorageResult<IndexSchema> {
+        self.require_ddl()?;
         index_manager::create_index(
             &self.database.catalog().for_transaction(self.txn_id),
             name,

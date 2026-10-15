@@ -17,9 +17,13 @@ pub trait CatalogRead {
 /// Relational operations needed to execute a physical plan.
 pub trait RelationalAccess {
     /// Table records in primary-key order, owned independently of storage pages.
-    type TableScan: Iterator<Item = StorageResult<OwnedTableRecord>>;
+    type TableScan<'txn>: Iterator<Item = StorageResult<OwnedTableRecord>>
+    where
+        Self: 'txn;
     /// Table records in secondary-index order, owned independently of storage pages.
-    type IndexScan: Iterator<Item = StorageResult<OwnedTableRecord>>;
+    type IndexScan<'txn>: Iterator<Item = StorageResult<OwnedTableRecord>>
+    where
+        Self: 'txn;
 
     fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema>;
     fn create_index(
@@ -28,18 +32,18 @@ pub trait RelationalAccess {
         table_name: &str,
         columns: &[&str],
     ) -> StorageResult<IndexSchema>;
-    fn scan_table(&self, table: &TableSchema) -> StorageResult<Self::TableScan>;
+    fn scan_table(&self, table: &TableSchema) -> StorageResult<Self::TableScan<'_>>;
     fn scan_table_range(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
-    ) -> StorageResult<Self::TableScan>;
+    ) -> StorageResult<Self::TableScan<'_>>;
     fn scan_index(
         &self,
         table: &TableSchema,
         index: &IndexSchema,
         range: IndexValueRange,
-    ) -> StorageResult<Self::IndexScan>;
+    ) -> StorageResult<Self::IndexScan<'_>>;
     fn insert_table_row(
         &self,
         table: &TableSchema,
