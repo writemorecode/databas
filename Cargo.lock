@@ -89,6 +89,7 @@ name = "databas"
 version = "0.1.0"
 dependencies = [
  "crc",
+ "databas-sql-parser",
  "fastrand",
  "loom",
  "proptest",
@@ -96,6 +97,10 @@ dependencies = [
  "tempfile",
  "thiserror",
 ]
+
+[[package]]
+name = "databas-sql-parser"
+version = "0.1.0"
 
 [[package]]
 name = "errno"

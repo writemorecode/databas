@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use crate::sql_parser::{
+use crate::{
     error::SQLError,
     lexer::{
         token::Token,
@@ -79,7 +79,7 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql_parser::parser::{Parser, SqlItem, expr::Expression, op::Op, stmt::Statement};
+    use crate::parser::{Parser, SqlItem, expr::Expression, op::Op, stmt::Statement};
 
     #[test]
     fn test_parse_update_query() {
@@ -89,9 +89,7 @@ mod tests {
             table: "users",
             assignments: AssignmentList(vec![Assignment {
                 column: "name",
-                expression: Expression::Literal(crate::sql_parser::parser::expr::Literal::String(
-                    "Ada",
-                )),
+                expression: Expression::Literal(crate::parser::expr::Literal::String("Ada")),
             }]),
             where_clause: None,
         };
@@ -108,9 +106,7 @@ mod tests {
             assignments: AssignmentList(vec![
                 Assignment {
                     column: "name",
-                    expression: Expression::Literal(
-                        crate::sql_parser::parser::expr::Literal::String("Ada"),
-                    ),
+                    expression: Expression::Literal(crate::parser::expr::Literal::String("Ada")),
                 },
                 Assignment { column: "active", expression: Expression::from(true) },
             ]),

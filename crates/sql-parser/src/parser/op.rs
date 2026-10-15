@@ -1,8 +1,8 @@
 use std::fmt::Display;
 
-use crate::sql_parser::error::{SQLError, SQLErrorKind};
-use crate::sql_parser::lexer::token::Token;
-use crate::sql_parser::lexer::token_kind::{Keyword, TokenKind};
+use crate::error::{SQLError, SQLErrorKind};
+use crate::lexer::token::Token;
+use crate::lexer::token_kind::{Keyword, TokenKind};
 
 impl<'a> TryFrom<Token<'a>> for Op {
     type Error = SQLError<'a>;

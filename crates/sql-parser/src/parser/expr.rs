@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
-use crate::sql_parser::lexer::token_kind::NumberKind;
-use crate::sql_parser::parser::Op;
+use crate::lexer::token_kind::NumberKind;
+use crate::parser::Op;
 
 #[derive(Debug, PartialEq)]
 pub enum Literal<'a> {
@@ -164,8 +164,8 @@ impl Display for Literal<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql_parser::parser::Parser;
-    use crate::sql_parser::parser::stmt::{
+    use crate::parser::Parser;
+    use crate::parser::stmt::{
         Statement::{self},
         lists::ExpressionList,
         select::{SelectQuery, TableReference},

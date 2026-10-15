@@ -1,5 +1,5 @@
-use crate::sql_parser::lexer::token_kind::TokenKind;
-use crate::sql_parser::parser::stmt::create_table::ColumnConstraint;
+use crate::lexer::token_kind::TokenKind;
+use crate::parser::stmt::create_table::ColumnConstraint;
 
 use std::fmt::Display;
 

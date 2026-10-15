@@ -10,7 +10,7 @@ pub mod protocol;
 pub(crate) mod relational;
 pub mod server;
 pub mod session;
-pub mod sql_parser;
+pub use databas_sql_parser as sql_parser;
 pub(crate) mod storage;
 pub(crate) mod sync;
 pub mod thread_pool;

@@ -9,10 +9,10 @@ use op::Op;
 use stmt::Statement;
 use stmt::lists::{ExpressionList, IdentifierList};
 
-use crate::sql_parser::error::{SQLError, SQLErrorKind};
-use crate::sql_parser::lexer::Lexer;
-use crate::sql_parser::lexer::token::Token;
-use crate::sql_parser::lexer::token_kind::{Aggregate, Keyword, NumberKind, TokenKind};
+use crate::error::{SQLError, SQLErrorKind};
+use crate::lexer::Lexer;
+use crate::lexer::token::Token;
+use crate::lexer::token_kind::{Aggregate, Keyword, NumberKind, TokenKind};
 
 #[derive(Debug)]
 pub struct Parser<'a> {
@@ -326,7 +326,7 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod parser_tests {
     use super::*;
-    use crate::sql_parser::{
+    use crate::{
         error::{SQLError, SQLErrorKind},
         lexer::token_kind::TokenKind,
     };

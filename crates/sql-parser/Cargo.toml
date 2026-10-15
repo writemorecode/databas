@@ -1,0 +1,7 @@
+[package]
+name = "databas-sql-parser"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true

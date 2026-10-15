@@ -1,7 +1,7 @@
 pub mod token;
 pub mod token_kind;
 
-use crate::sql_parser::error::{SQLError, SQLErrorKind};
+use crate::error::{SQLError, SQLErrorKind};
 use token::Token;
 use token_kind::{NumberKind, TokenKind};
 
@@ -215,7 +215,7 @@ impl<'a> Iterator for Lexer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql_parser::error::SQLErrorKind;
+    use crate::error::SQLErrorKind;
     use token_kind::NumberKind::{Float, Integer};
     use token_kind::{Aggregate, Keyword};
 
