@@ -3,8 +3,7 @@
 use std::collections::TryReserveError;
 use thiserror::Error;
 
-use crate::relational::PageId;
-use crate::relational::lock_manager::LockError;
+use crate::lock_manager::LockError;
 
 mod corruption;
 
@@ -47,11 +46,7 @@ pub enum ConstraintError {
     #[error("column {column} does not accept NULL values")]
     NullValue { column: String },
     #[error("column {column} expects {expected:?}, got {actual}")]
-    ColumnTypeMismatch {
-        column: String,
-        expected: crate::relational::DataType,
-        actual: &'static str,
-    },
+    ColumnTypeMismatch { column: String, expected: crate::DataType, actual: &'static str },
 }
 
 /// Invalid argument supplied to a storage or relational operation.
@@ -59,8 +54,6 @@ pub enum ConstraintError {
 pub enum InvalidArgumentError {
     #[error("schema changes require a DDL statement")]
     DdlRequired,
-    #[error("invalid page id: {page_id}")]
-    InvalidPageId { page_id: PageId },
     #[error("key not found")]
     KeyNotFound,
     #[error("table not found: {name}")]

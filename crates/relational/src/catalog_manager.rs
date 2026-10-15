@@ -1,34 +1,34 @@
 use std::path::Path;
 
-use crate::relational::CatalogId;
-use crate::relational::IndexSchema;
-use crate::relational::PageId;
-use crate::relational::TableRecord;
-use crate::relational::TableSchema;
-use crate::relational::Tuple;
-use crate::relational::TupleSchema;
-use crate::relational::TxnId;
-use crate::relational::catalog::CatalogError;
-use crate::relational::catalog::CatalogObjectKind;
-use crate::relational::catalog::ColumnCatalogRow;
-use crate::relational::catalog::ColumnSchema;
-use crate::relational::catalog::IndexCatalogRow;
-use crate::relational::catalog::IndexColumnSchema;
-use crate::relational::catalog::SYS_COLUMNS_ROOT_PAGE_ID;
-use crate::relational::catalog::SYS_INDEXES_ROOT_PAGE_ID;
-use crate::relational::catalog::SYS_TABLES_ROOT_PAGE_ID;
-use crate::relational::catalog::TableCatalogRow;
-use crate::relational::catalog::system_column_rows;
-use crate::relational::catalog::system_table_schemas;
-use crate::relational::cursor::IndexCursor;
-use crate::relational::cursor::TableCursor;
-use crate::relational::error::ConstraintError;
-use crate::relational::error::CorruptionComponent;
-use crate::relational::error::CorruptionError;
-use crate::relational::error::CorruptionKind;
-use crate::relational::error::InvalidArgumentError;
-use crate::relational::error::StorageError;
-use crate::relational::error::StorageResult;
+use crate::CatalogId;
+use crate::IndexSchema;
+use crate::PageId;
+use crate::TableRecord;
+use crate::TableSchema;
+use crate::Tuple;
+use crate::TupleSchema;
+use crate::TxnId;
+use crate::catalog::CatalogError;
+use crate::catalog::CatalogObjectKind;
+use crate::catalog::ColumnCatalogRow;
+use crate::catalog::ColumnSchema;
+use crate::catalog::IndexCatalogRow;
+use crate::catalog::IndexColumnSchema;
+use crate::catalog::SYS_COLUMNS_ROOT_PAGE_ID;
+use crate::catalog::SYS_INDEXES_ROOT_PAGE_ID;
+use crate::catalog::SYS_TABLES_ROOT_PAGE_ID;
+use crate::catalog::TableCatalogRow;
+use crate::catalog::system_column_rows;
+use crate::catalog::system_table_schemas;
+use crate::cursor::IndexCursor;
+use crate::cursor::TableCursor;
+use crate::error::ConstraintError;
+use crate::error::CorruptionComponent;
+use crate::error::CorruptionError;
+use crate::error::CorruptionKind;
+use crate::error::InvalidArgumentError;
+use crate::error::RelationalError;
+use crate::error::RelationalResult;
 use crate::storage::Storage;
 
 /// Internal catalog manager for one database file.
@@ -42,7 +42,7 @@ pub struct CatalogManager {
 }
 
 impl CatalogManager {
-    pub(crate) fn from_storage(storage: Storage) -> StorageResult<Self> {
+    pub(crate) fn from_storage(storage: Storage) -> RelationalResult<Self> {
         let manager = Self { storage, txn_id: None };
         manager.initialize_or_validate_system_catalog()?;
         manager.validate_page_formats()?;
@@ -59,7 +59,7 @@ impl CatalogManager {
     }
 
     /// Flushes all dirty, currently unpinned pages to disk.
-    pub fn flush(&self) -> StorageResult<()> {
+    pub fn flush(&self) -> RelationalResult<()> {
         self.storage.flush().map_err(Into::into)
     }
 
@@ -68,10 +68,10 @@ impl CatalogManager {
     }
 
     /// Creates a cataloged table, allocates its root page, and records its columns.
-    pub fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
+    pub fn create_table(&self, name: &str, row: TupleSchema) -> RelationalResult<TableSchema> {
         validate_user_table_schema(name, &row)?;
         if self.table_catalog_rows()?.iter().any(|row| row.name == name) {
-            return Err(StorageError::Constraint(ConstraintError::DuplicateTableName {
+            return Err(RelationalError::Constraint(ConstraintError::DuplicateTableName {
                 name: name.to_owned(),
             }));
         }
@@ -82,9 +82,9 @@ impl CatalogManager {
             None => self.storage.create_tree()?,
         }
         .root_page_id();
-        let schema = TableSchema { table_id, name: name.to_owned(), root_page_id, row };
+        let schema = TableSchema { table_id, name: name.to_owned(), row };
 
-        self.insert_table_catalog_row(&schema.catalog_row())?;
+        self.insert_table_catalog_row(&schema.catalog_row(root_page_id))?;
         for (column_id, (ordinal, column)) in
             (self.next_column_id()?..).zip(schema.row.columns.iter().enumerate())
         {
@@ -112,12 +112,12 @@ impl CatalogManager {
         name: &str,
         table_name: &str,
         columns: &[&str],
-    ) -> StorageResult<IndexSchema> {
+    ) -> RelationalResult<IndexSchema> {
         if columns.is_empty() {
-            return Err(StorageError::InvalidArgument(InvalidArgumentError::EmptyIndexColumns));
+            return Err(RelationalError::InvalidArgument(InvalidArgumentError::EmptyIndexColumns));
         }
         if self.index_catalog_rows()?.iter().any(|row| row.name == name) {
-            return Err(StorageError::Constraint(ConstraintError::DuplicateIndexName {
+            return Err(RelationalError::Constraint(ConstraintError::DuplicateIndexName {
                 name: name.to_owned(),
             }));
         }
@@ -137,7 +137,7 @@ impl CatalogManager {
                 .enumerate()
                 .find(|(_, column)| column.name == *column_name)
                 .ok_or_else(|| {
-                    StorageError::InvalidArgument(InvalidArgumentError::ColumnNotFound {
+                    RelationalError::InvalidArgument(InvalidArgumentError::ColumnNotFound {
                         table: table.name.clone(),
                         column: (*column_name).to_owned(),
                     })
@@ -167,48 +167,52 @@ impl CatalogManager {
             index_id,
             name: name.to_owned(),
             table_id: table.table_id,
-            root_page_id,
             unique: false,
             columns: index_columns,
         };
-        self.insert_index_catalog_row(&schema.catalog_row())?;
+        self.insert_index_catalog_row(&schema.catalog_row(root_page_id))?;
         for row in catalog_columns {
             self.insert_column_catalog_row(&row)?;
         }
         Ok(schema)
     }
 
-    /// Returns a typed cursor for the cataloged table named `name`.
-    pub fn table_cursor_by_name(&self, name: &str) -> StorageResult<TableCursor> {
-        let schema = self.table_schema_by_name(name)?;
-        self.table_cursor(schema.root_page_id)
+    fn table_root(&self, name: &str) -> RelationalResult<PageId> {
+        self.table_catalog_rows()?
+            .into_iter()
+            .find(|row| row.name == name)
+            .map(|row| row.root_page_id)
+            .ok_or_else(|| {
+                RelationalError::InvalidArgument(InvalidArgumentError::TableNotFound {
+                    name: name.into(),
+                })
+            })
+    }
+    fn index_root(&self, name: &str) -> RelationalResult<PageId> {
+        self.index_catalog_rows()?
+            .into_iter()
+            .find(|row| row.name == name)
+            .map(|row| row.root_page_id)
+            .ok_or_else(|| {
+                RelationalError::InvalidArgument(InvalidArgumentError::IndexNotFound {
+                    name: name.into(),
+                })
+            })
     }
 
-    pub(crate) fn transaction_table_cursor_by_name(
-        &self,
-        txn_id: crate::relational::TxnId,
-        name: &str,
-    ) -> StorageResult<TableCursor> {
-        let schema = self.table_schema_by_name(name)?;
-        Ok(TableCursor::new(self.storage.transaction_tree_cursor(txn_id, schema.root_page_id)?))
+    /// Returns a typed cursor for the cataloged table named `name`.
+    pub fn table_cursor_by_name(&self, name: &str) -> RelationalResult<TableCursor> {
+        let root_page_id = self.table_root(name)?;
+        self.table_cursor(root_page_id)
     }
 
     /// Returns a typed cursor for the cataloged index named `name`.
-    pub fn index_cursor_by_name(&self, name: &str) -> StorageResult<IndexCursor> {
-        let schema = self.index_schema_by_name(name)?;
-        self.index_cursor(schema.root_page_id)
+    pub fn index_cursor_by_name(&self, name: &str) -> RelationalResult<IndexCursor> {
+        let root_page_id = self.index_root(name)?;
+        self.index_cursor(root_page_id)
     }
 
-    pub(crate) fn transaction_index_cursor_by_name(
-        &self,
-        txn_id: crate::relational::TxnId,
-        name: &str,
-    ) -> StorageResult<IndexCursor> {
-        let schema = self.index_schema_by_name(name)?;
-        Ok(IndexCursor::new(self.storage.transaction_tree_cursor(txn_id, schema.root_page_id)?))
-    }
-
-    fn initialize_or_validate_system_catalog(&self) -> StorageResult<()> {
+    fn initialize_or_validate_system_catalog(&self) -> RelationalResult<()> {
         match self.storage.opened_page_count() {
             0 => Err(missing_system_catalog_root(0)),
             1 => self.initialize_system_catalog(),
@@ -217,7 +221,7 @@ impl CatalogManager {
         }
     }
 
-    fn initialize_system_root(&self, expected_page_id: PageId) -> StorageResult<()> {
+    fn initialize_system_root(&self, expected_page_id: PageId) -> RelationalResult<()> {
         let actual_page_id = match self.txn_id {
             Some(txn_id) => self.storage.transaction_create_tree(txn_id)?,
             None => self.storage.create_tree()?,
@@ -230,14 +234,14 @@ impl CatalogManager {
         }
     }
 
-    fn initialize_system_catalog(&self) -> StorageResult<()> {
+    fn initialize_system_catalog(&self) -> RelationalResult<()> {
         self.initialize_system_root(SYS_TABLES_ROOT_PAGE_ID)?;
         self.initialize_system_root(SYS_INDEXES_ROOT_PAGE_ID)?;
         self.initialize_system_root(SYS_COLUMNS_ROOT_PAGE_ID)?;
         self.seed_system_catalog()
     }
 
-    fn seed_system_catalog(&self) -> StorageResult<()> {
+    fn seed_system_catalog(&self) -> RelationalResult<()> {
         let mut tables = self.table_cursor(SYS_TABLES_ROOT_PAGE_ID)?;
         let mut columns = self.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID)?;
 
@@ -254,7 +258,7 @@ impl CatalogManager {
         Ok(())
     }
 
-    fn table_cursor(&self, root_page_id: PageId) -> StorageResult<TableCursor> {
+    fn table_cursor(&self, root_page_id: PageId) -> RelationalResult<TableCursor> {
         let cursor = match self.txn_id {
             Some(txn_id) => self.storage.transaction_tree_cursor(txn_id, root_page_id)?,
             None => self.storage.tree_cursor(root_page_id)?,
@@ -262,7 +266,7 @@ impl CatalogManager {
         Ok(TableCursor::new(cursor))
     }
 
-    fn index_cursor(&self, root_page_id: PageId) -> StorageResult<IndexCursor> {
+    fn index_cursor(&self, root_page_id: PageId) -> RelationalResult<IndexCursor> {
         let cursor = match self.txn_id {
             Some(txn_id) => self.storage.transaction_tree_cursor(txn_id, root_page_id)?,
             None => self.storage.tree_cursor(root_page_id)?,
@@ -270,7 +274,7 @@ impl CatalogManager {
         Ok(IndexCursor::new(cursor))
     }
 
-    fn validate_page_formats(&self) -> StorageResult<()> {
+    fn validate_page_formats(&self) -> RelationalResult<()> {
         let system_roots =
             [SYS_TABLES_ROOT_PAGE_ID, SYS_INDEXES_ROOT_PAGE_ID, SYS_COLUMNS_ROOT_PAGE_ID];
         for root_page_id in system_roots {
@@ -292,11 +296,11 @@ impl CatalogManager {
         Ok(())
     }
 
-    pub(crate) fn table_schema_by_name(&self, name: &str) -> StorageResult<TableSchema> {
+    pub(crate) fn table_schema_by_name(&self, name: &str) -> RelationalResult<TableSchema> {
         let table =
             self.table_catalog_rows()?.into_iter().find(|row| row.name == name).ok_or_else(
                 || {
-                    StorageError::InvalidArgument(InvalidArgumentError::TableNotFound {
+                    RelationalError::InvalidArgument(InvalidArgumentError::TableNotFound {
                         name: name.to_owned(),
                     })
                 },
@@ -313,35 +317,14 @@ impl CatalogManager {
         Ok(TableSchema {
             table_id: table.table_id,
             name: table.name,
-            root_page_id: table.root_page_id,
             row: TupleSchema { columns: columns.into_iter().map(column_schema_from_row).collect() },
         })
-    }
-
-    fn index_schema_by_name(&self, name: &str) -> StorageResult<IndexSchema> {
-        let index =
-            self.index_catalog_rows()?.into_iter().find(|row| row.name == name).ok_or_else(
-                || {
-                    StorageError::InvalidArgument(InvalidArgumentError::IndexNotFound {
-                        name: name.to_owned(),
-                    })
-                },
-            )?;
-        let columns: Vec<_> = self
-            .column_catalog_rows()?
-            .into_iter()
-            .filter(|row| {
-                row.object_kind == CatalogObjectKind::Index && row.object_id == index.index_id
-            })
-            .collect();
-
-        index_schema_from_rows(index, columns)
     }
 
     pub(crate) fn index_schemas_for_table(
         &self,
         table: &TableSchema,
-    ) -> StorageResult<Vec<IndexSchema>> {
+    ) -> RelationalResult<Vec<IndexSchema>> {
         let mut indexes: Vec<_> = self
             .index_catalog_rows()?
             .into_iter()
@@ -366,7 +349,7 @@ impl CatalogManager {
             .collect()
     }
 
-    fn next_object_id(&self) -> StorageResult<CatalogId> {
+    fn next_object_id(&self) -> RelationalResult<CatalogId> {
         let max_table_id =
             self.table_catalog_rows()?.into_iter().map(|row| row.table_id).max().unwrap_or(0);
         let max_index_id =
@@ -374,19 +357,19 @@ impl CatalogManager {
         Ok(max_table_id.max(max_index_id) + 1)
     }
 
-    fn next_column_id(&self) -> StorageResult<CatalogId> {
+    fn next_column_id(&self) -> RelationalResult<CatalogId> {
         Ok(self.column_catalog_rows()?.into_iter().map(|row| row.column_id).max().unwrap_or(0) + 1)
     }
 
-    fn table_catalog_rows(&self) -> StorageResult<Vec<TableCatalogRow>> {
+    fn table_catalog_rows(&self) -> RelationalResult<Vec<TableCatalogRow>> {
         self.scan_catalog_table(SYS_TABLES_ROOT_PAGE_ID, "sys_tables", TableCatalogRow::decode)
     }
 
-    fn index_catalog_rows(&self) -> StorageResult<Vec<IndexCatalogRow>> {
+    fn index_catalog_rows(&self) -> RelationalResult<Vec<IndexCatalogRow>> {
         self.scan_catalog_table(SYS_INDEXES_ROOT_PAGE_ID, "sys_indexes", IndexCatalogRow::decode)
     }
 
-    fn column_catalog_rows(&self) -> StorageResult<Vec<ColumnCatalogRow>> {
+    fn column_catalog_rows(&self) -> RelationalResult<Vec<ColumnCatalogRow>> {
         self.scan_catalog_table(SYS_COLUMNS_ROOT_PAGE_ID, "sys_columns", ColumnCatalogRow::decode)
     }
 
@@ -395,7 +378,7 @@ impl CatalogManager {
         root_page_id: PageId,
         catalog_table_name: &'static str,
         decode: impl Fn(&Tuple) -> Result<T, CatalogError>,
-    ) -> StorageResult<Vec<T>> {
+    ) -> RelationalResult<Vec<T>> {
         let mut cursor = self.table_cursor(root_page_id)?;
         let mut rows = Vec::new();
         if !cursor.seek_to_first()? {
@@ -418,15 +401,15 @@ impl CatalogManager {
         Ok(rows)
     }
 
-    fn insert_table_catalog_row(&self, row: &TableCatalogRow) -> StorageResult<()> {
+    fn insert_table_catalog_row(&self, row: &TableCatalogRow) -> RelationalResult<()> {
         self.insert_catalog_row(SYS_TABLES_ROOT_PAGE_ID, row.table_id, &row.to_bytes()?)
     }
 
-    fn insert_index_catalog_row(&self, row: &IndexCatalogRow) -> StorageResult<()> {
+    fn insert_index_catalog_row(&self, row: &IndexCatalogRow) -> RelationalResult<()> {
         self.insert_catalog_row(SYS_INDEXES_ROOT_PAGE_ID, row.index_id, &row.to_bytes()?)
     }
 
-    fn insert_column_catalog_row(&self, row: &ColumnCatalogRow) -> StorageResult<()> {
+    fn insert_column_catalog_row(&self, row: &ColumnCatalogRow) -> RelationalResult<()> {
         self.insert_catalog_row(SYS_COLUMNS_ROOT_PAGE_ID, row.column_id, &row.to_bytes()?)
     }
 
@@ -435,37 +418,37 @@ impl CatalogManager {
         root_page_id: PageId,
         table_key: CatalogId,
         bytes: &[u8],
-    ) -> StorageResult<()> {
+    ) -> RelationalResult<()> {
         let mut cursor = self.table_cursor(root_page_id)?;
         cursor.insert(table_key, bytes)
     }
 }
 
-pub fn validate_user_table_schema(name: &str, row: &TupleSchema) -> StorageResult<()> {
+pub fn validate_user_table_schema(name: &str, row: &TupleSchema) -> RelationalResult<()> {
     let primary_key_count = row.columns.iter().filter(|column| column.primary_key).count();
     if primary_key_count != 1 {
-        return Err(StorageError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
+        return Err(RelationalError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
             table: name.to_owned(),
             reason: "tables must declare exactly one primary key".to_owned(),
         }));
     }
 
     let Some(primary_key) = row.columns.first().filter(|column| column.primary_key) else {
-        return Err(StorageError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
+        return Err(RelationalError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
             table: name.to_owned(),
             reason: "primary key must be the first column".to_owned(),
         }));
     };
 
-    if primary_key.data_type != crate::relational::DataType::Integer {
-        return Err(StorageError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
+    if primary_key.data_type != crate::DataType::Integer {
+        return Err(RelationalError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
             table: name.to_owned(),
             reason: "primary key must use INT type".to_owned(),
         }));
     }
 
     if primary_key.nullable {
-        return Err(StorageError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
+        return Err(RelationalError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
             table: name.to_owned(),
             reason: "primary key cannot be nullable".to_owned(),
         }));
@@ -474,16 +457,16 @@ pub fn validate_user_table_schema(name: &str, row: &TupleSchema) -> StorageResul
     Ok(())
 }
 
-fn missing_system_catalog_root(page_id: PageId) -> StorageError {
-    StorageError::Corruption(CorruptionError {
+fn missing_system_catalog_root(page_id: PageId) -> RelationalError {
+    RelationalError::Corruption(CorruptionError {
         component: CorruptionComponent::Catalog,
         page_id: Some(page_id),
         kind: CorruptionKind::MissingSystemCatalogRoot { page_id },
     })
 }
 
-fn unexpected_system_catalog_root(expected: PageId, actual: PageId) -> StorageError {
-    StorageError::Corruption(CorruptionError {
+fn unexpected_system_catalog_root(expected: PageId, actual: PageId) -> RelationalError {
+    RelationalError::Corruption(CorruptionError {
         component: CorruptionComponent::Catalog,
         page_id: Some(actual),
         kind: CorruptionKind::UnexpectedSystemCatalogRoot { expected, actual },
@@ -494,7 +477,7 @@ fn decode_catalog_record<T>(
     catalog_table_name: &'static str,
     record: &TableRecord,
     decode: &impl Fn(&Tuple) -> Result<T, CatalogError>,
-) -> StorageResult<T> {
+) -> RelationalResult<T> {
     record.with_record(|bytes| {
         let tuple = Tuple::from_bytes(bytes)
             .map_err(|error| invalid_catalog_row(catalog_table_name, error))?;
@@ -502,8 +485,8 @@ fn decode_catalog_record<T>(
     })?
 }
 
-fn invalid_catalog_row(table: &'static str, error: impl std::error::Error) -> StorageError {
-    StorageError::Corruption(CorruptionError {
+fn invalid_catalog_row(table: &'static str, error: impl std::error::Error) -> RelationalError {
+    RelationalError::Corruption(CorruptionError {
         component: CorruptionComponent::Catalog,
         page_id: None,
         kind: CorruptionKind::InvalidCatalogRow { table, reason: error.to_string() },
@@ -522,7 +505,7 @@ fn column_schema_from_row(row: ColumnCatalogRow) -> ColumnSchema {
 fn index_schema_from_rows(
     index: IndexCatalogRow,
     mut columns: Vec<ColumnCatalogRow>,
-) -> StorageResult<IndexSchema> {
+) -> RelationalResult<IndexSchema> {
     columns.sort_by_key(|row| row.ordinal);
     let columns = columns
         .into_iter()
@@ -532,13 +515,12 @@ fn index_schema_from_rows(
                 .map_err(|error| invalid_catalog_row("sys_columns", error))?;
             Ok(IndexColumnSchema { source_column_ordinal, column: column_schema_from_row(row) })
         })
-        .collect::<StorageResult<_>>()?;
+        .collect::<RelationalResult<_>>()?;
 
     Ok(IndexSchema {
         index_id: index.index_id,
         name: index.name,
         table_id: index.table_id,
-        root_page_id: index.root_page_id,
         unique: index.unique,
         columns,
     })
@@ -549,20 +531,20 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::relational::CatalogId;
-    use crate::relational::Tuple;
-    use crate::relational::TupleSchema;
-    use crate::relational::catalog::ColumnCatalogRow;
-    use crate::relational::catalog::ColumnSchema;
-    use crate::relational::catalog::DataType;
-    use crate::relational::catalog::IndexCatalogRow;
-    use crate::relational::catalog::SYS_COLUMNS_TABLE_ID;
-    use crate::relational::catalog::SYS_INDEXES_TABLE_ID;
-    use crate::relational::catalog::SYS_TABLES_TABLE_ID;
-    use crate::relational::catalog::TableCatalogRow;
-    use crate::relational::catalog::system_column_rows;
+    use crate::CatalogId;
+    use crate::Tuple;
+    use crate::TupleSchema;
+    use crate::catalog::ColumnCatalogRow;
+    use crate::catalog::ColumnSchema;
+    use crate::catalog::DataType;
+    use crate::catalog::IndexCatalogRow;
+    use crate::catalog::SYS_COLUMNS_TABLE_ID;
+    use crate::catalog::SYS_INDEXES_TABLE_ID;
+    use crate::catalog::SYS_TABLES_TABLE_ID;
+    use crate::catalog::TableCatalogRow;
+    use crate::catalog::system_column_rows;
 
-    fn open(path: impl AsRef<Path>) -> StorageResult<CatalogManager> {
+    fn open(path: impl AsRef<Path>) -> RelationalResult<CatalogManager> {
         CatalogManager::from_storage(Storage::open_or_create(path)?)
     }
 
@@ -598,7 +580,7 @@ mod tests {
             let record =
                 columns.get(row.column_id).unwrap().expect("system column row should exist");
             let tuple = Tuple::from_bytes(&record.record).unwrap();
-            let actual = crate::relational::catalog::ColumnCatalogRow::decode(&tuple).unwrap();
+            let actual = crate::catalog::ColumnCatalogRow::decode(&tuple).unwrap();
             assert_eq!(actual.column_id, row.column_id);
             assert_eq!(actual.object_kind, row.object_kind);
             assert_eq!(actual.object_id, row.object_id);
@@ -645,7 +627,7 @@ mod tests {
         };
         assert!(matches!(
             error,
-            StorageError::Corruption(CorruptionError {
+            RelationalError::Corruption(CorruptionError {
                 component: CorruptionComponent::Catalog,
                 kind: CorruptionKind::MissingSystemCatalogRoot { page_id: 2 },
                 ..
@@ -663,15 +645,20 @@ mod tests {
 
         assert_eq!(table.table_id, 4);
         assert_eq!(table.name, "users");
-        assert_eq!(table.root_page_id, 4);
+        assert_eq!(manager.table_root("users").unwrap(), 4);
         assert_eq!(table.row, row_schema);
         assert_eq!(
             manager.table_cursor_by_name("users").unwrap().root_page_id(),
-            table.root_page_id
+            manager.table_root("users").unwrap()
         );
 
         let mut tables = manager.table_cursor(SYS_TABLES_ROOT_PAGE_ID).unwrap();
-        assert_table_catalog_row(&mut tables, table.table_id, "users", table.root_page_id);
+        assert_table_catalog_row(
+            &mut tables,
+            table.table_id,
+            "users",
+            manager.table_root("users").unwrap(),
+        );
 
         let first_user_column_id = CatalogId::try_from(system_column_rows().len()).unwrap() + 1;
         let mut columns = manager.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID).unwrap();
@@ -701,7 +688,7 @@ mod tests {
         missing.columns[0].primary_key = false;
         assert!(matches!(
             manager.create_table("missing_pk", missing),
-            Err(StorageError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
+            Err(RelationalError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
                 table,
                 ..
             })) if table == "missing_pk"
@@ -712,7 +699,7 @@ mod tests {
         second.columns[1].primary_key = true;
         assert!(matches!(
             manager.create_table("second_pk", second),
-            Err(StorageError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
+            Err(RelationalError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
                 table,
                 ..
             })) if table == "second_pk"
@@ -722,7 +709,7 @@ mod tests {
         text.columns[0].data_type = DataType::Text;
         assert!(matches!(
             manager.create_table("text_pk", text),
-            Err(StorageError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
+            Err(RelationalError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
                 table,
                 ..
             })) if table == "text_pk"
@@ -732,7 +719,7 @@ mod tests {
         nullable.columns[0].nullable = true;
         assert!(matches!(
             manager.create_table("nullable_pk", nullable),
-            Err(StorageError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
+            Err(RelationalError::InvalidArgument(InvalidArgumentError::InvalidPrimaryKey {
                 table,
                 ..
             })) if table == "nullable_pk"
@@ -750,23 +737,23 @@ mod tests {
         assert_eq!(index.index_id, 5);
         assert_eq!(index.name, "idx_users_email");
         assert_eq!(index.table_id, table.table_id);
-        assert_eq!(index.root_page_id, 5);
+        assert_eq!(manager.index_root("idx_users_email").unwrap(), 5);
         assert_eq!(index.columns.len(), 1);
         assert_eq!(index.columns[0].source_column_ordinal, 2);
         assert_eq!(index.columns[0].column.name, "email");
         assert_eq!(
             manager.index_cursor_by_name("idx_users_email").unwrap().root_page_id(),
-            index.root_page_id
+            manager.index_root("idx_users_email").unwrap()
         );
 
         let mut indexes = manager.table_cursor(SYS_INDEXES_ROOT_PAGE_ID).unwrap();
         assert_index_catalog_row(
             &mut indexes,
             IndexCatalogRow {
+                root_page_id: manager.index_root("idx_users_email").unwrap(),
                 index_id: index.index_id,
                 name: "idx_users_email".to_owned(),
                 table_id: table.table_id,
-                root_page_id: index.root_page_id,
                 unique: false,
             },
         );
@@ -802,7 +789,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            StorageError::InvalidArgument(InvalidArgumentError::ColumnNotFound {
+            RelationalError::InvalidArgument(InvalidArgumentError::ColumnNotFound {
                 table,
                 column,
             }) if table == "users" && column == "missing"

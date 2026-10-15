@@ -2,8 +2,8 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::relational::PageId;
-use crate::relational::TableKey;
+use crate::PageId;
+use crate::TableKey;
 
 /// Corruption detected in an encoded database component.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -22,13 +22,8 @@ pub struct CorruptionError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CorruptionComponent {
     Catalog,
-    DatabaseFile,
-    DiskPage,
-    OverflowPage,
-    Page,
-    LeafPage,
-    InteriorPage,
-    Cell,
+    TableRecord,
+    IndexEntry,
 }
 
 /// Specific malformed on-disk condition.
@@ -52,13 +47,8 @@ impl fmt::Display for CorruptionComponent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Catalog => write!(f, "catalog"),
-            Self::DatabaseFile => write!(f, "database file"),
-            Self::DiskPage => write!(f, "disk page"),
-            Self::OverflowPage => write!(f, "overflow page"),
-            Self::Page => write!(f, "page"),
-            Self::LeafPage => write!(f, "leaf page"),
-            Self::InteriorPage => write!(f, "interior page"),
-            Self::Cell => write!(f, "cell"),
+            Self::TableRecord => write!(f, "table record"),
+            Self::IndexEntry => write!(f, "index entry"),
         }
     }
 }
@@ -81,11 +71,11 @@ mod tests {
     #[test]
     fn corruption_display_includes_component_page_and_kind() {
         let error = CorruptionError {
-            component: CorruptionComponent::LeafPage,
+            component: CorruptionComponent::TableRecord,
             page_id: Some(7),
             kind: CorruptionKind::InvalidTableKeyLength { actual: 2 },
         };
 
-        assert_eq!(error.to_string(), "leaf page (page 7): table key has invalid length 2");
+        assert_eq!(error.to_string(), "table record (page 7): table key has invalid length 2");
     }
 }

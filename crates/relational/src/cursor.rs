@@ -2,12 +2,10 @@
 
 use std::fmt::{self, Display};
 
-use crate::relational::TableKey;
-use crate::relational::Tuple;
-use crate::relational::error::StorageResult;
-use crate::relational::error::{
-    CorruptionComponent, CorruptionError, CorruptionKind, StorageError,
-};
+use crate::TableKey;
+use crate::Tuple;
+use crate::error::RelationalResult;
+use crate::error::{CorruptionComponent, CorruptionError, CorruptionKind, RelationalError};
 use crate::storage::CursorState;
 use crate::storage::Record;
 use crate::storage::TreeCursor;
@@ -18,10 +16,10 @@ fn encode_table_key(table_key: TableKey) -> [u8; TABLE_KEY_SIZE] {
     (table_key ^ TableKey::MIN).to_be_bytes()
 }
 
-fn decode_table_key(key: &[u8]) -> StorageResult<TableKey> {
+fn decode_table_key(key: &[u8]) -> RelationalResult<TableKey> {
     let bytes: [u8; TABLE_KEY_SIZE] = key.try_into().map_err(|_wrong_length| {
-        StorageError::Corruption(CorruptionError {
-            component: CorruptionComponent::Catalog,
+        RelationalError::Corruption(CorruptionError {
+            component: CorruptionComponent::TableRecord,
             page_id: None,
             kind: CorruptionKind::InvalidTableKeyLength { actual: key.len() },
         })
@@ -40,10 +38,10 @@ pub fn encode_index_entry_key(index_key: &[u8], table_key: TableKey) -> Vec<u8> 
     key
 }
 
-fn decode_index_table_key(value: &[u8]) -> StorageResult<TableKey> {
+fn decode_index_table_key(value: &[u8]) -> RelationalResult<TableKey> {
     let bytes: [u8; TABLE_KEY_SIZE] = value.try_into().map_err(|_wrong_length| {
-        StorageError::Corruption(CorruptionError {
-            component: CorruptionComponent::Catalog,
+        RelationalError::Corruption(CorruptionError {
+            component: CorruptionComponent::IndexEntry,
             page_id: None,
             kind: CorruptionKind::InvalidIndexTableKeyValueLength { actual: value.len() },
         })
@@ -166,7 +164,7 @@ impl TableCursor {
     }
 
     /// Returns the root page id that anchors this table tree.
-    pub(crate) fn root_page_id(&self) -> crate::relational::PageId {
+    pub(crate) fn root_page_id(&self) -> crate::PageId {
         self.inner.root_page_id()
     }
 
@@ -181,48 +179,40 @@ impl TableCursor {
     }
 
     /// Positions the cursor on the first table record.
-    pub fn seek_to_first(&mut self) -> StorageResult<bool> {
+    pub fn seek_to_first(&mut self) -> RelationalResult<bool> {
         self.inner.seek_to_first().map_err(Into::into)
     }
 
     /// Positions the cursor on the first table record whose key is greater than
     /// or equal to `table_key`.
-    pub fn seek_to_table_key(&mut self, table_key: TableKey) -> StorageResult<bool> {
+    pub fn seek_to_table_key(&mut self, table_key: TableKey) -> RelationalResult<bool> {
         self.inner.seek_to_key(&encode_table_key(table_key)).map_err(Into::into)
     }
 
     /// Positions the cursor on the first table record whose key is strictly
     /// greater than `table_key`.
-    pub fn seek_after_table_key(&mut self, table_key: TableKey) -> StorageResult<bool> {
+    pub fn seek_after_table_key(&mut self, table_key: TableKey) -> RelationalResult<bool> {
         self.inner.seek_after_key(&encode_table_key(table_key)).map_err(Into::into)
     }
 
     /// Reads the currently selected table record, if any.
-    pub fn current_record(&self) -> StorageResult<Option<TableRecord>> {
-        self.inner
-            .current()?
-            .map(|record| self.table_record_from_raw(record))
-            .transpose()
-            .map_err(Into::into)
+    pub fn current_record(&self) -> RelationalResult<Option<TableRecord>> {
+        self.inner.current()?.map(|record| self.table_record_from_raw(record)).transpose()
     }
 
     /// Advances to the next table record in table key order.
-    pub fn next_record(&mut self) -> StorageResult<Option<TableRecord>> {
-        self.inner
-            .next_record()?
-            .map(|record| self.table_record_from_raw(record))
-            .transpose()
-            .map_err(Into::into)
+    pub fn next_record(&mut self) -> RelationalResult<Option<TableRecord>> {
+        self.inner.next_record()?.map(|record| self.table_record_from_raw(record)).transpose()
     }
 
     /// Inserts a table record keyed by `table_key`.
-    pub fn insert(&mut self, table_key: TableKey, record: &[u8]) -> StorageResult<()> {
+    pub fn insert(&mut self, table_key: TableKey, record: &[u8]) -> RelationalResult<()> {
         self.inner.insert(&encode_table_key(table_key), record).map_err(Into::into)
     }
 
     /// Looks up a table record by table key.
     #[cfg(test)]
-    pub fn get(&mut self, table_key: TableKey) -> StorageResult<Option<OwnedTableRecord>> {
+    pub fn get(&mut self, table_key: TableKey) -> RelationalResult<Option<OwnedTableRecord>> {
         self.inner
             .get(&encode_table_key(table_key))?
             .map(|record| {
@@ -232,7 +222,7 @@ impl TableCursor {
     }
 
     /// Looks up a table record by table key without eagerly copying page-resident bytes.
-    pub fn get_record(&mut self, table_key: TableKey) -> StorageResult<Option<TableRecord>> {
+    pub fn get_record(&mut self, table_key: TableKey) -> RelationalResult<Option<TableRecord>> {
         self.inner
             .get(&encode_table_key(table_key))?
             .map(|record| self.table_record_from_raw(record))
@@ -240,16 +230,16 @@ impl TableCursor {
     }
 
     /// Replaces the encoded record bytes stored for an existing `table_key`.
-    pub fn update(&mut self, table_key: TableKey, record: &[u8]) -> StorageResult<()> {
+    pub fn update(&mut self, table_key: TableKey, record: &[u8]) -> RelationalResult<()> {
         self.inner.update(&encode_table_key(table_key), record).map_err(Into::into)
     }
 
     /// Deletes the table record identified by `table_key`.
-    pub fn delete(&mut self, table_key: TableKey) -> StorageResult<()> {
+    pub fn delete(&mut self, table_key: TableKey) -> RelationalResult<()> {
         self.inner.delete(&encode_table_key(table_key)).map_err(Into::into)
     }
 
-    fn table_record_from_raw(&self, raw: Record) -> StorageResult<TableRecord> {
+    fn table_record_from_raw(&self, raw: Record) -> RelationalResult<TableRecord> {
         let table_key = raw.with_key(decode_table_key)??;
         Ok(TableRecord { table_key, raw })
     }
@@ -262,7 +252,7 @@ impl IndexCursor {
     }
 
     /// Returns the root page id that anchors this index tree.
-    pub(crate) fn root_page_id(&self) -> crate::relational::PageId {
+    pub(crate) fn root_page_id(&self) -> crate::PageId {
         self.inner.root_page_id()
     }
 
@@ -272,34 +262,34 @@ impl IndexCursor {
     }
 
     /// Positions the cursor on the first index entry.
-    pub fn seek_to_first(&mut self) -> StorageResult<bool> {
+    pub fn seek_to_first(&mut self) -> RelationalResult<bool> {
         self.inner.seek_to_first().map_err(Into::into)
     }
 
     /// Positions the cursor on the first index entry whose key is greater than
     /// or equal to `key`.
-    pub fn seek_to_key(&mut self, key: &[u8]) -> StorageResult<bool> {
+    pub fn seek_to_key(&mut self, key: &[u8]) -> RelationalResult<bool> {
         self.inner.seek_to_key(key).map_err(Into::into)
     }
 
     /// Reads the currently selected index entry, if any.
-    pub fn current_entry(&self) -> StorageResult<Option<IndexEntry>> {
-        self.inner.current()?.map(IndexEntry::try_from).transpose().map_err(Into::into)
+    pub fn current_entry(&self) -> RelationalResult<Option<IndexEntry>> {
+        self.inner.current()?.map(IndexEntry::try_from).transpose()
     }
 
     /// Advances to the next index entry in key order.
-    pub fn next_entry(&mut self) -> StorageResult<Option<IndexEntry>> {
-        self.inner.next_record()?.map(IndexEntry::try_from).transpose().map_err(Into::into)
+    pub fn next_entry(&mut self) -> RelationalResult<Option<IndexEntry>> {
+        self.inner.next_record()?.map(IndexEntry::try_from).transpose()
     }
 
     /// Inserts an index entry from `key` to `table_key`.
-    pub fn insert(&mut self, key: &[u8], table_key: TableKey) -> StorageResult<()> {
+    pub fn insert(&mut self, key: &[u8], table_key: TableKey) -> RelationalResult<()> {
         self.inner.insert(key, &encode_index_table_key(table_key)).map_err(Into::into)
     }
 
     /// Looks up an index entry by key.
     #[cfg(test)]
-    pub fn get(&mut self, key: &[u8]) -> StorageResult<Option<OwnedIndexEntry>> {
+    pub fn get(&mut self, key: &[u8]) -> RelationalResult<Option<OwnedIndexEntry>> {
         self.inner
             .get(key)?
             .map(|record| IndexEntry::try_from(record).and_then(|entry| entry.to_owned_entry()))
@@ -309,19 +299,19 @@ impl IndexCursor {
     /// Looks up an index entry by key without eagerly copying page-resident bytes.
     #[cfg(test)]
     #[cfg_attr(all(test, loom), allow(dead_code))]
-    pub fn get_entry(&mut self, key: &[u8]) -> StorageResult<Option<IndexEntry>> {
-        self.inner.get(key)?.map(IndexEntry::try_from).transpose().map_err(Into::into)
+    pub fn get_entry(&mut self, key: &[u8]) -> RelationalResult<Option<IndexEntry>> {
+        self.inner.get(key)?.map(IndexEntry::try_from).transpose()
     }
 
     /// Replaces the table key stored for an existing index `key`.
     #[cfg(test)]
     #[cfg_attr(all(test, loom), allow(dead_code))]
-    pub fn update(&mut self, key: &[u8], table_key: TableKey) -> StorageResult<()> {
+    pub fn update(&mut self, key: &[u8], table_key: TableKey) -> RelationalResult<()> {
         self.inner.update(key, &encode_index_table_key(table_key)).map_err(Into::into)
     }
 
     /// Deletes the index entry identified by `key`.
-    pub fn delete(&mut self, key: &[u8]) -> StorageResult<()> {
+    pub fn delete(&mut self, key: &[u8]) -> RelationalResult<()> {
         self.inner.delete(key).map_err(Into::into)
     }
 }
@@ -333,19 +323,19 @@ impl TableRecord {
     }
 
     /// Executes `f` with a borrowed table record view.
-    pub fn with_view<R>(&self, f: impl FnOnce(TableRecordView<'_>) -> R) -> StorageResult<R> {
+    pub fn with_view<R>(&self, f: impl FnOnce(TableRecordView<'_>) -> R) -> RelationalResult<R> {
         self.raw
             .with_value(|record| f(TableRecordView::new(self.table_key, record)))
             .map_err(Into::into)
     }
 
     /// Executes `f` with a borrowed view of the encoded table record bytes.
-    pub fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
+    pub fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> RelationalResult<R> {
         self.raw.with_value(f).map_err(Into::into)
     }
 
     /// Returns a stable, owned snapshot of this table record.
-    pub fn to_owned_record(&self) -> StorageResult<OwnedTableRecord> {
+    pub fn to_owned_record(&self) -> RelationalResult<OwnedTableRecord> {
         self.raw
             .with_value(|record| OwnedTableRecord {
                 table_key: self.table_key,
@@ -362,17 +352,17 @@ impl IndexEntry {
     }
 
     /// Executes `f` with a borrowed secondary-index entry view.
-    pub fn with_view<R>(&self, f: impl FnOnce(IndexEntryView<'_>) -> R) -> StorageResult<R> {
+    pub fn with_view<R>(&self, f: impl FnOnce(IndexEntryView<'_>) -> R) -> RelationalResult<R> {
         self.raw.with_key(|key| f(IndexEntryView::new(key, self.table_key))).map_err(Into::into)
     }
 
     /// Executes `f` with a borrowed view of the encoded secondary-index key bytes.
-    pub fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
+    pub fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> RelationalResult<R> {
         self.raw.with_key(f).map_err(Into::into)
     }
 
     /// Returns a stable, owned snapshot of this index entry.
-    pub fn to_owned_entry(&self) -> StorageResult<OwnedIndexEntry> {
+    pub fn to_owned_entry(&self) -> RelationalResult<OwnedIndexEntry> {
         self.raw.with_key_value(|key, value| {
             Ok(OwnedIndexEntry { key: key.into(), table_key: decode_index_table_key(value)? })
         })?
@@ -416,7 +406,7 @@ impl fmt::Debug for IndexEntry {
 }
 
 impl TryFrom<Record> for IndexEntry {
-    type Error = crate::relational::error::StorageError;
+    type Error = crate::error::RelationalError;
 
     fn try_from(raw: Record) -> Result<Self, Self::Error> {
         let table_key = raw.with_value(decode_index_table_key)??;
@@ -428,7 +418,7 @@ impl TryFrom<Record> for IndexEntry {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::relational::error::{ConstraintError, InvalidArgumentError, StorageError};
+    use crate::error::{ConstraintError, InvalidArgumentError, RelationalError};
     use crate::storage::{Storage, StorageOptions};
     use tempfile::NamedTempFile;
     const PAGE_SIZE: usize = 4096;
@@ -588,14 +578,14 @@ mod tests {
         table.insert(1, b"one").unwrap();
         assert!(matches!(
             table.insert(1, b"again"),
-            Err(StorageError::Constraint(ConstraintError::DuplicateKey))
+            Err(RelationalError::Constraint(ConstraintError::DuplicateKey))
         ));
 
         let mut index = temp_index_cursor(8);
         index.insert(b"key", 1).unwrap();
         assert!(matches!(
             index.insert(b"key", 2),
-            Err(StorageError::Constraint(ConstraintError::DuplicateKey))
+            Err(RelationalError::Constraint(ConstraintError::DuplicateKey))
         ));
     }
 
@@ -604,21 +594,21 @@ mod tests {
         let mut table = temp_table_cursor(8);
         assert!(matches!(
             table.update(404, b"missing"),
-            Err(StorageError::InvalidArgument(InvalidArgumentError::KeyNotFound))
+            Err(RelationalError::InvalidArgument(InvalidArgumentError::KeyNotFound))
         ));
         assert!(matches!(
             table.delete(404),
-            Err(StorageError::InvalidArgument(InvalidArgumentError::KeyNotFound))
+            Err(RelationalError::InvalidArgument(InvalidArgumentError::KeyNotFound))
         ));
 
         let mut index = temp_index_cursor(8);
         assert!(matches!(
             index.update(b"missing", 404),
-            Err(StorageError::InvalidArgument(InvalidArgumentError::KeyNotFound))
+            Err(RelationalError::InvalidArgument(InvalidArgumentError::KeyNotFound))
         ));
         assert!(matches!(
             index.delete(b"missing"),
-            Err(StorageError::InvalidArgument(InvalidArgumentError::KeyNotFound))
+            Err(RelationalError::InvalidArgument(InvalidArgumentError::KeyNotFound))
         ));
     }
 

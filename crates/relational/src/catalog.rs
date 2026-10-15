@@ -2,12 +2,12 @@
 
 use std::fmt;
 
-use crate::relational::CatalogId;
-use crate::relational::PageId;
-use crate::relational::Tuple;
-use crate::relational::TupleRef;
-use crate::relational::Value;
-use crate::relational::ValueRef;
+use crate::CatalogId;
+use crate::PageId;
+use crate::Tuple;
+use crate::TupleRef;
+use crate::Value;
+use crate::ValueRef;
 
 /// Root page id of the `sys_tables` catalog table.
 pub const SYS_TABLES_ROOT_PAGE_ID: PageId = 1;
@@ -122,8 +122,6 @@ pub struct TableSchema {
     pub table_id: CatalogId,
     /// Table name.
     pub name: String,
-    /// Root page id of the table's B+-tree.
-    pub root_page_id: PageId,
     /// Schema of table rows stored in the tree values.
     pub row: TupleSchema,
 }
@@ -146,8 +144,6 @@ pub struct IndexSchema {
     pub name: String,
     /// Table object id that this index belongs to.
     pub table_id: CatalogId,
-    /// Root page id of the index B+-tree.
-    pub root_page_id: PageId,
     /// Whether duplicate key tuples are rejected.
     pub unique: bool,
     /// Ordered key columns stored in the index.
@@ -313,12 +309,8 @@ impl std::error::Error for CatalogError {}
 
 impl TableSchema {
     /// Returns the `sys_tables` row describing this table.
-    pub fn catalog_row(&self) -> TableCatalogRow {
-        TableCatalogRow {
-            table_id: self.table_id,
-            name: self.name.clone(),
-            root_page_id: self.root_page_id,
-        }
+    pub(crate) fn catalog_row(&self, root_page_id: PageId) -> TableCatalogRow {
+        TableCatalogRow { table_id: self.table_id, name: self.name.clone(), root_page_id }
     }
 }
 
@@ -329,12 +321,12 @@ impl IndexSchema {
     }
 
     /// Returns the `sys_indexes` row describing this index.
-    pub fn catalog_row(&self) -> IndexCatalogRow {
+    pub(crate) fn catalog_row(&self, root_page_id: PageId) -> IndexCatalogRow {
         IndexCatalogRow {
             index_id: self.index_id,
             name: self.name.clone(),
             table_id: self.table_id,
-            root_page_id: self.root_page_id,
+            root_page_id,
             unique: self.unique,
         }
     }

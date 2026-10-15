@@ -1,8 +1,8 @@
 //! Transaction lifetime and statement atomicity, independent of SQL.
-use crate::relational::error::{InternalError, InvariantViolation};
-use crate::relational::transaction::Transaction;
-use crate::relational::{
-    Database, LockMode, StatementTransactionMode, StorageError, StorageResult, TableId, TxnId,
+use crate::error::{InternalError, InvariantViolation};
+use crate::transaction::Transaction;
+use crate::{
+    Database, LockMode, RelationalError, RelationalResult, StatementTransactionMode, TableId, TxnId,
 };
 
 /// Owns a physical transaction and its table locks. Drop attempts rollback;
@@ -27,7 +27,7 @@ impl<'db> ActiveTransaction<'db> {
     /// Table locks survive successful and failed statements until transaction end.
     /// Lock-admission failures abort the transaction. Scans borrow the scoped access
     /// handle, so no page-backed scan can escape this callback.
-    pub fn statement<T, E: From<StorageError>>(
+    pub fn statement<T, E: From<RelationalError>>(
         &mut self,
         mode: StatementTransactionMode,
         locks: &[(TableId, LockMode)],
@@ -53,7 +53,7 @@ impl<'db> ActiveTransaction<'db> {
         drop(access);
         let result = match result {
             Ok(_) if self.database.transaction_is_poisoned(self.id)? => {
-                Err(StorageError::Internal(InternalError::InvariantViolation(
+                Err(RelationalError::Internal(InternalError::InvariantViolation(
                     InvariantViolation::TransactionPoisoned { txn_id: self.id },
                 ))
                 .into())
@@ -65,7 +65,7 @@ impl<'db> ActiveTransaction<'db> {
         }
         result
     }
-    pub fn commit(&mut self) -> StorageResult<()> {
+    pub fn commit(&mut self) -> RelationalResult<()> {
         if !self.active {
             return Err(inactive());
         }
@@ -73,7 +73,7 @@ impl<'db> ActiveTransaction<'db> {
         self.active = self.database.transaction_is_active(self.id)?;
         result
     }
-    pub fn rollback(&mut self) -> StorageResult<()> {
+    pub fn rollback(&mut self) -> RelationalResult<()> {
         if !self.active {
             return Err(inactive());
         }
@@ -82,7 +82,7 @@ impl<'db> ActiveTransaction<'db> {
         result
     }
     /// Rolls back unfinished work, reporting cleanup failure without a Drop retry.
-    pub fn close(mut self) -> StorageResult<()> {
+    pub fn close(mut self) -> RelationalResult<()> {
         let result = if self.active { self.database.rollback_transaction(self.id) } else { Ok(()) };
         self.active = false;
         result
@@ -95,8 +95,8 @@ impl Drop for ActiveTransaction<'_> {
         }
     }
 }
-fn inactive() -> StorageError {
-    StorageError::Internal(InternalError::InvariantViolation(
+fn inactive() -> RelationalError {
+    RelationalError::Internal(InternalError::InvariantViolation(
         InvariantViolation::NoActiveTransaction,
     ))
 }

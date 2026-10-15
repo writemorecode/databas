@@ -1,11 +1,9 @@
 //! Physical query execution.
 //!
-//! The executor consumes [`PhysicalPlan`] trees produced by the planner and
-//! turns them into either a stream of executor rows or an immediate side-effect
-//! result such as rows affected or schema changed. Row-producing
-//! operators are deliberately iterator-based: scans, filters, projections,
-//! limits, and offsets do their work as the caller pulls rows from the returned
-//! [`RowStream`].
+//! The executor consumes [`PhysicalPlan`] trees and returns owned query results
+//! or immediate mutation results. Operators use iterators internally but
+//! materialize rows before returning, so result consumption never retains
+//! transaction locks or storage page pins.
 //!
 //! This module is also responsible for evaluating executable scalar expressions
 //! against slot-addressed row values and shaping inserted values into the target

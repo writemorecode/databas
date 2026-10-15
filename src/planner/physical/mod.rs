@@ -241,10 +241,8 @@ pub enum PhysicalPlanNode {
 
 /// Metadata needed to scan a table through a secondary index.
 ///
-/// Secondary indexes store encoded index keys, while diagnostics and `EXPLAIN`
-/// output should stay close to SQL values. This struct therefore keeps both the
-/// human-readable [`IndexValueRange`] and the encoded [`IndexKeyRange`] that the
-/// storage layer scans.
+/// Carries a logical value range. The relational layer encodes its bounds when
+/// opening the scan, keeping physical index layout out of query planning.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SecondaryIndexScanPlan {
     /// Query-local identity of the scanned table occurrence.

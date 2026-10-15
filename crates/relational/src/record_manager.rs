@@ -1,27 +1,26 @@
-use crate::relational::CorruptionComponent;
-use crate::relational::CorruptionError;
-use crate::relational::CorruptionKind;
-use crate::relational::DataType;
-use crate::relational::IndexEntry;
-use crate::relational::IndexKeyRange;
-use crate::relational::IndexSchema;
-use crate::relational::OwnedTableRecord;
-use crate::relational::TableKey;
-use crate::relational::TableKeyBound;
-use crate::relational::TableKeyRange;
-use crate::relational::TableRecord;
-use crate::relational::TableSchema;
-use crate::relational::Tuple;
-use crate::relational::TxnId;
-use crate::relational::Value;
-use crate::relational::catalog_manager::CatalogManager;
-use crate::relational::cursor::IndexCursor;
-use crate::relational::cursor::TableCursor;
-use crate::relational::error::ConstraintError;
-use crate::relational::error::InvalidArgumentError;
-use crate::relational::error::StorageError;
-use crate::relational::error::StorageResult;
-use crate::relational::index_manager;
+use crate::CorruptionComponent;
+use crate::CorruptionError;
+use crate::CorruptionKind;
+use crate::DataType;
+use crate::IndexEntry;
+use crate::IndexKeyRange;
+use crate::IndexSchema;
+use crate::OwnedTableRecord;
+use crate::TableKey;
+use crate::TableKeyBound;
+use crate::TableKeyRange;
+use crate::TableRecord;
+use crate::TableSchema;
+use crate::Tuple;
+use crate::Value;
+use crate::catalog_manager::CatalogManager;
+use crate::cursor::IndexCursor;
+use crate::cursor::TableCursor;
+use crate::error::ConstraintError;
+use crate::error::InvalidArgumentError;
+use crate::error::RelationalError;
+use crate::error::RelationalResult;
+use crate::index_manager;
 
 /// Compatibility wrapper retained for focused relational tests.
 #[cfg(test)]
@@ -50,21 +49,16 @@ pub struct IndexScan {
     done: bool,
 }
 
-pub fn scan_table(
-    catalog: &CatalogManager,
-    txn_id: Option<TxnId>,
-    table: &TableSchema,
-) -> StorageResult<TableScan> {
-    scan_table_range(catalog, txn_id, table, TableKeyRange::unbounded())
+pub fn scan_table(catalog: &CatalogManager, table: &TableSchema) -> RelationalResult<TableScan> {
+    scan_table_range(catalog, table, TableKeyRange::unbounded())
 }
 
 pub fn scan_table_range(
     catalog: &CatalogManager,
-    txn_id: Option<TxnId>,
     table: &TableSchema,
     range: TableKeyRange,
-) -> StorageResult<TableScan> {
-    let cursor = table_cursor(catalog, txn_id, &table.name)?;
+) -> RelationalResult<TableScan> {
+    let cursor = table_cursor(catalog, &table.name)?;
     let observed_mutation_epoch = cursor.mutation_epoch();
     Ok(TableScan {
         cursor,
@@ -78,15 +72,14 @@ pub fn scan_table_range(
 
 pub fn scan_index(
     catalog: &CatalogManager,
-    txn_id: Option<TxnId>,
     table: &TableSchema,
     index: &IndexSchema,
     key_range: IndexKeyRange,
-) -> StorageResult<IndexScan> {
+) -> RelationalResult<IndexScan> {
     Ok(IndexScan {
         table_name: table.name.clone(),
-        table_cursor: table_cursor(catalog, txn_id, &table.name)?,
-        index_cursor: index_cursor(catalog, txn_id, &index.name)?,
+        table_cursor: table_cursor(catalog, &table.name)?,
+        index_cursor: index_cursor(catalog, &index.name)?,
         key_range,
         initialized: false,
         done: false,
@@ -95,44 +88,41 @@ pub fn scan_index(
 
 pub fn insert_table_row(
     catalog: &CatalogManager,
-    txn_id: Option<TxnId>,
     table: &TableSchema,
     values: Vec<Value>,
-) -> StorageResult<OwnedTableRecord> {
+) -> RelationalResult<OwnedTableRecord> {
     validate_table_row(table, &values)?;
 
     let table_key = table_key_from_values(table, &values)?;
     let record = Tuple::new(values).to_bytes()?;
-    let mut table_cursor = table_cursor(catalog, txn_id, &table.name)?;
+    let mut table_cursor = table_cursor(catalog, &table.name)?;
     table_cursor.insert(table_key, &record)?;
 
     let record = OwnedTableRecord { table_key, record: record.into_boxed_slice() };
-    index_manager::insert_index_entries(catalog, txn_id, table, &record)?;
+    index_manager::insert_index_entries(catalog, table, &record)?;
     Ok(record)
 }
 
 pub fn delete_table_row(
     catalog: &CatalogManager,
-    txn_id: Option<TxnId>,
     table: &TableSchema,
     record: &OwnedTableRecord,
-) -> StorageResult<()> {
-    index_manager::delete_index_entries(catalog, txn_id, table, record)?;
-    let mut table_cursor = table_cursor(catalog, txn_id, &table.name)?;
+) -> RelationalResult<()> {
+    index_manager::delete_index_entries(catalog, table, record)?;
+    let mut table_cursor = table_cursor(catalog, &table.name)?;
     table_cursor.delete(record.table_key)
 }
 
 pub fn update_table_row(
     catalog: &CatalogManager,
-    txn_id: Option<TxnId>,
     table: &TableSchema,
     record: &OwnedTableRecord,
     values: Vec<Value>,
-) -> StorageResult<OwnedTableRecord> {
+) -> RelationalResult<OwnedTableRecord> {
     validate_table_row(table, &values)?;
     let updated_table_key = table_key_from_values(table, &values)?;
     if updated_table_key != record.table_key {
-        return Err(StorageError::InvalidArgument(InvalidArgumentError::PrimaryKeyUpdate {
+        return Err(RelationalError::InvalidArgument(InvalidArgumentError::PrimaryKeyUpdate {
             table: table.name.clone(),
             column: table.row.columns[0].name.clone(),
         }));
@@ -142,34 +132,20 @@ pub fn update_table_row(
     let updated =
         OwnedTableRecord { table_key: record.table_key, record: updated.into_boxed_slice() };
 
-    index_manager::delete_index_entries(catalog, txn_id, table, record)?;
-    let mut table_cursor = table_cursor(catalog, txn_id, &table.name)?;
+    index_manager::delete_index_entries(catalog, table, record)?;
+    let mut table_cursor = table_cursor(catalog, &table.name)?;
     table_cursor.update(record.table_key, &updated.record)?;
-    index_manager::insert_index_entries(catalog, txn_id, table, &updated)?;
+    index_manager::insert_index_entries(catalog, table, &updated)?;
 
     Ok(updated)
 }
 
-fn table_cursor(
-    catalog: &CatalogManager,
-    txn_id: Option<TxnId>,
-    name: &str,
-) -> StorageResult<TableCursor> {
-    match txn_id {
-        Some(txn_id) => catalog.transaction_table_cursor_by_name(txn_id, name),
-        None => catalog.table_cursor_by_name(name),
-    }
+fn table_cursor(catalog: &CatalogManager, name: &str) -> RelationalResult<TableCursor> {
+    catalog.table_cursor_by_name(name)
 }
 
-fn index_cursor(
-    catalog: &CatalogManager,
-    txn_id: Option<TxnId>,
-    name: &str,
-) -> StorageResult<IndexCursor> {
-    match txn_id {
-        Some(txn_id) => catalog.transaction_index_cursor_by_name(txn_id, name),
-        None => catalog.index_cursor_by_name(name),
-    }
+fn index_cursor(catalog: &CatalogManager, name: &str) -> RelationalResult<IndexCursor> {
+    catalog.index_cursor_by_name(name)
 }
 
 #[cfg(test)]
@@ -177,42 +153,42 @@ impl RecordManager {
     pub(crate) fn new(catalog: CatalogManager) -> Self {
         Self { catalog }
     }
-    pub(crate) fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
-        scan_table(&self.catalog, None, table)
+    pub(crate) fn scan_table(&self, table: &TableSchema) -> RelationalResult<TableScan> {
+        scan_table(&self.catalog, table)
     }
     pub(crate) fn scan_table_range(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
-    ) -> StorageResult<TableScan> {
-        scan_table_range(&self.catalog, None, table, range)
+    ) -> RelationalResult<TableScan> {
+        scan_table_range(&self.catalog, table, range)
     }
     pub(crate) fn insert_table_row(
         &self,
         table: &TableSchema,
         values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord> {
-        insert_table_row(&self.catalog, None, table, values)
+    ) -> RelationalResult<OwnedTableRecord> {
+        insert_table_row(&self.catalog, table, values)
     }
     pub(crate) fn delete_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,
-    ) -> StorageResult<()> {
-        delete_table_row(&self.catalog, None, table, record)
+    ) -> RelationalResult<()> {
+        delete_table_row(&self.catalog, table, record)
     }
     pub(crate) fn update_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,
         values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord> {
-        update_table_row(&self.catalog, None, table, record, values)
+    ) -> RelationalResult<OwnedTableRecord> {
+        update_table_row(&self.catalog, table, record, values)
     }
 }
 
 impl Iterator for IndexScan {
-    type Item = StorageResult<TableRecord>;
+    type Item = RelationalResult<TableRecord>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -282,7 +258,7 @@ impl Iterator for IndexScan {
 }
 
 impl IndexScan {
-    fn first_entry(&mut self) -> StorageResult<Option<IndexEntry>> {
+    fn first_entry(&mut self) -> RelationalResult<Option<IndexEntry>> {
         match self.key_range.lower.as_ref() {
             Some(lower) => {
                 if self.index_cursor.seek_to_key(lower.key())? {
@@ -303,7 +279,7 @@ impl IndexScan {
 }
 
 impl Iterator for TableScan {
-    type Item = StorageResult<TableRecord>;
+    type Item = RelationalResult<TableRecord>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -345,7 +321,7 @@ impl Iterator for TableScan {
 }
 
 impl TableScan {
-    fn resume_after_mutation(&mut self) -> StorageResult<Option<TableRecord>> {
+    fn resume_after_mutation(&mut self) -> RelationalResult<Option<TableRecord>> {
         let Some(last_table_key) = self.last_table_key else {
             return self.first_record();
         };
@@ -356,7 +332,7 @@ impl TableScan {
         }
     }
 
-    fn first_record(&mut self) -> StorageResult<Option<TableRecord>> {
+    fn first_record(&mut self) -> RelationalResult<Option<TableRecord>> {
         match range_start(self.range.lower) {
             RangeStart::At(start_key) => {
                 if self.cursor.seek_to_table_key(start_key)? {
@@ -393,9 +369,9 @@ fn range_start(lower: Option<TableKeyBound>) -> RangeStart {
     }
 }
 
-pub fn validate_table_row(table: &TableSchema, values: &[Value]) -> StorageResult<()> {
+pub fn validate_table_row(table: &TableSchema, values: &[Value]) -> RelationalResult<()> {
     if values.len() != table.row.columns.len() {
-        return Err(StorageError::InvalidArgument(InvalidArgumentError::TableRowValueCount {
+        return Err(RelationalError::InvalidArgument(InvalidArgumentError::TableRowValueCount {
             table: table.name.clone(),
             columns: table.row.columns.len(),
             values: values.len(),
@@ -405,7 +381,7 @@ pub fn validate_table_row(table: &TableSchema, values: &[Value]) -> StorageResul
     for (column, value) in table.row.columns.iter().zip(values.iter()) {
         if matches!(value, Value::Null) {
             if !column.nullable || column.primary_key {
-                return Err(StorageError::Constraint(ConstraintError::NullValue {
+                return Err(RelationalError::Constraint(ConstraintError::NullValue {
                     column: column.name.clone(),
                 }));
             }
@@ -413,7 +389,7 @@ pub fn validate_table_row(table: &TableSchema, values: &[Value]) -> StorageResul
         }
 
         if !value_matches_data_type(value, column.data_type) {
-            return Err(StorageError::Constraint(ConstraintError::ColumnTypeMismatch {
+            return Err(RelationalError::Constraint(ConstraintError::ColumnTypeMismatch {
                 column: column.name.clone(),
                 expected: column.data_type,
                 actual: value_type_name(value),
@@ -424,18 +400,18 @@ pub fn validate_table_row(table: &TableSchema, values: &[Value]) -> StorageResul
     Ok(())
 }
 
-pub fn table_key_from_values(table: &TableSchema, values: &[Value]) -> StorageResult<TableKey> {
+pub fn table_key_from_values(table: &TableSchema, values: &[Value]) -> RelationalResult<TableKey> {
     match values.first() {
         Some(Value::Integer(value)) => Ok(*value),
-        Some(Value::Null) => Err(StorageError::Constraint(ConstraintError::NullValue {
+        Some(Value::Null) => Err(RelationalError::Constraint(ConstraintError::NullValue {
             column: table.row.columns[0].name.clone(),
         })),
-        Some(value) => Err(StorageError::Constraint(ConstraintError::ColumnTypeMismatch {
+        Some(value) => Err(RelationalError::Constraint(ConstraintError::ColumnTypeMismatch {
             column: table.row.columns[0].name.clone(),
             expected: DataType::Integer,
             actual: value_type_name(value),
         })),
-        None => Err(StorageError::InvalidArgument(InvalidArgumentError::TableRowValueCount {
+        None => Err(RelationalError::InvalidArgument(InvalidArgumentError::TableRowValueCount {
             table: table.name.clone(),
             columns: table.row.columns.len(),
             values: 0,
@@ -465,8 +441,8 @@ fn value_type_name(value: &Value) -> &'static str {
     }
 }
 
-fn invalid_index_entry(table_name: &str, table_key: TableKey, reason: &str) -> StorageError {
-    StorageError::Corruption(CorruptionError {
+fn invalid_index_entry(table_name: &str, table_key: TableKey, reason: &str) -> RelationalError {
+    RelationalError::Corruption(CorruptionError {
         component: CorruptionComponent::Catalog,
         page_id: None,
         kind: CorruptionKind::InvalidTableRecord {
@@ -482,17 +458,19 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::relational::ColumnSchema;
-    use crate::relational::TableKeyBound;
-    use crate::relational::TableKeyRange;
-    use crate::relational::TupleSchema;
-    use crate::relational::catalog_manager::CatalogManager;
-    use crate::relational::cursor::IndexCursor;
-    use crate::relational::cursor::encode_index_entry_key;
-    use crate::relational::index_manager::IndexManager;
+    use crate::ColumnSchema;
+    use crate::TableKeyBound;
+    use crate::TableKeyRange;
+    use crate::TupleSchema;
+    use crate::catalog_manager::CatalogManager;
+    use crate::cursor::IndexCursor;
+    use crate::cursor::encode_index_entry_key;
+    use crate::index_manager::IndexManager;
     use crate::storage::Storage;
 
-    fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, RecordManager)> {
+    fn open(
+        path: impl AsRef<std::path::Path>,
+    ) -> RelationalResult<(CatalogManager, RecordManager)> {
         let catalog = CatalogManager::from_storage(Storage::open_or_create(path)?)?;
         let records = RecordManager::new(catalog.clone());
         Ok((catalog, records))
@@ -762,7 +740,7 @@ mod tests {
         let rows = records
             .scan_table_range(&table, range)
             .unwrap()
-            .collect::<StorageResult<Vec<_>>>()
+            .collect::<RelationalResult<Vec<_>>>()
             .unwrap();
 
         assert!(rows.is_empty());
@@ -873,7 +851,7 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(matches!(error, StorageError::Constraint(ConstraintError::DuplicateKey)));
+        assert!(matches!(error, RelationalError::Constraint(ConstraintError::DuplicateKey)));
     }
 
     #[test]
@@ -898,7 +876,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            StorageError::InvalidArgument(InvalidArgumentError::PrimaryKeyUpdate {
+            RelationalError::InvalidArgument(InvalidArgumentError::PrimaryKeyUpdate {
                 table,
                 column,
             }) if table == "users" && column == "id"
@@ -923,7 +901,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            StorageError::Constraint(ConstraintError::NullValue { column }) if column == "active"
+            RelationalError::Constraint(ConstraintError::NullValue { column }) if column == "active"
         ));
         let mut users = catalog.table_cursor_by_name("users").unwrap();
         assert!(users.get(1).unwrap().is_none());
@@ -948,7 +926,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            StorageError::Constraint(ConstraintError::ColumnTypeMismatch {
+            RelationalError::Constraint(ConstraintError::ColumnTypeMismatch {
                 column,
                 expected: DataType::Boolean,
                 actual: "text",

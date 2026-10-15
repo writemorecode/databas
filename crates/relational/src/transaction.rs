@@ -1,23 +1,23 @@
 //! Scoped relational operations. Scans cannot outlive the statement access handle.
 
-use crate::relational::IndexSchema;
-use crate::relational::IndexValueRange;
-use crate::relational::OwnedTableRecord;
-use crate::relational::TableKeyRange;
-use crate::relational::TableSchema;
-use crate::relational::TupleSchema;
-use crate::relational::Value;
-use crate::relational::access::RelationalAccess;
-use crate::relational::error::StorageError;
-use crate::relational::error::StorageResult;
-use crate::relational::index_manager;
-use crate::relational::lock_manager::LockError;
-use crate::relational::lock_manager::LockMode;
-use crate::relational::lock_manager::TableId;
-use crate::relational::lock_manager::TableLease;
-use crate::relational::record_manager;
-use crate::relational::record_manager::IndexScan;
-use crate::relational::record_manager::TableScan;
+use crate::IndexSchema;
+use crate::IndexValueRange;
+use crate::OwnedTableRecord;
+use crate::TableKeyRange;
+use crate::TableSchema;
+use crate::TupleSchema;
+use crate::Value;
+use crate::access::RelationalAccess;
+use crate::error::RelationalError;
+use crate::error::RelationalResult;
+use crate::index_manager;
+use crate::lock_manager::LockError;
+use crate::lock_manager::LockMode;
+use crate::lock_manager::TableId;
+use crate::lock_manager::TableLease;
+use crate::record_manager;
+use crate::record_manager::IndexScan;
+use crate::record_manager::TableScan;
 use crate::storage::TxnId;
 
 use super::Database;
@@ -35,9 +35,9 @@ pub struct OwnedScan<'txn, I>(I, std::marker::PhantomData<&'txn ()>);
 
 impl<I> Iterator for OwnedScan<'_, I>
 where
-    I: Iterator<Item = StorageResult<crate::relational::TableRecord>>,
+    I: Iterator<Item = RelationalResult<crate::TableRecord>>,
 {
-    type Item = StorageResult<OwnedTableRecord>;
+    type Item = RelationalResult<OwnedTableRecord>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next().map(|row| row?.to_owned_record())
@@ -54,7 +54,7 @@ impl RelationalAccess for Transaction<'_> {
     where
         Self: 'txn;
 
-    fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
+    fn create_table(&self, name: &str, row: TupleSchema) -> RelationalResult<TableSchema> {
         Transaction::create_table(self, name, row)
     }
 
@@ -63,11 +63,11 @@ impl RelationalAccess for Transaction<'_> {
         name: &str,
         table_name: &str,
         columns: &[&str],
-    ) -> StorageResult<IndexSchema> {
+    ) -> RelationalResult<IndexSchema> {
         Transaction::create_index(self, name, table_name, columns)
     }
 
-    fn scan_table(&self, table: &TableSchema) -> StorageResult<Self::TableScan<'_>> {
+    fn scan_table(&self, table: &TableSchema) -> RelationalResult<Self::TableScan<'_>> {
         Ok(OwnedScan(Transaction::scan_table(self, table)?, std::marker::PhantomData))
     }
 
@@ -75,7 +75,7 @@ impl RelationalAccess for Transaction<'_> {
         &self,
         table: &TableSchema,
         range: TableKeyRange,
-    ) -> StorageResult<Self::TableScan<'_>> {
+    ) -> RelationalResult<Self::TableScan<'_>> {
         Ok(OwnedScan(Transaction::scan_table_range(self, table, range)?, std::marker::PhantomData))
     }
 
@@ -84,15 +84,18 @@ impl RelationalAccess for Transaction<'_> {
         table: &TableSchema,
         index: &IndexSchema,
         range: IndexValueRange,
-    ) -> StorageResult<Self::IndexScan<'_>> {
-        Ok(OwnedScan(Transaction::scan_index(self, table, index, range)?, std::marker::PhantomData))
+    ) -> RelationalResult<Self::IndexScan<'_>> {
+        Ok(OwnedScan(
+            Transaction::scan_index(self, table, index, &range)?,
+            std::marker::PhantomData,
+        ))
     }
 
     fn insert_table_row(
         &self,
         table: &TableSchema,
         values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord> {
+    ) -> RelationalResult<OwnedTableRecord> {
         Transaction::insert_table_row(self, table, values)
     }
 
@@ -101,7 +104,7 @@ impl RelationalAccess for Transaction<'_> {
         table: &TableSchema,
         record: &OwnedTableRecord,
         values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord> {
+    ) -> RelationalResult<OwnedTableRecord> {
         Transaction::update_table_row(self, table, record, values)
     }
 
@@ -109,7 +112,7 @@ impl RelationalAccess for Transaction<'_> {
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,
-    ) -> StorageResult<()> {
+    ) -> RelationalResult<()> {
         Transaction::delete_table_row(self, table, record)
     }
 }
@@ -124,27 +127,31 @@ impl<'db> Transaction<'db> {
         Self { database, txn_id, leases, ddl }
     }
 
-    fn require_ddl(&self) -> StorageResult<()> {
+    fn require_ddl(&self) -> RelationalResult<()> {
         if self.ddl {
             Ok(())
         } else {
-            Err(StorageError::InvalidArgument(crate::relational::InvalidArgumentError::DdlRequired))
+            Err(RelationalError::InvalidArgument(crate::InvalidArgumentError::DdlRequired))
         }
     }
 
-    fn require_table(&self, table: &TableSchema, mode: LockMode) -> StorageResult<()> {
+    fn require_table(&self, table: &TableSchema, mode: LockMode) -> RelationalResult<()> {
         let table_id = TableId::from(table.table_id);
         if self.leases.iter().any(|lease| lease.authorize_mode(self.txn_id, table_id, mode).is_ok())
         {
             Ok(())
         } else {
-            Err(StorageError::Lock(LockError::LeaseMismatch { txn_id: self.txn_id, table_id }))
+            Err(RelationalError::Lock(LockError::LeaseMismatch { txn_id: self.txn_id, table_id }))
         }
     }
 }
 
 impl Transaction<'_> {
-    pub(crate) fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
+    pub(crate) fn create_table(
+        &self,
+        name: &str,
+        row: TupleSchema,
+    ) -> RelationalResult<TableSchema> {
         self.require_ddl()?;
         self.database.catalog().for_transaction(self.txn_id).create_table(name, row)
     }
@@ -154,7 +161,7 @@ impl Transaction<'_> {
         name: &str,
         table_name: &str,
         columns: &[&str],
-    ) -> StorageResult<IndexSchema> {
+    ) -> RelationalResult<IndexSchema> {
         self.require_ddl()?;
         index_manager::create_index(
             &self.database.catalog().for_transaction(self.txn_id),
@@ -166,30 +173,33 @@ impl Transaction<'_> {
 }
 
 impl Transaction<'_> {
-    pub(crate) fn scan_table(&self, table: &TableSchema) -> StorageResult<TableScan> {
+    pub(crate) fn scan_table(&self, table: &TableSchema) -> RelationalResult<TableScan> {
         self.require_table(table, LockMode::Shared)?;
-        record_manager::scan_table(self.database.catalog(), Some(self.txn_id), table)
+        record_manager::scan_table(&self.database.catalog().for_transaction(self.txn_id), table)
     }
 
     pub(crate) fn scan_table_range(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
-    ) -> StorageResult<TableScan> {
+    ) -> RelationalResult<TableScan> {
         self.require_table(table, LockMode::Shared)?;
-        record_manager::scan_table_range(self.database.catalog(), Some(self.txn_id), table, range)
+        record_manager::scan_table_range(
+            &self.database.catalog().for_transaction(self.txn_id),
+            table,
+            range,
+        )
     }
 
     pub(crate) fn scan_index(
         &self,
         table: &TableSchema,
         index: &IndexSchema,
-        key_range: IndexValueRange,
-    ) -> StorageResult<IndexScan> {
+        key_range: &IndexValueRange,
+    ) -> RelationalResult<IndexScan> {
         self.require_table(table, LockMode::Shared)?;
         record_manager::scan_index(
-            self.database.catalog(),
-            Some(self.txn_id),
+            &self.database.catalog().for_transaction(self.txn_id),
             table,
             index,
             key_range.encode()?,
@@ -200,18 +210,26 @@ impl Transaction<'_> {
         &self,
         table: &TableSchema,
         values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord> {
+    ) -> RelationalResult<OwnedTableRecord> {
         self.require_table(table, LockMode::Exclusive)?;
-        record_manager::insert_table_row(self.database.catalog(), Some(self.txn_id), table, values)
+        record_manager::insert_table_row(
+            &self.database.catalog().for_transaction(self.txn_id),
+            table,
+            values,
+        )
     }
 
     pub(crate) fn delete_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,
-    ) -> StorageResult<()> {
+    ) -> RelationalResult<()> {
         self.require_table(table, LockMode::Exclusive)?;
-        record_manager::delete_table_row(self.database.catalog(), Some(self.txn_id), table, record)
+        record_manager::delete_table_row(
+            &self.database.catalog().for_transaction(self.txn_id),
+            table,
+            record,
+        )
     }
 
     pub(crate) fn update_table_row(
@@ -219,11 +237,10 @@ impl Transaction<'_> {
         table: &TableSchema,
         record: &OwnedTableRecord,
         values: Vec<Value>,
-    ) -> StorageResult<OwnedTableRecord> {
+    ) -> RelationalResult<OwnedTableRecord> {
         self.require_table(table, LockMode::Exclusive)?;
         record_manager::update_table_row(
-            self.database.catalog(),
-            Some(self.txn_id),
+            &self.database.catalog().for_transaction(self.txn_id),
             table,
             record,
             values,
