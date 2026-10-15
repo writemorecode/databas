@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::{
     core::{
-        ColumnSchema, TableSchema, TupleSchema, Value,
+        ColumnSchema, DataType, TableSchema, TupleSchema, Value,
         access::CatalogRead,
         error::{InvalidArgumentError, StorageError},
     },
@@ -13,8 +13,13 @@ use crate::{
         parser::{
             expr::{ColumnReference, Expression, Literal},
             stmt::{
-                Statement, create_index::CreateIndexQuery, create_table::CreateTableQuery,
-                delete::DeleteQuery, insert::InsertQuery, select::SelectQuery, update::UpdateQuery,
+                Statement,
+                create_index::CreateIndexQuery,
+                create_table::{ColumnConstraint, ColumnType, CreateTableQuery},
+                delete::DeleteQuery,
+                insert::InsertQuery,
+                select::SelectQuery,
+                update::UpdateQuery,
             },
         },
     },
@@ -84,7 +89,7 @@ impl<'catalog> Binder<'catalog> {
             nodes,
             LogicalPlanNode::CreateTable {
                 name: query.table_name.to_owned(),
-                schema: TupleSchema::from_create_table_query(query),
+                schema: schema_from_sql(query),
             },
         )
     }
@@ -1011,5 +1016,25 @@ mod tests {
             }),
             Err(PlannerError::DuplicateTableQualifier { qualifier }) if qualifier == "source"
         ));
+    }
+}
+
+/// SQL syntax is translated here; relational schemas are language-independent.
+fn schema_from_sql(query: &CreateTableQuery<'_>) -> TupleSchema {
+    TupleSchema {
+        columns: query
+            .columns
+            .iter()
+            .map(|column| ColumnSchema {
+                name: column.name.to_owned(),
+                data_type: match column.column_type {
+                    ColumnType::Int => DataType::Integer,
+                    ColumnType::Float => DataType::Float,
+                    ColumnType::Text => DataType::Text,
+                },
+                nullable: column.constraints.contains(&ColumnConstraint::Nullable),
+                primary_key: column.constraints.contains(&ColumnConstraint::PrimaryKey),
+            })
+            .collect(),
     }
 }

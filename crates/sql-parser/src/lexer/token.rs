@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use crate::sql_parser::lexer::token_kind::TokenKind;
+use crate::lexer::token_kind::TokenKind;
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub struct Token<'a> {

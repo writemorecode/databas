@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use crate::sql_parser::parser::expr::Expression;
+use crate::parser::expr::Expression;
 
 #[derive(Debug, PartialEq, Default)]
 pub struct ExpressionList<'a>(pub Vec<Expression<'a>>);

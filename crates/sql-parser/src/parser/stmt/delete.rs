@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use crate::sql_parser::{
+use crate::{
     error::SQLError,
     lexer::{
         token::Token,
@@ -49,7 +49,7 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql_parser::parser::{Parser, SqlItem, expr::Expression, op::Op, stmt::Statement};
+    use crate::parser::{Parser, SqlItem, expr::Expression, op::Op, stmt::Statement};
 
     #[test]
     fn test_parse_delete_query() {

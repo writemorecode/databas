@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/sql-parser"]
+resolver = "3"
+
 [package]
 name = "databas"
 version = '0.1.0'
@@ -6,6 +10,7 @@ edition = '2024'
 repository = 'https://github.com/writemorecode/databas'
 
 [dependencies]
+databas-sql-parser = { path = "crates/sql-parser" }
 crc = "3.4.0"
 rustyline = { version = "15.0.0", default-features = false, features = ["with-file-history"] }
 thiserror = "2.0.18"
@@ -19,10 +24,13 @@ tempfile = "3.25.0"
 [profile.release]
 panic = "abort"
 
-[lints.rust]
+[lints]
+workspace = true
+
+[workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
-[lints.clippy]
+[workspace.lints.clippy]
 # Don't panic
 expect_used = "deny"
 get_unwrap = "deny"

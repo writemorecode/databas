@@ -2,13 +2,7 @@
 
 use std::fmt;
 
-use crate::{
-    core::{CatalogId, PageId, Tuple, TupleRef, Value, ValueRef},
-    sql_parser::parser::stmt::{
-        create_index::CreateIndexQuery,
-        create_table::{ColumnConstraint, ColumnType, CreateTableQuery},
-    },
-};
+use crate::core::{CatalogId, PageId, Tuple, TupleRef, Value, ValueRef};
 
 /// Root page id of the `sys_tables` catalog table.
 pub const SYS_TABLES_ROOT_PAGE_ID: PageId = 1;
@@ -92,15 +86,6 @@ impl DataType {
             4 => Ok(Self::Boolean),
             5 => Ok(Self::UnsignedInteger),
             _ => Err(CatalogError::InvalidDataType { actual: tag }),
-        }
-    }
-
-    /// Maps a parsed SQL column type onto the storage catalog type.
-    pub fn from_sql(column_type: &ColumnType) -> Self {
-        match column_type {
-            ColumnType::Int => Self::Integer,
-            ColumnType::Float => Self::Float,
-            ColumnType::Text => Self::Text,
         }
     }
 }
@@ -322,20 +307,6 @@ impl fmt::Display for CatalogError {
 impl std::error::Error for CatalogError {}
 
 impl TableSchema {
-    /// Builds a table schema from a parsed `CREATE TABLE` statement.
-    pub fn from_create_table(
-        table_id: CatalogId,
-        root_page_id: PageId,
-        query: &CreateTableQuery<'_>,
-    ) -> Self {
-        Self {
-            table_id,
-            name: query.table_name.to_owned(),
-            root_page_id,
-            row: TupleSchema::from_create_table_query(query),
-        }
-    }
-
     /// Returns the `sys_tables` row describing this table.
     pub fn catalog_row(&self) -> TableCatalogRow {
         TableCatalogRow {
@@ -346,57 +317,7 @@ impl TableSchema {
     }
 }
 
-impl TupleSchema {
-    /// Builds a tuple schema from a parsed `CREATE TABLE` statement.
-    pub fn from_create_table_query(query: &CreateTableQuery<'_>) -> Self {
-        let columns = query
-            .columns
-            .iter()
-            .map(|column| ColumnSchema {
-                name: column.name.to_owned(),
-                data_type: DataType::from_sql(&column.column_type),
-                nullable: column.constraints.contains(&ColumnConstraint::Nullable),
-                primary_key: column.constraints.contains(&ColumnConstraint::PrimaryKey),
-            })
-            .collect();
-
-        Self { columns }
-    }
-}
-
 impl IndexSchema {
-    /// Builds an index schema from a parsed `CREATE INDEX` statement and source table schema.
-    pub fn from_create_index(
-        index_id: CatalogId,
-        root_page_id: PageId,
-        table: &TableSchema,
-        query: &CreateIndexQuery<'_>,
-    ) -> Result<Self, CatalogError> {
-        let mut columns = Vec::new();
-        for column_name in &query.columns.0 {
-            let (source_column_ordinal, column) = table
-                .row
-                .columns
-                .iter()
-                .enumerate()
-                .find(|(_, column)| column.name == *column_name)
-                .ok_or_else(|| CatalogError::UnknownIndexColumn {
-                    table: table.name.clone(),
-                    column: (*column_name).to_owned(),
-                })?;
-            columns.push(IndexColumnSchema { source_column_ordinal, column: column.clone() });
-        }
-
-        Ok(Self {
-            index_id,
-            name: query.index_name.to_owned(),
-            table_id: table.table_id,
-            root_page_id,
-            unique: false,
-            columns,
-        })
-    }
-
     /// Returns the tuple schema used to encode keys in this index.
     pub fn key_schema(&self) -> TupleSchema {
         TupleSchema { columns: self.columns.iter().map(|column| column.column.clone()).collect() }

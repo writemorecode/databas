@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use crate::sql_parser::{
+use crate::{
     error::{SQLError, SQLErrorKind},
     lexer::{
         token::Token,
@@ -285,7 +285,7 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql_parser::{
+    use crate::{
         error::{SQLError, SQLErrorKind},
         lexer::token_kind::{Keyword, TokenKind},
         parser::{Parser, op::Op, stmt::Statement::Select},
