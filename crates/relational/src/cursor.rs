@@ -2,13 +2,10 @@
 
 use std::fmt::{self, Display};
 
-use crate::TableKey;
-use crate::Tuple;
 use crate::error::RelationalResult;
 use crate::error::{CorruptionComponent, CorruptionError, CorruptionKind, RelationalError};
-use crate::storage::CursorState;
-use crate::storage::Record;
-use crate::storage::TreeCursor;
+use crate::storage::{CursorState, Record, TreeCursor};
+use crate::{TableKey, Tuple};
 
 const TABLE_KEY_SIZE: usize = size_of::<TableKey>();
 

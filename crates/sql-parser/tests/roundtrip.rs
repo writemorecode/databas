@@ -1,6 +1,6 @@
 #![allow(clippy::panic, reason = "panics in tests provide clear assertion failures")]
 
-use databas::sql_parser::{
+use databas_sql_parser::{
     error::SQLErrorKind,
     parser::{Command, Parser, SqlItem, stmt::Statement},
 };

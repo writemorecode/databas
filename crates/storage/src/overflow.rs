@@ -1,12 +1,10 @@
 //! Overflow-page chain helpers for large B+-tree cell payloads.
 
-use crate::PAGE_SIZE;
-use crate::PageId;
-use crate::TxnId;
 use crate::error::StorageResult;
 use crate::page::format;
 use crate::page::format::OVERFLOW_NEXT_PAGE_ID_SIZE;
 use crate::page_cache::PageCache;
+use crate::{PAGE_SIZE, PageId, TxnId};
 
 pub const OVERFLOW_PAYLOAD_SIZE: usize = PAGE_SIZE - OVERFLOW_NEXT_PAGE_ID_SIZE;
 

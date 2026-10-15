@@ -22,32 +22,20 @@ use std::{
 };
 
 use crate::Lsn;
-use crate::sync::Arc;
-use crate::sync::AtomicBool;
-use crate::sync::AtomicU32;
-use crate::sync::AtomicU64;
-use crate::sync::Mutex;
-use crate::sync::MutexGuard;
-use crate::sync::Ordering;
-use crate::sync::RwLock;
-use crate::sync::RwLockReadGuard;
-use crate::sync::RwLockWriteGuard;
+use crate::sync::{
+    Arc, AtomicBool, AtomicU32, AtomicU64, Mutex, MutexGuard, Ordering, RwLock, RwLockReadGuard,
+    RwLockWriteGuard,
+};
 
 use thiserror::Error;
 
-use crate::PAGE_SIZE;
-use crate::PageId;
-use crate::TxnId;
 use crate::error::StorageError;
 use crate::log_manager::ZERO_LSN;
-use crate::page::NodeMarker;
-use crate::page::Page;
-use crate::page::PageResult;
-use crate::page::Read;
-use crate::page::Write;
+use crate::page::{NodeMarker, Page, PageResult, Read, Write};
 use crate::page_replacement::ClockPolicy;
 use crate::storage_runtime::StorageRuntime;
 use crate::transaction_manager::PageRestore;
+use crate::{PAGE_SIZE, PageId, TxnId};
 
 #[derive(Debug, Error)]
 pub enum PageCacheError {
@@ -629,16 +617,11 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::disk_manager::DiskManager;
-    use crate::disk_manager::DiskManagerError;
-    use crate::log_manager::Lsn;
-    use crate::log_manager::OwnedLogRecordKind;
-    use crate::log_manager::read_log_record_kinds_for_test;
+    use crate::disk_manager::{DiskManager, DiskManagerError};
+    use crate::log_manager::{Lsn, OwnedLogRecordKind, read_log_record_kinds_for_test};
     use crate::page;
-    use crate::page::Leaf;
-    use crate::page::Page;
-    use crate::page::Write;
     use crate::page::format::PageKind;
+    use crate::page::{Leaf, Page, Write};
     use crate::storage_runtime::StorageRuntime;
 
     /// Generates a deterministic page payload from a seed byte.
@@ -1606,8 +1589,7 @@ mod loom_tests {
 
     use super::*;
     use crate::disk_manager::DiskManager;
-    use crate::loom_support::check_model;
-    use crate::loom_support::thread;
+    use crate::loom_support::{check_model, thread};
     use crate::storage_runtime::StorageRuntime;
 
     fn cache_with_pages(patterns: &[u8], frame_count: usize) -> (NamedTempFile, PageCache) {

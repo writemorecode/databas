@@ -1,10 +1,8 @@
 use core::marker::PhantomData;
 use std::cmp::Ordering;
 
-use crate::PAGE_SIZE;
-use crate::PageId;
-use crate::SlotId;
 use crate::log_manager::ZERO_LSN;
+use crate::{PAGE_SIZE, PageId, SlotId};
 
 use super::{
     error::{PageCorruption, PageError, PageResult},

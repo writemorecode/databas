@@ -1,12 +1,6 @@
-use crate::planner::BoundColumn;
-use crate::planner::ExecColumn;
-use crate::planner::ExecExpr;
-use crate::planner::RelationId;
-use crate::planner::UpdateAssignment;
-use crate::relational::TableSchema;
-use crate::relational::Tuple;
-use crate::relational::Value;
+use crate::planner::{BoundColumn, ExecColumn, ExecExpr, RelationId, UpdateAssignment};
 use crate::relational::access::RelationalAccess;
+use crate::relational::{TableSchema, Tuple, Value};
 use crate::sql_parser::parser::op::Op;
 
 use super::{ExecutionOutput, ExecutorError, ExecutorResult, ExecutorRow, RowStream, collect_rows};

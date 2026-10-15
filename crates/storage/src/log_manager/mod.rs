@@ -30,9 +30,8 @@ use thiserror::Error;
 
 #[allow(clippy::redundant_pub_crate)] // Lsn is intentionally crate-private.
 pub(crate) use crate::Lsn;
-use crate::PAGE_SIZE;
-use crate::PageId;
 pub use crate::TxnId;
+use crate::{PAGE_SIZE, PageId};
 
 mod checkpoint;
 #[cfg(any(test, feature = "test-support"))]
@@ -524,7 +523,7 @@ impl LogManager {
         self.highest_durable_lsn
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(loom)))]
     pub(crate) fn force_next_lsn_exhausted_for_test(&mut self) {
         self.highest_appended_lsn = Some(Lsn::MAX);
     }

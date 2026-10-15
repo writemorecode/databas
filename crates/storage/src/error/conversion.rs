@@ -2,20 +2,12 @@
 
 use crate::PAGE_SIZE;
 use crate::disk_manager::DiskManagerError;
-use crate::error::ConstraintError;
-use crate::error::CorruptionComponent;
-use crate::error::CorruptionError;
-use crate::error::CorruptionKind;
-use crate::error::InternalError;
-use crate::error::InvalidArgumentError;
-use crate::error::InvariantViolation;
-use crate::error::LimitExceededError;
-use crate::error::StorageError;
-use crate::log_manager::LogManagerError;
-use crate::log_manager::LogManagerFlushError;
-use crate::page::CellCorruption;
-use crate::page::PageCorruption;
-use crate::page::PageError;
+use crate::error::{
+    ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InternalError,
+    InvalidArgumentError, InvariantViolation, LimitExceededError, StorageError,
+};
+use crate::log_manager::{LogManagerError, LogManagerFlushError};
+use crate::page::{CellCorruption, PageCorruption, PageError};
 use crate::page_cache::PageCacheError;
 
 impl From<DiskManagerError> for StorageError {

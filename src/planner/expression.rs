@@ -2,8 +2,7 @@
 
 use std::fmt;
 
-use crate::relational::DataType;
-use crate::relational::Value;
+use crate::relational::{DataType, Value};
 use crate::sql_parser::parser::op::Op;
 use crate::sql_parser::parser::stmt::select::Ordering;
 

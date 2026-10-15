@@ -52,6 +52,8 @@ pub enum ConstraintError {
 /// Invalid argument supplied to a storage or relational operation.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum InvalidArgumentError {
+    #[error("schema does not match the catalog object: {name}")]
+    SchemaMismatch { name: String },
     #[error("schema changes require a DDL statement")]
     DdlRequired,
     #[error("key not found")]

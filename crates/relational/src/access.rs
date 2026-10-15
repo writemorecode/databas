@@ -1,11 +1,7 @@
-use crate::IndexSchema;
-use crate::IndexValueRange;
-use crate::OwnedTableRecord;
-use crate::TableKeyRange;
-use crate::TableSchema;
-use crate::TupleSchema;
-use crate::Value;
 use crate::error::RelationalResult;
+use crate::{
+    IndexSchema, IndexValueRange, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
+};
 
 /// Minimal catalog seam used by the planner and its lightweight tests.
 pub trait CatalogRead {

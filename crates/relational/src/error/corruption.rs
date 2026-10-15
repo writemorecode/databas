@@ -2,8 +2,7 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::PageId;
-use crate::TableKey;
+use crate::{PageId, TableKey};
 
 /// Corruption detected in an encoded database component.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

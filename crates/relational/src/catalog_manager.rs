@@ -1,35 +1,17 @@
 use std::path::Path;
 
-use crate::CatalogId;
-use crate::IndexSchema;
-use crate::PageId;
-use crate::TableRecord;
-use crate::TableSchema;
-use crate::Tuple;
-use crate::TupleSchema;
-use crate::TxnId;
-use crate::catalog::CatalogError;
-use crate::catalog::CatalogObjectKind;
-use crate::catalog::ColumnCatalogRow;
-use crate::catalog::ColumnSchema;
-use crate::catalog::IndexCatalogRow;
-use crate::catalog::IndexColumnSchema;
-use crate::catalog::SYS_COLUMNS_ROOT_PAGE_ID;
-use crate::catalog::SYS_INDEXES_ROOT_PAGE_ID;
-use crate::catalog::SYS_TABLES_ROOT_PAGE_ID;
-use crate::catalog::TableCatalogRow;
-use crate::catalog::system_column_rows;
-use crate::catalog::system_table_schemas;
-use crate::cursor::IndexCursor;
-use crate::cursor::TableCursor;
-use crate::error::ConstraintError;
-use crate::error::CorruptionComponent;
-use crate::error::CorruptionError;
-use crate::error::CorruptionKind;
-use crate::error::InvalidArgumentError;
-use crate::error::RelationalError;
-use crate::error::RelationalResult;
+use crate::catalog::{
+    CatalogError, CatalogObjectKind, ColumnCatalogRow, ColumnSchema, IndexCatalogRow,
+    IndexColumnSchema, SYS_COLUMNS_ROOT_PAGE_ID, SYS_INDEXES_ROOT_PAGE_ID, SYS_TABLES_ROOT_PAGE_ID,
+    TableCatalogRow, system_column_rows, system_table_schemas,
+};
+use crate::cursor::{IndexCursor, TableCursor};
+use crate::error::{
+    ConstraintError, CorruptionComponent, CorruptionError, CorruptionKind, InvalidArgumentError,
+    RelationalError, RelationalResult,
+};
 use crate::storage::Storage;
+use crate::{CatalogId, IndexSchema, PageId, TableRecord, TableSchema, Tuple, TupleSchema, TxnId};
 
 /// Internal catalog manager for one database file.
 ///
@@ -531,18 +513,11 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::CatalogId;
-    use crate::Tuple;
-    use crate::TupleSchema;
-    use crate::catalog::ColumnCatalogRow;
-    use crate::catalog::ColumnSchema;
-    use crate::catalog::DataType;
-    use crate::catalog::IndexCatalogRow;
-    use crate::catalog::SYS_COLUMNS_TABLE_ID;
-    use crate::catalog::SYS_INDEXES_TABLE_ID;
-    use crate::catalog::SYS_TABLES_TABLE_ID;
-    use crate::catalog::TableCatalogRow;
-    use crate::catalog::system_column_rows;
+    use crate::catalog::{
+        ColumnCatalogRow, ColumnSchema, DataType, IndexCatalogRow, SYS_COLUMNS_TABLE_ID,
+        SYS_INDEXES_TABLE_ID, SYS_TABLES_TABLE_ID, TableCatalogRow, system_column_rows,
+    };
+    use crate::{CatalogId, Tuple, TupleSchema};
 
     fn open(path: impl AsRef<Path>) -> RelationalResult<CatalogManager> {
         CatalogManager::from_storage(Storage::open_or_create(path)?)

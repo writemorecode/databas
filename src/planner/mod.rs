@@ -62,20 +62,13 @@ pub use schema::{PlanColumn, PlanSchema};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::relational::CatalogId;
-    use crate::relational::ColumnSchema;
-    use crate::relational::DataType;
-    use crate::relational::IndexColumnSchema;
+    use crate::relational::{CatalogId, ColumnSchema, DataType, IndexColumnSchema};
 
-    use crate::relational::IndexSchema;
-    use crate::relational::InvalidArgumentError;
-    use crate::relational::StorageError;
-    use crate::relational::TableKeyBound;
-    use crate::relational::TableKeyRange;
-    use crate::relational::TableSchema;
-    use crate::relational::TupleSchema;
-    use crate::relational::Value;
     use crate::relational::access::CatalogRead;
+    use crate::relational::{
+        IndexSchema, InvalidArgumentError, StorageError, TableKeyBound, TableKeyRange, TableSchema,
+        TupleSchema, Value,
+    };
 
     use crate::sql_parser::parser::Parser;
     use crate::sql_parser::parser::op::Op;

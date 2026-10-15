@@ -254,9 +254,7 @@ fn substitute_expression(
 
 #[cfg(test)]
 mod tests {
-    use crate::planner::BoundColumn;
-    use crate::planner::PlanColumn;
-    use crate::planner::RelationId;
+    use crate::planner::{BoundColumn, PlanColumn, RelationId};
     use crate::relational::DataType;
 
     use super::*;

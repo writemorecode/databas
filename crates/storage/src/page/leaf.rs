@@ -1,8 +1,6 @@
 use std::ops::Range;
 
-use crate::PAGE_SIZE;
-use crate::PageId;
-use crate::SlotId;
+use crate::{PAGE_SIZE, PageId, SlotId};
 
 use super::{
     CellCorruption, PageError, PageResult,

@@ -39,14 +39,10 @@ use std::{
     fmt,
 };
 
-use crate::sync::Arc;
-use crate::sync::Condvar;
-use crate::sync::Mutex;
-use crate::sync::MutexGuard;
+use crate::sync::{Arc, Condvar, Mutex, MutexGuard};
 use thiserror::Error;
 
-use crate::CatalogId;
-use crate::TxnId;
+use crate::{CatalogId, TxnId};
 
 /// Stable identity of a user-table lock resource.
 ///
@@ -572,7 +568,7 @@ impl LockManager {
             .ok_or(LockError::TransactionNotActive { txn_id })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(loom)))]
     pub(crate) fn transaction_is_waiting_for(
         &self,
         txn_id: TxnId,
@@ -1736,8 +1732,7 @@ mod loom_tests {
     };
 
     use super::*;
-    use crate::loom_support::check_model;
-    use crate::loom_support::thread;
+    use crate::loom_support::{check_model, thread};
 
     fn rollback(manager: &LockManager, txn_id: TxnId) {
         manager.begin_rollback(txn_id).unwrap();

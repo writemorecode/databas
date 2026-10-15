@@ -2,9 +2,7 @@ use std::collections::TryReserveError;
 
 use thiserror::Error;
 
-use crate::Lsn;
-use crate::PageId;
-use crate::TxnId;
+use crate::{Lsn, PageId, TxnId};
 
 /// Failure of an internal invariant or allocation.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

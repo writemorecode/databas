@@ -27,6 +27,31 @@ impl<'db> ActiveTransaction<'db> {
     /// Table locks survive successful and failed statements until transaction end.
     /// Lock-admission failures abort the transaction. Scans borrow the scoped access
     /// handle, so no page-backed scan can escape this callback.
+    ///
+    /// Owned records can leave the callback:
+    /// ```
+    /// use databas_relational::{ActiveTransaction, TableSchema, OwnedTableRecord,
+    ///     RelationalResult, StatementTransactionMode as Mode, LockMode,
+    ///     access::RelationalAccess};
+    /// fn read(tx: &mut ActiveTransaction<'_>, table: &TableSchema)
+    ///     -> RelationalResult<Vec<OwnedTableRecord>> {
+    ///     tx.statement(Mode::Ordinary, &[(table.table_id.into(), LockMode::Shared)], |access| {
+    ///         access.scan_table(table)?.collect()
+    ///     })
+    /// }
+    /// ```
+    /// A live scan cannot leave the callback:
+    /// ```compile_fail
+    /// use databas_relational::{ActiveTransaction, TableSchema, RelationalResult,
+    ///     StatementTransactionMode as Mode, LockMode, access::RelationalAccess};
+    /// fn read(tx: &mut ActiveTransaction<'_>, table: &TableSchema) -> RelationalResult<()> {
+    ///     let scan = tx.statement(Mode::Ordinary,
+    ///         &[(table.table_id.into(), LockMode::Shared)], |access| access.scan_table(table))?;
+    ///     tx.commit()?;
+    ///     for record in scan { record?; }
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn statement<T, E: From<RelationalError>>(
         &mut self,
         mode: StatementTransactionMode,

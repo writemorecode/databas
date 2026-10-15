@@ -192,8 +192,7 @@ impl fmt::Debug for Record {
 mod tests {
     use super::*;
     use crate::btree::PAGE_SIZE;
-    use crate::btree::test_support::cursor;
-    use crate::btree::test_support::record_bytes;
+    use crate::btree::test_support::{cursor, record_bytes};
 
     #[test]
     fn inline_records_remain_page_resident() {

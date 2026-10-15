@@ -7,20 +7,11 @@ use super::{
     PhysicalPlan, PhysicalPlanNode, SecondaryIndexScanPlan,
     access_path::{IndexPredicate, primary_key_range_predicate, secondary_index_predicate},
 };
-use crate::planner::BoundExpr;
-use crate::planner::BoundSortTerm;
-use crate::planner::BoundUpdateAssignment;
-use crate::planner::ExecColumn;
-use crate::planner::ExecExpr;
-use crate::planner::LogicalPlan;
-use crate::planner::LogicalPlanNode;
-use crate::planner::NodeId;
-use crate::planner::PlanSchema;
-use crate::planner::PlannerError;
-use crate::planner::PlannerResult;
-use crate::planner::RelationId;
-use crate::planner::SortTerm;
-use crate::planner::UpdateAssignment;
+use crate::planner::{
+    BoundExpr, BoundSortTerm, BoundUpdateAssignment, ExecColumn, ExecExpr, LogicalPlan,
+    LogicalPlanNode, NodeId, PlanSchema, PlannerError, PlannerResult, RelationId, SortTerm,
+    UpdateAssignment,
+};
 
 /// Selects executable operators and access paths for a logical plan.
 pub(in crate::planner) struct PhysicalPlanner<'catalog> {

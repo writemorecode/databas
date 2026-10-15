@@ -2,23 +2,16 @@
 
 use std::collections::HashSet;
 
-use crate::relational::ColumnSchema;
-use crate::relational::DataType;
-use crate::relational::TableSchema;
-use crate::relational::TupleSchema;
-use crate::relational::Value;
 use crate::relational::access::CatalogRead;
-use crate::relational::error::InvalidArgumentError;
-use crate::relational::error::StorageError;
+use crate::relational::error::{InvalidArgumentError, StorageError};
+use crate::relational::{ColumnSchema, DataType, TableSchema, TupleSchema, Value};
 use crate::sql_parser::NumberKind;
-use crate::sql_parser::parser::expr::ColumnReference;
-use crate::sql_parser::parser::expr::Expression;
-use crate::sql_parser::parser::expr::Literal;
+use crate::sql_parser::parser::expr::{ColumnReference, Expression, Literal};
 use crate::sql_parser::parser::stmt::Statement;
 use crate::sql_parser::parser::stmt::create_index::CreateIndexQuery;
-use crate::sql_parser::parser::stmt::create_table::ColumnConstraint;
-use crate::sql_parser::parser::stmt::create_table::ColumnType;
-use crate::sql_parser::parser::stmt::create_table::CreateTableQuery;
+use crate::sql_parser::parser::stmt::create_table::{
+    ColumnConstraint, ColumnType, CreateTableQuery,
+};
 use crate::sql_parser::parser::stmt::delete::DeleteQuery;
 use crate::sql_parser::parser::stmt::insert::InsertQuery;
 use crate::sql_parser::parser::stmt::select::SelectQuery;
@@ -606,9 +599,7 @@ fn schema_from_sql(query: &CreateTableQuery<'_>) -> TupleSchema {
 mod tests {
     use super::*;
     use crate::planner::Planner;
-    use crate::relational::DataType;
-    use crate::relational::IndexSchema;
-    use crate::relational::TupleSchema;
+    use crate::relational::{DataType, IndexSchema, TupleSchema};
     use crate::sql_parser::parser::Parser;
     use crate::sql_parser::parser::op::Op;
     use crate::sql_parser::parser::stmt::select::JoinType;

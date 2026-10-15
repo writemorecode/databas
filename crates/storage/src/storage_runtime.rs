@@ -1,23 +1,14 @@
 use std::path::PathBuf;
 
-use crate::CheckpointOutcome;
-use crate::PAGE_SIZE;
-use crate::PageId;
 use crate::disk_manager::DiskManager;
-use crate::error::InternalError;
-use crate::error::StorageError;
-use crate::error::StorageResult;
-use crate::log_manager::LogManager;
-use crate::log_manager::Lsn;
-use crate::log_manager::TxnId;
+use crate::error::{InternalError, StorageError, StorageResult};
+use crate::log_manager::{LogManager, Lsn, TxnId};
 use crate::recovery::recover_from_wal;
-use crate::sync::Mutex;
-use crate::sync::MutexGuard;
-use crate::transaction_manager::LoggedPageUpdate;
-use crate::transaction_manager::PageRestore;
-use crate::transaction_manager::TransactionManager;
-use crate::transaction_manager::TransactionRollback;
-use crate::transaction_manager::TransactionSavepoint;
+use crate::sync::{Mutex, MutexGuard};
+use crate::transaction_manager::{
+    LoggedPageUpdate, PageRestore, TransactionManager, TransactionRollback, TransactionSavepoint,
+};
+use crate::{CheckpointOutcome, PAGE_SIZE, PageId};
 
 type ActiveTransactionManager = TransactionManager;
 
@@ -103,7 +94,7 @@ impl StorageRuntime {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(loom)))]
     pub(crate) fn force_next_lsn_exhausted_for_test(&self) -> StorageResult<()> {
         Self::lock(&self.log, "log manager")?.force_next_lsn_exhausted_for_test();
         Ok(())
@@ -288,8 +279,7 @@ mod loom_tests {
 
     use super::*;
     use crate::log_manager::ZERO_LSN;
-    use crate::loom_support::check_model;
-    use crate::loom_support::thread;
+    use crate::loom_support::{check_model, thread};
 
     #[test]
     fn wal_flush_and_transaction_begin_share_log_safely() {

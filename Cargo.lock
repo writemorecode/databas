@@ -91,9 +91,6 @@ dependencies = [
  "databas-relational",
  "databas-sql-parser",
  "databas-storage",
- "fastrand",
- "loom",
- "proptest",
  "rustyline",
  "tempfile",
  "thiserror",
@@ -112,6 +109,9 @@ dependencies = [
 [[package]]
 name = "databas-sql-parser"
 version = "0.1.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "databas-storage"

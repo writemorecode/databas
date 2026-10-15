@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/sql-parser", "crates/storage", "crates/relational"]
+default-members = [".", "crates/sql-parser", "crates/storage", "crates/relational"]
 resolver = "3"
 
 [package]
@@ -18,9 +19,6 @@ thiserror = "2.0.18"
 
 [dev-dependencies]
 databas-relational = { path = "crates/relational", features = ["test-support"] }
-fastrand = "2.3.0"
-loom = "0.7.2"
-proptest = "1.9.0"
 tempfile = "3.25.0"
 
 [profile.release]

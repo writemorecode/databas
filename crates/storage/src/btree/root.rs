@@ -95,11 +95,7 @@ pub(super) fn expect_page_kind(
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::btree::test_support::assert_matches;
-    use crate::btree::test_support::cursor;
-    use crate::btree::test_support::height;
-    use crate::btree::test_support::oversized_key;
-    use crate::btree::test_support::scan;
+    use crate::btree::test_support::{assert_matches, cursor, height, oversized_key, scan};
 
     #[test]
     fn root_page_stays_stable_as_splits_add_levels() {

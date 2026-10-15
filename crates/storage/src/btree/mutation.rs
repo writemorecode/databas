@@ -261,12 +261,9 @@ mod tests {
 
     use super::*;
     use crate::btree::PAGE_SIZE;
-    use crate::btree::test_support::assert_matches;
-    use crate::btree::test_support::cursor;
-    use crate::btree::test_support::random_bytes;
-    use crate::btree::test_support::random_key;
-    use crate::btree::test_support::random_record;
-    use crate::btree::test_support::record_bytes;
+    use crate::btree::test_support::{
+        assert_matches, cursor, random_bytes, random_key, random_record, record_bytes,
+    };
 
     #[test]
     fn mutations_advance_the_shared_epoch_only_when_successful() {

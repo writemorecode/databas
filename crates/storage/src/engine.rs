@@ -1,12 +1,8 @@
 use std::path::Path;
 
 use crate::PageId;
-use crate::btree::TreeCursor;
-use crate::btree::initialize_empty_root;
-use crate::btree::validate_tree_page_formats;
-use crate::database_header::DATABASE_HEADER_PAGE_ID;
-use crate::database_header::DatabaseHeader;
-use crate::database_header::missing_header;
+use crate::btree::{TreeCursor, initialize_empty_root, validate_tree_page_formats};
+use crate::database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header};
 use crate::disk_manager::DiskManager;
 use crate::error::StorageResult;
 use crate::log_manager::TxnId;
@@ -32,8 +28,8 @@ impl Default for StorageOptions {
 
 /// Storage-engine handle for one database file.
 ///
-/// `Storage` owns the disk manager and page cache indirectly, and is responsible
-/// only for producing raw B+-tree cursors rooted at specific page ids.
+/// Owns the shared storage runtime and page cache, and coordinates raw trees,
+/// transaction durability, rollback, and checkpoints.
 #[derive(Clone)]
 pub struct Storage {
     runtime: Arc<StorageRuntime>,
@@ -170,6 +166,7 @@ impl Storage {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn fail_next_wal_flush_for_test(&self) -> StorageResult<()> {
         self.runtime.fail_next_wal_flush_for_test()
     }
@@ -250,10 +247,8 @@ mod tests {
         use std::io::{Seek, SeekFrom, Write};
 
         use crate::PAGE_SIZE;
-        use crate::log_manager::OwnedLogRecordKind;
-        use crate::log_manager::read_log_record_kinds_for_test;
-        use crate::page::format;
-        use crate::page::validate_btree_page;
+        use crate::log_manager::{OwnedLogRecordKind, read_log_record_kinds_for_test};
+        use crate::page::{format, validate_btree_page};
 
         let file = NamedTempFile::new().unwrap();
         let storage = Storage::open_or_create(file.path()).unwrap();

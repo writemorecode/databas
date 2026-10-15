@@ -1,18 +1,11 @@
 //! Predicate analysis and scan-range derivation for physical table access.
 
-use crate::relational::DataType;
-use crate::relational::IndexSchema;
-use crate::relational::TableKey;
-use crate::relational::TableKeyBound;
-use crate::relational::TableKeyRange;
-use crate::relational::TableSchema;
-use crate::relational::Value;
+use crate::relational::{
+    DataType, IndexSchema, TableKey, TableKeyBound, TableKeyRange, TableSchema, Value,
+};
 use crate::sql_parser::parser::op::Op;
 
-use crate::planner::BoundColumn;
-use crate::planner::BoundExpr;
-use crate::planner::IndexValueRange;
-use crate::planner::RelationId;
+use crate::planner::{BoundColumn, BoundExpr, IndexValueRange, RelationId};
 
 #[derive(Debug, Clone, PartialEq)]
 /// A primary-key scan range and an optional predicate that must be evaluated afterward.

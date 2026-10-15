@@ -94,3 +94,38 @@ fn ordinary_statement_cannot_bypass_ddl_admission() {
     assert!(database.table_schema_by_name("illegal").is_err());
     transaction.close().unwrap();
 }
+
+#[test]
+fn a_forged_schema_cannot_authorize_access_to_another_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    let first = create_table(&database);
+    let mut ddl = database.begin(Mode::Ddl).unwrap();
+    let second = ddl
+        .statement(Mode::Ddl, &[], |access| access.create_table("other", first.row.clone()))
+        .unwrap();
+    ddl.commit().unwrap();
+
+    let mut transaction = database.begin(Mode::Ordinary).unwrap();
+    let mut forged = first.clone();
+    forged.name = second.name.clone();
+    let result = transaction.statement(
+        Mode::Ordinary,
+        &[(first.table_id.into(), LockMode::Exclusive)],
+        |access| access.insert_table_row(&forged, vec![Value::Integer(1)]),
+    );
+    assert!(matches!(
+        result,
+        Err(databas_relational::RelationalError::InvalidArgument(
+            databas_relational::InvalidArgumentError::SchemaMismatch { .. }
+        ))
+    ));
+    transaction.close().unwrap();
+    let mut reader = database.begin(Mode::Ordinary).unwrap();
+    let count: StorageResult<usize> =
+        reader.statement(Mode::Ordinary, &[(second.table_id.into(), LockMode::Shared)], |access| {
+            Ok(access.scan_table(&second)?.collect::<StorageResult<Vec<_>>>()?.len())
+        });
+    assert_eq!(count.unwrap(), 0);
+    reader.close().unwrap();
+}
