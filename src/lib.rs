@@ -1,8 +1,7 @@
 pub mod client;
 pub mod core;
 pub mod error;
-pub mod executor;
-pub mod planner;
+pub use databas_query::{executor, planner};
 pub mod protocol;
 pub use databas_relational as relational;
 pub mod server;
