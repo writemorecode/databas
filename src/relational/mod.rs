@@ -43,3 +43,6 @@ pub use types::{CatalogId, IndexKeyBound, IndexKeyRange, TableKey, TableKeyBound
 
 mod index_range;
 pub use index_range::{IndexValueBound, IndexValueRange};
+
+mod active_transaction;
+pub use active_transaction::ActiveTransaction;

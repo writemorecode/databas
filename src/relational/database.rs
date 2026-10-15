@@ -93,12 +93,17 @@ impl Database {
     }
 
     /// Disables new lock requests and cancels pending waits after a fatal error.
-    pub(crate) fn stop(&self) -> StorageResult<()> {
+    pub fn stop(&self) -> StorageResult<()> {
         self.locks.stop().map_err(Into::into)
     }
 
-    pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
-        self.begin_statement_transaction(StatementTransactionMode::Ordinary)
+    /// Begins a transaction whose locks and rollback lifecycle are owned by the handle.
+    pub fn begin(
+        &self,
+        mode: StatementTransactionMode,
+    ) -> StorageResult<super::ActiveTransaction<'_>> {
+        let id = self.begin_statement_transaction(mode)?;
+        Ok(super::ActiveTransaction::new(self, id))
     }
 
     pub(crate) fn acquire_ddl_gate(&self, txn_id: TxnId) -> StorageResult<()> {
@@ -139,8 +144,9 @@ impl Database {
         &self,
         txn_id: TxnId,
         leases: Vec<TableLease>,
+        ddl: bool,
     ) -> crate::relational::transaction::Transaction<'_> {
-        crate::relational::transaction::Transaction::new(self, txn_id, leases)
+        crate::relational::transaction::Transaction::new(self, txn_id, leases, ddl)
     }
 
     pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {

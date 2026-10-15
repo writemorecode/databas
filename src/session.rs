@@ -19,18 +19,14 @@ use crate::planner::Planner;
 use crate::relational::Database;
 use crate::relational::LockMode;
 use crate::relational::TableId;
-use crate::relational::database::StatementTransactionMode;
-use crate::relational::error::InternalError;
-use crate::relational::error::InvariantViolation;
 use crate::relational::error::StorageError;
-use crate::relational::lock_manager::TableLease;
+use crate::relational::{ActiveTransaction, StatementTransactionMode};
 use crate::sql_parser::error::SQLError;
 use crate::sql_parser::error::SQLErrorKind;
 use crate::sql_parser::parser::Command;
 use crate::sql_parser::parser::Parser;
 use crate::sql_parser::parser::SqlItem;
 use crate::sql_parser::parser::stmt::Statement;
-use crate::storage::TransactionSavepoint;
 
 /// Errors raised by session-level transaction control.
 #[derive(Debug, Error)]
@@ -47,7 +43,7 @@ pub enum SessionError {
 /// SQL execution context for a single database handle.
 pub struct Session<'db> {
     database: &'db Database,
-    active_txn: Option<u64>,
+    active_txn: Option<ActiveTransaction<'db>>,
 }
 
 impl<'db> Session<'db> {
@@ -66,8 +62,8 @@ impl<'db> Session<'db> {
     /// Returns a storage error if rollback cannot complete. Server callers
     /// must treat a failed cleanup as fatal rather than reuse the database.
     pub fn close(mut self) -> Result<(), StorageError> {
-        if let Some(txn_id) = self.active_txn.take() {
-            self.database.rollback_transaction(txn_id)?;
+        if let Some(transaction) = self.active_txn.take() {
+            transaction.close()?;
         }
         Ok(())
     }
@@ -79,7 +75,7 @@ impl<'db> Session<'db> {
 
     #[cfg(test)]
     pub(crate) fn active_transaction_id_for_test(&self) -> Option<u64> {
-        self.active_txn
+        self.active_txn.as_ref().map(ActiveTransaction::id)
     }
 
     /// Parses and executes all SQL items in order, returning the final result.
@@ -127,19 +123,14 @@ impl<'db> Session<'db> {
         let plan = Planner::new(self.database).plan_physical_statement(statement)?;
         let table_locks = plan_table_locks(&plan);
 
-        if let Some(txn_id) = self.active_txn {
-            if transaction_mode == StatementTransactionMode::Ddl {
-                self.database.acquire_ddl_gate(txn_id)?;
+        if let Some(transaction) = self.active_txn.as_mut() {
+            let result = transaction.statement(transaction_mode, &table_locks, |access| {
+                Executor::in_transaction(access).execute(plan).map_err(DatabaseError::from)
+            });
+            if !transaction.is_active() {
+                self.active_txn = None;
             }
-            let leases = match self.database.acquire_table_leases(txn_id, &table_locks) {
-                Ok(leases) => leases,
-                Err(error) => {
-                    self.database.rollback_transaction(txn_id)?;
-                    self.active_txn = None;
-                    return Err(error.into());
-                }
-            };
-            self.execute_explicit_transaction_statement(txn_id, leases, plan)
+            result
         } else {
             self.execute_implicit_transaction(plan, &table_locks, transaction_mode)
         }
@@ -157,128 +148,52 @@ impl<'db> Session<'db> {
     }
 
     fn begin_transaction<'sql>(&mut self) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        if let Some(txn_id) = self.active_txn {
-            return Err(SessionError::TransactionAlreadyActive { txn_id }.into());
+        if let Some(transaction) = &self.active_txn {
+            return Err(SessionError::TransactionAlreadyActive { txn_id: transaction.id() }.into());
         }
-
-        let txn_id = self.database.begin_transaction()?;
-        self.active_txn = Some(txn_id);
+        self.active_txn = Some(self.database.begin(StatementTransactionMode::Ordinary)?);
         Ok(ExecutionOutput::CommandOk)
     }
-
     fn commit_transaction<'sql>(&mut self) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        let txn_id = self.active_txn.ok_or(SessionError::NoActiveTransaction)?;
-        match self.database.commit_transaction(txn_id) {
-            Ok(()) => {
-                self.active_txn = None;
-                Ok(ExecutionOutput::CommandOk)
-            }
-            Err(error) => {
-                self.sync_active_transaction(txn_id)?;
-                Err(error.into())
-            }
+        let transaction = self.active_txn.as_mut().ok_or(SessionError::NoActiveTransaction)?;
+        let result = transaction.commit();
+        if !transaction.is_active() {
+            self.active_txn = None;
         }
+        result?;
+        Ok(ExecutionOutput::CommandOk)
     }
-
     fn rollback_transaction<'sql>(&mut self) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        let txn_id = self.active_txn.ok_or(SessionError::NoActiveTransaction)?;
-        match self.database.rollback_transaction(txn_id) {
-            Ok(()) => {
-                self.active_txn = None;
-                Ok(ExecutionOutput::CommandOk)
-            }
-            Err(error) => {
-                self.sync_active_transaction(txn_id)?;
-                Err(error.into())
-            }
+        let transaction = self.active_txn.as_mut().ok_or(SessionError::NoActiveTransaction)?;
+        let result = transaction.rollback();
+        if !transaction.is_active() {
+            self.active_txn = None;
         }
+        result?;
+        Ok(ExecutionOutput::CommandOk)
     }
-
-    fn execute_explicit_transaction_statement<'sql>(
-        &self,
-        txn_id: u64,
-        leases: Vec<TableLease>,
-        plan: PhysicalPlan,
-    ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        let transaction = self.database.transaction(txn_id, leases);
-        debug_assert_eq!(transaction.id(), txn_id);
-        let savepoint = transaction.statement_savepoint()?;
-        match Executor::in_transaction(&transaction).execute(plan) {
-            Ok(output) => {
-                if transaction.is_poisoned()? {
-                    return self.rollback_failed_explicit_transaction_statement(
-                        savepoint,
-                        transaction_poisoned(txn_id).into(),
-                    );
-                }
-                Ok(output)
-            }
-            Err(error) => {
-                self.rollback_failed_explicit_transaction_statement(savepoint, error.into())
-            }
-        }
-    }
-
-    fn rollback_failed_explicit_transaction_statement<'sql>(
-        &self,
-        savepoint: TransactionSavepoint,
-        error: DatabaseError<'sql>,
-    ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        match self.database.rollback_to_savepoint(savepoint) {
-            Ok(()) => Err(error),
-            Err(rollback_error) => Err(rollback_error.into()),
-        }
-    }
-
     fn execute_implicit_transaction<'sql>(
         &self,
         plan: PhysicalPlan,
         table_locks: &[(TableId, LockMode)],
         mode: StatementTransactionMode,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {
-        let txn_id = self.database.begin_statement_transaction(mode)?;
-        let leases = match self.database.acquire_table_leases(txn_id, table_locks) {
-            Ok(leases) => leases,
-            Err(error) => {
-                self.database.rollback_transaction(txn_id)?;
-                return Err(error.into());
-            }
-        };
-        let transaction = self.database.transaction(txn_id, leases);
-        match Executor::in_transaction(&transaction).execute(plan) {
-            Ok(output) => match self.database.commit_transaction(txn_id) {
+        let mut transaction = self.database.begin(mode)?;
+        let result = transaction.statement(mode, table_locks, |access| {
+            Executor::in_transaction(access).execute(plan).map_err(DatabaseError::from)
+        });
+        match result {
+            Ok(output) => match transaction.commit() {
                 Ok(()) => Ok(output),
-                Err(commit_error) => {
-                    if self.database.transaction_is_active(txn_id)?
-                        && let Err(rollback_error) = self.database.rollback_transaction(txn_id)
-                        && !is_no_active_transaction(&rollback_error)
-                    {
-                        return Err(rollback_error.into());
-                    }
-                    Err(commit_error.into())
+                Err(error) => {
+                    transaction.close()?;
+                    Err(error.into())
                 }
             },
             Err(error) => {
-                if let Err(rollback_error) = self.database.rollback_transaction(txn_id) {
-                    return Err(rollback_error.into());
-                }
-                Err(error.into())
+                transaction.close()?;
+                Err(error)
             }
-        }
-    }
-
-    fn sync_active_transaction(&mut self, txn_id: u64) -> Result<(), StorageError> {
-        if !self.database.transaction_is_active(txn_id)? {
-            self.active_txn = None;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for Session<'_> {
-    fn drop(&mut self) {
-        if let Some(txn_id) = self.active_txn.take() {
-            let _ = self.database.rollback_transaction(txn_id);
         }
     }
 }
@@ -353,19 +268,4 @@ mod tests {
             assert_eq!(plan_table_locks(&plan), expected, "{sql}");
         }
     }
-}
-
-fn is_no_active_transaction(error: &StorageError) -> bool {
-    matches!(
-        error,
-        StorageError::Internal(InternalError::InvariantViolation(
-            InvariantViolation::NoActiveTransaction
-        ))
-    )
-}
-
-fn transaction_poisoned(txn_id: u64) -> StorageError {
-    StorageError::Internal(InternalError::InvariantViolation(
-        InvariantViolation::TransactionPoisoned { txn_id },
-    ))
 }
