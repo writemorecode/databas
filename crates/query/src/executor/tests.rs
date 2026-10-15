@@ -1,7 +1,6 @@
 use std::{cell::RefCell, collections::BTreeMap};
 
 use super::*;
-use crate::error::DatabaseError;
 use crate::planner::{ExecExpr, PhysicalPlan, PhysicalPlanNode, Planner};
 use crate::relational::access::{CatalogRead, RelationalAccess};
 use crate::relational::error::{ConstraintError, StorageError};
@@ -15,6 +14,31 @@ use crate::relational::{
 };
 use crate::sql_parser::parser::Parser;
 use crate::sql_parser::parser::op::Op;
+
+#[derive(Debug)]
+enum TestDatabaseError {
+    Parser,
+    Planner,
+    Executor(ExecutorError),
+}
+
+impl<'sql> From<crate::sql_parser::error::SQLError<'sql>> for TestDatabaseError {
+    fn from(_: crate::sql_parser::error::SQLError<'sql>) -> Self {
+        Self::Parser
+    }
+}
+
+impl From<crate::planner::PlannerError> for TestDatabaseError {
+    fn from(_: crate::planner::PlannerError) -> Self {
+        Self::Planner
+    }
+}
+
+impl From<ExecutorError> for TestDatabaseError {
+    fn from(error: ExecutorError) -> Self {
+        Self::Executor(error)
+    }
+}
 
 #[derive(Clone)]
 struct MemoryTable {
@@ -304,7 +328,7 @@ impl RelationalAccess for MemoryStore {
 fn execute<'sql>(
     database: &MemoryStore,
     sql: &'sql str,
-) -> Result<ExecutionOutput, DatabaseError<'sql>> {
+) -> Result<ExecutionOutput, TestDatabaseError> {
     let statement = Parser::new(sql).stmt()?;
     let plan = Planner::with_schema(database).plan_physical_statement(&statement)?;
     let before = database.state.borrow().clone();
@@ -533,13 +557,13 @@ fn insert_enforces_nullability_and_column_types() {
 
     assert!(matches!(
         execute(&database, "INSERT INTO users (id) VALUES (1);"),
-        Err(DatabaseError::Executor(ExecutorError::Storage(StorageError::Constraint(
+        Err(TestDatabaseError::Executor(ExecutorError::Storage(StorageError::Constraint(
             ConstraintError::NullValue { column }
         )))) if column == "name"
     ));
     assert!(matches!(
         execute(&database, "INSERT INTO users (id, name) VALUES ('two', 'Grace');"),
-        Err(DatabaseError::Executor(ExecutorError::Storage(StorageError::Constraint(
+        Err(TestDatabaseError::Executor(ExecutorError::Storage(StorageError::Constraint(
             ConstraintError::ColumnTypeMismatch {
                 column,
                 expected: DataType::Integer,
@@ -595,7 +619,7 @@ fn failed_multi_row_update_is_atomic() {
 
     assert!(matches!(
         execute(&database, "UPDATE users SET score = 10 / (2 - id);"),
-        Err(DatabaseError::Executor(ExecutorError::DivisionByZero))
+        Err(TestDatabaseError::Executor(ExecutorError::DivisionByZero))
     ));
     assert_eq!(
         query(&database, "SELECT score FROM users;"),

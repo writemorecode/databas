@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/sql-parser", "crates/storage", "crates/relational"]
-default-members = [".", "crates/sql-parser", "crates/storage", "crates/relational"]
+members = ["crates/sql-parser", "crates/storage", "crates/relational", "crates/query"]
+default-members = [".", "crates/sql-parser", "crates/storage", "crates/relational", "crates/query"]
 resolver = "3"
 
 [package]
@@ -12,6 +12,7 @@ repository = 'https://github.com/writemorecode/databas'
 
 [dependencies]
 databas-relational = { path = "crates/relational" }
+databas-query = { path = "crates/query" }
 databas-sql-parser = { path = "crates/sql-parser" }
 databas-storage = { path = "crates/storage" }
 rustyline = { version = "15.0.0", default-features = false, features = ["with-file-history"] }
