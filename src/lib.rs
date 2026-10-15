@@ -11,6 +11,6 @@ pub mod relational;
 pub mod server;
 pub mod session;
 pub use databas_sql_parser as sql_parser;
-pub(crate) mod storage;
+pub use databas_storage as storage;
 pub(crate) mod sync;
 pub mod thread_pool;

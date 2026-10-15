@@ -176,7 +176,7 @@ mod tests {
     use crate::relational::Value;
     use crate::relational::catalog_manager::CatalogManager;
     use crate::relational::record_manager::RecordManager;
-    use crate::storage::engine::Storage;
+    use crate::storage::Storage;
 
     fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, IndexManager)> {
         let catalog = CatalogManager::from_storage(Storage::open_or_create(path)?)?;

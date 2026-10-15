@@ -29,7 +29,7 @@ use crate::relational::error::CorruptionKind;
 use crate::relational::error::InvalidArgumentError;
 use crate::relational::error::StorageError;
 use crate::relational::error::StorageResult;
-use crate::storage::engine::Storage;
+use crate::storage::Storage;
 
 /// Internal catalog manager for one database file.
 ///
@@ -210,7 +210,7 @@ impl CatalogManager {
 
     fn initialize_or_validate_system_catalog(&self) -> StorageResult<()> {
         match self.storage.opened_page_count() {
-            0 => Err(crate::storage::database_header::missing_header().into()),
+            0 => Err(missing_system_catalog_root(0)),
             1 => self.initialize_system_catalog(),
             2..=3 => Err(missing_system_catalog_root(self.storage.opened_page_count())),
             _ => Ok(()),
@@ -561,8 +561,6 @@ mod tests {
     use crate::relational::catalog::SYS_TABLES_TABLE_ID;
     use crate::relational::catalog::TableCatalogRow;
     use crate::relational::catalog::system_column_rows;
-    use crate::storage::database_header::DatabaseHeader;
-    use crate::storage::disk_manager::DiskManager;
 
     fn open(path: impl AsRef<Path>) -> StorageResult<CatalogManager> {
         CatalogManager::from_storage(Storage::open_or_create(path)?)
@@ -636,10 +634,9 @@ mod tests {
     fn open_rejects_partial_system_catalog() {
         let file = NamedTempFile::new().unwrap();
         {
-            let mut disk_manager = DiskManager::new(file.path()).unwrap();
-            assert_eq!(disk_manager.new_page().unwrap(), 0);
-            disk_manager.write_page(0, &DatabaseHeader::encode_page()).unwrap();
-            assert_eq!(disk_manager.new_page().unwrap(), 1);
+            let storage = Storage::open_or_create(file.path()).unwrap();
+            assert_eq!(storage.create_tree().unwrap().root_page_id(), 1);
+            storage.flush().unwrap();
         }
 
         let error = match open(file.path()) {

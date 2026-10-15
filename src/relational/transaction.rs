@@ -23,8 +23,8 @@ use crate::relational::lock_manager::TableLease;
 use crate::relational::record_manager;
 use crate::relational::record_manager::IndexScan;
 use crate::relational::record_manager::TableScan;
-use crate::storage::log_manager::TxnId;
-use crate::storage::transaction_manager::TransactionSavepoint;
+use crate::storage::TransactionSavepoint;
+use crate::storage::TxnId;
 
 use super::Database;
 

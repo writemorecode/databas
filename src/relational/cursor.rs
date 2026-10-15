@@ -8,9 +8,9 @@ use crate::relational::error::StorageResult;
 use crate::relational::error::{
     CorruptionComponent, CorruptionError, CorruptionKind, StorageError,
 };
-use crate::storage::btree::CursorState;
-use crate::storage::btree::Record;
-use crate::storage::btree::TreeCursor;
+use crate::storage::CursorState;
+use crate::storage::Record;
+use crate::storage::TreeCursor;
 
 const TABLE_KEY_SIZE: usize = size_of::<TableKey>();
 
@@ -427,38 +427,24 @@ impl TryFrom<Record> for IndexEntry {
 #[cfg(all(test, not(loom)))]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::sync::Arc;
-
-    use tempfile::NamedTempFile;
-
     use super::*;
-    use crate::relational::error::ConstraintError;
-    use crate::relational::error::InvalidArgumentError;
-    use crate::relational::error::StorageError;
-    use crate::storage::PAGE_SIZE;
-    use crate::storage::btree::initialize_empty_root;
-    use crate::storage::disk_manager::DiskManager;
-    use crate::storage::page_cache::PageCache;
-    use crate::storage::storage_runtime::StorageRuntime;
+    use crate::relational::error::{ConstraintError, InvalidArgumentError, StorageError};
+    use crate::storage::{Storage, StorageOptions};
+    use tempfile::NamedTempFile;
+    const PAGE_SIZE: usize = 4096;
 
-    fn temp_page_cache(cache_frames: usize) -> PageCache {
+    fn temp_tree(cache_frames: usize) -> TreeCursor {
         let file = NamedTempFile::new().unwrap();
-        let disk_manager = DiskManager::new(file.path()).unwrap();
-        let runtime =
-            Arc::new(StorageRuntime::new(file.path().to_path_buf(), disk_manager).unwrap());
-        PageCache::new(runtime, cache_frames).unwrap()
+        let storage =
+            Storage::open_or_create_with_options(file.path(), StorageOptions { cache_frames })
+                .unwrap();
+        storage.create_tree().unwrap()
     }
-
     fn temp_table_cursor(cache_frames: usize) -> TableCursor {
-        let page_cache = temp_page_cache(cache_frames);
-        let root_page_id = initialize_empty_root(&page_cache, None).unwrap();
-        TableCursor::new(TreeCursor::new(page_cache, root_page_id).unwrap())
+        TableCursor::new(temp_tree(cache_frames))
     }
-
     fn temp_index_cursor(cache_frames: usize) -> IndexCursor {
-        let page_cache = temp_page_cache(cache_frames);
-        let root_page_id = initialize_empty_root(&page_cache, None).unwrap();
-        IndexCursor::new(TreeCursor::new(page_cache, root_page_id).unwrap())
+        IndexCursor::new(temp_tree(cache_frames))
     }
 
     #[test]

@@ -1,0 +1,146 @@
+use super::{
+    CorruptionComponent, CorruptionError, CorruptionKind, Interior, KIND_OFFSET, PAGE_SIZE,
+    PageCache, PageError, PageId, PageKind, RawLeaf, StorageError, StorageResult, TxnId, Write,
+    page,
+};
+
+/// Allocates and initializes a brand-new empty raw root leaf page.
+pub fn initialize_empty_root(
+    page_cache: &PageCache,
+    txn_id: Option<TxnId>,
+) -> StorageResult<PageId> {
+    let (page_id, pin) = page_cache.new_page(txn_id)?;
+    let mut page = pin.write(txn_id)?;
+    let _ = RawLeaf::<Write<'_>>::initialize(page.page_mut());
+    Ok(page_id)
+}
+
+/// Validates every B+-tree page reachable from `root_page_id`.
+pub fn validate_tree_page_formats(
+    page_cache: &PageCache,
+    root_page_id: PageId,
+) -> StorageResult<()> {
+    let mut pending = vec![root_page_id];
+    let mut visited = Vec::new();
+
+    while let Some(page_id) = pending.pop() {
+        if visited.contains(&page_id) {
+            continue;
+        }
+        visited.push(page_id);
+
+        let pin = page_cache.fetch_page(page_id)?;
+        let page = pin.read()?;
+        validate_btree_page_format(page.page(), page_id)?;
+
+        match read_page_kind(page.page(), page_id)? {
+            PageKind::RawLeaf => {}
+            PageKind::RawInterior => {
+                let interior = page.open::<Interior>()?;
+                for slot_index in 0..interior.slot_count() {
+                    let (left_child, _, _, _) = interior.cell_payload_parts(slot_index)?;
+                    pending.push(left_child);
+                }
+                pending.push(interior.rightmost_child());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_btree_page_format(bytes: &[u8; PAGE_SIZE], page_id: PageId) -> StorageResult<()> {
+    page::validate_btree_page(bytes).map_err(|err| page_error_with_id(err, page_id))
+}
+
+fn page_error_with_id(err: PageError, page_id: PageId) -> StorageError {
+    let mut err = StorageError::from(err);
+    if let StorageError::Corruption(corruption) = &mut err {
+        corruption.page_id = Some(page_id);
+    }
+    err
+}
+
+pub(super) fn read_page_kind(bytes: &[u8; PAGE_SIZE], page_id: PageId) -> StorageResult<PageKind> {
+    let raw_kind = bytes[KIND_OFFSET];
+    PageKind::from_raw(raw_kind).ok_or({
+        StorageError::Corruption(CorruptionError {
+            component: CorruptionComponent::Page,
+            page_id: Some(page_id),
+            kind: CorruptionKind::UnknownPageKind { actual: raw_kind },
+        })
+    })
+}
+
+pub(super) fn expect_page_kind(
+    bytes: &[u8; PAGE_SIZE],
+    page_id: PageId,
+    expected: PageKind,
+    expected_name: &'static str,
+) -> StorageResult<()> {
+    let raw_kind = bytes[KIND_OFFSET];
+    let actual = read_page_kind(bytes, page_id)?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(StorageError::Corruption(CorruptionError {
+            component: CorruptionComponent::Page,
+            page_id: Some(page_id),
+            kind: CorruptionKind::InvalidPageKind { expected: expected_name, actual: raw_kind },
+        }))
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::btree::test_support::assert_matches;
+    use crate::btree::test_support::cursor;
+    use crate::btree::test_support::height;
+    use crate::btree::test_support::oversized_key;
+    use crate::btree::test_support::scan;
+
+    #[test]
+    fn root_page_stays_stable_as_splits_add_levels() {
+        let mut cursor = cursor(256);
+        let root_page_id = cursor.root_page_id();
+        let mut model = BTreeMap::new();
+
+        for index in 0..256_u16 {
+            let key = oversized_key(index);
+            let value = format!("value-{index}").into_bytes();
+            let epoch = cursor.mutation_epoch();
+            cursor.insert(&key, &value).unwrap();
+            model.insert(key, value);
+
+            assert_eq!(cursor.root_page_id(), root_page_id);
+            assert_eq!(cursor.mutation_epoch(), epoch.wrapping_add(1));
+            if height(&cursor) >= 3 {
+                break;
+            }
+        }
+
+        assert!(height(&cursor) >= 3, "an interior root should have split");
+        assert_matches(&mut cursor, &model);
+    }
+
+    #[test]
+    fn root_page_stays_stable_when_the_tree_shrinks() {
+        let mut cursor = cursor(256);
+        let root_page_id = cursor.root_page_id();
+        let keys = (0..512_u32).map(u32::to_be_bytes).collect::<Vec<_>>();
+
+        for key in &keys {
+            cursor.insert(key, b"value").unwrap();
+        }
+        assert!(height(&cursor) >= 2, "the root should have split");
+
+        for key in keys {
+            cursor.delete(&key).unwrap();
+            assert_eq!(cursor.root_page_id(), root_page_id);
+        }
+        assert_eq!(height(&cursor), 1);
+        assert!(scan(&mut cursor).is_empty());
+    }
+}

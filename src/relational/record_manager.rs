@@ -490,7 +490,7 @@ mod tests {
     use crate::relational::cursor::IndexCursor;
     use crate::relational::cursor::encode_index_entry_key;
     use crate::relational::index_manager::IndexManager;
-    use crate::storage::engine::Storage;
+    use crate::storage::Storage;
 
     fn open(path: impl AsRef<std::path::Path>) -> StorageResult<(CatalogManager, RecordManager)> {
         let catalog = CatalogManager::from_storage(Storage::open_or_create(path)?)?;
