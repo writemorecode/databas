@@ -150,6 +150,7 @@ impl ThreadPool {
     /// # Errors
     ///
     /// Returns [`ThreadPoolError::QueueClosed`] if all workers have stopped.
+    #[cfg(test)]
     pub(crate) fn execute<F>(&self, job: F) -> Result<(), ThreadPoolError>
     where
         F: FnOnce() + Send + 'static,

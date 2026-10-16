@@ -17,7 +17,7 @@ pub use crate::catalog::{
     ColumnSchema, DataType, IndexColumnSchema, IndexSchema, TableSchema, TupleSchema,
 };
 pub use crate::cursor::{
-    IndexEntry, IndexEntryView, OwnedIndexEntry, OwnedTableRecord, TableRecord, TableRecordView,
+    IndexEntry, OwnedIndexEntry, OwnedTableRecord, TableRecord, TableRecordView,
 };
 pub use crate::storage::{CheckpointOutcome, PageId, TxnId};
 pub use crate::tuple::{Tuple, TupleRef, TupleView, Value, ValueRef};

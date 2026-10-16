@@ -19,11 +19,13 @@ pub struct LogicalPlan {
 
 impl LogicalPlan {
     /// Creates a plan containing a single root node.
+    #[cfg(test)]
     pub(crate) fn new(root: LogicalPlanNode) -> Self {
         Self { nodes: vec![root], root: NodeId::new(0) }
     }
 
     /// Adds a node and makes it the plan root, returning its ID.
+    #[cfg(test)]
     pub(crate) fn push(&mut self, node: LogicalPlanNode) -> NodeId {
         let id = NodeId::new(self.nodes.len());
         self.nodes.push(node);
@@ -32,6 +34,7 @@ impl LogicalPlan {
     }
 
     /// Returns the root node.
+    #[cfg(test)]
     pub(crate) fn root(&self) -> &LogicalPlanNode {
         self.node(self.root)
     }
@@ -52,6 +55,7 @@ impl LogicalPlan {
     }
 
     /// Iterates over all nodes in arena order.
+    #[cfg(test)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = &LogicalPlanNode> {
         self.nodes.iter()
     }

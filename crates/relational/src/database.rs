@@ -61,6 +61,7 @@ impl Database {
     }
 
     /// Returns the database-file path associated with this database.
+    #[cfg(test)]
     fn path(&self) -> &Path {
         self.catalog.path()
     }

@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::path::Path;
 
 use crate::catalog::{
@@ -36,6 +37,7 @@ impl CatalogManager {
     }
 
     /// Returns the database-file path associated with this manager.
+    #[cfg(test)]
     pub fn path(&self) -> &Path {
         self.storage.path()
     }

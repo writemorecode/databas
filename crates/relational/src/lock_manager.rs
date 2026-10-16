@@ -57,11 +57,6 @@ impl TableId {
     pub const fn new(catalog_id: CatalogId) -> Self {
         Self(catalog_id)
     }
-
-    /// Returns the underlying catalog identifier.
-    const fn catalog_id(self) -> CatalogId {
-        self.0
-    }
 }
 
 impl From<CatalogId> for TableId {
@@ -206,16 +201,19 @@ pub struct TableLease {
 
 impl TableLease {
     /// Returns the transaction owning this capability.
+    #[cfg(test)]
     const fn transaction_id(&self) -> TxnId {
         self.txn_id
     }
 
     /// Returns the table authorized by this capability.
+    #[cfg(test)]
     const fn table_id(&self) -> TableId {
         self.table_id
     }
 
     /// Returns the access mode authorized by this capability.
+    #[cfg(test)]
     const fn mode(&self) -> LockMode {
         self.mode
     }
@@ -559,6 +557,7 @@ impl LockManager {
     ///
     /// Returns [`LockError::TransactionNotActive`] if `txn_id` is unknown or
     /// has already completed.
+    #[cfg(test)]
     pub(crate) fn transaction_phase(&self, txn_id: TxnId) -> Result<TransactionPhase, LockError> {
         let graph = self.lock_graph()?;
         graph
@@ -611,6 +610,7 @@ impl LockManager {
     }
 
     /// Acquires a shared table lock. See [`Self::acquire_mode`] for waiting and errors.
+    #[cfg(test)]
     fn acquire_shared(
         &self,
         txn_id: TxnId,

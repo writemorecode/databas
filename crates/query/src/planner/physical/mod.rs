@@ -24,41 +24,14 @@ pub struct PhysicalPlan {
 
 impl PhysicalPlan {
     /// Creates a plan containing a single root node without output metadata.
-    /// Use [`Self::with_output_schema`] to describe a manually built result.
+    #[cfg(test)]
     pub(crate) fn new(root: PhysicalPlanNode) -> Self {
         Self { nodes: vec![root], root: NodeId::new(0), output_schema: None }
-    }
-
-    /// Adds a node and makes it the plan root, returning its ID.
-    /// Clears output metadata, which described the previous root.
-    fn push(&mut self, node: PhysicalPlanNode) -> NodeId {
-        let id = NodeId::new(self.nodes.len());
-        self.nodes.push(node);
-        self.root = id;
-        self.output_schema = None;
-        id
-    }
-
-    /// Attaches the output schema of the current root in row-value order.
-    fn with_output_schema(mut self, schema: PlanSchema) -> Self {
-        self.output_schema = Some(schema);
-        self
-    }
-
-    /// Returns result metadata, including when execution produces no rows.
-    /// Non-row plans and manually built plans without metadata return `None`.
-    fn output_schema(&self) -> Option<&PlanSchema> {
-        self.output_schema.as_ref()
     }
 
     /// Returns the root node.
     pub fn root(&self) -> &PhysicalPlanNode {
         self.node(self.root)
-    }
-
-    /// Returns the root node ID.
-    fn root_id(&self) -> NodeId {
-        self.root
     }
 
     /// Returns a node by arena ID.

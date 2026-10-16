@@ -11,13 +11,14 @@
 
 use crate::planner::{NodeId, PhysicalPlan, PhysicalPlanNode, RelationId};
 use crate::relational::access::RelationalAccess;
-use crate::relational::error::{StorageError, StorageResult};
-use crate::relational::{CatalogId, OwnedTableRecord, TableKey, Tuple, TupleRef, Value, ValueRef};
+use crate::relational::error::StorageError;
+use crate::relational::{OwnedTableRecord, Tuple, Value};
+#[cfg(test)]
+use crate::relational::{StorageResult, TupleRef, ValueRef};
 use crate::sql_parser::parser::op::Op;
 
 mod expression;
 
-pub(crate) use expression::evaluate_expression;
 use expression::{
     EvaluationContext, empty_record, evaluate_expressions, evaluate_value, execute_delete,
     execute_insert_values, execute_update, execute_values, offset_rows,
@@ -144,26 +145,10 @@ pub type ExecutorResult<T> = Result<T, ExecutorError>;
 #[derive(Debug, Clone)]
 pub struct RowLocator {
     relation: RelationId,
-    table_id: CatalogId,
     record: OwnedTableRecord,
 }
 
 impl RowLocator {
-    /// Returns the query-local relation this record came from.
-    fn relation(&self) -> RelationId {
-        self.relation
-    }
-
-    /// Returns the catalog table containing the record.
-    fn table_id(&self) -> CatalogId {
-        self.table_id
-    }
-
-    /// Returns the table key of the source record.
-    fn table_key(&self) -> TableKey {
-        self.record.table_key
-    }
-
     fn record(&self) -> &OwnedTableRecord {
         &self.record
     }
@@ -186,14 +171,10 @@ impl ExecutorRow {
         Self { values, locators: Vec::new() }
     }
 
-    fn from_table_record(
-        relation: RelationId,
-        table_id: CatalogId,
-        record: OwnedTableRecord,
-    ) -> ExecutorResult<Self> {
+    fn from_table_record(relation: RelationId, record: OwnedTableRecord) -> ExecutorResult<Self> {
         let values =
             Tuple::from_bytes(&record.record).map_err(ExecutorError::InvalidTuple)?.into_values();
-        let locator = RowLocator { relation, table_id, record };
+        let locator = RowLocator { relation, record };
         Ok(Self { values, locators: vec![locator] })
     }
 
@@ -202,18 +183,9 @@ impl ExecutorRow {
         &self.values
     }
 
-    /// Returns all source-row locators retained through relational operators.
-    fn locators(&self) -> &[RowLocator] {
-        &self.locators
-    }
-
     /// Returns the source record for a query-local relation, if present.
     fn locator(&self, relation: RelationId) -> Option<&RowLocator> {
         self.locators.iter().find(|locator| locator.relation == relation)
-    }
-
-    fn with_values(&self, values: Vec<Value>) -> Self {
-        Self { values, locators: self.locators.clone() }
     }
 
     fn into_with_values(self, values: Vec<Value>) -> Self {
@@ -221,6 +193,7 @@ impl ExecutorRow {
     }
 
     /// Executes `f` with this row encoded in the storage tuple format.
+    #[cfg(test)]
     fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
         let values = self.values.iter().map(ValueRef::from).collect::<Vec<_>>();
         let record = TupleRef::new(&values).to_bytes()?;
@@ -402,30 +375,27 @@ where
                 rows: collect_rows(std::iter::empty()),
             }),
             PhysicalPlanNode::FullTableScan { relation, table } => {
-                let table_id = table.table_id;
                 let rows = self.transaction.scan_table(&table)?.map(move |record| {
                     let record = record.map_err(ExecutorError::from)?;
-                    ExecutorRow::from_table_record(relation, table_id, record)
+                    ExecutorRow::from_table_record(relation, record)
                 });
                 Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
             }
             PhysicalPlanNode::PrimaryKeyRangeScan { relation, table, range } => {
-                let table_id = table.table_id;
                 let rows = self.transaction.scan_table_range(&table, range)?.map(move |record| {
                     let record = record.map_err(ExecutorError::from)?;
-                    ExecutorRow::from_table_record(relation, table_id, record)
+                    ExecutorRow::from_table_record(relation, record)
                 });
                 Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
             }
             PhysicalPlanNode::SecondaryIndexScan { scan } => {
-                let table_id = scan.table.table_id;
                 let relation = scan.relation;
                 let rows = self
                     .transaction
                     .scan_index(&scan.table, &scan.index, scan.value_range)?
                     .map(move |record| {
                         let record = record.map_err(ExecutorError::from)?;
-                        ExecutorRow::from_table_record(relation, table_id, record)
+                        ExecutorRow::from_table_record(relation, record)
                     });
                 Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
             }

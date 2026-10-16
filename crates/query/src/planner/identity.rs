@@ -31,9 +31,4 @@ impl RelationId {
     pub(crate) const fn new(value: u32) -> Self {
         Self(value)
     }
-
-    /// Returns the query-local numeric identity.
-    const fn value(self) -> u32 {
-        self.0
-    }
 }

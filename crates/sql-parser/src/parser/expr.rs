@@ -72,6 +72,7 @@ enum ChildSide {
     Right,
 }
 
+#[cfg(test)]
 impl<'a> Expression<'a> {
     pub(crate) const fn column(column: &'a str) -> Self {
         Self::ColumnReference(ColumnReference { table: None, column })
@@ -80,7 +81,9 @@ impl<'a> Expression<'a> {
     pub(crate) const fn qualified_column(table: &'a str, column: &'a str) -> Self {
         Self::ColumnReference(ColumnReference { table: Some(table), column })
     }
+}
 
+impl Expression<'_> {
     fn fmt_with_parent_op(
         &self,
         f: &mut std::fmt::Formatter<'_>,

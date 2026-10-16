@@ -6,7 +6,7 @@ use super::{
     Read, Record, SearchResult, StorageResult, TreeCursor, TxnId,
 };
 
-fn advance_mutation_epoch(epoch: &AtomicU64) {
+pub fn advance_mutation_epoch(epoch: &AtomicU64) {
     epoch.fetch_add(1, AtomicOrdering::Release);
 }
 
