@@ -95,11 +95,6 @@ workspace members, so plain `cargo test` also exercises the workspace.
 - Parser round-trip/property tests belong to the parser crate.
 - Root tests exercise planning, execution, sessions, protocol, and TCP behavior.
 
-`test-support` is an opt-in feature used by dev-dependencies for WAL fault
-injection and in-memory relational test helpers. Normal builds do not expose
-these helpers or enable the fault-injecting WAL writer. It is not a production
-extension API.
-
 Each concurrent crate owns its small synchronization adapter and bounded Loom
 harness. `cfg(all(test, loom))` selects Loom only for that crate's unit tests;
 it must not be assumed to propagate through dependencies. Run:

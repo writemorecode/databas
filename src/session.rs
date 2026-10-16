@@ -65,11 +65,6 @@ impl<'db> Session<'db> {
         self.active_txn.is_some()
     }
 
-    #[cfg(test)]
-    pub(crate) fn active_transaction_id_for_test(&self) -> Option<u64> {
-        self.active_txn.as_ref().map(ActiveTransaction::id)
-    }
-
     /// Parses and executes all SQL items in order, returning the final result.
     /// Earlier row results are drained so their errors are not silently lost.
     pub fn execute_sql<'sql>(

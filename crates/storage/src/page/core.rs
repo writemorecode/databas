@@ -201,11 +201,6 @@ where
     }
 
     /// Returns the statically known encoded kind of this page.
-    #[cfg(all(test, not(loom)))]
-    pub(crate) fn kind(&self) -> format::PageKind {
-        page_kind::<N>()
-    }
-
     /// Returns the number of live slots in the slot directory.
     pub(crate) fn slot_count(&self) -> u16 {
         format::read_u16(self.bytes(), SLOT_COUNT_OFFSET)
@@ -653,25 +648,8 @@ where
     }
 }
 
-#[allow(
-    clippy::elidable_lifetime_names,
-    reason = "The test-only constructor returns the impl lifetime."
-)]
-impl<'a> Page<Write<'a>, Leaf> {
-    /// Initializes a fresh empty leaf page in-place.
-    #[cfg(test)]
-    pub(crate) fn init(bytes: &'a mut [u8; PAGE_SIZE]) -> Self {
-        Self::initialize(bytes)
-    }
-}
-
 impl<'a> Page<Write<'a>, Interior> {
     /// Initializes a fresh empty interior page with its rightmost child pointer set.
-    #[cfg(test)]
-    pub(crate) fn init(bytes: &'a mut [u8; PAGE_SIZE], rightmost_child: PageId) -> Self {
-        Self::initialize_with_rightmost(bytes, rightmost_child)
-    }
-
     pub(crate) fn initialize_with_rightmost(
         bytes: &'a mut [u8; PAGE_SIZE],
         page_id: PageId,

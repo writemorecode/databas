@@ -3,9 +3,6 @@ name = "databas-relational"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-test-support = ["databas-storage/test-support"]
-
 [dependencies]
 databas-storage = { path = "../storage" }
 thiserror = "2.0.18"

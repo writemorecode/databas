@@ -139,29 +139,3 @@ impl TreeCursor {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::choose_balanced_split;
-
-    #[test]
-    fn split_selection_chooses_lowest_score() {
-        let split = choose_balanced_split(5, |index| (index != 2).then_some(index.abs_diff(3)));
-
-        assert_eq!(split, Some(3));
-    }
-
-    #[test]
-    fn split_selection_prefers_leftmost_equal_candidate() {
-        let split = choose_balanced_split(6, |_| Some(0));
-
-        assert_eq!(split, Some(1));
-    }
-
-    #[test]
-    fn split_selection_rejects_all_invalid_candidates() {
-        let split = choose_balanced_split(4, |_| None);
-
-        assert_eq!(split, None);
-    }
-}

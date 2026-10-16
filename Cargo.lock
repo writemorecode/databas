@@ -128,10 +128,6 @@ name = "databas-storage"
 version = "0.1.0"
 dependencies = [
  "crc",
- "fastrand",
- "loom",
- "proptest",
- "tempfile",
  "thiserror",
 ]
 

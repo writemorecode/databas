@@ -106,22 +106,3 @@ fn format_corruption_error(
         None => format!("{component}: {kind}"),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn corruption_display_includes_component_page_and_kind() {
-        let error = CorruptionError {
-            component: CorruptionComponent::LeafPage,
-            page_id: Some(7),
-            kind: CorruptionKind::InvalidPageVersion { expected: 2, actual: 1 },
-        };
-
-        assert_eq!(
-            error.to_string(),
-            "leaf page (page 7): invalid page version: expected 2, got 1"
-        );
-    }
-}

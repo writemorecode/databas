@@ -8,8 +8,5 @@ databas-relational = { path = "../relational" }
 databas-sql-parser = { path = "../sql-parser" }
 thiserror = "2.0.18"
 
-[dev-dependencies]
-databas-relational = { path = "../relational", features = ["test-support"] }
-
 [lints]
 workspace = true

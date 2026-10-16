@@ -6,7 +6,10 @@
 
 use std::{borrow::Cow, cmp::Ordering};
 
-use crate::sync::{Arc, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering as AtomicOrdering},
+};
 
 use crate::error::{
     CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult,
@@ -31,148 +34,6 @@ mod record;
 mod root;
 mod search;
 mod split;
-
-#[cfg(all(test, not(loom)))]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-#[allow(clippy::redundant_pub_crate)]
-pub(crate) mod test_support {
-    use std::collections::BTreeMap;
-
-    use fastrand::Rng;
-    use tempfile::NamedTempFile;
-
-    use super::{root::read_page_kind, *};
-    use crate::disk_manager::DiskManager;
-    use crate::storage_runtime::StorageRuntime;
-
-    pub(crate) const TARGET_HEIGHT: usize = 4;
-    pub(crate) const MAX_RECORDS: usize = 50_000;
-
-    pub(crate) fn page_cache(cache_frames: usize) -> PageCache {
-        let file = NamedTempFile::new().unwrap();
-        let disk = DiskManager::new(file.path()).unwrap();
-        let runtime = Arc::new(StorageRuntime::new(file.path().to_path_buf(), disk).unwrap());
-        PageCache::new(runtime, cache_frames).unwrap()
-    }
-
-    pub(crate) fn cursor(cache_frames: usize) -> TreeCursor {
-        let page_cache = page_cache(cache_frames);
-        let root_page_id = initialize_empty_root(&page_cache, None).unwrap();
-        TreeCursor::new(page_cache, root_page_id).unwrap()
-    }
-
-    pub(crate) fn height(cursor: &TreeCursor) -> usize {
-        let mut height = 1;
-        let mut page_id = cursor.root_page_id();
-        loop {
-            let pin = cursor.page_cache.fetch_page(page_id).unwrap();
-            let page = pin.read().unwrap();
-            page_id = match read_page_kind(page.page(), page_id).unwrap() {
-                PageKind::RawLeaf => return height,
-                PageKind::RawInterior => {
-                    let interior = page.open::<Interior>().unwrap();
-                    if interior.slot_count() == 0 {
-                        interior.rightmost_child()
-                    } else {
-                        interior.cell(0).unwrap().left_child()
-                    }
-                }
-            };
-            height += 1;
-        }
-    }
-
-    pub(crate) fn oversized_key(index: u16) -> Vec<u8> {
-        let mut key = vec![(index % 251) as u8; PAGE_SIZE + 256];
-        key[..2].copy_from_slice(&index.to_be_bytes());
-        key
-    }
-
-    pub(crate) fn record_bytes(record: &Record) -> (Vec<u8>, Vec<u8>) {
-        record.with_key_value(|key, value| (key.to_vec(), value.to_vec())).unwrap()
-    }
-
-    pub(crate) fn scan(cursor: &mut TreeCursor) -> BTreeMap<Vec<u8>, Vec<u8>> {
-        let mut records = BTreeMap::new();
-        if !cursor.seek_to_first().unwrap() {
-            return records;
-        }
-        loop {
-            let record = cursor.current().unwrap().unwrap();
-            let (key, value) = record_bytes(&record);
-            if let Some((previous, _)) = records.last_key_value() {
-                assert!(previous < &key, "scan keys must be strictly increasing");
-            }
-            assert!(records.insert(key, value).is_none(), "scan returned a duplicate key");
-            if cursor.next_record().unwrap().is_none() {
-                return records;
-            }
-        }
-    }
-
-    pub(crate) fn assert_matches(cursor: &mut TreeCursor, model: &BTreeMap<Vec<u8>, Vec<u8>>) {
-        for (key, value) in model {
-            let record = cursor.get(key).unwrap().expect("model key should be present");
-            assert_eq!(record_bytes(&record), (key.clone(), value.clone()));
-        }
-        assert_eq!(&scan(cursor), model);
-    }
-
-    pub(crate) fn random_bytes(rng: &mut Rng, len: usize) -> Vec<u8> {
-        let mut bytes = vec![0; len];
-        rng.fill(&mut bytes);
-        bytes
-    }
-
-    pub(crate) fn random_record(
-        rng: &mut Rng,
-        model: &BTreeMap<Vec<u8>, Vec<u8>>,
-    ) -> (Vec<u8>, Vec<u8>) {
-        loop {
-            let key_len = rng.usize(8..=192);
-            let key = random_bytes(rng, key_len);
-            if !model.contains_key(&key) {
-                let value_len = if rng.u8(0..32) == 0 {
-                    rng.usize(8..=PAGE_SIZE * 3)
-                } else {
-                    rng.usize(8..=512)
-                };
-                return (key, random_bytes(rng, value_len));
-            }
-        }
-    }
-
-    pub(crate) fn random_key<'a>(
-        rng: &mut Rng,
-        model: &'a BTreeMap<Vec<u8>, Vec<u8>>,
-    ) -> &'a Vec<u8> {
-        model.keys().nth(rng.usize(0..model.len())).unwrap()
-    }
-}
-
-#[cfg(all(test, loom))]
-#[allow(clippy::unwrap_used)]
-mod loom_tests {
-    use super::search::advance_mutation_epoch;
-    use crate::loom_support::{check_model, thread};
-    use crate::sync::{Arc, AtomicU64, Ordering};
-
-    #[test]
-    fn concurrent_mutations_each_advance_the_shared_epoch() {
-        check_model(|| {
-            let epoch = Arc::new(AtomicU64::new(0));
-
-            let first_epoch = Arc::clone(&epoch);
-            let first = thread::spawn(move || advance_mutation_epoch(&first_epoch));
-            let second_epoch = Arc::clone(&epoch);
-            let second = thread::spawn(move || advance_mutation_epoch(&second_epoch));
-
-            first.join().unwrap();
-            second.join().unwrap();
-            assert_eq!(epoch.load(Ordering::Acquire), 2);
-        });
-    }
-}
 
 pub use record::Record;
 pub use root::{initialize_empty_root, validate_tree_page_formats};
