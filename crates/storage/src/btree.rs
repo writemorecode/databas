@@ -34,7 +34,8 @@ mod split;
 
 #[cfg(all(test, not(loom)))]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
-mod test_support {
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) mod test_support {
     use std::collections::BTreeMap;
 
     use fastrand::Rng;
@@ -44,23 +45,23 @@ mod test_support {
     use crate::disk_manager::DiskManager;
     use crate::storage_runtime::StorageRuntime;
 
-    pub const TARGET_HEIGHT: usize = 4;
-    pub const MAX_RECORDS: usize = 50_000;
+    pub(crate) const TARGET_HEIGHT: usize = 4;
+    pub(crate) const MAX_RECORDS: usize = 50_000;
 
-    pub fn page_cache(cache_frames: usize) -> PageCache {
+    pub(crate) fn page_cache(cache_frames: usize) -> PageCache {
         let file = NamedTempFile::new().unwrap();
         let disk = DiskManager::new(file.path()).unwrap();
         let runtime = Arc::new(StorageRuntime::new(file.path().to_path_buf(), disk).unwrap());
         PageCache::new(runtime, cache_frames).unwrap()
     }
 
-    pub fn cursor(cache_frames: usize) -> TreeCursor {
+    pub(crate) fn cursor(cache_frames: usize) -> TreeCursor {
         let page_cache = page_cache(cache_frames);
         let root_page_id = initialize_empty_root(&page_cache, None).unwrap();
         TreeCursor::new(page_cache, root_page_id).unwrap()
     }
 
-    pub fn height(cursor: &TreeCursor) -> usize {
+    pub(crate) fn height(cursor: &TreeCursor) -> usize {
         let mut height = 1;
         let mut page_id = cursor.root_page_id();
         loop {
@@ -81,17 +82,17 @@ mod test_support {
         }
     }
 
-    pub fn oversized_key(index: u16) -> Vec<u8> {
+    pub(crate) fn oversized_key(index: u16) -> Vec<u8> {
         let mut key = vec![(index % 251) as u8; PAGE_SIZE + 256];
         key[..2].copy_from_slice(&index.to_be_bytes());
         key
     }
 
-    pub fn record_bytes(record: &Record) -> (Vec<u8>, Vec<u8>) {
+    pub(crate) fn record_bytes(record: &Record) -> (Vec<u8>, Vec<u8>) {
         record.with_key_value(|key, value| (key.to_vec(), value.to_vec())).unwrap()
     }
 
-    pub fn scan(cursor: &mut TreeCursor) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    pub(crate) fn scan(cursor: &mut TreeCursor) -> BTreeMap<Vec<u8>, Vec<u8>> {
         let mut records = BTreeMap::new();
         if !cursor.seek_to_first().unwrap() {
             return records;
@@ -109,7 +110,7 @@ mod test_support {
         }
     }
 
-    pub fn assert_matches(cursor: &mut TreeCursor, model: &BTreeMap<Vec<u8>, Vec<u8>>) {
+    pub(crate) fn assert_matches(cursor: &mut TreeCursor, model: &BTreeMap<Vec<u8>, Vec<u8>>) {
         for (key, value) in model {
             let record = cursor.get(key).unwrap().expect("model key should be present");
             assert_eq!(record_bytes(&record), (key.clone(), value.clone()));
@@ -117,13 +118,16 @@ mod test_support {
         assert_eq!(&scan(cursor), model);
     }
 
-    pub fn random_bytes(rng: &mut Rng, len: usize) -> Vec<u8> {
+    pub(crate) fn random_bytes(rng: &mut Rng, len: usize) -> Vec<u8> {
         let mut bytes = vec![0; len];
         rng.fill(&mut bytes);
         bytes
     }
 
-    pub fn random_record(rng: &mut Rng, model: &BTreeMap<Vec<u8>, Vec<u8>>) -> (Vec<u8>, Vec<u8>) {
+    pub(crate) fn random_record(
+        rng: &mut Rng,
+        model: &BTreeMap<Vec<u8>, Vec<u8>>,
+    ) -> (Vec<u8>, Vec<u8>) {
         loop {
             let key_len = rng.usize(8..=192);
             let key = random_bytes(rng, key_len);
@@ -138,7 +142,10 @@ mod test_support {
         }
     }
 
-    pub fn random_key<'a>(rng: &mut Rng, model: &'a BTreeMap<Vec<u8>, Vec<u8>>) -> &'a Vec<u8> {
+    pub(crate) fn random_key<'a>(
+        rng: &mut Rng,
+        model: &'a BTreeMap<Vec<u8>, Vec<u8>>,
+    ) -> &'a Vec<u8> {
         model.keys().nth(rng.usize(0..model.len())).unwrap()
     }
 }
@@ -167,7 +174,7 @@ mod loom_tests {
     }
 }
 
-pub use record::{OwnedRecord, Record, RecordView};
+pub use record::Record;
 pub use root::{initialize_empty_root, validate_tree_page_formats};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

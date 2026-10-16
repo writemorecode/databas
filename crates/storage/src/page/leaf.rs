@@ -18,16 +18,16 @@ const VALUE_LENGTH_OFFSET: usize = KEY_LENGTH_OFFSET + KEY_LENGTH_SIZE;
 
 #[derive(Debug, Clone)]
 pub struct LeafCellParts {
-    pub(crate) payload_len: usize,
-    pub(crate) first_overflow_page_id: Option<PageId>,
-    pub(crate) inline_payload_range: Range<usize>,
-    pub(crate) key_range: Range<usize>,
+    payload_len: usize,
+    first_overflow_page_id: Option<PageId>,
+    inline_payload_range: Range<usize>,
+    key_range: Range<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ParsedLeafCell {
-    pub(crate) cell_offset: usize,
-    pub(crate) parts: LeafCellParts,
+    cell_offset: usize,
+    parts: LeafCellParts,
 }
 
 pub fn cell_len_at(

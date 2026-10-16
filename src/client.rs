@@ -23,9 +23,9 @@ use crate::relational::Value;
 #[error("server error {code:?} ({}): {message}", code.as_u16())]
 pub struct ServerError {
     /// Stable, machine-readable error category.
-    pub code: ErrorCode,
+    pub(crate) code: ErrorCode,
     /// Human-readable diagnostic supplied by the server.
-    pub message: String,
+    message: String,
 }
 
 /// Errors returned by the network client.

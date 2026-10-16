@@ -19,17 +19,17 @@ const KEY_LENGTH_OFFSET: usize = LEFT_CHILD_OFFSET + PAGE_ID_SIZE;
 
 #[derive(Debug, Clone)]
 pub struct InteriorCellParts {
-    pub(crate) payload_len: usize,
-    pub(crate) first_overflow_page_id: Option<PageId>,
-    pub(crate) inline_payload_range: Range<usize>,
+    payload_len: usize,
+    first_overflow_page_id: Option<PageId>,
+    inline_payload_range: Range<usize>,
     pub(crate) left_child: PageId,
 }
 
 #[derive(Debug, Clone)]
 pub struct ParsedInteriorCell {
-    pub(crate) cell_offset: usize,
-    pub(crate) cell_len: usize,
-    pub(crate) parts: InteriorCellParts,
+    cell_offset: usize,
+    cell_len: usize,
+    parts: InteriorCellParts,
 }
 
 pub fn cell_len_at(

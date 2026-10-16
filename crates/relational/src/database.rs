@@ -61,7 +61,7 @@ impl Database {
     }
 
     /// Returns the database-file path associated with this database.
-    pub fn path(&self) -> &Path {
+    fn path(&self) -> &Path {
         self.catalog.path()
     }
 
@@ -104,7 +104,7 @@ impl Database {
         self.locks.acquire_ddl_gate(txn_id).map_err(Into::into)
     }
 
-    pub(crate) fn begin_statement_transaction(
+    fn begin_statement_transaction(
         &self,
         mode: StatementTransactionMode,
     ) -> RelationalResult<TxnId> {

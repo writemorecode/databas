@@ -97,7 +97,7 @@ impl<'db> Session<'db> {
     }
 
     /// Executes one parsed SQL item.
-    pub fn execute_item<'sql>(
+    fn execute_item<'sql>(
         &mut self,
         item: SqlItem<'sql>,
     ) -> Result<ExecutionOutput, DatabaseError<'sql>> {

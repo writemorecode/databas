@@ -9,12 +9,12 @@ pub struct NodeId(usize);
 
 impl NodeId {
     /// Creates an arena-local node ID.
-    pub const fn new(index: usize) -> Self {
+    pub(crate) const fn new(index: usize) -> Self {
         Self(index)
     }
 
     /// Returns the underlying arena index.
-    pub const fn index(self) -> usize {
+    pub(crate) const fn index(self) -> usize {
         self.0
     }
 }
@@ -28,12 +28,12 @@ pub struct RelationId(u32);
 
 impl RelationId {
     /// Creates a query-local relation ID.
-    pub const fn new(value: u32) -> Self {
+    pub(crate) const fn new(value: u32) -> Self {
         Self(value)
     }
 
     /// Returns the query-local numeric identity.
-    pub const fn value(self) -> u32 {
+    const fn value(self) -> u32 {
         self.0
     }
 }

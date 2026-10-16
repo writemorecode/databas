@@ -28,7 +28,7 @@ impl TreeCursor {
     }
 
     /// Re-points the parent-side child reference after inserting a separator.
-    pub(super) fn update_interior_child_ref(
+    fn update_interior_child_ref(
         interior_page: &mut RawInterior<Write<'_>>,
         child_ref: ChildSlotRef,
         inserted_slot_index: u16,
@@ -110,7 +110,7 @@ impl TreeCursor {
     }
 
     /// Chooses the leaf split point with the smallest byte imbalance.
-    pub(super) fn choose_leaf_split_index(cells: &[LeafSplitCell<'_>]) -> StorageResult<usize> {
+    fn choose_leaf_split_index(cells: &[LeafSplitCell<'_>]) -> StorageResult<usize> {
         debug_assert!(cells.len() >= 2, "leaf splits need at least two cells");
 
         let total_cell_len = cells.iter().map(LeafSplitCell::encoded_size).sum::<usize>();
@@ -151,7 +151,7 @@ impl TreeCursor {
     }
 
     /// Reads all leaf cells from a stable page snapshot.
-    pub(super) fn read_leaf_cells_from_snapshot<'a>(
+    fn read_leaf_cells_from_snapshot<'a>(
         &self,
         leaf_page_id: PageId,
         leaf_snapshot_bytes: &'a [u8; PAGE_SIZE],
@@ -196,7 +196,7 @@ impl TreeCursor {
         Ok(cells)
     }
 
-    pub(super) fn snapshot_leaf_cells<'a>(
+    fn snapshot_leaf_cells<'a>(
         &self,
         page_id: PageId,
         snapshot_bytes: &'a mut [u8; PAGE_SIZE],
@@ -212,7 +212,7 @@ impl TreeCursor {
         self.read_leaf_cells_from_snapshot(page_id, snapshot_bytes, &snapshot)
     }
 
-    pub(super) fn snapshot_leaf_pair_cells<'a>(
+    fn snapshot_leaf_pair_cells<'a>(
         &self,
         first_page_id: PageId,
         first_snapshot_bytes: &'a mut [u8; PAGE_SIZE],
@@ -242,7 +242,7 @@ impl TreeCursor {
     }
 
     /// Rebuilds a split leaf pair from ordered materialized cells.
-    pub(super) fn split_leaf_cells(
+    fn split_leaf_cells(
         &mut self,
         leaf_page_id: PageId,
         leaf_pin_guard: &PinGuard,
@@ -384,7 +384,7 @@ impl TreeCursor {
     }
 
     /// Splits a full interior page while inserting a propagated separator.
-    pub(super) fn insert_with_interior_page_split(
+    fn insert_with_interior_page_split(
         &self,
         parent_frame: PathFrame,
         pending: PendingSplit,
@@ -474,7 +474,7 @@ impl TreeCursor {
         Ok(())
     }
 
-    pub(super) fn relink_copied_root_left_child(
+    fn relink_copied_root_left_child(
         &self,
         left_page_id: PageId,
         right_page_id: PageId,
@@ -502,7 +502,7 @@ impl TreeCursor {
         Ok(())
     }
 
-    pub(super) fn remap_positioned_page(&mut self, from_page_id: PageId, to_page_id: PageId) {
+    fn remap_positioned_page(&mut self, from_page_id: PageId, to_page_id: PageId) {
         if let CursorState::Positioned { page_id, slot_index } = self.state
             && page_id == from_page_id
         {

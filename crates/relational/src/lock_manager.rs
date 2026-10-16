@@ -59,7 +59,7 @@ impl TableId {
     }
 
     /// Returns the underlying catalog identifier.
-    pub const fn catalog_id(self) -> CatalogId {
+    const fn catalog_id(self) -> CatalogId {
         self.0
     }
 }
@@ -206,17 +206,17 @@ pub struct TableLease {
 
 impl TableLease {
     /// Returns the transaction owning this capability.
-    pub const fn transaction_id(&self) -> TxnId {
+    const fn transaction_id(&self) -> TxnId {
         self.txn_id
     }
 
     /// Returns the table authorized by this capability.
-    pub const fn table_id(&self) -> TableId {
+    const fn table_id(&self) -> TableId {
         self.table_id
     }
 
     /// Returns the access mode authorized by this capability.
-    pub const fn mode(&self) -> LockMode {
+    const fn mode(&self) -> LockMode {
         self.mode
     }
 
@@ -239,7 +239,7 @@ impl TableLease {
     /// # Errors
     /// Returns [`LockError::LeaseMismatch`] for different identifiers or
     /// [`LockError::InsufficientLockMode`] when a shared lease is used to write.
-    pub fn authorize_mode(
+    pub(crate) fn authorize_mode(
         &self,
         txn_id: TxnId,
         table_id: impl Into<TableId>,
@@ -513,7 +513,7 @@ impl LockManager {
     ///
     /// Returns [`LockError::TransactionAlreadyActive`] for a duplicate ID or
     /// [`LockError::DdlBusy`] when any transaction is active.
-    pub fn begin_ddl_transaction(&self, txn_id: TxnId) -> Result<(), LockError> {
+    pub(crate) fn begin_ddl_transaction(&self, txn_id: TxnId) -> Result<(), LockError> {
         let mut graph = self.lock_graph()?;
         if graph.stopped {
             return Err(LockError::Canceled { txn_id });
@@ -535,7 +535,7 @@ impl LockManager {
     ///
     /// Returns [`LockError::TransactionNotActive`] if `txn_id` is unknown,
     /// or [`LockError::DdlBusy`] unless it is the sole active transaction.
-    pub fn acquire_ddl_gate(&self, txn_id: TxnId) -> Result<(), LockError> {
+    pub(crate) fn acquire_ddl_gate(&self, txn_id: TxnId) -> Result<(), LockError> {
         let mut graph = self.lock_graph()?;
         if graph.stopped {
             return Err(LockError::Canceled { txn_id });
@@ -559,7 +559,7 @@ impl LockManager {
     ///
     /// Returns [`LockError::TransactionNotActive`] if `txn_id` is unknown or
     /// has already completed.
-    pub fn transaction_phase(&self, txn_id: TxnId) -> Result<TransactionPhase, LockError> {
+    pub(crate) fn transaction_phase(&self, txn_id: TxnId) -> Result<TransactionPhase, LockError> {
         let graph = self.lock_graph()?;
         graph
             .transactions
@@ -569,7 +569,7 @@ impl LockManager {
     }
 
     #[cfg(all(test, not(loom)))]
-    pub(crate) fn transaction_is_waiting_for(
+    fn transaction_is_waiting_for(
         &self,
         txn_id: TxnId,
         table_id: TableId,
@@ -611,7 +611,7 @@ impl LockManager {
     }
 
     /// Acquires a shared table lock. See [`Self::acquire_mode`] for waiting and errors.
-    pub fn acquire_shared(
+    fn acquire_shared(
         &self,
         txn_id: TxnId,
         table_id: impl Into<TableId>,
@@ -633,7 +633,7 @@ impl LockManager {
     /// # Errors
     /// Returns the same lifecycle, cancellation, and deadlock errors as
     /// [`Self::acquire`]. A deadlock victim retains all previously held locks.
-    pub fn acquire_mode(
+    pub(crate) fn acquire_mode(
         &self,
         txn_id: TxnId,
         table_id: impl Into<TableId>,
@@ -791,7 +791,7 @@ impl LockManager {
     /// Returns [`LockError::TransactionNotActive`] for an unknown or completed
     /// transaction, or an explicit poison/invariant error if manager state
     /// cannot be updated safely.
-    pub fn cancel_waiting(&self, txn_id: TxnId) -> Result<bool, LockError> {
+    fn cancel_waiting(&self, txn_id: TxnId) -> Result<bool, LockError> {
         let table_id = {
             let graph = self.lock_graph()?;
             graph
@@ -840,7 +840,7 @@ impl LockManager {
     ///
     /// Returns an active-transaction, incompatible-phase, poison, or invariant
     /// error if rollback cannot safely begin.
-    pub fn begin_rollback(&self, txn_id: TxnId) -> Result<(), LockError> {
+    pub(crate) fn begin_rollback(&self, txn_id: TxnId) -> Result<(), LockError> {
         self.begin_completion(txn_id, TransactionPhase::Aborting)
     }
 

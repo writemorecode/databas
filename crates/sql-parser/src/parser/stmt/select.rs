@@ -43,7 +43,7 @@ impl Display for JoinType {
 #[derive(Debug, PartialEq)]
 pub struct TableReference<'a> {
     pub name: &'a str,
-    pub alias: Option<&'a str>,
+    pub(crate) alias: Option<&'a str>,
 }
 
 impl TableReference<'_> {
@@ -101,7 +101,7 @@ pub struct OrderBy<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn parse_order_by(&mut self) -> Result<Option<OrderBy<'a>>, SQLError<'a>> {
+    fn parse_order_by(&mut self) -> Result<Option<OrderBy<'a>>, SQLError<'a>> {
         let Some(Ok(Token { kind: TokenKind::Keyword(Keyword::Order), .. })) = self.lexer.peek()
         else {
             return Ok(None);
@@ -180,7 +180,7 @@ impl Display for SelectQuery<'_> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn parse_select_query(&mut self) -> Result<SelectQuery<'a>, SQLError<'a>> {
+    pub(crate) fn parse_select_query(&mut self) -> Result<SelectQuery<'a>, SQLError<'a>> {
         let columns = match self.parse_expression_list() {
             Err(SQLError { kind: SQLErrorKind::UnexpectedEnd, pos }) => {
                 return Err(SQLError { kind: SQLErrorKind::ExpectedExpression, pos });

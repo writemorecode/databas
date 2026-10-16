@@ -225,7 +225,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn parse_unary_op(&mut self, tok: Token<'a>) -> Result<Expression<'a>, SQLError<'a>> {
+    fn parse_unary_op(&mut self, tok: Token<'a>) -> Result<Expression<'a>, SQLError<'a>> {
         let op: Op = tok.try_into()?;
         let ((), r_bp) = op.prefix_binding_power().ok_or(SQLError::new(
             SQLErrorKind::InvalidPrefixOperator { op: tok.kind },
@@ -235,7 +235,7 @@ impl<'a> Parser<'a> {
         Ok(Expression::UnaryOp((op, Box::new(rhs))))
     }
 
-    pub fn expr(mut self) -> Result<Expression<'a>, SQLError<'a>> {
+    fn expr(mut self) -> Result<Expression<'a>, SQLError<'a>> {
         self.expr_bp(0)
     }
 

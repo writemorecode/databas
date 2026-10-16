@@ -376,7 +376,7 @@ pub(super) fn transaction_frame_len(buf: &'_ [u8]) -> Result<usize, LogManagerEr
 }
 
 #[cfg(test)]
-pub fn read_log_record_kinds_for_test(
+pub(crate) fn read_log_record_kinds_for_test(
     db_file_path: impl AsRef<Path>,
 ) -> Vec<(TxnId, OwnedLogRecordKind)> {
     let wal_file_path = db_file_path.as_ref().with_added_extension("wal");

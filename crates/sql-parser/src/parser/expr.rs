@@ -23,7 +23,7 @@ pub enum AggregateFunctionKind {
 #[derive(Debug, PartialEq)]
 pub struct AggregateFunction<'a> {
     pub kind: AggregateFunctionKind,
-    pub expr: Box<Expression<'a>>,
+    pub(crate) expr: Box<Expression<'a>>,
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -73,11 +73,11 @@ enum ChildSide {
 }
 
 impl<'a> Expression<'a> {
-    pub const fn column(column: &'a str) -> Self {
+    pub(crate) const fn column(column: &'a str) -> Self {
         Self::ColumnReference(ColumnReference { table: None, column })
     }
 
-    pub const fn qualified_column(table: &'a str, column: &'a str) -> Self {
+    pub(crate) const fn qualified_column(table: &'a str, column: &'a str) -> Self {
         Self::ColumnReference(ColumnReference { table: Some(table), column })
     }
 

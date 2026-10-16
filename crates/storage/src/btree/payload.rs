@@ -14,7 +14,7 @@ pub(super) fn cell_corruption(page_id: PageId, kind: CorruptionKind) -> StorageE
     })
 }
 
-pub(super) fn overflow_corruption(page_id: Option<PageId>, kind: CorruptionKind) -> StorageError {
+fn overflow_corruption(page_id: Option<PageId>, kind: CorruptionKind) -> StorageError {
     StorageError::Corruption(CorruptionError {
         component: CorruptionComponent::OverflowPage,
         page_id,

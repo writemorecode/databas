@@ -12,7 +12,7 @@ use super::{LogicalPlan, PhysicalPlan};
 pub struct Plan {
     /// Catalog-bound statement representation before physical operator
     /// selection.
-    pub logical: LogicalPlan,
+    pub(crate) logical: LogicalPlan,
     /// Executable operator tree selected from the logical plan.
-    pub physical: PhysicalPlan,
+    pub(crate) physical: PhysicalPlan,
 }

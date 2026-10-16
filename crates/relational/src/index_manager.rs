@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_pub_crate)]
+
 use crate::catalog_manager::CatalogManager;
 use crate::cursor::encode_index_entry_key;
 use crate::error::{
@@ -75,7 +77,7 @@ fn index_cursor(
 /// manager-to-operation migration.
 #[cfg(test)]
 #[derive(Clone)]
-pub struct IndexManager {
+pub(crate) struct IndexManager {
     catalog: CatalogManager,
 }
 

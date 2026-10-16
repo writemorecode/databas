@@ -21,7 +21,7 @@ impl IndexKeyBound {
     }
 
     /// Returns whether `key` satisfies this lower bound.
-    pub(crate) fn contains_lower(&self, key: &[u8]) -> bool {
+    fn contains_lower(&self, key: &[u8]) -> bool {
         match self {
             Self::Inclusive(value) => key >= value,
             Self::Exclusive(value) => key > value,
@@ -29,7 +29,7 @@ impl IndexKeyBound {
     }
 
     /// Returns whether `key` satisfies this upper bound.
-    pub(crate) fn contains_upper(&self, key: &[u8]) -> bool {
+    fn contains_upper(&self, key: &[u8]) -> bool {
         match self {
             Self::Inclusive(value) => key <= value,
             Self::Exclusive(value) => key < value,
@@ -41,9 +41,9 @@ impl IndexKeyBound {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IndexKeyRange {
     /// Optional lower bound.
-    pub lower: Option<IndexKeyBound>,
+    pub(crate) lower: Option<IndexKeyBound>,
     /// Optional upper bound.
-    pub upper: Option<IndexKeyBound>,
+    pub(crate) upper: Option<IndexKeyBound>,
 }
 
 impl IndexKeyRange {
@@ -77,7 +77,7 @@ impl TableKeyBound {
     }
 
     /// Returns whether `key` satisfies this lower bound.
-    pub fn contains_lower(self, key: TableKey) -> bool {
+    fn contains_lower(self, key: TableKey) -> bool {
         match self {
             Self::Inclusive(value) => key >= value,
             Self::Exclusive(value) => key > value,
@@ -85,7 +85,7 @@ impl TableKeyBound {
     }
 
     /// Returns whether `key` satisfies this upper bound.
-    pub fn contains_upper(self, key: TableKey) -> bool {
+    fn contains_upper(self, key: TableKey) -> bool {
         match self {
             Self::Inclusive(value) => key <= value,
             Self::Exclusive(value) => key < value,

@@ -9,9 +9,9 @@ use crate::PageId;
 #[error("{}", format_corruption_error(*component, *page_id, kind))]
 pub struct CorruptionError {
     /// Component whose bytes or structure were invalid.
-    pub component: CorruptionComponent,
+    pub(crate) component: CorruptionComponent,
     /// Page containing the corruption, when known.
-    pub page_id: Option<PageId>,
+    pub(crate) page_id: Option<PageId>,
     /// Specific validation failure.
     #[source]
     pub kind: CorruptionKind,

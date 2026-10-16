@@ -84,7 +84,9 @@ impl Display for CreateTableQuery<'_> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn parse_create_table_query(&mut self) -> Result<CreateTableQuery<'a>, SQLError<'a>> {
+    pub(crate) fn parse_create_table_query(
+        &mut self,
+    ) -> Result<CreateTableQuery<'a>, SQLError<'a>> {
         let table_name = self.parse_identifier()?;
 
         self.lexer.expect_token(TokenKind::LeftParen)?;

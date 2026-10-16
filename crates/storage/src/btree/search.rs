@@ -6,7 +6,7 @@ use super::{
     Read, Record, SearchResult, StorageResult, TreeCursor, TxnId,
 };
 
-pub(super) fn advance_mutation_epoch(epoch: &AtomicU64) {
+fn advance_mutation_epoch(epoch: &AtomicU64) {
     epoch.fetch_add(1, AtomicOrdering::Release);
 }
 
@@ -71,12 +71,12 @@ impl TreeCursor {
     }
 
     /// Marks the cursor as having moved past the scan range.
-    pub(super) fn set_exhausted_state(&mut self) {
+    fn set_exhausted_state(&mut self) {
         self.state = CursorState::Exhausted;
     }
 
     /// Materializes one record from a positioned raw leaf slot.
-    pub(super) fn record_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<Record> {
+    fn record_at(&self, page_id: PageId, slot_index: u16) -> StorageResult<Record> {
         Record::new(&self.page_cache, page_id, slot_index)
     }
 
@@ -184,11 +184,7 @@ impl TreeCursor {
         Ok(SearchResult::InsertAt(low))
     }
 
-    pub(super) fn lower_bound_leaf_slot(
-        &self,
-        page_id: PageId,
-        key: &[u8],
-    ) -> StorageResult<BoundResult> {
+    fn lower_bound_leaf_slot(&self, page_id: PageId, key: &[u8]) -> StorageResult<BoundResult> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
         let leaf = page.open::<Leaf>()?;
@@ -284,10 +280,7 @@ impl TreeCursor {
     }
 
     /// Follows leftmost children from `start_page_id` until reaching a leaf.
-    pub(super) fn descend_to_first_leaf_from(
-        &self,
-        start_page_id: PageId,
-    ) -> StorageResult<PageId> {
+    fn descend_to_first_leaf_from(&self, start_page_id: PageId) -> StorageResult<PageId> {
         let mut page_id = start_page_id;
 
         loop {

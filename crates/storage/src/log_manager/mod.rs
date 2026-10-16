@@ -20,6 +20,8 @@
 //! responsible for making appended bytes durable before pages protected by
 //! those LSNs are written to the database file.
 
+#![allow(clippy::redundant_pub_crate)]
+
 use std::{
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
@@ -43,7 +45,7 @@ use fault_injection::FaultInjectingWriter;
 #[cfg(test)]
 use frame::FOOTER_LEN;
 #[cfg(test)]
-pub use frame::read_log_record_kinds_for_test;
+pub(crate) use frame::read_log_record_kinds_for_test;
 use frame::{
     CRC32, HEADER_LEN, deserialize_transaction, scan_transaction_frame, serialize_transaction,
     transaction_frame_len, validate_record_txn_ids, wal_open_error,
@@ -239,7 +241,7 @@ pub struct RecoveryLogScan {
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OwnedLogRecordKind {
+pub(crate) enum OwnedLogRecordKind {
     Begin,
     Commit,
     Rollback,
@@ -250,9 +252,9 @@ pub enum OwnedLogRecordKind {
 #[derive(Debug)]
 pub struct LogTransaction<'a> {
     /// Transaction id shared by all records in this frame.
-    pub(crate) txn_id: TxnId,
+    txn_id: TxnId,
     /// Records decoded from the frame payload.
-    pub(crate) records: Vec<LogRecord<'a>>,
+    records: Vec<LogRecord<'a>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,11 +346,11 @@ pub struct LogManager {
 }
 
 impl LogManager {
-    pub(crate) fn flush_all(&mut self) -> Result<(), LogManagerFlushError> {
+    fn flush_all(&mut self) -> Result<(), LogManagerFlushError> {
         self.flush_through(self.highest_appended_lsn.unwrap_or(ZERO_LSN))
     }
 
-    pub(crate) fn poison(&mut self) {
+    fn poison(&mut self) {
         self.poisoned = true;
     }
 
@@ -534,12 +536,12 @@ impl LogManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn fail_next_append_after_bytes_for_test(&mut self, byte_count: usize) {
+    fn fail_next_append_after_bytes_for_test(&mut self, byte_count: usize) {
         self.wal_writer.fail_next_write_all_after(byte_count);
     }
 
     #[cfg(test)]
-    pub(crate) fn flush_buffer_for_test(&mut self) -> std::io::Result<()> {
+    fn flush_buffer_for_test(&mut self) -> std::io::Result<()> {
         self.wal_writer.flush()
     }
 }

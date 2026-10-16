@@ -51,7 +51,7 @@ impl Display for UpdateQuery<'_> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn parse_update_query(&mut self) -> Result<UpdateQuery<'a>, SQLError<'a>> {
+    pub(crate) fn parse_update_query(&mut self) -> Result<UpdateQuery<'a>, SQLError<'a>> {
         let table = self.parse_identifier()?;
         self.lexer.expect_token(TokenKind::Keyword(Keyword::Set))?;
         let assignments = AssignmentList(self.parse_comma_separated_list(|p| {

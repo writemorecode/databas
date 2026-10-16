@@ -23,17 +23,17 @@ impl<'catalog> Planner<'catalog> {
     }
 
     /// Creates a planner over an arbitrary catalog implementation.
-    pub fn with_schema(catalog: &'catalog dyn CatalogRead) -> Self {
+    pub(crate) fn with_schema(catalog: &'catalog dyn CatalogRead) -> Self {
         Self { catalog }
     }
 
     /// Builds only the catalog-bound logical plan for one parsed statement.
-    pub fn plan_logical_statement(&self, statement: &Statement<'_>) -> PlannerResult<LogicalPlan> {
+    fn plan_logical_statement(&self, statement: &Statement<'_>) -> PlannerResult<LogicalPlan> {
         Binder::new(self.catalog).bind(statement).and_then(optimizer::optimize)
     }
 
     /// Builds both the bound logical plan and executable physical plan.
-    pub fn plan_statement(&self, statement: &Statement<'_>) -> PlannerResult<Plan> {
+    pub(crate) fn plan_statement(&self, statement: &Statement<'_>) -> PlannerResult<Plan> {
         let logical = self.plan_logical_statement(statement)?;
         let physical = PhysicalPlanner::new(self.catalog).plan(logical.clone())?;
         Ok(Plan { logical, physical })

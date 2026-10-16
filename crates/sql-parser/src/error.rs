@@ -6,7 +6,7 @@ use std::fmt::Display;
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub struct SQLError<'a> {
     pub kind: SQLErrorKind<'a>,
-    pub pos: usize,
+    pub(crate) pos: usize,
 }
 
 impl<'a> SQLError<'a> {

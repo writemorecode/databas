@@ -12,15 +12,15 @@ use super::RelationId;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundColumn {
     /// Query-local identity of the table occurrence that owns this column.
-    pub relation: RelationId,
+    pub(crate) relation: RelationId,
     /// Table name retained for diagnostics and plan formatting.
-    pub table: String,
+    pub(crate) table: String,
     /// Column name.
-    pub name: String,
+    pub(crate) name: String,
     /// Zero-based position in the source table row.
-    pub ordinal: usize,
+    pub(crate) ordinal: usize,
     /// Catalog type of the column.
-    pub data_type: DataType,
+    pub(crate) data_type: DataType,
 }
 
 impl fmt::Display for BoundColumn {
@@ -81,11 +81,11 @@ impl fmt::Display for BoundExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecColumn {
     /// Zero-based slot in the physical operator's input row.
-    pub slot: usize,
+    pub(crate) slot: usize,
     /// Qualified source name retained for diagnostics and `EXPLAIN`.
-    pub name: String,
+    pub(crate) name: String,
     /// Statically known slot type.
-    pub data_type: DataType,
+    pub(crate) data_type: DataType,
 }
 
 impl fmt::Display for ExecColumn {
@@ -122,18 +122,18 @@ impl fmt::Display for ExecExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundUpdateAssignment {
     /// Target column to overwrite.
-    pub column: BoundColumn,
+    pub(crate) column: BoundColumn,
     /// Expression evaluated against the original row.
-    pub expression: BoundExpr,
+    pub(crate) expression: BoundExpr,
 }
 
 /// One executable update assignment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateAssignment {
     /// Target catalog column.
-    pub column: BoundColumn,
+    pub(crate) column: BoundColumn,
     /// Slot-resolved expression evaluated against the original row.
-    pub expression: ExecExpr,
+    pub(crate) expression: ExecExpr,
 }
 
 impl fmt::Display for UpdateAssignment {
@@ -146,18 +146,18 @@ impl fmt::Display for UpdateAssignment {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundSortTerm {
     /// Bound source column used as the sort key.
-    pub column: BoundColumn,
+    pub(crate) column: BoundColumn,
     /// Requested direction, or `None` for the SQL default.
-    pub direction: Option<Ordering>,
+    pub(crate) direction: Option<Ordering>,
 }
 
 /// One executable `ORDER BY` term.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SortTerm {
     /// Input slot used as the sort key.
-    pub column: ExecColumn,
+    pub(crate) column: ExecColumn,
     /// Requested direction, or `None` for the SQL default.
-    pub direction: Option<Ordering>,
+    pub(crate) direction: Option<Ordering>,
 }
 
 impl fmt::Display for SortTerm {

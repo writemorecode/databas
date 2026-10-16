@@ -81,7 +81,7 @@ impl Tuple {
         Self(values)
     }
 
-    pub fn values(&self) -> &[Value] {
+    pub(crate) fn values(&self) -> &[Value] {
         &self.0
     }
 
@@ -89,11 +89,11 @@ impl Tuple {
         self.0
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.0.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -135,7 +135,7 @@ pub struct TupleView<'a> {
 }
 
 impl<'a> TupleView<'a> {
-    pub fn parse(bytes: &'a [u8]) -> io::Result<Self> {
+    pub(crate) fn parse(bytes: &'a [u8]) -> io::Result<Self> {
         let mut input = bytes;
         let count = take(&mut input, 4)?;
         let count = u32::from_le_bytes([count[0], count[1], count[2], count[3]]) as usize;
@@ -163,15 +163,15 @@ impl<'a> TupleView<'a> {
         Ok(Self { values })
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.values.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
 
-    pub fn values(&self) -> impl Iterator<Item = ValueRef<'a>> + '_ {
+    pub(crate) fn values(&self) -> impl Iterator<Item = ValueRef<'a>> + '_ {
         self.values.iter().copied()
     }
 }

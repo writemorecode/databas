@@ -82,12 +82,12 @@ impl<'a> TableRecordView<'a> {
     }
 
     /// Returns the primary-key table key that identifies this table record.
-    pub fn table_key(&self) -> TableKey {
+    fn table_key(&self) -> TableKey {
         self.table_key
     }
 
     /// Returns the encoded table record bytes.
-    pub fn record(&self) -> &'a [u8] {
+    fn record(&self) -> &'a [u8] {
         self.record
     }
 }
@@ -96,9 +96,9 @@ impl<'a> TableRecordView<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedIndexEntry {
     /// Encoded secondary-index key bytes.
-    pub key: Box<[u8]>,
+    key: Box<[u8]>,
     /// Table primary-key value referenced by this secondary-index key.
-    pub table_key: TableKey,
+    pub(crate) table_key: TableKey,
 }
 
 /// Borrowed secondary-index entry view valid only for the callback that receives it.
@@ -114,12 +114,12 @@ impl<'a> IndexEntryView<'a> {
     }
 
     /// Returns the encoded secondary-index key bytes.
-    pub fn key(&self) -> &'a [u8] {
+    fn key(&self) -> &'a [u8] {
         self.key
     }
 
     /// Returns the table primary-key value referenced by this secondary-index key.
-    pub fn table_key(&self) -> TableKey {
+    fn table_key(&self) -> TableKey {
         self.table_key
     }
 }
@@ -166,7 +166,7 @@ impl TableCursor {
     }
 
     /// Returns the cursor's current logical state.
-    pub(crate) fn state(&self) -> CursorState {
+    fn state(&self) -> CursorState {
         self.inner.state()
     }
 
@@ -209,7 +209,10 @@ impl TableCursor {
 
     /// Looks up a table record by table key.
     #[cfg(test)]
-    pub fn get(&mut self, table_key: TableKey) -> RelationalResult<Option<OwnedTableRecord>> {
+    pub(crate) fn get(
+        &mut self,
+        table_key: TableKey,
+    ) -> RelationalResult<Option<OwnedTableRecord>> {
         self.inner
             .get(&encode_table_key(table_key))?
             .map(|record| {
@@ -254,7 +257,7 @@ impl IndexCursor {
     }
 
     /// Returns the cursor's current logical state.
-    pub(crate) fn state(&self) -> CursorState {
+    fn state(&self) -> CursorState {
         self.inner.state()
     }
 
@@ -286,7 +289,7 @@ impl IndexCursor {
 
     /// Looks up an index entry by key.
     #[cfg(test)]
-    pub fn get(&mut self, key: &[u8]) -> RelationalResult<Option<OwnedIndexEntry>> {
+    pub(crate) fn get(&mut self, key: &[u8]) -> RelationalResult<Option<OwnedIndexEntry>> {
         self.inner
             .get(key)?
             .map(|record| IndexEntry::try_from(record).and_then(|entry| entry.to_owned_entry()))
@@ -296,14 +299,14 @@ impl IndexCursor {
     /// Looks up an index entry by key without eagerly copying page-resident bytes.
     #[cfg(test)]
     #[cfg_attr(all(test, loom), allow(dead_code))]
-    pub fn get_entry(&mut self, key: &[u8]) -> RelationalResult<Option<IndexEntry>> {
+    fn get_entry(&mut self, key: &[u8]) -> RelationalResult<Option<IndexEntry>> {
         self.inner.get(key)?.map(IndexEntry::try_from).transpose()
     }
 
     /// Replaces the table key stored for an existing index `key`.
     #[cfg(test)]
     #[cfg_attr(all(test, loom), allow(dead_code))]
-    pub fn update(&mut self, key: &[u8], table_key: TableKey) -> RelationalResult<()> {
+    fn update(&mut self, key: &[u8], table_key: TableKey) -> RelationalResult<()> {
         self.inner.update(key, &encode_index_table_key(table_key)).map_err(Into::into)
     }
 
@@ -315,24 +318,24 @@ impl IndexCursor {
 
 impl TableRecord {
     /// Returns the primary-key table key that identifies this table record.
-    pub fn table_key(&self) -> TableKey {
+    pub(crate) fn table_key(&self) -> TableKey {
         self.table_key
     }
 
     /// Executes `f` with a borrowed table record view.
-    pub fn with_view<R>(&self, f: impl FnOnce(TableRecordView<'_>) -> R) -> RelationalResult<R> {
+    fn with_view<R>(&self, f: impl FnOnce(TableRecordView<'_>) -> R) -> RelationalResult<R> {
         self.raw
             .with_value(|record| f(TableRecordView::new(self.table_key, record)))
             .map_err(Into::into)
     }
 
     /// Executes `f` with a borrowed view of the encoded table record bytes.
-    pub fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> RelationalResult<R> {
+    pub(crate) fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> RelationalResult<R> {
         self.raw.with_value(f).map_err(Into::into)
     }
 
     /// Returns a stable, owned snapshot of this table record.
-    pub fn to_owned_record(&self) -> RelationalResult<OwnedTableRecord> {
+    pub(crate) fn to_owned_record(&self) -> RelationalResult<OwnedTableRecord> {
         self.raw
             .with_value(|record| OwnedTableRecord {
                 table_key: self.table_key,
@@ -344,22 +347,22 @@ impl TableRecord {
 
 impl IndexEntry {
     /// Returns the table primary-key value referenced by this secondary-index key.
-    pub fn table_key(&self) -> TableKey {
+    pub(crate) fn table_key(&self) -> TableKey {
         self.table_key
     }
 
     /// Executes `f` with a borrowed secondary-index entry view.
-    pub fn with_view<R>(&self, f: impl FnOnce(IndexEntryView<'_>) -> R) -> RelationalResult<R> {
+    fn with_view<R>(&self, f: impl FnOnce(IndexEntryView<'_>) -> R) -> RelationalResult<R> {
         self.raw.with_key(|key| f(IndexEntryView::new(key, self.table_key))).map_err(Into::into)
     }
 
     /// Executes `f` with a borrowed view of the encoded secondary-index key bytes.
-    pub fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> RelationalResult<R> {
+    pub(crate) fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> RelationalResult<R> {
         self.raw.with_key(f).map_err(Into::into)
     }
 
     /// Returns a stable, owned snapshot of this index entry.
-    pub fn to_owned_entry(&self) -> RelationalResult<OwnedIndexEntry> {
+    fn to_owned_entry(&self) -> RelationalResult<OwnedIndexEntry> {
         self.raw.with_key_value(|key, value| {
             Ok(OwnedIndexEntry { key: key.into(), table_key: decode_index_table_key(value)? })
         })?
