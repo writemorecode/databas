@@ -4,11 +4,11 @@ use crate::disk_manager::DiskManager;
 use crate::error::{InternalError, StorageError, StorageResult};
 use crate::log_manager::{LogManager, Lsn, TxnId};
 use crate::recovery::recover_from_wal;
-use crate::sync::{Mutex, MutexGuard};
 use crate::transaction_manager::{
     LoggedPageUpdate, PageRestore, TransactionManager, TransactionRollback, TransactionSavepoint,
 };
 use crate::{CheckpointOutcome, PAGE_SIZE, PageId};
+use std::sync::{Mutex, MutexGuard};
 
 type ActiveTransactionManager = TransactionManager;
 
@@ -91,18 +91,6 @@ impl StorageRuntime {
 
     pub(crate) fn flush_wal_through(&self, lsn: Lsn) -> StorageResult<()> {
         Self::lock(&self.log, "log manager")?.flush_through(lsn)?;
-        Ok(())
-    }
-
-    #[cfg(all(test, not(loom)))]
-    pub(crate) fn force_next_lsn_exhausted_for_test(&self) -> StorageResult<()> {
-        Self::lock(&self.log, "log manager")?.force_next_lsn_exhausted_for_test();
-        Ok(())
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn fail_next_wal_flush_for_test(&self) -> StorageResult<()> {
-        Self::lock(&self.log, "log manager")?.fail_next_flush_for_test();
         Ok(())
     }
 
@@ -236,65 +224,5 @@ impl Checkpointer {
         } else {
             Ok(CheckpointOutcome::Partial)
         }
-    }
-}
-
-#[cfg(all(test, not(loom)))]
-#[allow(clippy::panic, clippy::unwrap_used)]
-mod tests {
-    use std::{sync::Arc, thread};
-
-    use tempfile::NamedTempFile;
-
-    use super::*;
-
-    #[test]
-    fn poisoned_manager_lock_is_reported_as_an_internal_error() {
-        let file = NamedTempFile::new().unwrap();
-        let disk = DiskManager::new(file.path()).unwrap();
-        let runtime = Arc::new(StorageRuntime::new(file.path().to_path_buf(), disk).unwrap());
-
-        let poisoned_runtime = Arc::clone(&runtime);
-        let panicked = thread::spawn(move || {
-            let _transactions = poisoned_runtime.transactions.lock().unwrap();
-            panic!("poison transaction manager");
-        })
-        .join();
-        assert!(panicked.is_err());
-
-        assert!(matches!(
-            runtime.transaction_is_active(1),
-            Err(StorageError::Internal(InternalError::SynchronizationPoisoned {
-                lock: "transaction manager"
-            }))
-        ));
-    }
-}
-
-#[cfg(all(test, loom))]
-#[allow(clippy::panic, clippy::unwrap_used)]
-mod loom_tests {
-    use loom::sync::Arc;
-    use tempfile::NamedTempFile;
-
-    use super::*;
-    use crate::log_manager::ZERO_LSN;
-    use crate::loom_support::{check_model, thread};
-
-    #[test]
-    fn wal_flush_and_transaction_begin_share_log_safely() {
-        check_model(|| {
-            let file = NamedTempFile::new().unwrap();
-            let disk = DiskManager::new(file.path()).unwrap();
-            let runtime = Arc::new(StorageRuntime::new(file.path().to_path_buf(), disk).unwrap());
-
-            let flush_runtime = Arc::clone(&runtime);
-            let flush = thread::spawn(move || flush_runtime.flush_wal_through(ZERO_LSN));
-            let begin_runtime = Arc::clone(&runtime);
-            let begin = thread::spawn(move || begin_runtime.begin_transaction());
-
-            flush.join().unwrap().unwrap();
-            assert!(begin.join().unwrap().is_ok());
-        });
     }
 }

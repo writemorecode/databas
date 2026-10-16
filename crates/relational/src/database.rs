@@ -192,12 +192,6 @@ impl Database {
         self.catalog.storage().transaction_is_poisoned(txn_id).map_err(Into::into)
     }
 
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub fn fail_next_wal_flush_for_test(&self) -> RelationalResult<()> {
-        self.catalog.storage().fail_next_wal_flush_for_test().map_err(Into::into)
-    }
-
     pub(super) fn catalog(&self) -> &CatalogManager {
         &self.catalog
     }

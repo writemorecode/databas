@@ -25,10 +25,11 @@ pub(crate) use types::SlotId;
 pub use types::{CheckpointOutcome, Lsn, PageId, TxnId};
 pub(crate) use types::{PAGE_SIZE, PAGE_SIZE_U16};
 
-#[cfg(all(test, loom))]
-#[allow(clippy::unwrap_used)]
-mod loom_support;
-mod sync;
 pub use btree::{CursorState, Record, TreeCursor};
 pub use engine::{Storage, StorageOptions};
+
+pub use std::sync::{
+    Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+};
 pub use transaction_manager::TransactionSavepoint;

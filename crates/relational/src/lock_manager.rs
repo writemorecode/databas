@@ -39,7 +39,7 @@ use std::{
     fmt,
 };
 
-use crate::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use thiserror::Error;
 
 use crate::{CatalogId, TxnId};

@@ -1,13 +1,9 @@
 use std::io::{Read, Write};
-#[cfg(test)]
-use std::{fs::File, path::Path};
 
 use crc::{CRC_32_ISO_HDLC, Crc, Digest};
 
 use crate::PAGE_SIZE;
 
-#[cfg(test)]
-use super::OwnedLogRecordKind;
 use super::{LogManagerError, LogRecord, LogRecordKind, LogTransaction, TxnId};
 
 const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
@@ -373,38 +369,6 @@ pub(super) fn transaction_frame_len(buf: &'_ [u8]) -> Result<usize, LogManagerEr
         .checked_add(payload_len)
         .and_then(|len| len.checked_add(FOOTER_LEN))
         .ok_or(LogManagerError::PayloadLengthOverflow)
-}
-
-#[cfg(test)]
-pub(crate) fn read_log_record_kinds_for_test(
-    db_file_path: impl AsRef<Path>,
-) -> Vec<(TxnId, OwnedLogRecordKind)> {
-    let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
-    let mut wal_file = File::open(wal_file_path).unwrap();
-    let mut buf = Vec::new();
-    wal_file.read_to_end(&mut buf).unwrap();
-
-    let mut records = Vec::new();
-    let mut offset = super::WAL_FILE_HEADER_LEN;
-    while offset < buf.len() {
-        let frame_len = transaction_frame_len(&buf[offset..]).unwrap();
-        let transaction = deserialize_transaction(&buf[offset..offset + frame_len]).unwrap();
-        for record in transaction.records {
-            let kind = match record.kind {
-                LogRecordKind::Begin => OwnedLogRecordKind::Begin,
-                LogRecordKind::Commit => OwnedLogRecordKind::Commit,
-                LogRecordKind::Rollback => OwnedLogRecordKind::Rollback,
-                LogRecordKind::PageUpdate { page_id, .. } => {
-                    OwnedLogRecordKind::PageUpdate { page_id }
-                }
-                LogRecordKind::PageAlloc { page_id } => OwnedLogRecordKind::PageAlloc { page_id },
-            };
-            records.push((record.txn_id, kind));
-        }
-        offset += frame_len;
-    }
-
-    records
 }
 
 fn deserialize_log_record<'a>(

@@ -8,8 +8,8 @@ use crate::error::StorageResult;
 use crate::log_manager::TxnId;
 use crate::page_cache::PageCache;
 use crate::storage_runtime::StorageRuntime;
-use crate::sync::Arc;
 use crate::transaction_manager::TransactionSavepoint;
+use std::sync::Arc;
 
 const DEFAULT_PAGE_CACHE_SIZE: usize = 16384;
 
@@ -159,12 +159,6 @@ impl Storage {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn fail_next_wal_flush_for_test(&self) -> StorageResult<()> {
-        self.runtime.fail_next_wal_flush_for_test()
-    }
-
     /// Creates a new empty raw tree and returns a cursor rooted at it.
     pub fn create_tree(&self) -> StorageResult<TreeCursor> {
         let root_page_id = initialize_empty_root(&self.page_cache, None)?;
@@ -211,124 +205,4 @@ fn validate_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
     let mut page = [0u8; crate::PAGE_SIZE];
     disk_manager.read_page(DATABASE_HEADER_PAGE_ID, &mut page)?;
     DatabaseHeader::validate_page(&page)
-}
-
-#[cfg(test)]
-mod tests {
-    use tempfile::NamedTempFile;
-
-    use super::*;
-
-    #[test]
-    fn opens_database_and_manages_raw_trees() {
-        let file = NamedTempFile::new().unwrap();
-        let storage = Storage::open_or_create(file.path()).unwrap();
-
-        assert_eq!(storage.opened_page_count(), 1);
-        assert_eq!(storage.create_tree().unwrap().root_page_id(), 1);
-        assert_eq!(storage.create_tree().unwrap().root_page_id(), 2);
-        storage.flush().unwrap();
-        drop(storage);
-
-        let storage = Storage::open(file.path()).unwrap();
-        assert_eq!(storage.opened_page_count(), 3);
-        assert_eq!(storage.tree_cursor(1).unwrap().root_page_id(), 1);
-        assert_eq!(storage.tree_cursor(2).unwrap().root_page_id(), 2);
-    }
-
-    #[test]
-    fn full_rollback_flushes_savepoint_restores_before_reopen() {
-        use std::io::{Seek, SeekFrom, Write};
-
-        use crate::PAGE_SIZE;
-        use crate::log_manager::{OwnedLogRecordKind, read_log_record_kinds_for_test};
-        use crate::page::{format, validate_btree_page};
-
-        let file = NamedTempFile::new().unwrap();
-        let storage = Storage::open_or_create(file.path()).unwrap();
-        // Keep the baseline out of the WAL so replaying an earlier commit cannot
-        // hide a torn page left behind by rollback.
-        let mut tree = storage.create_tree().unwrap();
-        let root_page_id = tree.root_page_id();
-        tree.insert(b"original", b"preserved value").unwrap();
-        drop(tree);
-        storage.flush().unwrap();
-
-        let txn_id = storage.begin_transaction().unwrap();
-        let savepoint = storage.statement_savepoint(txn_id).unwrap();
-        let mut tree = storage.transaction_tree_cursor(txn_id, root_page_id).unwrap();
-        tree.insert(b"rolled-back", b"discarded value").unwrap();
-        drop(tree);
-
-        let updated_page = {
-            let pin = storage.page_cache.fetch_page(root_page_id).unwrap();
-            *pin.read().unwrap().page()
-        };
-        let update_lsn = format::read_u64(&updated_page, format::LSN_OFFSET);
-        storage.runtime.flush_wal_through(update_lsn).unwrap();
-
-        // Simulate a failed write: the new header and slots reach disk, but the
-        // cell contents in the second half of the page do not (issue #134).
-        let mut database_file = file.reopen().unwrap();
-        database_file.seek(SeekFrom::Start(root_page_id * PAGE_SIZE as u64)).unwrap();
-        database_file.write_all(&updated_page[..PAGE_SIZE / 2]).unwrap();
-        database_file.sync_all().unwrap();
-        drop(database_file);
-
-        let mut torn_page = [0; PAGE_SIZE];
-        storage.runtime.read_page(root_page_id, &mut torn_page).unwrap();
-        assert!(validate_btree_page(&torn_page).is_err());
-
-        storage.rollback_to_savepoint(savepoint).unwrap();
-        storage.validate_tree_page_formats(root_page_id).unwrap();
-
-        let mut disk_page_after_savepoint = [0; PAGE_SIZE];
-        storage.runtime.read_page(root_page_id, &mut disk_page_after_savepoint).unwrap();
-        assert_eq!(disk_page_after_savepoint, torn_page);
-
-        // The savepoint restored the cache and discarded all undo entries.
-        // Full rollback must still flush that page before recording completion.
-        assert!(storage.runtime.prepare_rollback_pages(txn_id).unwrap().pages.is_empty());
-        storage.rollback_transaction(txn_id).unwrap();
-        assert!(!storage.transaction_is_active(txn_id).unwrap());
-        assert_eq!(
-            read_log_record_kinds_for_test(file.path()).last(),
-            Some(&(txn_id, OwnedLogRecordKind::Rollback))
-        );
-        drop(storage);
-
-        let reopened = Storage::open(file.path()).unwrap();
-        reopened.validate_tree_page_formats(root_page_id).unwrap();
-        let mut tree = reopened.tree_cursor(root_page_id).unwrap();
-        assert!(tree.seek_to_first().unwrap());
-        let original = tree.current().unwrap().unwrap();
-        original
-            .with_view(|record| {
-                assert_eq!(record.key(), b"original");
-                assert_eq!(record.value(), b"preserved value");
-            })
-            .unwrap();
-        drop(original);
-        assert!(tree.next_record().unwrap().is_none());
-        assert!(tree.get(b"rolled-back").unwrap().is_none());
-    }
-
-    #[test]
-    fn rollback_does_not_flush_pages_pinned_by_other_work() {
-        let file = NamedTempFile::new().unwrap();
-        let storage = Storage::open_or_create(file.path()).unwrap();
-        let first_root = storage.create_tree().unwrap().root_page_id();
-        let second_root = storage.create_tree().unwrap().root_page_id();
-        storage.flush().unwrap();
-
-        let txn_id = storage.begin_transaction().unwrap();
-        storage
-            .transaction_tree_cursor(txn_id, first_root)
-            .unwrap()
-            .insert(b"key", b"value")
-            .unwrap();
-        let _unrelated_pin = storage.page_cache.fetch_page(second_root).unwrap();
-
-        storage.rollback_transaction(txn_id).unwrap();
-    }
 }

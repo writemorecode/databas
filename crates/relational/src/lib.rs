@@ -38,15 +38,9 @@ mod active_transaction;
 pub use active_transaction::ActiveTransaction;
 
 use databas_storage as storage;
-#[cfg(all(test, loom))]
-#[allow(clippy::unwrap_used)]
-mod loom_support;
-mod sync;
 
 /// Helpers for in-memory test implementations of the relational access traits.
 /// Not part of the production database API.
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
 pub mod testing {
     pub fn transaction_is_active(
         database: &crate::Database,
