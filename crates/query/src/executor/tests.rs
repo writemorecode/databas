@@ -325,10 +325,7 @@ impl RelationalAccess for MemoryStore {
     }
 }
 
-fn execute<'sql>(
-    database: &MemoryStore,
-    sql: &'sql str,
-) -> Result<ExecutionOutput, TestDatabaseError> {
+fn execute(database: &MemoryStore, sql: &str) -> Result<ExecutionOutput, TestDatabaseError> {
     let statement = Parser::new(sql).stmt()?;
     let plan = Planner::with_schema(database).plan_physical_statement(&statement)?;
     let before = database.state.borrow().clone();

@@ -19,7 +19,7 @@ pub(in crate::btree) enum RecordStorage {
 pub struct Record {
     page_id: PageId,
     slot_index: u16,
-    pub(in crate::btree) storage: RecordStorage,
+    storage: RecordStorage,
 }
 
 /// Stable, owned raw record snapshot.
@@ -41,17 +41,17 @@ impl<'a> RecordView<'a> {
     }
 
     /// Returns the record key bytes.
-    pub fn key(&self) -> &'a [u8] {
+    pub(crate) fn key(&self) -> &'a [u8] {
         self.key
     }
 
     /// Returns the record value bytes.
-    pub fn value(&self) -> &'a [u8] {
+    pub(crate) fn value(&self) -> &'a [u8] {
         self.value
     }
 
     /// Returns the record key and value bytes.
-    pub fn key_value(&self) -> (&'a [u8], &'a [u8]) {
+    fn key_value(&self) -> (&'a [u8], &'a [u8]) {
         (self.key, self.value)
     }
 }
@@ -106,12 +106,12 @@ impl Record {
     }
 
     /// Returns the slot index that this record refers to within its leaf page.
-    pub fn slot_index(&self) -> u16 {
+    fn slot_index(&self) -> u16 {
         self.slot_index
     }
 
     /// Executes `f` with a borrowed view of this record.
-    pub fn with_view<R>(&self, f: impl FnOnce(RecordView<'_>) -> R) -> StorageResult<R> {
+    pub(crate) fn with_view<R>(&self, f: impl FnOnce(RecordView<'_>) -> R) -> StorageResult<R> {
         match &self.storage {
             RecordStorage::PageResident { pin, key_range, value_range } => {
                 let page = pin.read()?;
@@ -126,7 +126,7 @@ impl Record {
     }
 
     /// Returns a stable, owned snapshot of this record.
-    pub fn to_owned_record(&self) -> StorageResult<OwnedRecord> {
+    fn to_owned_record(&self) -> StorageResult<OwnedRecord> {
         self.with_key_value(|key, value| OwnedRecord::new(key.into(), value.into()))
     }
 
@@ -155,17 +155,17 @@ impl OwnedRecord {
     }
 
     /// Executes `f` with a borrowed view of the record key.
-    pub fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+    fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
         f(&self.key)
     }
 
     /// Executes `f` with a borrowed view of the record value.
-    pub fn with_value<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+    fn with_value<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
         f(&self.value)
     }
 
     /// Executes `f` with borrowed views of the key and value.
-    pub fn with_key_value<R>(&self, f: impl FnOnce(&[u8], &[u8]) -> R) -> R {
+    fn with_key_value<R>(&self, f: impl FnOnce(&[u8], &[u8]) -> R) -> R {
         f(&self.key, &self.value)
     }
 }

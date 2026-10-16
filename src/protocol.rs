@@ -11,9 +11,9 @@ use thiserror::Error;
 
 use crate::relational::Value;
 
-pub(crate) const MAGIC: [u8; 4] = *b"DBAS";
-pub(crate) const VERSION: u16 = 1;
-pub(crate) const MAX_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
+const MAGIC: [u8; 4] = *b"DBAS";
+const VERSION: u16 = 1;
+const MAX_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
 const HEADER_LEN: usize = 12;
 
 pub(crate) const STARTUP: u8 = 0x01;
@@ -76,7 +76,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Returns the numeric representation used on the wire.
-    pub const fn as_u16(self) -> u16 {
+    pub(crate) const fn as_u16(self) -> u16 {
         match self {
             Self::ProtocolError => 1,
             Self::UnsupportedProtocolVersion => 2,
@@ -96,7 +96,7 @@ impl ErrorCode {
         }
     }
 
-    pub(crate) const fn from_u16(code: u16) -> Self {
+    const fn from_u16(code: u16) -> Self {
         match code {
             1 => Self::ProtocolError,
             2 => Self::UnsupportedProtocolVersion,

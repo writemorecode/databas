@@ -71,7 +71,7 @@ impl Display for Op {
 }
 
 impl Op {
-    pub fn prefix_binding_power(&self) -> Option<((), u8)> {
+    pub(crate) fn prefix_binding_power(&self) -> Option<((), u8)> {
         let res = match self {
             Op::Not | Op::Sub => ((), 7),
             _ => return None,
@@ -79,7 +79,7 @@ impl Op {
         Some(res)
     }
 
-    pub fn infix_binding_power(&self) -> Option<(u8, u8)> {
+    pub(crate) fn infix_binding_power(&self) -> Option<(u8, u8)> {
         let res = match self {
             Op::And | Op::Or => (1, 2),
             Op::NotEquals

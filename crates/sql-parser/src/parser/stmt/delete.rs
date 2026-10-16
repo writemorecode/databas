@@ -28,7 +28,7 @@ impl Display for DeleteQuery<'_> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn parse_delete_query(&mut self) -> Result<DeleteQuery<'a>, SQLError<'a>> {
+    pub(crate) fn parse_delete_query(&mut self) -> Result<DeleteQuery<'a>, SQLError<'a>> {
         self.lexer.expect_token(TokenKind::Keyword(Keyword::From))?;
         let table = self.parse_identifier()?;
         let where_clause =

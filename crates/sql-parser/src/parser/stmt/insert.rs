@@ -41,7 +41,7 @@ impl Display for InsertQuery<'_> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn parse_insert_query(&mut self) -> Result<InsertQuery<'a>, SQLError<'a>> {
+    pub(crate) fn parse_insert_query(&mut self) -> Result<InsertQuery<'a>, SQLError<'a>> {
         self.lexer.expect_token(TokenKind::Keyword(Keyword::Into))?;
         let table = self.parse_identifier()?;
 

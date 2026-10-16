@@ -17,7 +17,7 @@ use crate::sql_parser::parser::op::Op;
 
 mod expression;
 
-pub use expression::evaluate_expression;
+pub(crate) use expression::evaluate_expression;
 use expression::{
     EvaluationContext, empty_record, evaluate_expressions, evaluate_value, execute_delete,
     execute_insert_values, execute_update, execute_values, offset_rows,
@@ -150,21 +150,21 @@ pub struct RowLocator {
 
 impl RowLocator {
     /// Returns the query-local relation this record came from.
-    pub fn relation(&self) -> RelationId {
+    fn relation(&self) -> RelationId {
         self.relation
     }
 
     /// Returns the catalog table containing the record.
-    pub fn table_id(&self) -> CatalogId {
+    fn table_id(&self) -> CatalogId {
         self.table_id
     }
 
     /// Returns the table key of the source record.
-    pub fn table_key(&self) -> TableKey {
+    fn table_key(&self) -> TableKey {
         self.record.table_key
     }
 
-    pub(crate) fn record(&self) -> &OwnedTableRecord {
+    fn record(&self) -> &OwnedTableRecord {
         &self.record
     }
 }
@@ -182,7 +182,7 @@ pub struct ExecutorRow {
 
 impl ExecutorRow {
     /// Creates a synthetic row with no storage locators.
-    pub fn from_values(values: Vec<Value>) -> Self {
+    fn from_values(values: Vec<Value>) -> Self {
         Self { values, locators: Vec::new() }
     }
 
@@ -203,25 +203,25 @@ impl ExecutorRow {
     }
 
     /// Returns all source-row locators retained through relational operators.
-    pub fn locators(&self) -> &[RowLocator] {
+    fn locators(&self) -> &[RowLocator] {
         &self.locators
     }
 
     /// Returns the source record for a query-local relation, if present.
-    pub fn locator(&self, relation: RelationId) -> Option<&RowLocator> {
+    fn locator(&self, relation: RelationId) -> Option<&RowLocator> {
         self.locators.iter().find(|locator| locator.relation == relation)
     }
 
-    pub(crate) fn with_values(&self, values: Vec<Value>) -> Self {
+    fn with_values(&self, values: Vec<Value>) -> Self {
         Self { values, locators: self.locators.clone() }
     }
 
-    pub(crate) fn into_with_values(self, values: Vec<Value>) -> Self {
+    fn into_with_values(self, values: Vec<Value>) -> Self {
         Self { values, locators: self.locators }
     }
 
     /// Executes `f` with this row encoded in the storage tuple format.
-    pub fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
+    fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> StorageResult<R> {
         let values = self.values.iter().map(ValueRef::from).collect::<Vec<_>>();
         let record = TupleRef::new(&values).to_bytes()?;
         Ok(f(&record))
@@ -271,7 +271,7 @@ impl ExecutionOutput {
     /// Row operators call this when they expect their child plan to produce
     /// rows. Non-row outputs become [`ExecutorError::ExpectedRows`] tagged with
     /// the requesting operator name.
-    pub(crate) fn into_rows(self, operator: &'static str) -> ExecutorResult<RowStream> {
+    fn into_rows(self, operator: &'static str) -> ExecutorResult<RowStream> {
         match self {
             Self::Explain(_) => Err(ExecutorError::ExpectedRows { operator }),
             Self::Rows { rows, .. } => Ok(Box::new(rows.into_iter())),

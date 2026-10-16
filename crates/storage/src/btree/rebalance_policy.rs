@@ -89,7 +89,7 @@ impl TreeCursor {
     }
 
     /// Returns whether an interior page rebuilt from `children` would be underoccupied.
-    pub(super) fn interior_children_underoccupied(children: &[ChildEntry]) -> bool {
+    fn interior_children_underoccupied(children: &[ChildEntry]) -> bool {
         let mut cell_bytes = 0;
         for child in &children[..children.len().saturating_sub(1)] {
             let Some(key) = child.max_key.as_ref() else {

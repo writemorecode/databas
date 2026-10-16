@@ -8,7 +8,7 @@ use super::{BoundColumn, BoundExpr, RelationId};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlanSchema {
     /// Columns in output-slot order.
-    pub columns: Vec<PlanColumn>,
+    pub(crate) columns: Vec<PlanColumn>,
 }
 
 impl PlanSchema {
@@ -78,9 +78,9 @@ impl PlanSchema {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanColumn {
     /// Display name of the output expression or source column.
-    pub name: String,
+    pub(crate) name: String,
     /// Statically known type, if binding could determine one.
-    pub data_type: Option<DataType>,
+    pub(crate) data_type: Option<DataType>,
     /// Source column identity for a direct column output.
-    pub source: Option<BoundColumn>,
+    pub(crate) source: Option<BoundColumn>,
 }

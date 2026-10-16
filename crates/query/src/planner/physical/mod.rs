@@ -25,13 +25,13 @@ pub struct PhysicalPlan {
 impl PhysicalPlan {
     /// Creates a plan containing a single root node without output metadata.
     /// Use [`Self::with_output_schema`] to describe a manually built result.
-    pub fn new(root: PhysicalPlanNode) -> Self {
+    pub(crate) fn new(root: PhysicalPlanNode) -> Self {
         Self { nodes: vec![root], root: NodeId::new(0), output_schema: None }
     }
 
     /// Adds a node and makes it the plan root, returning its ID.
     /// Clears output metadata, which described the previous root.
-    pub fn push(&mut self, node: PhysicalPlanNode) -> NodeId {
+    fn push(&mut self, node: PhysicalPlanNode) -> NodeId {
         let id = NodeId::new(self.nodes.len());
         self.nodes.push(node);
         self.root = id;
@@ -40,14 +40,14 @@ impl PhysicalPlan {
     }
 
     /// Attaches the output schema of the current root in row-value order.
-    pub fn with_output_schema(mut self, schema: PlanSchema) -> Self {
+    fn with_output_schema(mut self, schema: PlanSchema) -> Self {
         self.output_schema = Some(schema);
         self
     }
 
     /// Returns result metadata, including when execution produces no rows.
     /// Non-row plans and manually built plans without metadata return `None`.
-    pub fn output_schema(&self) -> Option<&PlanSchema> {
+    fn output_schema(&self) -> Option<&PlanSchema> {
         self.output_schema.as_ref()
     }
 
@@ -57,12 +57,12 @@ impl PhysicalPlan {
     }
 
     /// Returns the root node ID.
-    pub fn root_id(&self) -> NodeId {
+    fn root_id(&self) -> NodeId {
         self.root
     }
 
     /// Returns a node by arena ID.
-    pub fn node(&self, id: NodeId) -> &PhysicalPlanNode {
+    fn node(&self, id: NodeId) -> &PhysicalPlanNode {
         &self.nodes[id.index()]
     }
 
@@ -243,15 +243,15 @@ pub enum PhysicalPlanNode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SecondaryIndexScanPlan {
     /// Query-local identity of the scanned table occurrence.
-    pub relation: RelationId,
+    pub(crate) relation: RelationId,
     /// Table to fetch rows from.
     pub table: TableSchema,
     /// Secondary index to scan.
-    pub index: IndexSchema,
+    pub(crate) index: IndexSchema,
     /// Bound table column matched by the index lookup.
-    pub column: BoundColumn,
+    pub(crate) column: BoundColumn,
     /// Human-readable indexed value range.
-    pub value_range: IndexValueRange,
+    pub(crate) value_range: IndexValueRange,
 }
 
 impl PartialEq<PhysicalPlanNode> for PhysicalPlan {

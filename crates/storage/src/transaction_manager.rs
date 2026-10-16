@@ -243,7 +243,7 @@ impl TransactionManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn active_transaction_id(&self) -> Option<TxnId> {
+    fn active_transaction_id(&self) -> Option<TxnId> {
         self.transactions.keys().next().copied()
     }
 

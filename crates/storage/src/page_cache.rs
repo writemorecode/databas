@@ -452,7 +452,7 @@ impl PinGuard {
 
     /// Returns the page ID associated with this pin.
     #[cfg(all(test, not(loom)))]
-    pub(crate) fn page_id(&self) -> PageId {
+    fn page_id(&self) -> PageId {
         self.page_id
     }
 

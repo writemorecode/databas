@@ -61,7 +61,7 @@ impl ThreadPool {
     /// # Errors
     ///
     /// Returns [`ThreadPoolError::InvalidSize`] when `size` is zero.
-    pub fn new(size: usize) -> Result<Self, ThreadPoolError> {
+    pub(crate) fn new(size: usize) -> Result<Self, ThreadPoolError> {
         if size == 0 {
             return Err(ThreadPoolError::InvalidSize);
         }
@@ -85,7 +85,7 @@ impl ThreadPool {
     ///
     /// # Errors
     /// Returns `InvalidInterval` for a zero interval or `QueueClosed` after shutdown.
-    pub fn execute_periodic<F>(
+    pub(crate) fn execute_periodic<F>(
         &mut self,
         interval: Duration,
         job: F,
@@ -150,7 +150,7 @@ impl ThreadPool {
     /// # Errors
     ///
     /// Returns [`ThreadPoolError::QueueClosed`] if all workers have stopped.
-    pub fn execute<F>(&self, job: F) -> Result<(), ThreadPoolError>
+    pub(crate) fn execute<F>(&self, job: F) -> Result<(), ThreadPoolError>
     where
         F: FnOnce() + Send + 'static,
     {
@@ -164,7 +164,7 @@ impl ThreadPool {
     ///
     /// Returns [`ThreadPoolError::QueueFull`] when the bounded queue is full,
     /// or [`ThreadPoolError::QueueClosed`] if all workers have stopped.
-    pub fn try_execute<F>(&self, job: F) -> Result<(), ThreadPoolError>
+    pub(crate) fn try_execute<F>(&self, job: F) -> Result<(), ThreadPoolError>
     where
         F: FnOnce() + Send + 'static,
     {
@@ -176,7 +176,7 @@ impl ThreadPool {
     }
 
     /// Returns the identifier of a worker that has stopped unexpectedly.
-    pub fn stopped_worker(&self) -> Option<usize> {
+    pub(crate) fn stopped_worker(&self) -> Option<usize> {
         self.workers
             .iter()
             .find(|worker| worker.thread.as_ref().is_some_and(JoinHandle::is_finished))
@@ -189,7 +189,7 @@ impl ThreadPool {
     ///
     /// Returns [`ThreadPoolError::WorkerPanicked`] if a worker panicked. All
     /// workers are joined before the error is returned.
-    pub fn shutdown(mut self) -> Result<(), ThreadPoolError> {
+    pub(crate) fn shutdown(mut self) -> Result<(), ThreadPoolError> {
         self.close_and_join()
     }
 

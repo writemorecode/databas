@@ -19,12 +19,12 @@ pub struct LogicalPlan {
 
 impl LogicalPlan {
     /// Creates a plan containing a single root node.
-    pub fn new(root: LogicalPlanNode) -> Self {
+    pub(crate) fn new(root: LogicalPlanNode) -> Self {
         Self { nodes: vec![root], root: NodeId::new(0) }
     }
 
     /// Adds a node and makes it the plan root, returning its ID.
-    pub fn push(&mut self, node: LogicalPlanNode) -> NodeId {
+    pub(crate) fn push(&mut self, node: LogicalPlanNode) -> NodeId {
         let id = NodeId::new(self.nodes.len());
         self.nodes.push(node);
         self.root = id;
@@ -32,27 +32,27 @@ impl LogicalPlan {
     }
 
     /// Returns the root node.
-    pub fn root(&self) -> &LogicalPlanNode {
+    pub(crate) fn root(&self) -> &LogicalPlanNode {
         self.node(self.root)
     }
 
     /// Returns the root node ID.
-    pub fn root_id(&self) -> NodeId {
+    pub(crate) fn root_id(&self) -> NodeId {
         self.root
     }
 
     /// Returns a node by arena ID.
-    pub fn node(&self, id: NodeId) -> &LogicalPlanNode {
+    pub(crate) fn node(&self, id: NodeId) -> &LogicalPlanNode {
         &self.nodes[id.index()]
     }
 
     /// Returns the output schema of a relational node.
-    pub fn output_schema(&self, id: NodeId) -> Option<&PlanSchema> {
+    pub(crate) fn output_schema(&self, id: NodeId) -> Option<&PlanSchema> {
         self.node(id).output_schema()
     }
 
     /// Iterates over all nodes in arena order.
-    pub fn iter(&self) -> impl Iterator<Item = &LogicalPlanNode> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &LogicalPlanNode> {
         self.nodes.iter()
     }
 
@@ -119,7 +119,7 @@ pub enum LogicalPlanNode {
 
 impl LogicalPlanNode {
     /// Returns the ordered output schema for row-producing operators.
-    pub fn output_schema(&self) -> Option<&PlanSchema> {
+    pub(crate) fn output_schema(&self) -> Option<&PlanSchema> {
         match self {
             Self::Values { output, .. }
             | Self::OneRow { output }

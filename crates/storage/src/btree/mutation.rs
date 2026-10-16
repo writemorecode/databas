@@ -7,14 +7,14 @@ use super::{
 };
 
 impl TreeCursor {
-    pub(super) fn checked_payload_len(&self, payload_len: usize) -> StorageResult<()> {
+    fn checked_payload_len(&self, payload_len: usize) -> StorageResult<()> {
         if payload_len > u16::MAX as usize {
             return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize }.into());
         }
         Ok(())
     }
 
-    pub(super) fn leaf_cell_local_size(&self, key: &[u8], value: &[u8]) -> StorageResult<usize> {
+    fn leaf_cell_local_size(&self, key: &[u8], value: &[u8]) -> StorageResult<usize> {
         let payload_len = key.len() + value.len();
         self.checked_payload_len(payload_len)?;
         Ok(LEAF_CELL_PREFIX_SIZE + local_payload_len(payload_len))
@@ -26,7 +26,7 @@ impl TreeCursor {
     }
 
     /// Builds the local leaf payload bytes and optional overflow chain for one key/value cell.
-    pub(super) fn prepare_leaf_payload(
+    fn prepare_leaf_payload(
         &self,
         key: &[u8],
         value: &[u8],
@@ -92,7 +92,7 @@ impl TreeCursor {
     }
 
     /// Rewrites one existing leaf slot using the same overflow layout as tree inserts.
-    pub(super) fn update_leaf_payload_at(
+    fn update_leaf_payload_at(
         &self,
         leaf: &mut RawLeaf<Write<'_>>,
         slot_index: u16,

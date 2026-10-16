@@ -67,7 +67,7 @@ pub enum DataType {
 
 impl DataType {
     /// Returns the integer tag stored in `sys_columns.data_type`.
-    pub fn catalog_tag(self) -> i32 {
+    fn catalog_tag(self) -> i32 {
         match self {
             Self::Integer => 1,
             Self::Float => 2,
@@ -78,7 +78,7 @@ impl DataType {
     }
 
     /// Decodes an integer tag stored in `sys_columns.data_type`.
-    pub fn from_catalog_tag(tag: i32) -> Result<Self, CatalogError> {
+    fn from_catalog_tag(tag: i32) -> Result<Self, CatalogError> {
         match tag {
             1 => Ok(Self::Integer),
             2 => Ok(Self::Float),
@@ -311,7 +311,7 @@ impl TableSchema {
 
 impl IndexSchema {
     /// Returns the tuple schema used to encode keys in this index.
-    pub fn key_schema(&self) -> TupleSchema {
+    fn key_schema(&self) -> TupleSchema {
         TupleSchema { columns: self.columns.iter().map(|column| column.column.clone()).collect() }
     }
 

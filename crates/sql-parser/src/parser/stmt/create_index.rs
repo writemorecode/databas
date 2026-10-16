@@ -20,7 +20,9 @@ impl Display for CreateIndexQuery<'_> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn parse_create_index_query(&mut self) -> Result<CreateIndexQuery<'a>, SQLError<'a>> {
+    pub(crate) fn parse_create_index_query(
+        &mut self,
+    ) -> Result<CreateIndexQuery<'a>, SQLError<'a>> {
         let index_name = self.parse_identifier()?;
         self.lexer.expect_token(TokenKind::Keyword(Keyword::On))?;
         let table_name = self.parse_identifier()?;

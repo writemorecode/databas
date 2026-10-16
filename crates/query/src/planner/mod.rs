@@ -43,19 +43,19 @@ mod planning;
 mod schema;
 
 pub use error::{PlannerError, PlannerResult};
-pub use expression::{
+pub use expression::UpdateAssignment;
+pub(crate) use expression::{
     BoundColumn, BoundExpr, BoundSortTerm, BoundUpdateAssignment, ExecColumn, ExecExpr, SortTerm,
-    UpdateAssignment,
 };
 
 /// Backwards-compatible name for bound scalar expressions.
-pub type PlannedExpression = BoundExpr;
+type PlannedExpression = BoundExpr;
 pub use identity::{NodeId, RelationId};
-pub use logical::{LogicalPlan, LogicalPlanNode};
+pub(crate) use logical::{LogicalPlan, LogicalPlanNode};
 pub use physical::{
     IndexValueBound, IndexValueRange, PhysicalPlan, PhysicalPlanNode, SecondaryIndexScanPlan,
 };
-pub use plan::Plan;
+pub(crate) use plan::Plan;
 pub use planning::Planner;
 pub use schema::{PlanColumn, PlanSchema};
 

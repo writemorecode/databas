@@ -39,13 +39,13 @@ impl NodeMarker for Interior {
 /// Shared immutable access to a page-sized byte buffer.
 #[derive(Debug, Clone, Copy)]
 pub struct Read<'a> {
-    pub(crate) bytes: &'a [u8; PAGE_SIZE],
+    bytes: &'a [u8; PAGE_SIZE],
 }
 
 /// Shared mutable access to a page-sized byte buffer.
 #[derive(Debug)]
 pub struct Write<'a> {
-    pub(crate) bytes: &'a mut [u8; PAGE_SIZE],
+    bytes: &'a mut [u8; PAGE_SIZE],
 }
 
 /// Abstraction over page access modes that can expose immutable bytes.
@@ -108,9 +108,9 @@ pub enum BoundResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Freeblock {
-    pub(crate) offset: u16,
-    pub(crate) size: u16,
-    pub(crate) next: Option<u16>,
+    offset: u16,
+    size: u16,
+    next: Option<u16>,
 }
 
 impl Freeblock {
@@ -212,12 +212,12 @@ where
     }
 
     /// Returns the start offset of the packed cell-content region.
-    pub(crate) fn content_start(&self) -> u16 {
+    fn content_start(&self) -> u16 {
         format::read_u16(self.bytes(), CONTENT_START_OFFSET)
     }
 
     /// Returns the first freeblock on the page, if one exists.
-    pub(crate) fn first_freeblock(&self) -> Option<u16> {
+    fn first_freeblock(&self) -> Option<u16> {
         format::read_optional_u16(self.bytes(), FIRST_FREEBLOCK_OFFSET)
     }
 
@@ -232,15 +232,15 @@ where
     }
 
     /// Returns the contiguous free space between the slot directory and cell content.
-    pub(crate) fn free_space(&self) -> usize {
+    fn free_space(&self) -> usize {
         self.content_start() as usize - self.slot_directory_end()
     }
 
-    pub(crate) fn fragmented_free_bytes(&self) -> u16 {
+    fn fragmented_free_bytes(&self) -> u16 {
         format::read_u16(self.bytes(), FRAGMENTED_FREE_BYTES_OFFSET)
     }
 
-    pub(crate) fn freeblocks(&self) -> FreeblockIter<'_> {
+    fn freeblocks(&self) -> FreeblockIter<'_> {
         FreeblockIter::new(self.bytes(), self.content_start(), self.first_freeblock())
     }
 
@@ -252,7 +252,7 @@ where
         Ok(total)
     }
 
-    pub(crate) fn live_cell_bytes(&self) -> PageResult<usize> {
+    fn live_cell_bytes(&self) -> PageResult<usize> {
         let mut total = 0;
         for slot_index in 0..self.slot_count() {
             total += self.cell_len(slot_index)?;
@@ -268,7 +268,7 @@ where
         Ok(occupied_variable_bytes * 2 < usable_variable_bytes)
     }
 
-    pub(crate) fn slot_directory_end(&self) -> usize {
+    fn slot_directory_end(&self) -> usize {
         N::KIND.header_size() + self.slot_count() as usize * format::SLOT_ENTRY_SIZE
     }
 
@@ -327,15 +327,15 @@ where
         self.access.bytes_mut()
     }
 
-    pub(crate) fn set_slot_count(&mut self, slot_count: u16) {
+    fn set_slot_count(&mut self, slot_count: u16) {
         format::write_u16(self.bytes_mut(), SLOT_COUNT_OFFSET, slot_count);
     }
 
-    pub(crate) fn set_content_start(&mut self, content_start: u16) {
+    fn set_content_start(&mut self, content_start: u16) {
         format::write_u16(self.bytes_mut(), CONTENT_START_OFFSET, content_start);
     }
 
-    pub(crate) fn set_first_freeblock(&mut self, first_freeblock: Option<u16>) {
+    fn set_first_freeblock(&mut self, first_freeblock: Option<u16>) {
         format::write_optional_u16(self.bytes_mut(), FIRST_FREEBLOCK_OFFSET, first_freeblock);
     }
 
@@ -349,7 +349,7 @@ where
         format::write_optional_u64(self.bytes_mut(), NEXT_PAGE_ID_OFFSET, page_id);
     }
 
-    pub(crate) fn set_fragmented_free_bytes(&mut self, fragmented_free_bytes: u16) {
+    fn set_fragmented_free_bytes(&mut self, fragmented_free_bytes: u16) {
         format::write_u16(self.bytes_mut(), FRAGMENTED_FREE_BYTES_OFFSET, fragmented_free_bytes);
     }
 
@@ -386,7 +386,7 @@ where
         Ok(removed)
     }
 
-    pub(crate) fn defragment(&mut self) -> PageResult<()> {
+    fn defragment(&mut self) -> PageResult<()> {
         let slot_count = self.slot_count();
         let header_size = N::KIND.header_size();
         let bytes = self.bytes();

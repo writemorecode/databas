@@ -44,10 +44,7 @@ impl Storage {
     }
 
     /// Creates a new database file with explicit cache settings.
-    pub fn create_with_options(
-        path: impl AsRef<Path>,
-        options: StorageOptions,
-    ) -> StorageResult<Self> {
+    fn create_with_options(path: impl AsRef<Path>, options: StorageOptions) -> StorageResult<Self> {
         let path = path.as_ref().to_path_buf();
         let mut disk_manager = DiskManager::create_new(&path)?;
         disk_manager.lock_exclusive()?;
@@ -61,10 +58,7 @@ impl Storage {
     }
 
     /// Opens an existing storage with explicit cache settings.
-    pub fn open_with_options(
-        path: impl AsRef<Path>,
-        options: StorageOptions,
-    ) -> StorageResult<Self> {
+    fn open_with_options(path: impl AsRef<Path>, options: StorageOptions) -> StorageResult<Self> {
         let path = path.as_ref().to_path_buf();
         let mut disk_manager = DiskManager::open_existing(&path)?;
         disk_manager.lock_exclusive()?;

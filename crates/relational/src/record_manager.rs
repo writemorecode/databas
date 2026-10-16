@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_pub_crate)]
+
 use crate::catalog_manager::CatalogManager;
 use crate::cursor::{IndexCursor, TableCursor};
 use crate::error::{ConstraintError, InvalidArgumentError, RelationalError, RelationalResult};
@@ -11,7 +13,7 @@ use crate::{
 /// Compatibility wrapper retained for focused relational tests.
 #[cfg(test)]
 #[derive(Clone)]
-pub struct RecordManager {
+pub(crate) struct RecordManager {
     catalog: CatalogManager,
 }
 
@@ -139,10 +141,10 @@ impl RecordManager {
     pub(crate) fn new(catalog: CatalogManager) -> Self {
         Self { catalog }
     }
-    pub(crate) fn scan_table(&self, table: &TableSchema) -> RelationalResult<TableScan> {
+    fn scan_table(&self, table: &TableSchema) -> RelationalResult<TableScan> {
         scan_table(&self.catalog, table)
     }
-    pub(crate) fn scan_table_range(
+    fn scan_table_range(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
@@ -156,14 +158,14 @@ impl RecordManager {
     ) -> RelationalResult<OwnedTableRecord> {
         insert_table_row(&self.catalog, table, values)
     }
-    pub(crate) fn delete_table_row(
+    fn delete_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,
     ) -> RelationalResult<()> {
         delete_table_row(&self.catalog, table, record)
     }
-    pub(crate) fn update_table_row(
+    fn update_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,

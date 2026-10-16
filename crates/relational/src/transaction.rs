@@ -144,16 +144,12 @@ impl<'db> Transaction<'db> {
 }
 
 impl Transaction<'_> {
-    pub(crate) fn create_table(
-        &self,
-        name: &str,
-        row: TupleSchema,
-    ) -> RelationalResult<TableSchema> {
+    fn create_table(&self, name: &str, row: TupleSchema) -> RelationalResult<TableSchema> {
         self.require_ddl()?;
         self.database.catalog().for_transaction(self.txn_id).create_table(name, row)
     }
 
-    pub(crate) fn create_index(
+    fn create_index(
         &self,
         name: &str,
         table_name: &str,
@@ -170,12 +166,12 @@ impl Transaction<'_> {
 }
 
 impl Transaction<'_> {
-    pub(crate) fn scan_table(&self, table: &TableSchema) -> RelationalResult<TableScan> {
+    fn scan_table(&self, table: &TableSchema) -> RelationalResult<TableScan> {
         self.require_table(table, LockMode::Shared)?;
         record_manager::scan_table(&self.database.catalog().for_transaction(self.txn_id), table)
     }
 
-    pub(crate) fn scan_table_range(
+    fn scan_table_range(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
@@ -188,7 +184,7 @@ impl Transaction<'_> {
         )
     }
 
-    pub(crate) fn scan_index(
+    fn scan_index(
         &self,
         table: &TableSchema,
         index: &IndexSchema,
@@ -208,7 +204,7 @@ impl Transaction<'_> {
         )
     }
 
-    pub(crate) fn insert_table_row(
+    fn insert_table_row(
         &self,
         table: &TableSchema,
         values: Vec<Value>,
@@ -221,7 +217,7 @@ impl Transaction<'_> {
         )
     }
 
-    pub(crate) fn delete_table_row(
+    fn delete_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,
@@ -234,7 +230,7 @@ impl Transaction<'_> {
         )
     }
 
-    pub(crate) fn update_table_row(
+    fn update_table_row(
         &self,
         table: &TableSchema,
         record: &OwnedTableRecord,

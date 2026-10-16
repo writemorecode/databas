@@ -8,7 +8,7 @@ use super::{
 
 impl TreeCursor {
     /// Returns the previous and next sibling pointers for a leaf page.
-    pub(super) fn read_leaf_page_links(
+    fn read_leaf_page_links(
         &self,
         page_id: PageId,
     ) -> StorageResult<(Option<PageId>, Option<PageId>)> {
@@ -30,7 +30,7 @@ impl TreeCursor {
     }
 
     /// Returns the largest key in a leaf page, or `None` when the page is empty.
-    pub(super) fn read_leaf_max_key(&self, page_id: PageId) -> StorageResult<Option<Vec<u8>>> {
+    fn read_leaf_max_key(&self, page_id: PageId) -> StorageResult<Option<Vec<u8>>> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let key = {
             let page = pin.read()?;
@@ -71,7 +71,7 @@ impl TreeCursor {
     ///
     /// Inline leaf keys are borrowed from the page for the duration of `f`; keys
     /// that cross into overflow are materialized before the callback.
-    pub(super) fn with_subtree_max_key<R>(
+    fn with_subtree_max_key<R>(
         &self,
         page_id: PageId,
         f: impl FnOnce(Option<&[u8]>) -> StorageResult<R>,
@@ -122,10 +122,7 @@ impl TreeCursor {
     }
 
     /// Reads child page ids from an interior page in logical left-to-right order.
-    pub(super) fn read_interior_child_page_ids(
-        &self,
-        page_id: PageId,
-    ) -> StorageResult<Vec<PageId>> {
+    fn read_interior_child_page_ids(&self, page_id: PageId) -> StorageResult<Vec<PageId>> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
         let interior = page.open::<Interior>()?;
@@ -181,7 +178,7 @@ impl TreeCursor {
     }
 
     /// Returns the largest key reachable from the subtree rooted at `page_id`.
-    pub(super) fn subtree_max_key(&self, page_id: PageId) -> StorageResult<Option<Vec<u8>>> {
+    fn subtree_max_key(&self, page_id: PageId) -> StorageResult<Option<Vec<u8>>> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let next = {
             let page = pin.read()?;
@@ -246,7 +243,7 @@ impl TreeCursor {
     }
 
     /// Rewrites one stored separator while preserving the rest of the interior page.
-    pub(super) fn replace_interior_separator(
+    fn replace_interior_separator(
         &self,
         page_id: PageId,
         slot_index: u16,
@@ -288,7 +285,7 @@ impl TreeCursor {
     }
 
     /// Locates a child page within its parent's ordered child list.
-    pub(super) fn child_index_in_parent(
+    fn child_index_in_parent(
         &self,
         parent_page_id: PageId,
         child_page_id: PageId,
@@ -313,7 +310,7 @@ impl TreeCursor {
     }
 
     /// Reinitializes a leaf page with `cells` and updated sibling links.
-    pub(super) fn rewrite_leaf_page(
+    fn rewrite_leaf_page(
         &self,
         page_id: PageId,
         cells: &[LeafSplitCell<'_>],
@@ -424,7 +421,7 @@ impl TreeCursor {
     }
 
     /// Returns whether a leaf page is below the minimum occupancy target.
-    pub(super) fn leaf_page_underoccupied(&self, page_id: PageId) -> StorageResult<bool> {
+    fn leaf_page_underoccupied(&self, page_id: PageId) -> StorageResult<bool> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
         let leaf = page.open::<Leaf>()?;
@@ -432,7 +429,7 @@ impl TreeCursor {
     }
 
     /// Returns whether an interior page is below the minimum occupancy target.
-    pub(super) fn interior_page_underoccupied(&self, page_id: PageId) -> StorageResult<bool> {
+    fn interior_page_underoccupied(&self, page_id: PageId) -> StorageResult<bool> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
         let interior = page.open::<Interior>()?;
@@ -466,7 +463,7 @@ impl TreeCursor {
     }
 
     /// Removes `child_page_id` from `parent_page_id` and rewrites the parent.
-    pub(super) fn remove_child_from_parent(
+    fn remove_child_from_parent(
         &self,
         parent_page_id: PageId,
         child_page_id: PageId,
@@ -486,7 +483,7 @@ impl TreeCursor {
     }
 
     /// Rewrites adjacent leaf siblings after redistributing their combined cells.
-    pub(super) fn redistribute_leaf_pair(
+    fn redistribute_leaf_pair(
         &self,
         left_page_id: PageId,
         right_page_id: PageId,
@@ -510,7 +507,7 @@ impl TreeCursor {
     }
 
     /// Merges two adjacent leaf pages into `survivor_page_id`.
-    pub(super) fn merge_leaf_pages(
+    fn merge_leaf_pages(
         &self,
         survivor_page_id: PageId,
         removed_page_id: PageId,
@@ -537,7 +534,7 @@ impl TreeCursor {
     /// Rebalances an underoccupied leaf against siblings.
     ///
     /// Returns `true` when a merge removed one child from the parent page.
-    pub(super) fn rebalance_leaf_page(
+    fn rebalance_leaf_page(
         &mut self,
         leaf_page_id: PageId,
         parent_page_id: PageId,
@@ -615,7 +612,7 @@ impl TreeCursor {
     }
 
     /// Rewrites adjacent interior siblings after redistributing their children.
-    pub(super) fn redistribute_interior_pair(
+    fn redistribute_interior_pair(
         &self,
         left_page_id: PageId,
         right_page_id: PageId,
@@ -639,7 +636,7 @@ impl TreeCursor {
     }
 
     /// Merges two adjacent interior pages into `survivor_page_id`.
-    pub(super) fn merge_interior_pages(
+    fn merge_interior_pages(
         &self,
         survivor_page_id: PageId,
         removed_page_id: PageId,
@@ -691,7 +688,7 @@ impl TreeCursor {
     /// Rebalances an underoccupied interior page against siblings.
     ///
     /// Returns `true` when a merge removed one child from the parent page.
-    pub(super) fn rebalance_interior_page(
+    fn rebalance_interior_page(
         &self,
         interior_page_id: PageId,
         parent_page_id: PageId,

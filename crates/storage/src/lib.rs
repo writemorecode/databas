@@ -11,7 +11,7 @@ mod database_header;
 mod disk_manager;
 mod engine;
 pub mod error;
-mod log_manager;
+pub(crate) mod log_manager;
 mod overflow;
 mod page;
 mod page_cache;
@@ -21,13 +21,14 @@ mod storage_runtime;
 mod transaction_manager;
 
 mod types;
-pub use types::{CheckpointOutcome, Lsn, PageId, SlotId, TxnId};
+pub(crate) use types::SlotId;
+pub use types::{CheckpointOutcome, Lsn, PageId, TxnId};
 pub(crate) use types::{PAGE_SIZE, PAGE_SIZE_U16};
 
 #[cfg(all(test, loom))]
 #[allow(clippy::unwrap_used)]
 mod loom_support;
 mod sync;
-pub use btree::{CursorState, OwnedRecord, Record, RecordView, TreeCursor};
+pub use btree::{CursorState, Record, TreeCursor};
 pub use engine::{Storage, StorageOptions};
 pub use transaction_manager::TransactionSavepoint;
