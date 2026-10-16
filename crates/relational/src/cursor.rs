@@ -101,29 +101,6 @@ pub struct OwnedIndexEntry {
     pub(crate) table_key: TableKey,
 }
 
-/// Borrowed secondary-index entry view valid only for the callback that receives it.
-#[derive(Debug, Clone, Copy)]
-pub struct IndexEntryView<'a> {
-    key: &'a [u8],
-    table_key: TableKey,
-}
-
-impl<'a> IndexEntryView<'a> {
-    fn new(key: &'a [u8], table_key: TableKey) -> Self {
-        Self { key, table_key }
-    }
-
-    /// Returns the encoded secondary-index key bytes.
-    fn key(&self) -> &'a [u8] {
-        self.key
-    }
-
-    /// Returns the table primary-key value referenced by this secondary-index key.
-    fn table_key(&self) -> TableKey {
-        self.table_key
-    }
-}
-
 /// Table record returned by table cursor lookups and cursor iteration.
 ///
 /// Inline records keep the backing page pinned internally and expose bytes only
@@ -331,17 +308,15 @@ impl TableRecord {
 
     /// Executes `f` with a borrowed view of the encoded table record bytes.
     pub(crate) fn with_record<R>(&self, f: impl FnOnce(&[u8]) -> R) -> RelationalResult<R> {
-        self.raw.with_value(f).map_err(Into::into)
+        self.with_view(|view| f(view.record()))
     }
 
     /// Returns a stable, owned snapshot of this table record.
     pub(crate) fn to_owned_record(&self) -> RelationalResult<OwnedTableRecord> {
-        self.raw
-            .with_value(|record| OwnedTableRecord {
-                table_key: self.table_key,
-                record: record.into(),
-            })
-            .map_err(Into::into)
+        self.with_view(|view| OwnedTableRecord {
+            table_key: view.table_key(),
+            record: view.record().into(),
+        })
     }
 }
 
@@ -351,21 +326,15 @@ impl IndexEntry {
         self.table_key
     }
 
-    /// Executes `f` with a borrowed secondary-index entry view.
-    fn with_view<R>(&self, f: impl FnOnce(IndexEntryView<'_>) -> R) -> RelationalResult<R> {
-        self.raw.with_key(|key| f(IndexEntryView::new(key, self.table_key))).map_err(Into::into)
-    }
-
     /// Executes `f` with a borrowed view of the encoded secondary-index key bytes.
     pub(crate) fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> RelationalResult<R> {
         self.raw.with_key(f).map_err(Into::into)
     }
 
     /// Returns a stable, owned snapshot of this index entry.
+    #[cfg(test)]
     fn to_owned_entry(&self) -> RelationalResult<OwnedIndexEntry> {
-        self.raw.with_key_value(|key, value| {
-            Ok(OwnedIndexEntry { key: key.into(), table_key: decode_index_table_key(value)? })
-        })?
+        self.with_key(|key| OwnedIndexEntry { key: key.into(), table_key: self.table_key })
     }
 }
 
@@ -550,10 +519,6 @@ mod tests {
         let first = cursor.current_entry().unwrap().expect("first entry should exist");
         assert_eq!(first.table_key(), 10);
         assert_eq!(first.with_key(<[u8]>::to_vec).unwrap(), b"alpha");
-        assert_eq!(
-            first.with_view(|entry| (entry.key().to_vec(), entry.table_key())).unwrap(),
-            (b"alpha".to_vec(), 10)
-        );
 
         assert_eq!(
             cursor.next_entry().unwrap().map(|entry| entry.to_owned_entry().unwrap()),

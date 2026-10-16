@@ -235,6 +235,7 @@ impl<'a> Parser<'a> {
         Ok(Expression::UnaryOp((op, Box::new(rhs))))
     }
 
+    #[cfg(test)]
     fn expr(mut self) -> Result<Expression<'a>, SQLError<'a>> {
         self.expr_bp(0)
     }

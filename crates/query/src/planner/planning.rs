@@ -4,9 +4,11 @@ use crate::relational::access::CatalogRead;
 use crate::sql_parser::parser::stmt::Statement;
 
 use super::{
-    LogicalPlan, PhysicalPlan, Plan, PlannerResult, binder::Binder, optimizer,
-    physical::PhysicalPlanner,
+    LogicalPlan, PhysicalPlan, PlannerResult, binder::Binder, optimizer, physical::PhysicalPlanner,
 };
+
+#[cfg(test)]
+use super::Plan;
 
 /// Planner bound to a database catalog.
 ///
@@ -33,6 +35,7 @@ impl<'catalog> Planner<'catalog> {
     }
 
     /// Builds both the bound logical plan and executable physical plan.
+    #[cfg(test)]
     pub(crate) fn plan_statement(&self, statement: &Statement<'_>) -> PlannerResult<Plan> {
         let logical = self.plan_logical_statement(statement)?;
         let physical = PhysicalPlanner::new(self.catalog).plan(logical.clone())?;

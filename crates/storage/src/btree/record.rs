@@ -14,18 +14,12 @@ pub(in crate::btree) enum RecordStorage {
 /// Records for cells that fit entirely in their leaf page borrow the page
 /// through an internal pin and only expose byte slices during accessor
 /// callbacks. Records for cells with overflow payload are materialized into
-/// fixed-size heap allocations. Use [`OwnedRecord`] when a stable snapshot is
-/// needed across later tree mutations.
+/// fixed-size heap allocations. Copy bytes through the accessor callbacks when
+/// a stable snapshot is needed across later tree mutations.
 pub struct Record {
     page_id: PageId,
     slot_index: u16,
     storage: RecordStorage,
-}
-
-/// Stable, owned raw record snapshot.
-pub struct OwnedRecord {
-    key: Box<[u8]>,
-    value: Box<[u8]>,
 }
 
 /// Borrowed record view valid only for the callback that receives it.
@@ -105,11 +99,6 @@ impl Record {
         Ok(Self { page_id, slot_index, storage })
     }
 
-    /// Returns the slot index that this record refers to within its leaf page.
-    fn slot_index(&self) -> u16 {
-        self.slot_index
-    }
-
     /// Executes `f` with a borrowed view of this record.
     pub(crate) fn with_view<R>(&self, f: impl FnOnce(RecordView<'_>) -> R) -> StorageResult<R> {
         match &self.storage {
@@ -123,11 +112,6 @@ impl Record {
                 Ok(f(RecordView::new(key.as_ref(), value.as_ref())))
             }
         }
-    }
-
-    /// Returns a stable, owned snapshot of this record.
-    fn to_owned_record(&self) -> StorageResult<OwnedRecord> {
-        self.with_key_value(|key, value| OwnedRecord::new(key.into(), value.into()))
     }
 
     /// Executes `f` with a borrowed view of the record key.
@@ -146,36 +130,6 @@ impl Record {
             let (key, value) = record.key_value();
             f(key, value)
         })
-    }
-}
-
-impl OwnedRecord {
-    fn new(key: Box<[u8]>, value: Box<[u8]>) -> Self {
-        Self { key, value }
-    }
-
-    /// Executes `f` with a borrowed view of the record key.
-    fn with_key<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
-        f(&self.key)
-    }
-
-    /// Executes `f` with a borrowed view of the record value.
-    fn with_value<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
-        f(&self.value)
-    }
-
-    /// Executes `f` with borrowed views of the key and value.
-    fn with_key_value<R>(&self, f: impl FnOnce(&[u8], &[u8]) -> R) -> R {
-        f(&self.key, &self.value)
-    }
-}
-
-impl fmt::Debug for OwnedRecord {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OwnedRecord")
-            .field("key_len", &self.key.len())
-            .field("value_len", &self.value.len())
-            .finish()
     }
 }
 
@@ -222,11 +176,9 @@ mod tests {
         let mut cursor = cursor(4);
         cursor.insert(b"alpha", b"value").unwrap();
 
-        let owned = cursor.get(b"alpha").unwrap().unwrap().to_owned_record().unwrap();
+        let owned = record_bytes(&cursor.get(b"alpha").unwrap().unwrap());
+        cursor.update(b"alpha", b"changed").unwrap();
 
-        owned.with_key_value(|key, value| {
-            assert_eq!(key, b"alpha");
-            assert_eq!(value, b"value");
-        });
+        assert_eq!(owned, (b"alpha".to_vec(), b"value".to_vec()));
     }
 }

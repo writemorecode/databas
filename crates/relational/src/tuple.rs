@@ -93,10 +93,6 @@ impl Tuple {
         self.0.len()
     }
 
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
         Ok(Self(TupleView::parse(bytes)?.values.into_iter().map(Value::from).collect()))
     }
@@ -165,10 +161,6 @@ impl<'a> TupleView<'a> {
 
     pub(crate) fn len(&self) -> usize {
         self.values.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.values.is_empty()
     }
 
     pub(crate) fn values(&self) -> impl Iterator<Item = ValueRef<'a>> + '_ {

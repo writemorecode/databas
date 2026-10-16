@@ -2,7 +2,7 @@
 //!
 //! The planner is the boundary between parsed SQL syntax and executable
 //! database work. It lowers one parsed
-//! [`Statement`](crate::sql_parser::parser::stmt::Statement) into a [`Plan`] containing:
+//! [`Statement`](crate::sql_parser::parser::stmt::Statement) through two representations:
 //!
 //! - a catalog-bound [`LogicalPlan`] that describes the statement's meaning; and
 //! - a [`PhysicalPlan`] that selects the executor operators used to run it.
@@ -38,6 +38,7 @@ mod identity;
 mod logical;
 mod optimizer;
 mod physical;
+#[cfg(test)]
 mod plan;
 mod planning;
 mod schema;
@@ -48,13 +49,12 @@ pub(crate) use expression::{
     BoundColumn, BoundExpr, BoundSortTerm, BoundUpdateAssignment, ExecColumn, ExecExpr, SortTerm,
 };
 
-/// Backwards-compatible name for bound scalar expressions.
-type PlannedExpression = BoundExpr;
 pub use identity::{NodeId, RelationId};
 pub(crate) use logical::{LogicalPlan, LogicalPlanNode};
 pub use physical::{
     IndexValueBound, IndexValueRange, PhysicalPlan, PhysicalPlanNode, SecondaryIndexScanPlan,
 };
+#[cfg(test)]
 pub(crate) use plan::Plan;
 pub use planning::Planner;
 pub use schema::{PlanColumn, PlanSchema};

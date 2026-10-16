@@ -9,8 +9,8 @@ use crate::relational::testing::{
     validate_user_table_schema,
 };
 use crate::relational::{
-    DataType, IndexColumnSchema, IndexSchema, IndexValueRange, InvalidArgumentError, StorageResult,
-    TableKey, TableKeyRange, TableSchema, TupleSchema, Value,
+    CatalogId, DataType, IndexColumnSchema, IndexSchema, IndexValueRange, InvalidArgumentError,
+    StorageResult, TableKey, TableKeyRange, TableSchema, TupleSchema, Value,
 };
 use crate::sql_parser::parser::Parser;
 use crate::sql_parser::parser::op::Op;

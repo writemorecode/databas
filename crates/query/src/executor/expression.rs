@@ -5,18 +5,6 @@ use crate::sql_parser::parser::op::Op;
 
 use super::{ExecutionOutput, ExecutorError, ExecutorResult, ExecutorRow, RowStream, collect_rows};
 
-/// Evaluates one executable scalar expression against a row.
-///
-/// The result contains one value and preserves any source locators carried by
-/// the input row.
-pub fn evaluate_expression(
-    expression: &ExecExpr,
-    record: &ExecutorRow,
-) -> ExecutorResult<ExecutorRow> {
-    evaluate_values(std::slice::from_ref(expression), record)
-        .map(|values| record.with_values(values))
-}
-
 /// Executes a `VALUES` plan as a stream of evaluated literal rows.
 pub(super) fn execute_values(rows: Vec<Vec<ExecExpr>>) -> ExecutionOutput {
     let rows = rows.into_iter().map(|expressions| {

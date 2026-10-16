@@ -45,7 +45,7 @@ impl CatalogObjectKind {
         match tag {
             1 => Ok(Self::Table),
             2 => Ok(Self::Index),
-            _ => Err(CatalogError::InvalidObjectKind { actual: tag }),
+            _ => Err(CatalogError::UnknownObjectKind { actual: tag }),
         }
     }
 }
@@ -275,9 +275,7 @@ pub enum CatalogError {
     /// A `sys_columns.data_type` tag is not recognized.
     InvalidDataType { actual: i32 },
     /// A `sys_columns.object_kind` tag is not recognized.
-    InvalidObjectKind { actual: i32 },
-    /// An index definition referenced a column absent from the target table.
-    UnknownIndexColumn { table: String, column: String },
+    UnknownObjectKind { actual: i32 },
 }
 
 impl fmt::Display for CatalogError {
@@ -290,11 +288,8 @@ impl fmt::Display for CatalogError {
                 write!(f, "invalid catalog field {index}: expected {expected}")
             }
             Self::InvalidDataType { actual } => write!(f, "invalid catalog data type {actual}"),
-            Self::InvalidObjectKind { actual } => {
+            Self::UnknownObjectKind { actual } => {
                 write!(f, "invalid catalog object kind {actual}")
-            }
-            Self::UnknownIndexColumn { table, column } => {
-                write!(f, "index column {column} does not exist on table {table}")
             }
         }
     }
@@ -310,11 +305,6 @@ impl TableSchema {
 }
 
 impl IndexSchema {
-    /// Returns the tuple schema used to encode keys in this index.
-    fn key_schema(&self) -> TupleSchema {
-        TupleSchema { columns: self.columns.iter().map(|column| column.column.clone()).collect() }
-    }
-
     /// Returns the `sys_indexes` row describing this index.
     pub(crate) fn catalog_row(&self, root_page_id: PageId) -> IndexCatalogRow {
         IndexCatalogRow {
