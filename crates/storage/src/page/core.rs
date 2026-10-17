@@ -709,12 +709,14 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
     }
 
     let first_freeblock = format::read_optional_u16(bytes, FIRST_FREEBLOCK_OFFSET);
-    let max_freeblocks = USABLE_SPACE_END / FREEBLOCK_HEADER_SIZE;
     let mut occupied = [false; USABLE_SPACE_END];
-    for freeblock in
-        FreeblockIter::new(bytes, encoded_content_start, first_freeblock).take(max_freeblocks)
-    {
+    for freeblock in FreeblockIter::new(bytes, encoded_content_start, first_freeblock) {
         let freeblock = freeblock?;
+        // Allocation assumes an ascending chain. Strict forward progress also
+        // rejects cycles, rather than silently stopping validation at a limit.
+        if freeblock.next.is_some_and(|next| usize::from(next) < freeblock.end()) {
+            return Err(PageError::MalformedPage(PageCorruption::FreeblockChainOutOfOrder));
+        }
         occupied[usize::from(freeblock.offset)..freeblock.end()].fill(true);
     }
 
