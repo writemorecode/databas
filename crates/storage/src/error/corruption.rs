@@ -66,6 +66,8 @@ pub enum CorruptionKind {
     FreeblockTooSmall,
     #[error("freeblock runs past the usable page bounds")]
     FreeblockOutOfBounds,
+    #[error("page cells or freeblocks overlap")]
+    OverlappingPageRegions,
     #[error("slot offset points outside the cell-content region")]
     SlotOffsetOutOfBounds,
     #[error("cell length prefix runs past the usable page bounds")]
