@@ -72,6 +72,9 @@ pub enum PageCorruption {
     /// A freeblock span runs past the usable page region.
     #[error("freeblock runs past the usable page bounds")]
     FreeblockOutOfBounds,
+    /// The freeblock chain moves backward, overlaps itself, or contains a cycle.
+    #[error("freeblock chain is not in increasing nonoverlapping order")]
+    FreeblockChainOutOfOrder,
     /// Live cells overlap each other or a freeblock.
     #[error("page cells or freeblocks overlap")]
     OverlappingPageRegions,

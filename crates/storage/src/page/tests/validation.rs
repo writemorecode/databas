@@ -41,6 +41,16 @@ fn fragmented_page(interior: bool, payload: &[u8]) -> Result<FragmentedPage, Pag
 
 proptest! {
     #[test]
+    fn cyclic_freeblock_chains_are_rejected(
+        interior in any::<bool>(),
+        payload in prop::collection::vec(any::<u8>(), 4..=64),
+    ) {
+        let mut page = fragmented_page(interior, &payload)?;
+        format::write_optional_u16(&mut page.bytes, usize::from(page.freeblock), Some(page.freeblock));
+        prop_assert!(validate_btree_page(&page.bytes).is_err(), "accepted a cyclic freeblock chain");
+    }
+
+    #[test]
     fn overlapping_cells_and_freeblocks_are_rejected(
         interior in any::<bool>(),
         payload in prop::collection::vec(any::<u8>(), 4..=64),
