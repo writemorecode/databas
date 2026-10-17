@@ -10,6 +10,9 @@ use super::{
 };
 use crate::{PAGE_SIZE, PageId};
 
+mod cells;
+mod validation;
+
 fn payload() -> impl Strategy<Value = Vec<u8>> {
     prop_oneof![
         6 => prop::collection::vec(any::<u8>(), 0..=96),
