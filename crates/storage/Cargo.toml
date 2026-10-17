@@ -7,5 +7,8 @@ edition = "2024"
 crc = "3.4.0"
 thiserror = "2.0.18"
 
+[dev-dependencies]
+proptest = "1.9.0"
+
 [lints]
 workspace = true

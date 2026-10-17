@@ -19,6 +19,8 @@ mod error;
 pub mod format;
 mod interior;
 mod leaf;
+#[cfg(test)]
+mod tests;
 
 use crate::PAGE_SIZE;
 

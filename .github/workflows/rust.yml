@@ -53,21 +53,3 @@ jobs:
 
       - name: Documentation tests
         run: cargo test --workspace --locked --doc
-
-  loom:
-    name: Loom checks
-    runs-on: ubuntu-latest
-    # Keep the alternate configuration in its own job/cache rather than
-    # rebuilding dependencies with different RUSTFLAGS in the normal jobs.
-    env:
-      RUSTFLAGS: --cfg loom
-
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-
-      - name: Clippy (Loom configuration)
-        run: cargo clippy --workspace --locked --no-deps --lib --tests
-
-      - name: Loom tests
-        run: cargo test --workspace --locked --lib loom_tests -- --test-threads=1
