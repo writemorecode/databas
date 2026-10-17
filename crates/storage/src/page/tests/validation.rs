@@ -32,7 +32,7 @@ fn fragmented_page(interior: bool, payload: &[u8]) -> Result<FragmentedPage, Pag
         }
         let positions = (page.slot_offset(0)?, page.slot_offset(1)?);
         let combined_len = page.cell_len(0)? + page.cell_len(1)?;
-        page.delete(&[1])?;
+        page.delete_at(1)?;
         (format::LEAF_HEADER_SIZE, positions.0, positions.1, combined_len)
     };
     validate_btree_page(&bytes)?;

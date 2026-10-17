@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use proptest::{prelude::*, test_runner::TestCaseResult};
 
+use super::core::PageAccess;
 use super::{
     PageError, RawInterior, RawLeaf, Read, SearchResult, Write, format, validate_btree_page,
 };
@@ -55,7 +56,7 @@ fn check_leaf(
         prop_assert_eq!((key_len, value_len, overflow), (key.len(), value.len(), None));
         prop_assert_eq!(&bytes[range.clone()][..key_len], key);
         prop_assert_eq!(&bytes[range][key_len..], value);
-        prop_assert_eq!(page.search(key)?, SearchResult::Found(slot));
+        prop_assert_eq!(search_inline_key(&page, key)?, SearchResult::Found(slot));
     }
     let rank = u16::try_from(model.keys().take_while(|key| key.as_slice() < probe).count())?;
     let expected = if model.contains_key(probe) {
@@ -63,8 +64,18 @@ fn check_leaf(
     } else {
         SearchResult::InsertAt(rank)
     };
-    prop_assert_eq!(page.search(probe)?, expected);
+    prop_assert_eq!(search_inline_key(&page, probe)?, expected);
     Ok(())
+}
+
+fn search_inline_key<A: PageAccess>(
+    page: &RawLeaf<A>,
+    key: &[u8],
+) -> super::PageResult<SearchResult> {
+    page.search_slots_by(|page, slot| {
+        let (key_len, _, _, range) = page.cell_payload_parts(slot)?;
+        Ok(page.bytes()[range][..key_len].cmp(key))
+    })
 }
 
 fn check_capacity(result: &Result<u16, PageError>, fits: bool) -> TestCaseResult {
@@ -162,16 +173,17 @@ proptest! {
                     }
                     LeafOp::Delete(key) => {
                         let rank = u16::try_from(model.keys().take_while(|k| *k < &key).count())?;
-                        let expected = if model.remove(&key).is_some() {
-                            Ok(rank)
+                        let (slot, expected) = if model.remove(&key).is_some() {
+                            (rank, Ok(rank))
                         } else {
-                            Err(PageError::KeyNotFound)
+                            let slot = u16::try_from(model.len())?;
+                            (slot, Err(PageError::InvalidSlotIndex { slot_index: slot, slot_count: slot }))
                         };
-                        prop_assert_eq!(page.delete(&key), expected);
+                        prop_assert_eq!(page.delete_at(slot), expected);
                     }
                     LeafOp::Clear => {
-                        for key in model.keys().rev() {
-                            page.delete(key)?;
+                        for slot in (0..model.len()).rev() {
+                            page.delete_at(u16::try_from(slot)?)?;
                         }
                         model.clear();
                     }
