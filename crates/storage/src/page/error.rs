@@ -72,6 +72,9 @@ pub enum PageCorruption {
     /// A freeblock span runs past the usable page region.
     #[error("freeblock runs past the usable page bounds")]
     FreeblockOutOfBounds,
+    /// Live cells overlap each other or a freeblock.
+    #[error("page cells or freeblocks overlap")]
+    OverlappingPageRegions,
     /// A slot entry points outside the live cell-content region.
     #[error("slot offset points outside the cell-content region")]
     SlotOffsetOutOfBounds,

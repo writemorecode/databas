@@ -1,9 +1,60 @@
 use proptest::prelude::*;
 
-use super::super::{RawInterior, RawLeaf, Read, Write, format, validate_btree_page};
+use super::super::{PageError, RawInterior, RawLeaf, Read, Write, format, validate_btree_page};
 use crate::PAGE_SIZE;
 
+struct FragmentedPage {
+    bytes: [u8; PAGE_SIZE],
+    header_size: usize,
+    first_cell: u16,
+    freeblock: u16,
+    combined_len: usize,
+}
+
+fn fragmented_page(interior: bool, payload: &[u8]) -> Result<FragmentedPage, PageError> {
+    let mut bytes = [0; PAGE_SIZE];
+    let (header_size, first_cell, freeblock, combined_len) = if interior {
+        let mut page = RawInterior::<Write<'_>>::initialize_with_rightmost(&mut bytes, 9);
+        for slot in 0..3 {
+            page.insert_payload_at(slot, 7, payload.len(), None, payload)?;
+        }
+        let positions = (page.slot_offset(0)?, page.slot_offset(1)?);
+        let combined_len = page.cell_len(0)? + page.cell_len(1)?;
+        let len = page.cell_len(1)?;
+        let offset = page.remove_slot(1)?;
+        page.reclaim_space(offset, len)?;
+        (format::INTERIOR_HEADER_SIZE, positions.0, positions.1, combined_len)
+    } else {
+        let mut page = RawLeaf::<Write<'_>>::initialize(&mut bytes);
+        for key in 0u8..3 {
+            let inline = [&[key][..], payload].concat();
+            page.insert_payload_at(u16::from(key), 1, payload.len(), None, &inline)?;
+        }
+        let positions = (page.slot_offset(0)?, page.slot_offset(1)?);
+        let combined_len = page.cell_len(0)? + page.cell_len(1)?;
+        page.delete(&[1])?;
+        (format::LEAF_HEADER_SIZE, positions.0, positions.1, combined_len)
+    };
+    validate_btree_page(&bytes)?;
+    Ok(FragmentedPage { bytes, header_size, first_cell, freeblock, combined_len })
+}
+
 proptest! {
+    #[test]
+    fn overlapping_cells_and_freeblocks_are_rejected(
+        interior in any::<bool>(),
+        payload in prop::collection::vec(any::<u8>(), 4..=64),
+        damage in prop::sample::select(vec![0u8, 2]),
+    ) {
+        let mut page = fragmented_page(interior, &payload)?;
+        if damage == 0 {
+            format::write_u16(&mut page.bytes, page.header_size + format::SLOT_ENTRY_SIZE, page.first_cell);
+        } else {
+            format::write_u16(&mut page.bytes, usize::from(page.freeblock) + 2, u16::try_from(page.combined_len)?);
+        }
+        prop_assert!(validate_btree_page(&page.bytes).is_err(), "accepted overlapping regions, damage={}", damage);
+    }
+
     #[test]
     fn malformed_headers_slots_and_cells_are_rejected(
         interior in any::<bool>(),

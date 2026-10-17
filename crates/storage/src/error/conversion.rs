@@ -159,6 +159,7 @@ fn map_page_corruption(kind: PageCorruption) -> CorruptionKind {
         PageCorruption::FreeblockOffsetOutOfBounds => CorruptionKind::FreeblockOffsetOutOfBounds,
         PageCorruption::FreeblockTooSmall => CorruptionKind::FreeblockTooSmall,
         PageCorruption::FreeblockOutOfBounds => CorruptionKind::FreeblockOutOfBounds,
+        PageCorruption::OverlappingPageRegions => CorruptionKind::OverlappingPageRegions,
         PageCorruption::SlotOffsetOutOfBounds => CorruptionKind::SlotOffsetOutOfBounds,
         PageCorruption::CellLengthPrefixOutOfBounds => CorruptionKind::CellLengthPrefixOutOfBounds,
     }

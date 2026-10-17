@@ -710,10 +710,12 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
 
     let first_freeblock = format::read_optional_u16(bytes, FIRST_FREEBLOCK_OFFSET);
     let max_freeblocks = USABLE_SPACE_END / FREEBLOCK_HEADER_SIZE;
+    let mut occupied = [false; USABLE_SPACE_END];
     for freeblock in
         FreeblockIter::new(bytes, encoded_content_start, first_freeblock).take(max_freeblocks)
     {
-        let _ = freeblock?;
+        let freeblock = freeblock?;
+        occupied[usize::from(freeblock.offset)..freeblock.end()].fill(true);
     }
 
     for slot_index in 0..encoded_slot_count {
@@ -726,14 +728,17 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
             return Err(PageError::MalformedPage(PageCorruption::CellLengthPrefixOutOfBounds));
         }
 
-        match expected_kind.node_kind() {
-            format::NodeKind::Leaf => {
-                let _ = super::leaf::cell_len_at(bytes, slot_index, slot_offset)?;
-            }
+        let cell_len = match expected_kind.node_kind() {
+            format::NodeKind::Leaf => super::leaf::cell_len_at(bytes, slot_index, slot_offset)?,
             format::NodeKind::Interior => {
-                let _ = super::interior::cell_len_at(bytes, slot_index, slot_offset)?;
+                super::interior::cell_len_at(bytes, slot_index, slot_offset)?
             }
+        };
+        let cell_region = &mut occupied[slot_offset..slot_offset + cell_len];
+        if cell_region.contains(&true) {
+            return Err(PageError::MalformedPage(PageCorruption::OverlappingPageRegions));
         }
+        cell_region.fill(true);
     }
 
     Ok(())
