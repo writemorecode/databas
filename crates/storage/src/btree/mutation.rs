@@ -237,11 +237,15 @@ impl TreeCursor {
     /// Deletes the record identified by `key`.
     pub fn delete(&mut self, key: &[u8]) -> StorageResult<()> {
         let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
+        let slot_index = match self.search_leaf_slot(leaf_page_id, key)? {
+            SearchResult::Found(slot_index) => slot_index,
+            SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound.into()),
+        };
         {
             let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
             let mut leaf_guard = leaf_pin_guard.write(self.txn_id)?;
             let mut page = leaf_guard.open_mut::<Leaf>()?;
-            page.delete(key)?;
+            page.delete_at(slot_index)?;
             self.mark_tree_mutated();
         }
 

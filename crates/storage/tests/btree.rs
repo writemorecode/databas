@@ -15,6 +15,8 @@ type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
 #[path = "btree/cursors.rs"]
 mod cursors;
+#[path = "btree/long_keys.rs"]
+mod long_keys;
 
 fn new_storage(cache_frames: usize) -> Result<(TempDir, Storage), TestCaseError> {
     let directory = tempfile::tempdir()?;
