@@ -15,8 +15,21 @@ type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
 #[path = "btree/cursors.rs"]
 mod cursors;
+#[path = "btree/growth.rs"]
+mod growth;
+#[path = "btree/limits.rs"]
+mod limits;
 #[path = "btree/long_keys.rs"]
 mod long_keys;
+
+fn config() -> ProptestConfig {
+    ProptestConfig {
+        failure_persistence: Some(Box::new(proptest::test_runner::FileFailurePersistence::Direct(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/proptest-regressions/btree.txt"),
+        ))),
+        ..ProptestConfig::default()
+    }
+}
 
 fn new_storage(cache_frames: usize) -> Result<(TempDir, Storage), TestCaseError> {
     let directory = tempfile::tempdir()?;
@@ -111,6 +124,8 @@ fn operation() -> impl Strategy<Value = Op> {
 }
 
 proptest! {
+    #![proptest_config(config())]
+
     #[test]
     fn mutations_and_seeks_match_an_ordered_map(
         keys in keys(),
