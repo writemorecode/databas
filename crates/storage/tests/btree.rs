@@ -13,6 +13,9 @@ use tempfile::TempDir;
 type Pair = (Vec<u8>, Vec<u8>);
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
+#[path = "btree/cursors.rs"]
+mod cursors;
+
 fn new_storage(cache_frames: usize) -> Result<(TempDir, Storage), TestCaseError> {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open_or_create_with_options(
