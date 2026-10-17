@@ -56,6 +56,8 @@ fn command() -> impl Strategy<Value = Command> {
 }
 
 proptest! {
+    #![proptest_config(super::config())]
+
     #[test]
     fn cursor_positions_and_clones_match_a_logical_scan(
         model in prop::collection::btree_map(prop::collection::vec(any::<u8>(), 0..=16), value(), 0..=40),
