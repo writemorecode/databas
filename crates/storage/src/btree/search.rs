@@ -169,19 +169,9 @@ impl TreeCursor {
         leaf: &RawLeaf<Read<'_>>,
         key: &[u8],
     ) -> StorageResult<SearchResult> {
-        let mut low: u16 = 0;
-        let mut high = leaf.slot_count();
-
-        while low < high {
-            let mid = low + (high - low) / 2;
-            match self.compare_leaf_key_in_page(page_id, page_bytes, leaf, mid, key)? {
-                Ordering::Less => low = mid + 1,
-                Ordering::Greater => high = mid,
-                Ordering::Equal => return Ok(SearchResult::Found(mid)),
-            }
-        }
-
-        Ok(SearchResult::InsertAt(low))
+        leaf.search_slots_by(|leaf, slot| {
+            self.compare_leaf_key_in_page(page_id, page_bytes, leaf, slot, key)
+        })
     }
 
     fn lower_bound_leaf_slot(&self, page_id: PageId, key: &[u8]) -> StorageResult<BoundResult> {

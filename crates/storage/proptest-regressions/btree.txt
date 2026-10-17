@@ -1,0 +1,3 @@
+# Replay saved failures before generating new B+-tree and cursor workloads.
+# The concrete long-key deletion regression is also in tests/btree/long_keys.rs.
+cc 396a6ed3ff1ff36352cbc3394a1cef78454a4f9645c6dfdfa3034df3ff236fd0 # shrinks to priorities = [0], (prefix_len, prefix_byte) = (511, 0), seed = [], (expanded_len, expanded_seed) = (4087, 0), reverse = false, rotation = 0, cache_frames = 8

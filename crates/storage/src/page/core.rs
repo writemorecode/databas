@@ -273,9 +273,9 @@ where
         Ok(format::read_u16(self.bytes(), offset))
     }
 
-    pub(crate) fn search_slots_by<F>(&self, mut compare_slot: F) -> PageResult<SearchResult>
+    pub(crate) fn search_slots_by<F, E>(&self, mut compare_slot: F) -> Result<SearchResult, E>
     where
-        F: FnMut(&Self, SlotId) -> PageResult<Ordering>,
+        F: FnMut(&Self, SlotId) -> Result<Ordering, E>,
     {
         let mut low: SlotId = 0;
         let mut high = self.slot_count();
