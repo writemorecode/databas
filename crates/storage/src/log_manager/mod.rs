@@ -37,6 +37,8 @@ use crate::{PAGE_SIZE, PageId};
 
 mod checkpoint;
 mod frame;
+#[cfg(test)]
+mod tests;
 use frame::{
     CRC32, HEADER_LEN, deserialize_transaction, scan_transaction_frame, serialize_transaction,
     transaction_frame_len, validate_record_txn_ids, wal_open_error,
