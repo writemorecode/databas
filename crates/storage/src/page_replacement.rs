@@ -1,5 +1,8 @@
 use crate::page_cache::FrameId;
 
+#[cfg(test)]
+mod tests;
+
 const BITS_PER_WORD: usize = u64::BITS as usize;
 
 #[derive(Debug)]
