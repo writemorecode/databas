@@ -6,6 +6,7 @@ use super::{LogRecord, LogRecordKind, RecoveryLogRecordKind, TxnId};
 use crate::PAGE_SIZE;
 
 mod encoding;
+mod scanning;
 
 type Transaction = (TxnId, Vec<RecoveryLogRecordKind>);
 
@@ -113,4 +114,71 @@ fn fixture_frame(txn_id: TxnId, count: u32, payload: &[u8]) -> Vec<u8> {
     bytes.extend(txn_id.to_le_bytes());
     bytes.extend(checksum(payload).to_le_bytes());
     bytes
+}
+
+fn fixture_wal(
+    base_lsn: u64,
+    max_txn_id: TxnId,
+    frames: &[Transaction],
+) -> Result<Vec<u8>, super::LogManagerError> {
+    let mut bytes = vec![0; 32];
+    bytes[..10].copy_from_slice(b"DBWALHDR\x02\x00");
+    bytes[16..24].copy_from_slice(&base_lsn.to_le_bytes());
+    bytes[24..32].copy_from_slice(&max_txn_id.to_le_bytes());
+    let crc = checksum(&bytes);
+    bytes[10..14].copy_from_slice(&crc.to_le_bytes());
+    for frame in frames {
+        bytes.extend(encoded(frame)?);
+    }
+    Ok(bytes)
+}
+
+fn expected_scan(
+    base_lsn: u64,
+    max_txn_id: TxnId,
+    frames: &[Transaction],
+) -> super::RecoveryLogScan {
+    let mut result = super::RecoveryLogScan {
+        records: vec![],
+        truncated_tail: false,
+        max_txn_id,
+        last_assigned_lsn: base_lsn,
+    };
+    for (txn_id, kinds) in frames {
+        result.max_txn_id = result.max_txn_id.max(*txn_id);
+        for kind in kinds {
+            result.last_assigned_lsn += 1;
+            result.records.push(super::RecoveryLogRecord {
+                lsn: result.last_assigned_lsn,
+                txn_id: *txn_id,
+                kind: kind.clone(),
+            });
+        }
+    }
+    result
+}
+
+struct ChunkedReader<'a> {
+    bytes: &'a [u8],
+    position: usize,
+    chunk: usize,
+    error: Option<(usize, std::io::ErrorKind)>,
+}
+
+impl std::io::Read for ChunkedReader<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let until = if let Some((at, kind)) = self.error {
+            if self.position == at {
+                self.error = None;
+                return Err(kind.into());
+            }
+            at - self.position
+        } else {
+            usize::MAX
+        };
+        let len = out.len().min(self.chunk).min(until).min(self.bytes.len() - self.position);
+        out[..len].copy_from_slice(&self.bytes[self.position..self.position + len]);
+        self.position += len;
+        Ok(len)
+    }
 }
