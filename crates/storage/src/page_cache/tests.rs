@@ -9,14 +9,24 @@ use tempfile::TempDir;
 use super::{PageCache, PageCacheError, PinGuard};
 use crate::{PAGE_SIZE, PageId, disk_manager::DiskManager, storage_runtime::StorageRuntime};
 
+mod guards;
+mod writeback;
+
+type Model = Vec<[u8; PAGE_SIZE]>;
+
 fn image(seed: u8) -> [u8; PAGE_SIZE] {
     std::array::from_fn(|i| seed.wrapping_add(u8::try_from(i % 251).unwrap_or(0)))
 }
 
-fn setup(
-    capacity: usize,
+fn setup(capacity: usize, pages: usize) -> Result<(TempDir, PageCache, Model), TestCaseError> {
+    let (dir, runtime, model) = setup_runtime(pages, 0)?;
+    Ok((dir, PageCache::new(runtime, capacity)?, model))
+}
+
+fn setup_runtime(
     pages: usize,
-) -> Result<(TempDir, PageCache, Vec<[u8; PAGE_SIZE]>), TestCaseError> {
+    base_lsn: u64,
+) -> Result<(TempDir, Arc<StorageRuntime>, Model), TestCaseError> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("cache.db");
     let mut disk = DiskManager::new(&path)?;
@@ -27,8 +37,11 @@ fn setup(
         disk.write_page(page_id, &bytes)?;
         model.push(bytes);
     }
+    if base_lsn > 0 {
+        crate::log_manager::truncate_wal(&path, base_lsn, 0)?;
+    }
     let runtime = Arc::new(StorageRuntime::new(path, disk)?);
-    Ok((dir, PageCache::new(runtime, capacity)?, model))
+    Ok((dir, runtime, model))
 }
 
 fn snapshot(pin: &PinGuard) -> super::PageCacheResult<[u8; PAGE_SIZE]> {
