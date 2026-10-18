@@ -6,6 +6,7 @@ use super::{LogRecord, LogRecordKind, RecoveryLogRecordKind, TxnId};
 use crate::PAGE_SIZE;
 
 mod encoding;
+mod file_headers;
 mod interrupted_reads;
 mod scanning;
 

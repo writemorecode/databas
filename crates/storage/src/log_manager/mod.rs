@@ -238,7 +238,7 @@ struct WalFileHeader {
 }
 
 fn ensure_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
-    if wal_file.metadata()?.len() < WAL_FILE_HEADER_LEN as u64 {
+    if wal_file.metadata()?.len() == 0 {
         write_wal_file_header(wal_file, ZERO_LSN, 0)?;
         wal_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
         wal_file.sync_all()?;
