@@ -217,10 +217,12 @@ fn read_exact_or_eof<R: Read, const N: usize>(reader: &mut R) -> std::io::Result
     let mut buf = [0; N];
     let mut read_len = 0;
     while read_len < N {
-        match reader.read(&mut buf[read_len..])? {
-            0 if read_len == 0 => return Ok(None),
-            0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
-            len => read_len += len,
+        match reader.read(&mut buf[read_len..]) {
+            Ok(0) if read_len == 0 => return Ok(None),
+            Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            Ok(len) => read_len += len,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
         }
     }
     Ok(Some(buf))
