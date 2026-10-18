@@ -38,6 +38,9 @@ use crate::storage_runtime::StorageRuntime;
 use crate::transaction_manager::PageRestore;
 use crate::{PAGE_SIZE, PageId, TxnId};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Error)]
 pub enum PageCacheError {
     #[error("storage runtime error: {0}")]
