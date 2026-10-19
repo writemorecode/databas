@@ -89,10 +89,10 @@ impl DiskManager {
             return Ok(());
         }
 
-        let new_page_count = page_id + 1;
-        self.file.set_len(Self::page_offset(new_page_count))?;
+        let new_file_size = Self::page_end(page_id)?;
+        self.file.set_len(new_file_size)?;
         self.file.sync_all()?;
-        self.page_count = new_page_count;
+        self.page_count = page_id + 1;
         Ok(())
     }
 
@@ -105,8 +105,7 @@ impl DiskManager {
     /// Returns page ID of the new page.
     pub(crate) fn new_page(&mut self) -> DiskManagerResult<PageId> {
         let page_id = self.page_count;
-        let new_page_id = page_id + 1;
-        let new_file_size = Self::page_offset(new_page_id);
+        let new_file_size = Self::page_end(page_id)?;
         self.file.set_len(new_file_size)?;
         self.page_count += 1;
         Ok(page_id)
@@ -145,6 +144,14 @@ impl DiskManager {
     /// Calculate disk offset for page `page_id`.
     fn page_offset(page_id: PageId) -> u64 {
         page_id * (PAGE_SIZE as u64)
+    }
+
+    /// Reject impossible extents before a wrapped length can truncate the file.
+    fn page_end(page_id: PageId) -> DiskManagerResult<u64> {
+        page_id
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(PAGE_SIZE as u64))
+            .ok_or(DiskManagerError::InvalidPageId { page_id })
     }
 }
 
