@@ -1,8 +1,13 @@
 use std::{
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     io::{Read, Seek, Write},
     path::Path,
 };
+
+#[cfg(not(test))]
+use std::fs::File;
+#[cfg(test)]
+use tests::FaultFile as File;
 
 use thiserror::Error;
 
@@ -51,6 +56,8 @@ impl DiskManager {
 
     fn open_with_options(options: &OpenOptions, path: &Path) -> Result<Self, DiskManagerError> {
         let file = options.open(path)?;
+        #[cfg(test)]
+        let file = File::from(file);
 
         let file_metadata = file.metadata()?;
         let file_size = file_metadata.len();
@@ -142,4 +149,4 @@ impl DiskManager {
 }
 
 #[cfg(test)]
-mod tests;
+pub mod tests;

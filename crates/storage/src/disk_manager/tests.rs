@@ -6,6 +6,10 @@ use proptest::{prelude::*, test_runner::TestCaseResult};
 use super::{DiskManager, DiskManagerError};
 use crate::{PAGE_SIZE, PageId};
 
+pub use io::{Control, Effect, FaultFile, Operation};
+mod faults;
+mod io;
+
 fn image(pattern: &[u8]) -> [u8; PAGE_SIZE] {
     std::array::from_fn(|i| pattern[i % pattern.len()])
 }
@@ -58,13 +62,13 @@ proptest! {
                         let mut bytes = [0xa5; PAGE_SIZE];
                         let result = disk.read_page(id, &mut bytes);
                         if id < model.len() as u64 {
-                            prop_assert_eq!(bytes, model[id as usize]);
+                            prop_assert_eq!(bytes, model[usize::try_from(id)?]);
                         }
                         result
                     };
                     if id < model.len() as u64 {
                         result?;
-                        if let Op::Write(_, bytes) = op { model[id as usize] = image(&bytes); }
+                        if let Op::Write(_, bytes) = op { model[usize::try_from(id)?] = image(&bytes); }
                     } else {
                         prop_assert!(matches!(result, Err(DiskManagerError::InvalidPageId { page_id }) if page_id == id), "wrong missing-page error");
                     }
