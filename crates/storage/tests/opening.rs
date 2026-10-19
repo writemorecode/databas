@@ -5,19 +5,20 @@ use databas_storage::{Storage, StorageOptions, error::StorageError};
 
 const OPTIONS: StorageOptions = StorageOptions { cache_frames: 8 };
 
-fn probe(path: &Path, available: bool) {
-    let output = Command::new(std::env::current_exe().expect("test executable"))
+fn probe(path: &Path, available: bool) -> std::io::Result<()> {
+    let output = Command::new(std::env::current_exe()?)
         .args(["--exact", "lock_probe", "--nocapture"])
         .env("DATABAS_LOCK_PROBE_PATH", path)
         .env("DATABAS_LOCK_PROBE_AVAILABLE", available.to_string())
-        .output()
-        .expect("run ownership probe");
-    assert!(
-        output.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
 }
 
 #[test]
@@ -49,17 +50,17 @@ fn ownership_follows_the_file_and_lasts_until_the_final_cursor_and_record_drop()
     storage.flush().unwrap();
     let record = cursor.get(b"key").unwrap().unwrap();
     fs::hard_link(&path, &alias).unwrap();
-    probe(&path, false);
-    probe(&alias, false);
+    probe(&path, false).unwrap();
+    probe(&alias, false).unwrap();
     drop(storage);
-    probe(&path, false);
+    probe(&path, false).unwrap();
     drop(clone);
-    probe(&path, false);
+    probe(&path, false).unwrap();
     drop(cursor);
-    probe(&path, false);
+    probe(&path, false).unwrap();
     assert_eq!(record.with_key_value(|_, value| value.to_vec()).unwrap(), b"value");
     drop(record);
-    probe(&path, true);
+    probe(&path, true).unwrap();
 }
 
 #[test]

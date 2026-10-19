@@ -8,6 +8,8 @@ use crate::{
     error::{CorruptionKind, StorageError},
 };
 
+mod faults;
+
 const OPTIONS: StorageOptions = StorageOptions { cache_frames: 8 };
 
 // Independent fixture for the documented database header, not its encoder.
@@ -92,7 +94,7 @@ fn opening_modes_distinguish_missing_empty_and_initialized_files() -> TestCaseRe
 proptest! {
     #[test]
     fn damaged_headers_and_partial_files_are_rejected_without_touching_database_or_wal(
-        index in 0usize..PAGE_SIZE, bit in 0u8..8, tail in 1usize..PAGE_SIZE,
+        index in prop_oneof![0usize..12, 12usize..PAGE_SIZE], bit in 0u8..8, tail in 1usize..PAGE_SIZE,
     ) {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("db");
