@@ -140,3 +140,6 @@ impl DiskManager {
         page_id * (PAGE_SIZE as u64)
     }
 }
+
+#[cfg(test)]
+mod tests;

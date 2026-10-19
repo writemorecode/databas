@@ -206,3 +206,6 @@ fn validate_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
     disk_manager.read_page(DATABASE_HEADER_PAGE_ID, &mut page)?;
     DatabaseHeader::validate_page(&page)
 }
+
+#[cfg(test)]
+mod tests;
