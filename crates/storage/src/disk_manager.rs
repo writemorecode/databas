@@ -59,15 +59,7 @@ impl DiskManager {
         #[cfg(test)]
         let file = File::from(file);
 
-        let file_metadata = file.metadata()?;
-        let file_size = file_metadata.len();
-
-        if !file_size.is_multiple_of(PAGE_SIZE as u64) {
-            return Err(DiskManagerError::InvalidFileSize { size: file_size });
-        }
-
-        let page_count = file_size / (PAGE_SIZE as u64);
-
+        let page_count = Self::file_page_count(&file)?;
         Ok(Self { file, page_count, locked: false })
     }
 
@@ -75,9 +67,20 @@ impl DiskManager {
     pub(crate) fn lock_exclusive(&mut self) -> DiskManagerResult<()> {
         if !self.locked {
             self.file.try_lock().map_err(std::io::Error::from)?;
+            // Another owner may have grown or initialized the file since open.
+            // Only the length observed under ownership is safe for allocation.
+            self.page_count = Self::file_page_count(&self.file)?;
             self.locked = true;
         }
         Ok(())
+    }
+
+    fn file_page_count(file: &File) -> DiskManagerResult<u64> {
+        let size = file.metadata()?.len();
+        if !size.is_multiple_of(PAGE_SIZE as u64) {
+            return Err(DiskManagerError::InvalidFileSize { size });
+        }
+        Ok(size / PAGE_SIZE as u64)
     }
 
     pub(crate) fn page_count(&self) -> u64 {

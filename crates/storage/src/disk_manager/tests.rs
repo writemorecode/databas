@@ -10,6 +10,7 @@ pub use io::{Control, Effect, FaultFile, Operation};
 mod faults;
 mod io;
 mod limits;
+mod ownership;
 
 fn image(pattern: &[u8]) -> [u8; PAGE_SIZE] {
     std::array::from_fn(|i| pattern[i % pattern.len()])
