@@ -9,6 +9,7 @@ use crate::{PAGE_SIZE, PageId};
 pub use io::{Control, Effect, FaultFile, Operation};
 mod faults;
 mod io;
+mod limits;
 
 fn image(pattern: &[u8]) -> [u8; PAGE_SIZE] {
     std::array::from_fn(|i| pattern[i % pattern.len()])
