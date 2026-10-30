@@ -23,6 +23,7 @@ fn version_two_frames_match_independent_format_fixtures() -> TestCaseResult {
                 redo_data: Box::new([0xa5; PAGE_SIZE]),
                 undo_data: Box::new([0x5a; PAGE_SIZE]),
             },
+            RecoveryLogRecordKind::PageDealloc { page_id },
             RecoveryLogRecordKind::Commit,
             RecoveryLogRecordKind::Rollback,
         ],
@@ -34,9 +35,11 @@ fn version_two_frames_match_independent_format_fixtures() -> TestCaseResult {
     payload.extend([0, 16, 0, 0, 0, 16, 0, 0]); // Two 4096-byte images, little endian.
     payload.extend([0xa5; PAGE_SIZE]);
     payload.extend([0x5a; PAGE_SIZE]);
+    payload.push(6);
+    payload.extend(page_id.to_le_bytes());
     payload.extend([2, 3]);
     for (model, expected) in
-        [(transaction, fixture_frame(txn_id, 5, &payload)), ((0, vec![]), fixture_frame(0, 0, &[]))]
+        [(transaction, fixture_frame(txn_id, 6, &payload)), ((0, vec![]), fixture_frame(0, 0, &[]))]
     {
         prop_assert_eq!(&encoded(&model)?, &expected);
         check_decoded(&expected, &model)?;

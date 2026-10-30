@@ -19,6 +19,7 @@ const KIND_COMMIT: u8 = 2;
 const KIND_ROLLBACK: u8 = 3;
 const KIND_PAGE_UPDATE: u8 = 4;
 const KIND_PAGE_ALLOC: u8 = 5;
+const KIND_PAGE_DEALLOC: u8 = 6;
 
 /// Serializes a complete transaction frame to `writer`.
 ///
@@ -196,7 +197,7 @@ fn scan_log_record_payload<R: Read>(
 ) -> Result<(), LogManagerError> {
     match read_crc_u8(reader, digest, remaining)? {
         KIND_BEGIN | KIND_COMMIT | KIND_ROLLBACK => Ok(()),
-        KIND_PAGE_ALLOC => {
+        KIND_PAGE_ALLOC | KIND_PAGE_DEALLOC => {
             read_crc_u64(reader, digest, remaining)?;
             Ok(())
         }
@@ -395,6 +396,10 @@ fn deserialize_log_record<'a>(
             let page_id = cursor.read_u64()?;
             LogRecordKind::PageAlloc { page_id }
         }
+        KIND_PAGE_DEALLOC => {
+            let page_id = cursor.read_u64()?;
+            LogRecordKind::PageDealloc { page_id }
+        }
         kind => return Err(LogManagerError::UnknownRecordKind { kind }),
     };
     Ok(LogRecord { txn_id, kind })
@@ -439,7 +444,7 @@ fn serialized_record_len(kind: &LogRecordKind<'_>) -> Result<u64, LogManagerErro
             })?;
             Ok(1 + 8 + 4 + 4 + u64::from(redo_len) + u64::from(undo_len))
         }
-        LogRecordKind::PageAlloc { .. } => Ok(1 + 8),
+        LogRecordKind::PageAlloc { .. } | LogRecordKind::PageDealloc { .. } => Ok(1 + 8),
     }
 }
 
@@ -504,8 +509,13 @@ fn write_log_record_payload<W: Write>(
             write_crc_bytes(writer, digest, redo_data)?;
             write_crc_bytes(writer, digest, undo_data)?;
         }
-        LogRecordKind::PageAlloc { page_id } => {
-            write_crc_u8(writer, digest, KIND_PAGE_ALLOC)?;
+        LogRecordKind::PageAlloc { page_id } | LogRecordKind::PageDealloc { page_id } => {
+            let kind = if matches!(kind, LogRecordKind::PageAlloc { .. }) {
+                KIND_PAGE_ALLOC
+            } else {
+                KIND_PAGE_DEALLOC
+            };
+            write_crc_u8(writer, digest, kind)?;
             write_crc_u64(writer, digest, *page_id)?;
         }
     }
