@@ -99,15 +99,22 @@ impl TreeCursor {
         key: &[u8],
         value: &[u8],
     ) -> StorageResult<u16> {
+        let old_overflow = leaf.cell_payload_parts(slot_index)?.2;
         let (first_overflow_page_id, inline_payload, inline_payload_len) =
             self.prepare_leaf_payload(key, value)?;
-        Ok(leaf.update_payload_at(
+        let slot = leaf.update_payload_at(
             slot_index,
             key.len(),
             value.len(),
             first_overflow_page_id,
             &inline_payload[..inline_payload_len],
-        )?)
+        )?;
+        super::reclaim::reclaim_chains(
+            &self.page_cache,
+            self.txn_id,
+            old_overflow.into_iter().collect(),
+        )?;
+        Ok(slot)
     }
 
     pub(super) fn insert_interior_payload_at(
@@ -241,13 +248,20 @@ impl TreeCursor {
             SearchResult::Found(slot_index) => slot_index,
             SearchResult::InsertAt(_) => return Err(PageError::KeyNotFound.into()),
         };
+        let old_overflow;
         {
             let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
             let mut leaf_guard = leaf_pin_guard.write(self.txn_id)?;
             let mut page = leaf_guard.open_mut::<Leaf>()?;
+            old_overflow = page.cell_payload_parts(slot_index)?.2;
             page.delete_at(slot_index)?;
             self.mark_tree_mutated();
         }
+        super::reclaim::reclaim_chains(
+            &self.page_cache,
+            self.txn_id,
+            old_overflow.into_iter().collect(),
+        )?;
 
         self.set_page_state(leaf_page_id);
         self.rebalance_after_leaf_delete(leaf_page_id, &tree_path)?;

@@ -30,6 +30,7 @@ mod payload;
 mod rebalance;
 mod rebalance_policy;
 mod rebalance_repair;
+mod reclaim;
 mod record;
 mod root;
 mod search;
@@ -151,3 +152,5 @@ fn payload_uses_overflow(payload_len: usize) -> bool {
 fn local_payload_len(payload_len: usize) -> usize {
     if payload_uses_overflow(payload_len) { MAX_INLINE_OVERFLOW_PAYLOAD_BYTES } else { payload_len }
 }
+
+pub use reclaim::destroy_tree;
