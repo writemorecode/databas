@@ -49,6 +49,16 @@ impl RelationalAccess for Transaction<'_> {
         Transaction::create_table(self, name, row)
     }
 
+    fn drop_table(&self, name: &str) -> RelationalResult<()> {
+        self.require_ddl()?;
+        self.database.catalog().for_transaction(self.txn_id).drop_table(name)
+    }
+
+    fn drop_index(&self, name: &str) -> RelationalResult<()> {
+        self.require_ddl()?;
+        self.database.catalog().for_transaction(self.txn_id).drop_index(name)
+    }
+
     fn create_index(
         &self,
         name: &str,

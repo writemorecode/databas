@@ -16,3 +16,10 @@ cargo test --workspace
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features
 ```
+
+`DROP TABLE name;` removes a user table and all of its secondary indexes.
+`DROP INDEX name;` removes a secondary index while preserving its table.
+Both statements support explicit transactions: `ROLLBACK;` restores the catalog
+entries and all tree pages, including overflow data. Committed drops make those
+pages available for reuse. Missing names and attempts to drop a system table
+return errors. Like other DDL, drops require exclusive database access.

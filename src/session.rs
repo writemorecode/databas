@@ -187,7 +187,10 @@ impl<'db> Session<'db> {
 
 fn statement_transaction_mode(statement: &Statement<'_>) -> StatementTransactionMode {
     match statement {
-        Statement::CreateTable(_) | Statement::CreateIndex(_) => StatementTransactionMode::Ddl,
+        Statement::CreateTable(_)
+        | Statement::CreateIndex(_)
+        | Statement::DropTable { .. }
+        | Statement::DropIndex { .. } => StatementTransactionMode::Ddl,
         _ => StatementTransactionMode::Ordinary,
     }
 }
@@ -200,6 +203,8 @@ fn plan_table_locks(plan: &PhysicalPlan) -> Vec<(TableId, LockMode)> {
     if matches!(plan.root(), PhysicalPlanNode::Explain { .. }) {
         return Vec::new();
     }
+    // DROP resolves its target under the database-wide DDL gate, which already
+    // excludes every other transaction and is held until commit or rollback.
     let mut locks = BTreeMap::new();
     for node in plan.iter() {
         let (table, mode) = match node {

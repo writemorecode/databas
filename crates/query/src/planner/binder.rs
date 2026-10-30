@@ -47,6 +47,16 @@ impl<'catalog> Binder<'catalog> {
             Statement::Explain(statement) => self.plan_explain(statement, nodes),
             Statement::CreateTable(query) => Ok(self.plan_create_table(query, nodes)),
             Statement::CreateIndex(query) => self.plan_create_index(query, nodes),
+            // Resolve DROP targets during execution, once exclusive DDL admission
+            // prevents another transaction from changing the catalog or using the tree.
+            Statement::DropTable { name } => Ok(push_logical_node(
+                nodes,
+                LogicalPlanNode::DropTable { name: (*name).to_owned() },
+            )),
+            Statement::DropIndex { name } => Ok(push_logical_node(
+                nodes,
+                LogicalPlanNode::DropIndex { name: (*name).to_owned() },
+            )),
             Statement::Insert(query) => self.plan_insert(query, nodes),
             Statement::Update(query) => self.plan_update(query, nodes),
             Statement::Delete(query) => self.plan_delete(query, nodes),

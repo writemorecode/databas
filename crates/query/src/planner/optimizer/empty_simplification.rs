@@ -127,6 +127,8 @@ impl EmptySimplification {
             }
             leaf @ (LogicalPlanNode::CreateTable { .. }
             | LogicalPlanNode::CreateIndex { .. }
+            | LogicalPlanNode::DropTable { .. }
+            | LogicalPlanNode::DropIndex { .. }
             | LogicalPlanNode::Values { .. }
             | LogicalPlanNode::OneRow { .. }
             | LogicalPlanNode::Empty { .. }
