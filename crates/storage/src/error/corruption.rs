@@ -44,6 +44,8 @@ pub enum CorruptionKind {
     InvalidDatabasePageSize { expected: usize, actual: usize },
     #[error("database header reserved bytes are not zeroed")]
     DatabaseHeaderReservedBytesNotZero,
+    #[error("page ownership graph contains a cycle or shared page")]
+    InvalidPageGraph,
     #[error("invalid allocation bitmap")]
     InvalidAllocationBitmap,
     #[error("unknown page kind: raw tag {actual}")]

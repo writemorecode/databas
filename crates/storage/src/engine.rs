@@ -171,6 +171,26 @@ impl Storage {
         Ok(TreeCursor::new(self.page_cache.clone(), root_page_id)?.for_transaction(txn_id))
     }
 
+    /// Reclaims a whole tree, including its root and overflow chains.
+    ///
+    /// The caller must hold exclusive logical access and remove the catalog
+    /// reference in this same transaction. On error, roll back the transaction
+    /// or its statement savepoint. Cursors may not outlive that access scope.
+    pub fn transaction_destroy_tree(
+        &self,
+        txn_id: TxnId,
+        root_page_id: PageId,
+    ) -> StorageResult<()> {
+        if !self.transaction_is_active(txn_id)? {
+            return Err(crate::error::StorageError::Internal(
+                crate::error::InternalError::InvariantViolation(
+                    crate::error::InvariantViolation::NoActiveTransaction,
+                ),
+            ));
+        }
+        crate::btree::destroy_tree(&self.page_cache, txn_id, root_page_id)
+    }
+
     /// Returns a raw cursor rooted at an existing tree.
     pub fn tree_cursor(&self, root_page_id: PageId) -> StorageResult<TreeCursor> {
         TreeCursor::new(self.page_cache.clone(), root_page_id)

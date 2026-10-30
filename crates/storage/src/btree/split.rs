@@ -251,6 +251,8 @@ impl TreeCursor {
         cells: &[LeafSplitCell<'_>],
         target_key: &[u8],
     ) -> StorageResult<PendingSplit> {
+        let old_roots =
+            super::reclaim::overflow_roots(leaf_pin_guard.read()?.page(), leaf_page_id)?;
         let split_index = Self::choose_leaf_split_index(cells)?;
         let (left_cells, right_cells) = cells.split_at(split_index);
 
@@ -285,6 +287,7 @@ impl TreeCursor {
             *leaf_guard.page_mut() = left_page_image;
             *right_guard.page_mut() = right_page_image;
         }
+        super::reclaim::reclaim_chains(&self.page_cache, self.txn_id, old_roots)?;
         self.mark_tree_mutated();
 
         if let Some(next_page_id) = next_page_id {

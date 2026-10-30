@@ -420,6 +420,40 @@ fn recovery_reconciles_bitmap_writes_that_outlive_their_file_extension() -> Test
 }
 
 #[test]
+fn tree_destruction_rejects_cycles_and_shared_children_before_freeing_any_page() -> TestCaseResult {
+    use crate::page::{RawInterior, Write};
+    let dir = tempfile::tempdir()?;
+    for shared in [false, true] {
+        let path = dir.path().join(format!("graph-{shared}"));
+        let storage = open(&path, 2)?;
+        let mut tree = storage.create_tree()?;
+        let root = tree.root_page_id();
+        tree.insert(b"key", b"value")?;
+        let child = storage.create_tree()?.root_page_id();
+        storage.flush()?;
+        let txn = storage.begin_transaction()?;
+        let pin = storage.page_cache.fetch_page(root)?;
+        {
+            let mut write = pin.write(Some(txn))?;
+            let mut interior = RawInterior::<Write<'_>>::initialize_with_rightmost(
+                write.page_mut(),
+                if shared { child } else { root },
+            );
+            if shared {
+                interior.insert_payload_at(0, child, 1, None, b"k")?;
+            }
+        }
+        drop(pin);
+        prop_assert!(storage.transaction_destroy_tree(txn, root).is_err());
+        prop_assert!(storage.page_cache.fetch_page(root).is_ok());
+        prop_assert!(storage.page_cache.fetch_page(child).is_ok());
+        storage.rollback_transaction(txn)?;
+        prop_assert_eq!(tree.get(b"key")?.unwrap().with_key_value(|_, v| v.to_vec())?, b"value");
+    }
+    Ok(())
+}
+
+#[test]
 fn recovery_rejects_deallocation_of_metadata_or_missing_pages_without_extending_the_file()
 -> TestCaseResult {
     use crate::log_manager::{LogManager, LogRecordKind};

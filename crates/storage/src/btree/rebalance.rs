@@ -318,6 +318,7 @@ impl TreeCursor {
         next_page_id: Option<PageId>,
     ) -> StorageResult<()> {
         let pin = self.page_cache.fetch_page(page_id)?;
+        let old_roots = super::reclaim::overflow_roots(pin.read()?.page(), page_id)?;
         let mut guard = pin.write(self.txn_id)?;
         let mut leaf = RawLeaf::<Write<'_>>::initialize(guard.page_mut());
         leaf.set_prev_page_id(prev_page_id);
@@ -326,7 +327,9 @@ impl TreeCursor {
             let slot_index = leaf.slot_count();
             self.insert_leaf_payload_at(&mut leaf, slot_index, cell.key(), cell.value())?;
         }
-        Ok(())
+        drop(guard);
+        drop(pin);
+        super::reclaim::reclaim_chains(&self.page_cache, self.txn_id, old_roots)
     }
 
     /// Reinitializes an interior page from ordered `children` and sibling links.
@@ -380,9 +383,12 @@ impl TreeCursor {
         }
 
         let pin = self.page_cache.fetch_page(page_id)?;
+        let old_roots = super::reclaim::overflow_roots(pin.read()?.page(), page_id)?;
         let mut guard = pin.write(self.txn_id)?;
         *guard.page_mut() = page_image;
-        Ok(())
+        drop(guard);
+        drop(pin);
+        super::reclaim::reclaim_chains(&self.page_cache, self.txn_id, old_roots)
     }
 
     /// Returns whether an interior page already matches refreshed child maxima.
@@ -585,6 +591,8 @@ impl TreeCursor {
             if Self::leaf_cells_fit(cells) {
                 self.merge_leaf_pages(left_page_id, leaf_page_id, cells)?;
                 self.remove_child_from_parent(parent_page_id, leaf_page_id)?;
+                self.reclaim_page_overflow(leaf_page_id)?;
+                self.page_cache.dealloc_page(self.txn_id, leaf_page_id)?;
                 self.set_page_state(left_page_id);
                 return Ok(true);
             }
@@ -599,6 +607,8 @@ impl TreeCursor {
             if Self::leaf_cells_fit(cells) {
                 self.merge_leaf_pages(leaf_page_id, right_page_id, cells)?;
                 self.remove_child_from_parent(parent_page_id, right_page_id)?;
+                self.reclaim_page_overflow(right_page_id)?;
+                self.page_cache.dealloc_page(self.txn_id, right_page_id)?;
                 self.set_page_state(leaf_page_id);
                 return Ok(true);
             }
@@ -737,6 +747,8 @@ impl TreeCursor {
             if Self::interior_children_fit(children) {
                 self.merge_interior_pages(left_page_id, interior_page_id, children)?;
                 self.remove_child_from_parent(parent_page_id, interior_page_id)?;
+                self.reclaim_page_overflow(interior_page_id)?;
+                self.page_cache.dealloc_page(self.txn_id, interior_page_id)?;
                 return Ok(true);
             }
             if let Some(split_index) = Self::choose_interior_fitting_split(children) {
@@ -755,6 +767,8 @@ impl TreeCursor {
             if Self::interior_children_fit(children) {
                 self.merge_interior_pages(interior_page_id, right_page_id, children)?;
                 self.remove_child_from_parent(parent_page_id, right_page_id)?;
+                self.reclaim_page_overflow(right_page_id)?;
+                self.page_cache.dealloc_page(self.txn_id, right_page_id)?;
                 return Ok(true);
             }
             if let Some(split_index) = Self::choose_interior_fitting_split(children) {
