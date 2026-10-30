@@ -1,66 +1,26 @@
+use crate::bitset::BitSet;
 use crate::page_cache::FrameId;
 
 #[cfg(test)]
 mod tests;
 
-const BITS_PER_WORD: usize = u64::BITS as usize;
-
-#[derive(Debug)]
-struct BitSet {
-    words: Vec<u64>,
-    len: usize,
-}
-
-impl BitSet {
-    fn new(len: usize) -> Self {
-        let word_count = len.saturating_add(BITS_PER_WORD - 1) / BITS_PER_WORD;
-        Self { words: vec![0; word_count], len }
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn get(&self, index: usize) -> bool {
-        let (word_index, mask) = self.word_index_and_mask(index);
-        self.words[word_index] & mask != 0
-    }
-
-    fn set(&mut self, index: usize) {
-        let (word_index, mask) = self.word_index_and_mask(index);
-        self.words[word_index] |= mask;
-    }
-
-    fn clear(&mut self, index: usize) {
-        let (word_index, mask) = self.word_index_and_mask(index);
-        self.words[word_index] &= !mask;
-    }
-
-    fn word_index_and_mask(&self, index: usize) -> (usize, u64) {
-        assert!(index < self.len, "bit index out of bounds");
-        let word_index = index / BITS_PER_WORD;
-        let bit_offset = index % BITS_PER_WORD;
-        (word_index, 1u64 << bit_offset)
-    }
-}
-
 #[derive(Debug)]
 pub struct ClockPolicy {
     hand: FrameId,
-    reference_bits: BitSet,
+    reference_bits: BitSet<Vec<u8>>,
 }
 
 impl ClockPolicy {
     pub(crate) fn new(frame_count: usize) -> Self {
-        Self { hand: 0, reference_bits: BitSet::new(frame_count) }
+        Self { hand: 0, reference_bits: BitSet::zeroed(frame_count) }
     }
 
     pub(crate) fn record_access(&mut self, frame_id: FrameId) {
-        self.reference_bits.set(frame_id);
+        self.reference_bits.set(frame_id, true);
     }
 
     pub(crate) fn record_insert(&mut self, frame_id: FrameId) {
-        self.reference_bits.set(frame_id);
+        self.reference_bits.set(frame_id, true);
     }
 
     /// Selects a victim frame using CLOCK second-chance replacement.
@@ -80,8 +40,8 @@ impl ClockPolicy {
                 continue;
             }
 
-            if self.reference_bits.get(frame_id) {
-                self.reference_bits.clear(frame_id);
+            if self.reference_bits.contains(frame_id) {
+                self.reference_bits.set(frame_id, false);
                 continue;
             }
 
