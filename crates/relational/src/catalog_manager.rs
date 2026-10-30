@@ -222,7 +222,10 @@ impl CatalogManager {
         self.initialize_system_root(SYS_TABLES_ROOT_PAGE_ID)?;
         self.initialize_system_root(SYS_INDEXES_ROOT_PAGE_ID)?;
         self.initialize_system_root(SYS_COLUMNS_ROOT_PAGE_ID)?;
-        self.seed_system_catalog()
+        self.seed_system_catalog()?;
+        // Bootstrap is nontransactional. Persist its roots and allocation bits
+        // before a later transaction can commit changes to the catalog.
+        self.flush()
     }
 
     fn seed_system_catalog(&self) -> RelationalResult<()> {

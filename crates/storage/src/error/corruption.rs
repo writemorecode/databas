@@ -44,6 +44,8 @@ pub enum CorruptionKind {
     InvalidDatabasePageSize { expected: usize, actual: usize },
     #[error("database header reserved bytes are not zeroed")]
     DatabaseHeaderReservedBytesNotZero,
+    #[error("invalid allocation bitmap")]
+    InvalidAllocationBitmap,
     #[error("unknown page kind: raw tag {actual}")]
     UnknownPageKind { actual: u8 },
     #[error("invalid page kind: expected {expected}, got raw tag {actual}")]

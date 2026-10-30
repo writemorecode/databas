@@ -6,7 +6,7 @@ use crate::{PAGE_SIZE, PAGE_SIZE_U16, PageId};
 pub const DATABASE_HEADER_PAGE_ID: PageId = 0;
 
 const MAGIC: &[u8; 8] = b"DATABAS\0";
-const FORMAT_VERSION: u16 = 2;
+const FORMAT_VERSION: u16 = 3;
 const HEADER_LEN: usize = 12;
 
 /// Fixed-format database file header stored on page 0.
@@ -18,6 +18,7 @@ impl DatabaseHeader {
         page[0..8].copy_from_slice(MAGIC);
         page[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
         page[10..12].copy_from_slice(&PAGE_SIZE_U16.to_le_bytes());
+        page[crate::page_allocator::BITMAP_OFFSET] = 1;
         page
     }
 
@@ -47,7 +48,7 @@ impl DatabaseHeader {
             }));
         }
 
-        if page[HEADER_LEN..].iter().any(|byte| *byte != 0) {
+        if page[HEADER_LEN..crate::page_allocator::BITMAP_OFFSET].iter().any(|byte| *byte != 0) {
             return Err(corrupt_header(CorruptionKind::DatabaseHeaderReservedBytesNotZero));
         }
 

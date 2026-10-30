@@ -10,12 +10,12 @@ use super::{PageCache, PageCacheError, disk_image, image, setup, setup_runtime, 
 #[test]
 fn readers_share_access_and_writers_exclude_only_their_own_page() -> TestCaseResult {
     let (_dir, cache, model) = setup(2, 2)?;
-    let first = cache.fetch_page(0)?;
-    let alias = cache.clone().fetch_page(0)?;
-    let second = cache.fetch_page(1)?;
+    let first = cache.fetch_page(1)?;
+    let alias = cache.clone().fetch_page(1)?;
+    let second = cache.fetch_page(2)?;
     cache.flush_all()?; // Clean pinned pages do not prevent a full flush.
     prop_assert!(
-        matches!(cache.flush_page(0), Err(PageCacheError::PinnedPage { page_id: 0 })),
+        matches!(cache.flush_page(1), Err(PageCacheError::PinnedPage { page_id: 1 })),
         "single-page flush accepted a pin"
     );
     {
@@ -25,7 +25,7 @@ fn readers_share_access_and_writers_exclude_only_their_own_page() -> TestCaseRes
         prop_assert!(
             matches!(
                 alias.write(None),
-                Err(PageCacheError::PageMutableBorrowConflict { page_id: 0 })
+                Err(PageCacheError::PageMutableBorrowConflict { page_id: 1 })
             ),
             "write accepted during shared reads"
         );
@@ -35,13 +35,13 @@ fn readers_share_access_and_writers_exclude_only_their_own_page() -> TestCaseRes
         let mut write = alias.write(None)?;
         write.page_mut().copy_from_slice(&image(42));
         prop_assert!(
-            matches!(first.read(), Err(PageCacheError::PageImmutableBorrowConflict { page_id: 0 })),
+            matches!(first.read(), Err(PageCacheError::PageImmutableBorrowConflict { page_id: 1 })),
             "read accepted during write"
         );
         prop_assert!(
             matches!(
                 first.write(None),
-                Err(PageCacheError::PageMutableBorrowConflict { page_id: 0 })
+                Err(PageCacheError::PageMutableBorrowConflict { page_id: 1 })
             ),
             "second writer accepted"
         );
@@ -55,14 +55,14 @@ fn readers_share_access_and_writers_exclude_only_their_own_page() -> TestCaseRes
 #[test]
 fn pins_and_exclusive_borrows_are_shared_across_threads() -> TestCaseResult {
     let (dir, cache, _) = setup(1, 2)?;
-    let pin = cache.fetch_page(0)?;
+    let pin = cache.fetch_page(1)?;
     let mut write = pin.write(None)?;
     write.page_mut().copy_from_slice(&image(73));
     let observer = cache.clone();
     let alias = thread::scope(|scope| {
         scope
             .spawn(move || -> Result<_, TestCaseError> {
-                let alias = observer.fetch_page(0)?;
+                let alias = observer.fetch_page(1)?;
                 prop_assert!(
                     matches!(alias.read(), Err(PageCacheError::PageImmutableBorrowConflict { .. })),
                     "read accepted across threads"
@@ -75,7 +75,7 @@ fn pins_and_exclusive_borrows_are_shared_across_threads() -> TestCaseResult {
                     "write accepted across threads"
                 );
                 prop_assert!(matches!(
-                    observer.fetch_page(1),
+                    observer.fetch_page(2),
                     Err(PageCacheError::NoEvictableFrame)
                 ));
                 Ok(alias)
@@ -86,14 +86,14 @@ fn pins_and_exclusive_borrows_are_shared_across_threads() -> TestCaseResult {
     drop(write);
     prop_assert_eq!(snapshot(&alias)?, image(73));
     drop(pin);
-    prop_assert!(matches!(cache.fetch_page(1), Err(PageCacheError::NoEvictableFrame)));
+    prop_assert!(matches!(cache.fetch_page(2), Err(PageCacheError::NoEvictableFrame)));
     let client = cache.clone();
     drop(cache); // The transferred pin and another handle retain shared state.
     prop_assert_eq!(snapshot(&alias)?, image(73));
     drop(alias);
     // The final pin drop must not itself flush dirty data.
     prop_assert_ne!(disk_image(&dir.path().join("cache.db"), 0)?, image(73).to_vec());
-    drop(client.fetch_page(1)?);
+    drop(client.fetch_page(2)?);
     prop_assert_eq!(disk_image(&dir.path().join("cache.db"), 0)?, image(73).to_vec());
     Ok(())
 }
@@ -109,7 +109,7 @@ fn concurrent_fetches_share_bytes_and_retain_every_client_pin() -> TestCaseResul
             let client = cache.clone();
             tasks.push(scope.spawn(move || {
                 start.wait();
-                client.fetch_page(0)
+                client.fetch_page(1)
             }));
         }
         start.wait();
@@ -126,9 +126,9 @@ fn concurrent_fetches_share_bytes_and_retain_every_client_pin() -> TestCaseResul
         prop_assert_eq!(snapshot(pin)?, image(67));
     }
     drop(pins);
-    prop_assert!(matches!(cache.fetch_page(1), Err(PageCacheError::NoEvictableFrame)));
+    prop_assert!(matches!(cache.fetch_page(2), Err(PageCacheError::NoEvictableFrame)));
     drop(survivor);
-    drop(cache.fetch_page(1)?);
+    drop(cache.fetch_page(2)?);
     prop_assert_eq!(disk_image(&dir.path().join("cache.db"), 0)?, image(67).to_vec());
     Ok(())
 }

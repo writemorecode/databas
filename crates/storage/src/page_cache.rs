@@ -223,7 +223,16 @@ impl PageCache {
     /// Cache hits update replacement state and increment pin count.
     /// Cache misses use CLOCK replacement and may evict a dirty page.
     pub(crate) fn fetch_page(&self, page_id: PageId) -> PageCacheResult<PinGuard> {
+        self.fetch_page_impl(page_id, false)
+    }
+
+    fn fetch_page_impl(&self, page_id: PageId, restoring: bool) -> PageCacheResult<PinGuard> {
         let mut meta = self.inner.lock_meta()?;
+        if !restoring && !self.inner.runtime.page_is_live(page_id).map_err(runtime_error)? {
+            return Err(runtime_error(
+                crate::disk_manager::DiskManagerError::InvalidPageId { page_id }.into(),
+            ));
+        }
         if let Some(frame_id) = self.resident_frame_id(&meta, page_id)? {
             let frame = &self.inner.frames[frame_id];
             let pin_count = frame
@@ -250,12 +259,33 @@ impl PageCache {
         let mut meta = self.inner.lock_meta()?;
         let frame_id =
             self.select_victim_frame(&mut meta).ok_or(PageCacheError::NoEvictableFrame)?;
-        let page_id = self.inner.runtime.new_page().map_err(runtime_error)?;
-        if let Err(err) = self.inner.runtime.record_page_alloc(txn_id, page_id) {
-            return Err(PageCacheError::Storage(Box::new(err)));
+        let page_id = self.inner.runtime.new_page(txn_id).map_err(runtime_error)?;
+        // A recycled page can still be cached. Reuse its frame rather than
+        // creating a second mapping that could later overwrite its new owner.
+        let frame_id = self.resident_frame_id(&meta, page_id)?.unwrap_or(frame_id);
+        if self.inner.frames[frame_id].pin_count.load(Ordering::Acquire) != 0 {
+            return Err(PageCacheError::PinnedPage { page_id });
         }
         self.replace_frame(&mut meta, frame_id, page_id)?;
-        Ok((page_id, PinGuard::new(Arc::clone(&self.inner), frame_id, page_id)))
+        let pin = PinGuard::new(Arc::clone(&self.inner), frame_id, page_id);
+        drop(meta);
+        // Zero reused bytes through the ordinary WAL/undo path.
+        pin.write(txn_id)?.page_mut().fill(0);
+        Ok((page_id, pin))
+    }
+
+    pub(crate) fn dealloc_page(
+        &self,
+        txn_id: Option<TxnId>,
+        page_id: PageId,
+    ) -> PageCacheResult<()> {
+        let meta = self.inner.lock_meta()?;
+        if let Some(frame_id) = self.resident_frame_id(&meta, page_id)?
+            && self.inner.frames[frame_id].pin_count.load(Ordering::Acquire) != 0
+        {
+            return Err(PageCacheError::PinnedPage { page_id });
+        }
+        self.inner.runtime.dealloc_page(txn_id, page_id).map_err(runtime_error)
     }
 
     /// Flushes one resident page if dirty.
@@ -415,7 +445,7 @@ impl PageCache {
         restore_pages: Vec<PageRestore>,
     ) -> PageCacheResult<()> {
         for restore in restore_pages {
-            let pin = self.fetch_page(restore.page_id)?;
+            let pin = self.fetch_page_impl(restore.page_id, true)?;
             let frame = &self.inner.frames[pin.frame_id];
             {
                 let mut data = try_write_page_data(&frame.data, restore.page_id)?;

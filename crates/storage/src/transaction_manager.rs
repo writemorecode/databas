@@ -6,7 +6,7 @@
 //! in-memory undo images accumulated here; crash recovery uses the durable WAL
 //! records written by [`LogManager`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::error::{InternalError, InvariantViolation, StorageError, StorageResult};
 use crate::log_manager::{LogManager, LogRecordKind, Lsn, TxnId};
@@ -53,6 +53,7 @@ pub struct TransactionSavepoint {
     pub(crate) txn_id: TxnId,
     /// Undo-log boundary before the statement made any page changes.
     undo_len: usize,
+    allocation_len: usize,
 }
 
 /// WAL metadata returned after a transactional page update is logged.
@@ -86,6 +87,9 @@ pub struct TransactionManager {
 struct ActiveTransaction {
     /// Preserve undo history for transactions alive at checkpoint capture.
     begin_lsn: Lsn,
+    /// Logical allocation transitions, including savepoint compensation.
+    allocation_changes: Vec<(PageId, bool)>,
+    allocation_states: HashMap<PageId, bool>,
     /// One before-image per logical page mutation, in mutation order.
     ///
     /// Explicit rollback walks every entry in reverse so repeated writes restore
@@ -138,6 +142,8 @@ impl TransactionManager {
             txn_id,
             ActiveTransaction {
                 undo_pages: Vec::new(),
+                allocation_changes: Vec::new(),
+                allocation_states: HashMap::new(),
                 savepoint_restored_pages: HashSet::new(),
                 begin_lsn,
                 rollback_lsn: None,
@@ -147,29 +153,54 @@ impl TransactionManager {
         Ok(txn_id)
     }
 
-    /// Records a page allocation for a transaction, if it exists.
-    ///
-    /// Page allocations outside a transaction are allowed and do not write WAL.
-    /// Allocated page ids are currently not reclaimed during rollback; the WAL
-    /// record exists so crash recovery can make committed allocations visible
-    /// before replaying their updates.
+    pub(crate) fn allocation_changes(&self, txn_id: TxnId) -> StorageResult<Vec<(PageId, bool)>> {
+        Ok(self.transaction(txn_id)?.allocation_changes.clone())
+    }
+
+    pub(crate) fn page_pending_dealloc(&self, page_id: PageId) -> bool {
+        self.transactions
+            .values()
+            .any(|active| active.allocation_states.get(&page_id) == Some(&false))
+    }
+
     pub(crate) fn record_page_alloc(
         &mut self,
         log: &mut LogManager,
         txn_id: TxnId,
         page_id: PageId,
-    ) -> StorageResult<Option<Lsn>> {
-        // Allocated page ids are not reclaimed on rollback until a freelist exists.
-        if !self.transactions.contains_key(&txn_id) {
-            return Ok(None);
+    ) -> StorageResult<Lsn> {
+        self.record_allocation_change(log, txn_id, page_id, true)
+    }
+
+    pub(crate) fn record_page_dealloc(
+        &mut self,
+        log: &mut LogManager,
+        txn_id: TxnId,
+        page_id: PageId,
+    ) -> StorageResult<()> {
+        self.record_allocation_change(log, txn_id, page_id, false).map(|_| ())
+    }
+
+    fn record_allocation_change(
+        &mut self,
+        log: &mut LogManager,
+        txn_id: TxnId,
+        page_id: PageId,
+        allocated: bool,
+    ) -> StorageResult<Lsn> {
+        if self.transaction(txn_id)?.poisoned {
+            return Err(invariant(InvariantViolation::TransactionPoisoned { txn_id }));
         }
-        match log.append_record(txn_id, LogRecordKind::PageAlloc { page_id }) {
-            Ok(lsn) => Ok(Some(lsn)),
-            Err(err) => {
-                self.record_failure(txn_id);
-                Err(err.into())
-            }
-        }
+        let kind = if allocated {
+            LogRecordKind::PageAlloc { page_id }
+        } else {
+            LogRecordKind::PageDealloc { page_id }
+        };
+        let lsn = log.append_record(txn_id, kind).inspect_err(|_| self.record_failure(txn_id))?;
+        let active = self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
+        active.allocation_changes.push((page_id, allocated));
+        active.allocation_states.insert(page_id, allocated);
+        Ok(lsn)
     }
 
     /// Appends a full-page update record for a transaction, if any.
@@ -273,7 +304,11 @@ impl TransactionManager {
     pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
         let active = self.transaction(txn_id)?;
 
-        Ok(TransactionSavepoint { txn_id, undo_len: active.undo_pages.len() })
+        Ok(TransactionSavepoint {
+            txn_id,
+            undo_len: active.undo_pages.len(),
+            allocation_len: active.allocation_changes.len(),
+        })
     }
 
     /// Logs compensation records and returns page images that restore a savepoint.
@@ -299,6 +334,14 @@ impl TransactionManager {
                     txn_id: savepoint.txn_id,
                     undo_len: savepoint.undo_len,
                     active_undo_len: active.undo_pages.len(),
+                }));
+            }
+
+            if savepoint.allocation_len > active.allocation_changes.len() {
+                return Err(invariant(InvariantViolation::InvalidTransactionSavepoint {
+                    txn_id: savepoint.txn_id,
+                    undo_len: savepoint.allocation_len,
+                    active_undo_len: active.allocation_changes.len(),
                 }));
             }
 
@@ -330,6 +373,30 @@ impl TransactionManager {
                 });
             }
 
+            // Do not release any reservation until the transaction completes.
+            // Log inverses so a later commit replays the savepoint outcome too.
+            let mut originals = BTreeMap::new();
+            for &(id, allocated) in &active.allocation_changes[savepoint.allocation_len..] {
+                originals.entry(id).or_insert(!allocated);
+            }
+            let changes: Vec<_> = originals
+                .into_iter()
+                .filter(|(id, allocated)| active.allocation_states.get(id) != Some(allocated))
+                .collect();
+            for &(page_id, allocated) in &changes {
+                let kind = if allocated {
+                    LogRecordKind::PageAlloc { page_id }
+                } else {
+                    LogRecordKind::PageDealloc { page_id }
+                };
+                log.append_record(savepoint.txn_id, kind)?;
+            }
+            let active =
+                self.transactions.get_mut(&savepoint.txn_id).ok_or_else(no_active_transaction)?;
+            for &(id, allocated) in &changes {
+                active.allocation_states.insert(id, allocated);
+            }
+            active.allocation_changes.extend(changes);
             Ok(restore_pages)
         };
 
