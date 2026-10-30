@@ -60,6 +60,8 @@ pub fn recover_from_wal(path: &Path, disk: &mut DiskManager) -> StorageResult<Re
                     undo_data,
                 });
             }
+            // Allocation-state recovery is added with the persistent allocator.
+            RecoveryLogRecordKind::PageDealloc { .. } => {}
             RecoveryLogRecordKind::PageAlloc { page_id } => {
                 transaction.page_allocs.push(page_id);
             }

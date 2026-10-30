@@ -24,6 +24,7 @@ fn transaction() -> impl Strategy<Value = Transaction> {
         Just(RecoveryLogRecordKind::Commit),
         Just(RecoveryLogRecordKind::Rollback),
         any::<u64>().prop_map(|page_id| RecoveryLogRecordKind::PageAlloc { page_id }),
+        any::<u64>().prop_map(|page_id| RecoveryLogRecordKind::PageDealloc { page_id }),
         (any::<u64>(), image(), image()).prop_map(|(page_id, redo_data, undo_data)| {
             RecoveryLogRecordKind::PageUpdate { page_id, redo_data, undo_data }
         }),
@@ -42,6 +43,9 @@ fn borrowed((txn_id, records): &Transaction) -> Vec<LogRecord<'_>> {
                 RecoveryLogRecordKind::Rollback => LogRecordKind::Rollback,
                 RecoveryLogRecordKind::PageAlloc { page_id } => {
                     LogRecordKind::PageAlloc { page_id: *page_id }
+                }
+                RecoveryLogRecordKind::PageDealloc { page_id } => {
+                    LogRecordKind::PageDealloc { page_id: *page_id }
                 }
                 RecoveryLogRecordKind::PageUpdate { page_id, redo_data, undo_data } => {
                     LogRecordKind::PageUpdate {
@@ -75,6 +79,10 @@ fn check_decoded(bytes: &[u8], expected: &Transaction) -> TestCaseResult {
             (
                 LogRecordKind::PageAlloc { page_id: actual },
                 RecoveryLogRecordKind::PageAlloc { page_id: expected },
+            ) => prop_assert_eq!(actual, expected),
+            (
+                LogRecordKind::PageDealloc { page_id: actual },
+                RecoveryLogRecordKind::PageDealloc { page_id: expected },
             ) => prop_assert_eq!(actual, expected),
             (
                 LogRecordKind::PageUpdate { page_id, redo_data, undo_data },

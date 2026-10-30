@@ -179,6 +179,8 @@ pub enum LogRecordKind<'a> {
     PageUpdate { page_id: PageId, redo_data: &'a [u8], undo_data: &'a [u8] },
     /// Allocation of a database page by a transaction.
     PageAlloc { page_id: PageId },
+    /// Deallocation of a database page by a transaction.
+    PageDealloc { page_id: PageId },
 }
 
 /// Owned WAL record returned by recovery scans.
@@ -208,6 +210,8 @@ pub enum RecoveryLogRecordKind {
     PageUpdate { page_id: PageId, redo_data: Box<[u8; PAGE_SIZE]>, undo_data: Box<[u8; PAGE_SIZE]> },
     /// Allocation of a database page by a transaction.
     PageAlloc { page_id: PageId },
+    /// Deallocation of a database page by a transaction.
+    PageDealloc { page_id: PageId },
 }
 
 /// Result of scanning the WAL for recovery.
@@ -320,7 +324,7 @@ pub struct LogManager {
 }
 
 impl LogManager {
-    fn flush_all(&mut self) -> Result<(), LogManagerFlushError> {
+    pub(crate) fn flush_all(&mut self) -> Result<(), LogManagerFlushError> {
         self.flush_through(self.highest_appended_lsn.unwrap_or(ZERO_LSN))
     }
 
@@ -667,6 +671,7 @@ impl RecoveryLogRecordKind {
             Self::Commit => LogRecordKind::Commit,
             Self::Rollback => LogRecordKind::Rollback,
             Self::PageAlloc { page_id } => LogRecordKind::PageAlloc { page_id: *page_id },
+            Self::PageDealloc { page_id } => LogRecordKind::PageDealloc { page_id: *page_id },
             Self::PageUpdate { page_id, redo_data, undo_data } => LogRecordKind::PageUpdate {
                 page_id: *page_id,
                 redo_data: redo_data.as_ref(),
@@ -686,6 +691,7 @@ impl RecoveryLogRecordKind {
                 undo_data: page_image_array(undo_data)?,
             }),
             LogRecordKind::PageAlloc { page_id } => Ok(Self::PageAlloc { page_id: *page_id }),
+            LogRecordKind::PageDealloc { page_id } => Ok(Self::PageDealloc { page_id: *page_id }),
         }
     }
 }
