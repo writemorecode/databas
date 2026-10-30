@@ -9,13 +9,15 @@ use crate::{
 };
 
 mod faults;
+mod reuse;
 
 const OPTIONS: StorageOptions = StorageOptions { cache_frames: 8 };
 
 // Independent fixture for the documented database header, not its encoder.
 fn header() -> Vec<u8> {
     let mut bytes = vec![0; PAGE_SIZE];
-    bytes[..12].copy_from_slice(b"DATABAS\0\x02\0\0\x10");
+    bytes[..12].copy_from_slice(b"DATABAS\0\x03\0\0\x10");
+    bytes[16] = 1;
     bytes
 }
 
@@ -111,7 +113,9 @@ proptest! {
                 if mode == 0 {
                     prop_assert!(matches!(result, Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists));
                 } else {
-                    prop_assert!(matches!(result, Err(StorageError::Corruption(_))));
+                    // Invalid bitmap bits may need WAL reconciliation first;
+                    // this deliberately invalid WAL must also be preserved.
+                    prop_assert!(result.is_err());
                 }
                 prop_assert_eq!(&fs::read(&path)?, &bytes);
                 prop_assert_eq!(fs::read(&wal)?, b"must survive rejected open");

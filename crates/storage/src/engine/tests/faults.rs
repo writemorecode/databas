@@ -103,7 +103,9 @@ proptest! {
         control.arm(if sync { Operation::Sync } else { Operation::Write }, if sync { 0 } else { at }, Effect::Error(ErrorKind::Other));
         assert_io(Storage::from_disk_manager(path.clone(), disk, OPTIONS), &control)?;
         prop_assert_eq!(fs::read(&wal_path)?, wal);
-        prop_assert_eq!(&fs::read(&path)?[..PAGE_SIZE], super::header());
+        let mut expected_header = super::header();
+        expected_header[16] |= 1 << root;
+        prop_assert_eq!(&fs::read(&path)?[..PAGE_SIZE], expected_header);
         for _ in 0..2 {
             let storage = open(&path, 1)?;
             let mut cursor = storage.tree_cursor(root)?;

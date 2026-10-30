@@ -50,6 +50,8 @@ pub enum InvariantViolation {
     TransactionIdExhausted,
     #[error("transaction {txn_id} failed before commit")]
     TransactionPoisoned { txn_id: TxnId },
+    #[error("page {page_id} is free, metadata, or already pending deallocation")]
+    InvalidPageDeallocation { page_id: PageId },
     #[error("leaf split has no left-hand cells")]
     EmptyLeafSplit,
     #[error("leaf split target key is missing")]

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crate::disk_manager::DiskManager;
 use crate::error::{InternalError, StorageError, StorageResult};
 use crate::log_manager::{LogManager, Lsn, TxnId};
+use crate::page_allocator::PageAllocator;
 use crate::recovery::recover_from_wal;
 use crate::transaction_manager::{
     LoggedPageUpdate, PageRestore, TransactionManager, TransactionRollback, TransactionSavepoint,
@@ -29,17 +30,21 @@ pub struct StorageRuntime {
     disk: Mutex<DiskManager>,
     log: Mutex<LogManager>,
     transactions: Mutex<ActiveTransactionManager>,
+    allocator: Mutex<PageAllocator>,
 }
 
 impl StorageRuntime {
     pub(crate) fn new(path: PathBuf, mut disk: DiskManager) -> StorageResult<Self> {
         disk.lock_exclusive()?;
+        let _ = PageAllocator::load(&mut disk)?;
         let recovery = recover_from_wal(&path, &mut disk)?;
         let log = LogManager::new(&path)?;
+        let allocator = PageAllocator::load(&mut disk)?;
         let max_txn_id = recovery.max_txn_id.max(log.highest_txn_id());
         Ok(Self {
             checkpoint: Mutex::new(Checkpointer { path: path.clone() }),
             path,
+            allocator: Mutex::new(allocator),
             disk: Mutex::new(disk),
             log: Mutex::new(log),
             transactions: Mutex::new(make_transaction_manager(max_txn_id)),
@@ -56,21 +61,62 @@ impl StorageRuntime {
         &self.path
     }
 
-    pub(crate) fn new_page(&self) -> StorageResult<PageId> {
-        Ok(Self::lock(&self.disk, "disk manager")?.new_page()?)
+    pub(crate) fn new_page(&self, txn_id: Option<TxnId>) -> StorageResult<PageId> {
+        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        if let Some(id) = txn_id
+            && !transactions.transaction_is_active(id)
+        {
+            return Err(StorageError::Internal(InternalError::InvariantViolation(
+                crate::error::InvariantViolation::NoActiveTransaction,
+            )));
+        }
+        let mut allocator = Self::lock(&self.allocator, "page allocator")?;
+        let mut log = Self::lock(&self.log, "log manager")?;
+        let mut disk = Self::lock(&self.disk, "disk manager")?;
+        let page_id = allocator.candidate(&mut disk)?;
+        if let Some(id) = txn_id {
+            transactions.record_page_alloc(&mut log, id, page_id)?;
+        }
+        allocator.set_allocated(page_id, true);
+        Ok(page_id)
     }
 
-    pub(crate) fn record_page_alloc(
-        &self,
-        txn_id: Option<TxnId>,
-        page_id: PageId,
-    ) -> StorageResult<Option<Lsn>> {
-        let Some(txn_id) = txn_id else {
-            return Ok(None);
-        };
+    pub(crate) fn dealloc_page(&self, txn_id: Option<TxnId>, page_id: PageId) -> StorageResult<()> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let mut allocator = Self::lock(&self.allocator, "page allocator")?;
+        if PageAllocator::is_metadata(page_id)
+            || !allocator.is_allocated(page_id)
+            || transactions.page_pending_dealloc(page_id)
+        {
+            return Err(StorageError::Internal(InternalError::InvariantViolation(
+                crate::error::InvariantViolation::InvalidPageDeallocation { page_id },
+            )));
+        }
+        if let Some(id) = txn_id {
+            let mut log = Self::lock(&self.log, "log manager")?;
+            transactions.record_page_dealloc(&mut log, id, page_id)?;
+        } else {
+            allocator.set_allocated(page_id, false);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn page_is_live(&self, page_id: PageId) -> StorageResult<bool> {
+        let transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let allocator = Self::lock(&self.allocator, "page allocator")?;
+        Ok(allocator.is_allocated(page_id) && !transactions.page_pending_dealloc(page_id))
+    }
+
+    /// Lock order: cache metadata, transactions, allocator, WAL, disk. Never
+    /// enter the cache while holding runtime latches. WAL protects bitmap writes
+    /// even when a checkpoint persists reservations belonging to active writers.
+    pub(crate) fn flush_allocations(&self) -> StorageResult<()> {
+        let _transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let mut allocator = Self::lock(&self.allocator, "page allocator")?;
         let mut log = Self::lock(&self.log, "log manager")?;
-        transactions.record_page_alloc(&mut log, txn_id, page_id)
+        log.flush_all()?;
+        let mut disk = Self::lock(&self.disk, "disk manager")?;
+        allocator.flush(&mut disk)
     }
 
     pub(crate) fn read_page(
@@ -148,8 +194,14 @@ impl StorageRuntime {
 
     pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let changes = transactions.allocation_changes(txn_id)?;
+        let mut allocator = Self::lock(&self.allocator, "page allocator")?;
         let mut log = Self::lock(&self.log, "log manager")?;
-        transactions.commit(&mut log, txn_id)
+        transactions.commit(&mut log, txn_id)?;
+        for (id, allocated) in changes {
+            allocator.set_allocated(id, allocated);
+        }
+        Ok(())
     }
 
     pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
@@ -182,8 +234,15 @@ impl StorageRuntime {
 
     pub(crate) fn finish_rollback(&self, txn_id: TxnId) -> StorageResult<()> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let changes = transactions.allocation_changes(txn_id)?;
+        let mut allocator = Self::lock(&self.allocator, "page allocator")?;
         let mut log = Self::lock(&self.log, "log manager")?;
-        transactions.finish_rollback(&mut log, txn_id)
+        transactions.finish_rollback(&mut log, txn_id)?;
+        // The inverse of the first transition is each page's original state.
+        for (id, allocated) in changes.into_iter().rev() {
+            allocator.set_allocated(id, !allocated);
+        }
+        Ok(())
     }
 }
 
@@ -213,6 +272,7 @@ impl Checkpointer {
         if let Some(oldest) = deferred {
             retain_from = retain_from.min(oldest);
         }
+        runtime.flush_allocations()?;
         runtime.sync_database_file()?;
         // Publication serializes with WAL appends, not
         // transaction lifetimes. Never acquire cache latches in this section.

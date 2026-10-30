@@ -111,6 +111,7 @@ impl Storage {
     /// Flushes all dirty, currently unpinned pages to disk.
     pub fn flush(&self) -> StorageResult<()> {
         self.page_cache.flush_all()?;
+        self.runtime.flush_allocations()?;
         self.runtime.sync_database_file()?;
         Ok(())
     }

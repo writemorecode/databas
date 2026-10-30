@@ -30,6 +30,12 @@ fn setup_runtime(
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("cache.db");
     let mut disk = DiskManager::new(&path)?;
+    let mut header = crate::database_header::DatabaseHeader::encode_page();
+    disk.new_page()?;
+    for id in 1..=pages {
+        header[16 + id / 8] |= 1 << (id % 8);
+    }
+    disk.write_page(0, &header)?;
     let mut model = vec![];
     for seed in 0..pages {
         let page_id = disk.new_page()?;
@@ -50,12 +56,12 @@ fn snapshot(pin: &PinGuard) -> super::PageCacheResult<[u8; PAGE_SIZE]> {
 
 fn disk_image(path: &Path, page_id: PageId) -> Result<Vec<u8>, TestCaseError> {
     let bytes = fs::read(path)?;
-    let start = usize::try_from(page_id)? * PAGE_SIZE;
+    let start = (usize::try_from(page_id)? + 1) * PAGE_SIZE;
     Ok(bytes[start..start + PAGE_SIZE].to_vec())
 }
 
 fn check_disk(path: &Path, expected: &[[u8; PAGE_SIZE]]) -> TestCaseResult {
-    prop_assert_eq!(fs::read(path)?, expected.concat());
+    prop_assert_eq!(&fs::read(path)?[PAGE_SIZE..], expected.concat());
     Ok(())
 }
 
@@ -105,8 +111,8 @@ proptest! {
                         u64::from(page) % u64::try_from(model.len())?
                     } else { model.len() as u64 };
                     let bytes_before = fs::metadata(&path)?.len();
-                    let result = if allocating { client.new_page(None) } else {
-                        client.fetch_page(page_id).map(|pin| (page_id, pin))
+                    let result = if allocating { client.new_page(None).map(|(id, pin)| (id - 1, pin)) } else {
+                        client.fetch_page(page_id + 1).map(|pin| (page_id, pin))
                     };
                     if pinned.len() == capacity && !pinned.contains(&page_id) {
                         prop_assert!(matches!(result, Err(PageCacheError::NoEvictableFrame)), "unexpected result for full pinned cache");
@@ -139,9 +145,9 @@ proptest! {
                 }
                 Op::Flush(page) => {
                     let page_id = u64::from(page) % u64::try_from(model.len())?;
-                    let result = client.flush_page(page_id);
+                    let result = client.flush_page(page_id + 1);
                     if pins.iter().flatten().any(|(id, _)| *id == page_id) {
-                        prop_assert!(matches!(result, Err(PageCacheError::PinnedPage { page_id: id }) if id == page_id), "pinned flush was accepted");
+                        prop_assert!(matches!(result, Err(PageCacheError::PinnedPage { page_id: id }) if id == page_id + 1), "pinned flush was accepted");
                     } else {
                         result?;
                         prop_assert_eq!(disk_image(&path, page_id)?, model[usize::try_from(page_id)?].to_vec());
@@ -150,7 +156,7 @@ proptest! {
                 Op::FlushAll => match client.flush_all() {
                     Ok(()) => check_disk(&path, &model)?,
                     Err(PageCacheError::PinnedPage { page_id }) => {
-                        prop_assert!(pins.iter().flatten().any(|(id, _)| *id == page_id));
+                        prop_assert!(pins.iter().flatten().any(|(id, _)| *id + 1 == page_id));
                     }
                     Err(error) => return Err(error.into()),
                 },
@@ -173,13 +179,14 @@ proptest! {
         }
         drop(pins);
         cache.flush_all()?;
+        cache.inner.runtime.flush_allocations()?;
         check_disk(&path, &model)?;
         drop(clients);
         drop(cache);
         let runtime = Arc::new(StorageRuntime::new(path.clone(), DiskManager::open_existing(&path)?)?);
         let reopened = PageCache::new(runtime, capacity)?;
         for (id, bytes) in model.iter().enumerate() {
-            prop_assert_eq!(snapshot(&reopened.fetch_page(id as u64)?)?, *bytes);
+            prop_assert_eq!(snapshot(&reopened.fetch_page(id as u64 + 1)?)?, *bytes);
         }
     }
 }
