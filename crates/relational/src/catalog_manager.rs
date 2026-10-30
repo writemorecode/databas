@@ -161,6 +161,72 @@ impl CatalogManager {
         Ok(schema)
     }
 
+    /// The caller holds the database-wide DDL gate and a statement savepoint.
+    pub(crate) fn drop_table(&self, name: &str) -> RelationalResult<()> {
+        let txn_id = self.drop_transaction()?;
+        let table =
+            self.table_catalog_rows()?.into_iter().find(|row| row.name == name).ok_or_else(
+                || {
+                    RelationalError::InvalidArgument(InvalidArgumentError::TableNotFound {
+                        name: name.to_owned(),
+                    })
+                },
+            )?;
+        if system_table_schemas().iter().any(|schema| schema.table_id == table.table_id) {
+            return Err(RelationalError::InvalidArgument(InvalidArgumentError::SystemTableDrop {
+                name: name.to_owned(),
+            }));
+        }
+        for index in
+            self.index_catalog_rows()?.into_iter().filter(|row| row.table_id == table.table_id)
+        {
+            self.drop_index_row(txn_id, &index)?;
+        }
+        self.storage.transaction_destroy_tree(txn_id, table.root_page_id)?;
+        self.delete_object_columns(CatalogObjectKind::Table, table.table_id)?;
+        self.table_cursor(SYS_TABLES_ROOT_PAGE_ID)?.delete(table.table_id)
+    }
+
+    /// The caller holds the database-wide DDL gate and a statement savepoint.
+    pub(crate) fn drop_index(&self, name: &str) -> RelationalResult<()> {
+        let txn_id = self.drop_transaction()?;
+        let index =
+            self.index_catalog_rows()?.into_iter().find(|row| row.name == name).ok_or_else(
+                || {
+                    RelationalError::InvalidArgument(InvalidArgumentError::IndexNotFound {
+                        name: name.to_owned(),
+                    })
+                },
+            )?;
+        self.drop_index_row(txn_id, &index)
+    }
+
+    fn drop_transaction(&self) -> RelationalResult<TxnId> {
+        self.txn_id.ok_or(RelationalError::InvalidArgument(InvalidArgumentError::DdlRequired))
+    }
+
+    fn drop_index_row(&self, txn_id: TxnId, index: &IndexCatalogRow) -> RelationalResult<()> {
+        self.storage.transaction_destroy_tree(txn_id, index.root_page_id)?;
+        self.delete_object_columns(CatalogObjectKind::Index, index.index_id)?;
+        self.table_cursor(SYS_INDEXES_ROOT_PAGE_ID)?.delete(index.index_id)
+    }
+
+    fn delete_object_columns(
+        &self,
+        kind: CatalogObjectKind,
+        object_id: CatalogId,
+    ) -> RelationalResult<()> {
+        // Collect before mutating: deletion may merge catalog pages and invalidate a scan.
+        let columns = self.column_catalog_rows()?;
+        let mut cursor = self.table_cursor(SYS_COLUMNS_ROOT_PAGE_ID)?;
+        for column in
+            columns.into_iter().filter(|row| row.object_kind == kind && row.object_id == object_id)
+        {
+            cursor.delete(column.column_id)?;
+        }
+        Ok(())
+    }
+
     fn table_root(&self, name: &str) -> RelationalResult<PageId> {
         self.table_catalog_rows()?
             .into_iter()

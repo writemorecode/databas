@@ -331,6 +331,14 @@ where
             return Err(ExecutorError::UnsupportedOperator { operator: "INVALID PLAN" });
         };
         match node {
+            PhysicalPlanNode::DropTable { name } => {
+                self.transaction.drop_table(&name)?;
+                Ok(ExecutionOutput::SchemaAffected)
+            }
+            PhysicalPlanNode::DropIndex { name } => {
+                self.transaction.drop_index(&name)?;
+                Ok(ExecutionOutput::SchemaAffected)
+            }
             PhysicalPlanNode::Explain { .. } => {
                 Err(ExecutorError::UnsupportedOperator { operator: "NESTED EXPLAIN" })
             }

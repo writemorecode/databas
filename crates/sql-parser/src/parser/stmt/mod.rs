@@ -25,6 +25,8 @@ pub enum Statement<'a> {
     Insert(InsertQuery<'a>),
     CreateTable(CreateTableQuery<'a>),
     CreateIndex(CreateIndexQuery<'a>),
+    DropTable { name: &'a str },
+    DropIndex { name: &'a str },
 }
 
 impl Display for Statement<'_> {
@@ -37,6 +39,8 @@ impl Display for Statement<'_> {
             Statement::Insert(query) => query.fmt(f),
             Statement::CreateTable(query) => query.fmt(f),
             Statement::CreateIndex(query) => query.fmt(f),
+            Statement::DropTable { name } => write!(f, "DROP TABLE {name};"),
+            Statement::DropIndex { name } => write!(f, "DROP INDEX {name};"),
         }
     }
 }

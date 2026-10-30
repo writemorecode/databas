@@ -22,6 +22,10 @@ pub trait RelationalAccess {
         Self: 'txn;
 
     fn create_table(&self, name: &str, row: TupleSchema) -> RelationalResult<TableSchema>;
+    /// Drops a table and its secondary indexes. Requires exclusive DDL admission.
+    fn drop_table(&self, name: &str) -> RelationalResult<()>;
+    /// Drops a secondary index. Requires exclusive DDL admission.
+    fn drop_index(&self, name: &str) -> RelationalResult<()>;
     fn create_index(
         &self,
         name: &str,

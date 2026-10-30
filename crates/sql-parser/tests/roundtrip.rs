@@ -204,6 +204,8 @@ fn statement() -> BoxedStrategy<String> {
         join_query(),
         create_table_query(),
         create_index_query(),
+        identifier().prop_map(|name| format!("DROP TABLE {name};")),
+        identifier().prop_map(|name| format!("DROP INDEX {name};")),
         select_query().prop_map(|sql| format!("EXPLAIN {sql}")),
         transaction_control(),
         delete_query(),

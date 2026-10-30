@@ -82,6 +82,10 @@ pub enum LogicalPlanNode {
     CreateTable { name: String, schema: TupleSchema },
     /// Create a secondary index over bound columns from an existing table.
     CreateIndex { name: String, table: TableSchema, columns: Vec<BoundColumn> },
+    /// Resolve and drop a table under exclusive DDL admission.
+    DropTable { name: String },
+    /// Resolve and drop an index under exclusive DDL admission.
+    DropIndex { name: String },
     /// Literal rows, usually produced by an `INSERT ... VALUES` statement.
     Values { rows: Vec<Vec<BoundExpr>>, output: PlanSchema },
     /// Insert rows from an input plan into bound table columns.
@@ -138,6 +142,8 @@ impl LogicalPlanNode {
             Self::Explain { .. }
             | Self::CreateTable { .. }
             | Self::CreateIndex { .. }
+            | Self::DropTable { .. }
+            | Self::DropIndex { .. }
             | Self::Insert { .. }
             | Self::Update { .. }
             | Self::Delete { .. } => None,

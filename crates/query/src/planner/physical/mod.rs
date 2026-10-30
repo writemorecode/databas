@@ -80,6 +80,10 @@ impl fmt::Display for PhysicalPlanDisplay<'_> {
 )]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalPlanNode {
+    /// Resolve and drop a table and its indexes under the database-wide DDL gate.
+    DropTable { name: String },
+    /// Resolve and drop a secondary index under the database-wide DDL gate.
+    DropIndex { name: String },
     /// Return the formatted input plan without executing it.
     Explain {
         /// Plan to describe.
@@ -287,6 +291,8 @@ fn physical_plan_input(plan: &PhysicalPlanNode) -> Option<NodeId> {
 fn physical_plan_label(plan: &PhysicalPlanNode) -> String {
     match plan {
         PhysicalPlanNode::Explain { .. } => "Explain".to_owned(),
+        PhysicalPlanNode::DropTable { name } => format!("DropTable table={name}"),
+        PhysicalPlanNode::DropIndex { name } => format!("DropIndex index={name}"),
         PhysicalPlanNode::CreateTable { name, .. } => format!("CreateTable table={name}"),
         PhysicalPlanNode::CreateIndex { name, table, columns } => format!(
             "CreateIndex index={name} table={} columns=[{}]",

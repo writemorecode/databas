@@ -200,6 +200,7 @@ impl<'a> Parser<'a> {
                 Ok(Statement::Insert(self.parse_insert_query()?))
             }
             TokenKind::Keyword(Keyword::Create) => self.parse_create_query(),
+            TokenKind::Keyword(Keyword::Drop) => self.parse_drop_query(),
             other => Err(SQLError::new(SQLErrorKind::Other(other), token.offset)),
         }
     }
@@ -207,6 +208,21 @@ impl<'a> Parser<'a> {
     fn parse_command(&mut self, command: Command) -> Result<Command, SQLError<'a>> {
         self.lexer.expect_token(TokenKind::Semicolon)?;
         Ok(command)
+    }
+
+    fn parse_drop_query(&mut self) -> Result<Statement<'a>, SQLError<'a>> {
+        let token = self
+            .lexer
+            .next()
+            .ok_or(SQLError::new(SQLErrorKind::UnexpectedEnd, self.lexer.position))??;
+        let is_table = match token.kind {
+            TokenKind::Keyword(Keyword::Table) => true,
+            TokenKind::Keyword(Keyword::Index) => false,
+            other => return Err(SQLError::new(SQLErrorKind::Other(other), token.offset)),
+        };
+        let name = self.parse_identifier()?;
+        self.lexer.expect_token(TokenKind::Semicolon)?;
+        Ok(if is_table { Statement::DropTable { name } } else { Statement::DropIndex { name } })
     }
 
     fn parse_create_query(&mut self) -> Result<Statement<'a>, SQLError<'a>> {

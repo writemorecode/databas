@@ -57,6 +57,8 @@ impl<'catalog> PhysicalPlanner<'catalog> {
         physical_nodes: &mut Vec<PhysicalPlanNode>,
     ) -> PlannerResult<NodeId> {
         let node = match logical {
+            LogicalPlanNode::DropTable { name } => PhysicalPlanNode::DropTable { name },
+            LogicalPlanNode::DropIndex { name } => PhysicalPlanNode::DropIndex { name },
             LogicalPlanNode::Explain { input } => PhysicalPlanNode::Explain {
                 input: self.build_physical_plan(
                     logical_nodes,

@@ -52,6 +52,8 @@ pub enum ConstraintError {
 /// Invalid argument supplied to a storage or relational operation.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum InvalidArgumentError {
+    #[error("cannot drop system table: {name}")]
+    SystemTableDrop { name: String },
     #[error("schema does not match the catalog object: {name}")]
     SchemaMismatch { name: String },
     #[error("schema changes require a DDL statement")]

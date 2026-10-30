@@ -114,6 +114,30 @@ impl RelationalAccess for MemoryStore {
     type TableScan<'txn> = std::vec::IntoIter<StorageResult<OwnedTableRecord>>;
     type IndexScan<'txn> = std::vec::IntoIter<StorageResult<OwnedTableRecord>>;
 
+    fn drop_table(&self, name: &str) -> StorageResult<()> {
+        let table = self.table_schema_by_name(name)?;
+        let mut state = self.state.borrow_mut();
+        state.indexes.retain(|_, index| index.schema.table_id != table.table_id);
+        state.tables.remove(&table.table_id);
+        Ok(())
+    }
+
+    fn drop_index(&self, name: &str) -> StorageResult<()> {
+        let mut state = self.state.borrow_mut();
+        let id = state
+            .indexes
+            .iter()
+            .find(|(_, index)| index.schema.name == name)
+            .map(|(id, _)| *id)
+            .ok_or_else(|| {
+                StorageError::InvalidArgument(InvalidArgumentError::IndexNotFound {
+                    name: name.into(),
+                })
+            })?;
+        state.indexes.remove(&id);
+        Ok(())
+    }
+
     fn create_table(&self, name: &str, row: TupleSchema) -> StorageResult<TableSchema> {
         validate_user_table_schema(name, &row)?;
         let mut state = self.state.borrow_mut();
