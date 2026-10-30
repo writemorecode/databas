@@ -6,6 +6,7 @@
 //! and require an explicit flush. Page, cache, WAL, and runtime implementation
 //! details are private.
 
+mod bitset;
 mod btree;
 mod database_header;
 mod disk_manager;
