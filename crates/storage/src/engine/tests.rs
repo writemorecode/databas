@@ -16,7 +16,7 @@ const OPTIONS: StorageOptions = StorageOptions { cache_frames: 8 };
 // Independent fixture for the documented database header, not its encoder.
 fn header() -> Vec<u8> {
     let mut bytes = vec![0; PAGE_SIZE];
-    bytes[..12].copy_from_slice(b"DATABAS\0\x03\0\0\x10");
+    bytes[..12].copy_from_slice(b"DATABAS\0\x04\0\0\x10");
     bytes[16] = 1;
     bytes
 }

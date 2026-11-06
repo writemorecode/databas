@@ -66,7 +66,7 @@ pub(super) fn secondary_index_predicate(
 
         for conjunct in &conjuncts {
             if let Some(comparison) =
-                index_comparison_for_column(relation, conjunct, &candidate.column)
+                index_comparison_for_column(table, relation, conjunct, &candidate.column)
             {
                 combine_index_ranges(&mut value_range, comparison.value, comparison.kind)?;
             }
@@ -133,7 +133,7 @@ fn secondary_index_comparison(
     comparison: &BoundExpr,
     indexes: &[IndexSchema],
 ) -> Option<SecondaryIndexCandidate> {
-    let comparison = index_comparison(relation, comparison)?;
+    let comparison = index_comparison(table, relation, comparison)?;
     let index =
         indexes.iter().find(|index| exact_single_column_index(index, table, comparison.column))?;
     Some(SecondaryIndexCandidate { index: index.clone(), column: comparison.column.clone() })
@@ -141,11 +141,12 @@ fn secondary_index_comparison(
 
 /// Extracts a comparison when it targets the requested bound column.
 fn index_comparison_for_column<'a>(
+    table: &TableSchema,
     relation: RelationId,
     comparison: &'a BoundExpr,
     column: &BoundColumn,
 ) -> Option<IndexComparison<'a>> {
-    let comparison = index_comparison(relation, comparison)?;
+    let comparison = index_comparison(table, relation, comparison)?;
     (*comparison.column == *column).then_some(comparison)
 }
 
@@ -153,12 +154,26 @@ fn index_comparison_for_column<'a>(
 ///
 /// Comparisons written with the literal on the left are normalized so the
 /// returned comparison always describes the column relative to the literal.
-fn index_comparison(relation: RelationId, comparison: &BoundExpr) -> Option<IndexComparison<'_>> {
+fn index_comparison<'a>(
+    table: &TableSchema,
+    relation: RelationId,
+    comparison: &'a BoundExpr,
+) -> Option<IndexComparison<'a>> {
     let BoundExpr::Binary { left, op, right } = comparison else {
         return None;
     };
-    index_comparison_from_operands(relation, left, *op, right)
-        .or_else(|| index_comparison_from_reversed_operands(relation, left, *op, right))
+    let comparison = index_comparison_from_operands(relation, left, *op, right)
+        .or_else(|| index_comparison_from_reversed_operands(relation, left, *op, right))?;
+    let column = table.row.columns.get(comparison.column.ordinal)?;
+    // The executor errors on ordered comparisons with NULL. Keep the full
+    // scan for nullable TEXT ranges so an index cannot hide that error.
+    if column.data_type == DataType::Text
+        && column.nullable
+        && comparison.kind != IndexComparisonKind::Equals
+    {
+        return None;
+    }
+    Some(comparison)
 }
 
 /// Builds an index comparison from a column followed by a literal operand.
@@ -189,10 +204,6 @@ fn index_comparison_from_operands<'a>(
         }
     };
 
-    if !secondary_index_comparison_is_order_compatible(column.data_type, kind) {
-        return None;
-    }
-
     Some(IndexComparison { column, value, kind })
 }
 
@@ -217,17 +228,6 @@ fn reverse_comparison_op(op: Op) -> Option<Op> {
         Op::LessThanOrEqual => Some(Op::GreaterThanOrEqual),
         Op::And | Op::Or | Op::NotEquals | Op::Not | Op::Add | Op::Sub | Op::Mul | Op::Div => None,
     }
-}
-
-/// Reports whether a comparison can use the ordering of a secondary index.
-///
-/// Text indexes support equality lookups but not range comparisons because the
-/// index ordering is not suitable for those comparisons.
-fn secondary_index_comparison_is_order_compatible(
-    data_type: DataType,
-    kind: IndexComparisonKind,
-) -> bool {
-    kind == IndexComparisonKind::Equals || data_type != DataType::Text
 }
 
 /// Intersects one index comparison into the value and encoded-key ranges.
