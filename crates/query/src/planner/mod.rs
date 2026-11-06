@@ -375,7 +375,7 @@ mod tests {
                         input: NodeId::new(0),
                         terms: vec![SortTerm {
                             column: exec_column(2, "u.age", DataType::Integer),
-                            direction: Some(Ordering::Descending),
+                            direction: Ordering::Descending,
                         }],
                     },
                     PhysicalPlanNode::Project {
@@ -1066,7 +1066,7 @@ mod tests {
                         input: NodeId::new(0),
                         terms: vec![SortTerm {
                             column: exec_column(0, "users.id", DataType::Integer),
-                            direction: Some(Ordering::Descending),
+                            direction: Ordering::Descending,
                         }],
                     },
                     PhysicalPlanNode::Project {
