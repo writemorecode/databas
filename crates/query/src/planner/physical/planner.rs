@@ -1,11 +1,15 @@
 //! Logical-to-physical lowering and access-path selection.
 
-use crate::relational::TableSchema;
 use crate::relational::access::CatalogRead;
+use crate::relational::{TableKeyBound, TableKeyRange, TableSchema};
+use crate::sql_parser::parser::stmt::select::Ordering;
 
 use super::{
     PhysicalPlan, PhysicalPlanNode, SecondaryIndexScanPlan,
-    access_path::{IndexPredicate, primary_key_range_predicate, secondary_index_predicate},
+    access_path::{
+        IndexPredicate, ordered_secondary_index, primary_key_orders_column,
+        primary_key_range_predicate, secondary_index_predicate,
+    },
 };
 use crate::planner::{
     BoundExpr, BoundSortTerm, BoundUpdateAssignment, ExecColumn, ExecExpr, LogicalPlan,
@@ -45,6 +49,7 @@ impl<'catalog> PhysicalPlanner<'catalog> {
             logical_nodes,
             logical,
             allow_secondary_index_scans,
+            None,
             physical_nodes,
         )
     }
@@ -54,6 +59,7 @@ impl<'catalog> PhysicalPlanner<'catalog> {
         logical_nodes: &mut [Option<LogicalPlanNode>],
         logical: LogicalPlanNode,
         allow_secondary_index_scans: bool,
+        order: Option<&BoundSortTerm>,
         physical_nodes: &mut Vec<PhysicalPlanNode>,
     ) -> PlannerResult<NodeId> {
         let node = match logical {
@@ -103,67 +109,26 @@ impl<'catalog> PhysicalPlanner<'catalog> {
             LogicalPlanNode::OneRow { .. } => PhysicalPlanNode::OneRow,
             LogicalPlanNode::Empty { .. } => PhysicalPlanNode::Empty,
             LogicalPlanNode::TableScan { relation, table, .. } => {
-                PhysicalPlanNode::FullTableScan { relation, table }
+                self.table_scan(relation, table, None, allow_secondary_index_scans, order)?
             }
             LogicalPlanNode::Filter { input, predicate, .. } => {
                 let input_schema = logical_output_schema(logical_nodes, input)?;
                 match take_logical_node(logical_nodes, input)? {
                     LogicalPlanNode::TableScan { relation, table, .. } => {
-                        match primary_key_range_predicate(&table, relation, &predicate) {
-                            Some(range_predicate) => {
-                                if range_predicate.range.is_empty() {
-                                    return Ok(push_physical_node(
-                                        physical_nodes,
-                                        PhysicalPlanNode::Empty,
-                                    ));
-                                }
-                                let scan = push_physical_node(
-                                    physical_nodes,
-                                    PhysicalPlanNode::PrimaryKeyRangeScan {
-                                        relation,
-                                        table,
-                                        range: range_predicate.range,
-                                    },
-                                );
-                                match range_predicate.residual {
-                                    Some(predicate) => PhysicalPlanNode::Filter {
-                                        input: scan,
-                                        predicate: lower_expression(predicate, &input_schema)?,
-                                    },
-                                    None => return Ok(scan),
-                                }
-                            }
-                            None if allow_secondary_index_scans => {
-                                let scan = match self
-                                    .secondary_index_predicate(&table, relation, &predicate)?
-                                {
-                                    Some(index_predicate) => PhysicalPlanNode::SecondaryIndexScan {
-                                        scan: SecondaryIndexScanPlan {
-                                            relation,
-                                            table,
-                                            index: index_predicate.index,
-                                            column: index_predicate.column,
-                                            value_range: index_predicate.value_range,
-                                        },
-                                    },
-                                    None => PhysicalPlanNode::FullTableScan { relation, table },
-                                };
-                                let input = push_physical_node(physical_nodes, scan);
-                                PhysicalPlanNode::Filter {
-                                    input,
-                                    predicate: lower_expression(predicate, &input_schema)?,
-                                }
-                            }
-                            None => {
-                                let input = push_physical_node(
-                                    physical_nodes,
-                                    PhysicalPlanNode::FullTableScan { relation, table },
-                                );
-                                PhysicalPlanNode::Filter {
-                                    input,
-                                    predicate: lower_expression(predicate, &input_schema)?,
-                                }
-                            }
+                        let (scan, residual) = self.filtered_table_scan(
+                            relation,
+                            table,
+                            predicate,
+                            allow_secondary_index_scans,
+                            order,
+                        )?;
+                        let input = push_physical_node(physical_nodes, scan);
+                        match residual {
+                            Some(predicate) => PhysicalPlanNode::Filter {
+                                input,
+                                predicate: lower_expression(predicate, &input_schema)?,
+                            },
+                            None => return Ok(input),
                         }
                     }
                     input_node => PhysicalPlanNode::Filter {
@@ -171,6 +136,7 @@ impl<'catalog> PhysicalPlanner<'catalog> {
                             logical_nodes,
                             input_node,
                             allow_secondary_index_scans,
+                            None,
                             physical_nodes,
                         )?,
                         predicate: lower_expression(predicate, &input_schema)?,
@@ -179,15 +145,22 @@ impl<'catalog> PhysicalPlanner<'catalog> {
             }
             LogicalPlanNode::Sort { input, terms, .. } => {
                 let input_schema = logical_output_schema(logical_nodes, input)?;
-                PhysicalPlanNode::Sort {
-                    input: self.build_physical_plan(
-                        logical_nodes,
-                        input,
-                        allow_secondary_index_scans,
-                        physical_nodes,
-                    )?,
-                    terms: lower_sort_terms(terms, &input_schema)?,
+                let order = match terms.as_slice() {
+                    [term] => Some(term),
+                    _ => None,
+                };
+                let input_node = take_logical_node(logical_nodes, input)?;
+                let input = self.build_physical_node(
+                    logical_nodes,
+                    input_node,
+                    allow_secondary_index_scans,
+                    order,
+                    physical_nodes,
+                )?;
+                if order.is_some_and(|term| scan_satisfies_order(physical_nodes, input, term)) {
+                    return Ok(input);
                 }
+                PhysicalPlanNode::Sort { input, terms: lower_sort_terms(terms, &input_schema)? }
             }
             LogicalPlanNode::Project { input, expressions, .. } => {
                 let input_schema = logical_output_schema(logical_nodes, input)?;
@@ -231,14 +204,141 @@ impl<'catalog> PhysicalPlanner<'catalog> {
         Ok(push_physical_node(physical_nodes, node))
     }
 
-    fn secondary_index_predicate(
+    fn filtered_table_scan(
         &self,
-        table: &TableSchema,
         relation: RelationId,
-        predicate: &BoundExpr,
-    ) -> PlannerResult<Option<IndexPredicate>> {
-        let indexes = self.catalog.index_schemas_for_table(table)?;
-        Ok(secondary_index_predicate(table, relation, predicate, &indexes))
+        table: TableSchema,
+        predicate: BoundExpr,
+        allow_secondary_index_scans: bool,
+        order: Option<&BoundSortTerm>,
+    ) -> PlannerResult<(PhysicalPlanNode, Option<BoundExpr>)> {
+        if let Some(range_predicate) = primary_key_range_predicate(&table, relation, &predicate) {
+            if range_predicate.range.is_empty() {
+                return Ok((PhysicalPlanNode::Empty, None));
+            }
+            let direction = primary_order(&table, relation, order)
+                .map_or(Ordering::Ascending, |term| term.direction.clone());
+            return Ok((
+                PhysicalPlanNode::PrimaryKeyRangeScan {
+                    relation,
+                    table,
+                    range: range_predicate.range,
+                    direction,
+                },
+                range_predicate.residual,
+            ));
+        }
+
+        let scan =
+            self.table_scan(relation, table, Some(&predicate), allow_secondary_index_scans, order)?;
+        Ok((scan, Some(predicate)))
+    }
+
+    fn table_scan(
+        &self,
+        relation: RelationId,
+        table: TableSchema,
+        predicate: Option<&BoundExpr>,
+        allow_secondary_index_scans: bool,
+        order: Option<&BoundSortTerm>,
+    ) -> PlannerResult<PhysicalPlanNode> {
+        let primary_order = primary_order(&table, relation, order);
+        let needs_indexes = predicate.is_some() || (order.is_some() && primary_order.is_none());
+        let indexes = if allow_secondary_index_scans && needs_indexes {
+            self.catalog.index_schemas_for_table(&table)?
+        } else {
+            Vec::new()
+        };
+        let ordered_index = order.and_then(|term| {
+            ordered_secondary_index(&table, relation, &term.column, &indexes)
+                .map(|index| (index, term))
+        });
+        if !indexes.is_empty()
+            && let Some(predicate) = predicate
+        {
+            if let Some((index, term)) = ordered_index
+                && let Some(access) = secondary_index_predicate(
+                    &table,
+                    relation,
+                    predicate,
+                    std::slice::from_ref(index),
+                )
+            {
+                return Ok(secondary_scan(relation, table, access, term.direction.clone()));
+            }
+
+            // Keep a bounded predicate access path ahead of an unbounded ordering scan.
+            if let Some(access) = secondary_index_predicate(&table, relation, predicate, &indexes) {
+                return Ok(secondary_scan(relation, table, access, Ordering::Ascending));
+            }
+        }
+
+        if let Some(term) = primary_order {
+            return Ok(PhysicalPlanNode::PrimaryKeyRangeScan {
+                relation,
+                table,
+                range: TableKeyRange::unbounded(),
+                direction: term.direction.clone(),
+            });
+        }
+
+        if let Some((index, term)) = ordered_index {
+            let access = IndexPredicate {
+                index: index.clone(),
+                column: term.column.clone(),
+                value_range: Default::default(),
+            };
+            return Ok(secondary_scan(relation, table, access, term.direction.clone()));
+        }
+
+        Ok(PhysicalPlanNode::FullTableScan { relation, table })
+    }
+}
+
+fn primary_order<'a>(
+    table: &TableSchema,
+    relation: RelationId,
+    order: Option<&'a BoundSortTerm>,
+) -> Option<&'a BoundSortTerm> {
+    order.filter(|term| primary_key_orders_column(table, relation, &term.column))
+}
+
+fn secondary_scan(
+    relation: RelationId,
+    table: TableSchema,
+    access: IndexPredicate,
+    direction: Ordering,
+) -> PhysicalPlanNode {
+    PhysicalPlanNode::SecondaryIndexScan {
+        scan: SecondaryIndexScanPlan {
+            relation,
+            table,
+            index: access.index,
+            column: access.column,
+            value_range: access.value_range,
+            direction,
+        },
+    }
+}
+
+fn scan_satisfies_order(nodes: &[PhysicalPlanNode], input: NodeId, term: &BoundSortTerm) -> bool {
+    match &nodes[input.index()] {
+        PhysicalPlanNode::Filter { input, .. } => scan_satisfies_order(nodes, *input, term),
+        PhysicalPlanNode::PrimaryKeyRangeScan { relation, table, range, direction } => {
+            matches!(
+                (range.lower, range.upper),
+                (Some(TableKeyBound::Inclusive(lower)), Some(TableKeyBound::Inclusive(upper)))
+                    if lower == upper
+            ) || (*direction == term.direction
+                && primary_key_orders_column(table, *relation, &term.column))
+        }
+        PhysicalPlanNode::SecondaryIndexScan { scan } => {
+            scan.direction == term.direction
+                && scan.column == term.column
+                && !scan.table.row.columns[scan.column.ordinal].nullable
+        }
+        PhysicalPlanNode::Empty => true,
+        _ => false,
     }
 }
 
