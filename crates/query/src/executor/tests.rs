@@ -218,13 +218,14 @@ impl RelationalAccess for MemoryStore {
         self.scan_table_range(table, TableKeyRange::unbounded())
     }
 
-    fn scan_table_range(
+    fn scan_table_range_in_direction(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
+        direction: crate::relational::ScanDirection,
     ) -> StorageResult<Self::TableScan<'_>> {
         let state = self.state.borrow();
-        let records = state
+        let mut records: Vec<_> = state
             .tables
             .get(&table.table_id)
             .ok_or_else(|| missing_table(&table.name))?
@@ -233,14 +234,18 @@ impl RelationalAccess for MemoryStore {
             .filter(|(key, _)| range.contains(**key))
             .map(|(_, record)| record.clone())
             .collect();
+        if direction == crate::relational::ScanDirection::Reverse {
+            records.reverse();
+        }
         Ok(scan(records))
     }
 
-    fn scan_index(
+    fn scan_index_in_direction(
         &self,
         table: &TableSchema,
         index: &IndexSchema,
         range: IndexValueRange,
+        direction: crate::relational::ScanDirection,
     ) -> StorageResult<Self::IndexScan<'_>> {
         let range = crate::relational::testing::encode_range(&range)?;
         let state = self.state.borrow();
@@ -251,7 +256,7 @@ impl RelationalAccess for MemoryStore {
         })?;
         let table_data =
             state.tables.get(&table.table_id).ok_or_else(|| missing_table(&table.name))?;
-        let records = index
+        let mut records: Vec<_> = index
             .entries
             .iter()
             .filter(|(key, _)| crate::relational::testing::contains(&range, key))
@@ -263,6 +268,9 @@ impl RelationalAccess for MemoryStore {
                     .ok_or(StorageError::InvalidArgument(InvalidArgumentError::KeyNotFound))
             })
             .collect::<StorageResult<Vec<_>>>()?;
+        if direction == crate::relational::ScanDirection::Reverse {
+            records.reverse();
+        }
         Ok(scan(records))
     }
 

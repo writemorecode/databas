@@ -169,6 +169,21 @@ impl TableCursor {
         self.inner.seek_after_key(&encode_table_key(table_key)).map_err(Into::into)
     }
 
+    /// Positions the cursor on the last table record.
+    pub fn seek_to_last(&mut self) -> RelationalResult<bool> {
+        self.inner.seek_to_last().map_err(Into::into)
+    }
+
+    /// Positions on the last table record whose key is less than or equal to the bound.
+    pub fn seek_to_table_key_at_most(&mut self, table_key: TableKey) -> RelationalResult<bool> {
+        self.inner.seek_to_key_at_most(&encode_table_key(table_key)).map_err(Into::into)
+    }
+
+    /// Positions on the last table record whose key is strictly less than the bound.
+    pub fn seek_before_table_key(&mut self, table_key: TableKey) -> RelationalResult<bool> {
+        self.inner.seek_before_key(&encode_table_key(table_key)).map_err(Into::into)
+    }
+
     /// Reads the currently selected table record, if any.
     pub fn current_record(&self) -> RelationalResult<Option<TableRecord>> {
         self.inner.current()?.map(|record| self.table_record_from_raw(record)).transpose()
@@ -177,6 +192,11 @@ impl TableCursor {
     /// Advances to the next table record in table key order.
     pub fn next_record(&mut self) -> RelationalResult<Option<TableRecord>> {
         self.inner.next_record()?.map(|record| self.table_record_from_raw(record)).transpose()
+    }
+
+    /// Advances to the previous table record in key order.
+    pub fn previous_record(&mut self) -> RelationalResult<Option<TableRecord>> {
+        self.inner.previous_record()?.map(|record| self.table_record_from_raw(record)).transpose()
     }
 
     /// Inserts a table record keyed by `table_key`.
@@ -249,6 +269,21 @@ impl IndexCursor {
         self.inner.seek_to_key(key).map_err(Into::into)
     }
 
+    /// Positions the cursor on the last index entry.
+    pub fn seek_to_last(&mut self) -> RelationalResult<bool> {
+        self.inner.seek_to_last().map_err(Into::into)
+    }
+
+    /// Positions on the last index entry whose key is less than or equal to the bound.
+    pub fn seek_to_key_at_most(&mut self, key: &[u8]) -> RelationalResult<bool> {
+        self.inner.seek_to_key_at_most(key).map_err(Into::into)
+    }
+
+    /// Positions on the last index entry whose key is strictly less than the bound.
+    pub fn seek_before_key(&mut self, key: &[u8]) -> RelationalResult<bool> {
+        self.inner.seek_before_key(key).map_err(Into::into)
+    }
+
     /// Reads the currently selected index entry, if any.
     pub fn current_entry(&self) -> RelationalResult<Option<IndexEntry>> {
         self.inner.current()?.map(IndexEntry::try_from).transpose()
@@ -257,6 +292,11 @@ impl IndexCursor {
     /// Advances to the next index entry in key order.
     pub fn next_entry(&mut self) -> RelationalResult<Option<IndexEntry>> {
         self.inner.next_record()?.map(IndexEntry::try_from).transpose()
+    }
+
+    /// Advances to the previous index entry in key order.
+    pub fn previous_entry(&mut self) -> RelationalResult<Option<IndexEntry>> {
+        self.inner.previous_record()?.map(IndexEntry::try_from).transpose()
     }
 
     /// Inserts an index entry from `key` to `table_key`.
