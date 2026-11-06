@@ -129,3 +129,105 @@ fn a_forged_schema_cannot_authorize_access_to_another_table() {
     assert_eq!(count.unwrap(), 0);
     reader.close().unwrap();
 }
+
+#[test]
+fn reverse_ranges_use_inclusive_and_exclusive_bounds_across_duplicate_index_entries() {
+    use databas_relational::{
+        IndexValueBound, IndexValueRange, ScanDirection, TableKey, TableKeyBound, TableKeyRange,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    let mut ddl = database.begin(Mode::Ddl).unwrap();
+    let (table, index) = ddl
+        .statement(Mode::Ddl, &[], |access| {
+            let table = access.create_table(
+                "items",
+                TupleSchema {
+                    columns: vec![
+                        ColumnSchema {
+                            name: "id".into(),
+                            data_type: DataType::Integer,
+                            nullable: false,
+                            primary_key: true,
+                        },
+                        ColumnSchema {
+                            name: "name".into(),
+                            data_type: DataType::Text,
+                            nullable: false,
+                            primary_key: false,
+                        },
+                    ],
+                },
+            )?;
+            let index = access.create_index("items_name", "items", &["name"])?;
+            Ok::<_, databas_relational::RelationalError>((table, index))
+        })
+        .unwrap();
+    ddl.commit().unwrap();
+
+    let low = Value::String("a".into());
+    let middle = Value::String("m".repeat(240));
+    let high = Value::String("z".into());
+    let mut transaction = database.begin(Mode::Ordinary).unwrap();
+    transaction
+        .statement(Mode::Ordinary, &[(table.table_id.into(), LockMode::Exclusive)], |access| {
+            for key in (0..64).chain([TableKey::MIN, TableKey::MAX]) {
+                let value = match key {
+                    0 => &low,
+                    63 => &high,
+                    _ => &middle,
+                };
+                access.insert_table_row(&table, vec![Value::Integer(key), value.clone()])?;
+            }
+
+            let index_range = IndexValueRange {
+                lower: Some(IndexValueBound::Exclusive(low.clone())),
+                upper: Some(IndexValueBound::Inclusive(middle.clone())),
+            };
+            let rows = access
+                .scan_index_in_direction(&table, &index, index_range, ScanDirection::Reverse)?
+                .map(|record| record.map(|record| record.table_key))
+                .collect::<StorageResult<Vec<_>>>()?;
+            assert_eq!(
+                rows,
+                [TableKey::MAX]
+                    .into_iter()
+                    .chain((1..63).rev())
+                    .chain([TableKey::MIN])
+                    .collect::<Vec<_>>()
+            );
+
+            let index_range = IndexValueRange {
+                lower: None,
+                upper: Some(IndexValueBound::Exclusive(middle.clone())),
+            };
+            let rows = access
+                .scan_index_in_direction(&table, &index, index_range, ScanDirection::Reverse)?
+                .map(|record| record.map(|record| record.table_key))
+                .collect::<StorageResult<Vec<_>>>()?;
+            assert_eq!(rows, [0]);
+
+            let table_range = TableKeyRange {
+                lower: Some(TableKeyBound::Inclusive(59)),
+                upper: Some(TableKeyBound::Exclusive(63)),
+            };
+            let rows = access
+                .scan_table_range_in_direction(&table, table_range, ScanDirection::Reverse)?
+                .map(|record| record.map(|record| record.table_key))
+                .collect::<StorageResult<Vec<_>>>()?;
+            assert_eq!(rows, [62, 61, 60, 59]);
+
+            let empty_range =
+                TableKeyRange { lower: None, upper: Some(TableKeyBound::Exclusive(TableKey::MIN)) };
+            assert!(
+                access
+                    .scan_table_range_in_direction(&table, empty_range, ScanDirection::Reverse)?
+                    .next()
+                    .is_none()
+            );
+            Ok::<_, databas_relational::RelationalError>(())
+        })
+        .unwrap();
+    transaction.commit().unwrap();
+}

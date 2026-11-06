@@ -1,3 +1,4 @@
+use databas_storage::TreeCursor;
 use proptest::prelude::*;
 
 use super::{Model, new_storage, owned, pair, value};
@@ -119,5 +120,47 @@ proptest! {
                 prop_assert_eq!(owned(cursors[index].current()?)?, positions[index].current(&model));
             }
         }
+    }
+}
+
+#[test]
+#[allow(clippy::unwrap_used)]
+fn reverse_cursor_crosses_leaf_boundaries_after_splits_and_merges() {
+    let (_dir, storage) = super::new_storage(8).unwrap();
+    let mut cursor = storage.create_tree().unwrap();
+    assert!(!cursor.seek_to_last().unwrap());
+    assert!(cursor.previous_record().unwrap().is_none());
+
+    let payload = vec![0xab; 480];
+    for key in (0_u16..200).step_by(2).rev() {
+        cursor.insert(&key.to_be_bytes(), &payload).unwrap();
+    }
+    for key in (30_u16..170).step_by(2) {
+        cursor.delete(&key.to_be_bytes()).unwrap();
+    }
+
+    let keys: Vec<_> = (0_u16..200).step_by(2).filter(|key| !(30..170).contains(key)).collect();
+    let current_key = |cursor: &TreeCursor| {
+        cursor.current().unwrap().map(|record| {
+            record.with_key(|key| u16::from_be_bytes(key.try_into().unwrap())).unwrap()
+        })
+    };
+    assert!(cursor.seek_to_last().unwrap());
+    for &expected in keys.iter().rev() {
+        assert_eq!(current_key(&cursor), Some(expected));
+        cursor.previous_record().unwrap();
+    }
+    assert!(cursor.previous_record().unwrap().is_none());
+    assert_eq!(current_key(&cursor), None);
+
+    for probe in 0_u16..=201 {
+        let bytes = probe.to_be_bytes();
+        let expected = keys.iter().rev().find(|&&key| key <= probe).copied();
+        assert_eq!(cursor.seek_to_key_at_most(&bytes).unwrap(), expected.is_some());
+        assert_eq!(current_key(&cursor), expected);
+
+        let expected = keys.iter().rev().find(|&&key| key < probe).copied();
+        assert_eq!(cursor.seek_before_key(&bytes).unwrap(), expected.is_some());
+        assert_eq!(current_key(&cursor), expected);
     }
 }

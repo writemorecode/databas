@@ -3,6 +3,15 @@ use std::fmt;
 pub type CatalogId = i32;
 pub type TableKey = i32;
 
+/// Direction of traversal through the stored keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanDirection {
+    /// Visit keys from smallest to greatest.
+    Forward,
+    /// Visit keys from greatest to smallest.
+    Reverse,
+}
+
 /// Inclusive or exclusive bound over encoded secondary-index B+-tree keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexKeyBound {
@@ -51,6 +60,11 @@ impl IndexKeyRange {
     pub(crate) fn contains(&self, key: &[u8]) -> bool {
         self.lower.as_ref().is_none_or(|bound| bound.contains_lower(key))
             && self.upper.as_ref().is_none_or(|bound| bound.contains_upper(key))
+    }
+
+    /// Returns whether `key` has moved before this range's lower bound.
+    pub(crate) fn is_before_lower(&self, key: &[u8]) -> bool {
+        self.lower.as_ref().is_some_and(|bound| !bound.contains_lower(key))
     }
 
     /// Returns whether `key` has moved beyond this range's upper bound.
