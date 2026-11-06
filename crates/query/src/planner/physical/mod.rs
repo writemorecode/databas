@@ -3,6 +3,7 @@
 use std::fmt;
 
 use crate::relational::{IndexSchema, TableKeyRange, TableSchema, TupleSchema};
+use crate::sql_parser::parser::stmt::select::Ordering;
 
 use super::{BoundColumn, ExecExpr, NodeId, PlanSchema, RelationId, SortTerm, UpdateAssignment};
 
@@ -152,10 +153,10 @@ pub enum PhysicalPlanNode {
         /// Table to scan.
         table: TableSchema,
     },
-    /// Scan rows from a table whose primary key falls in a bounded range.
+    /// Scan rows from a table whose primary key falls in a given range.
     ///
     /// The planner emits this for compatible comparisons against the first
-    /// integer primary-key column. If only part of the `WHERE` predicate can be
+    /// integer primary-key column or to provide primary-key order. If only part of the `WHERE` predicate can be
     /// expressed as a key range, the range scan is wrapped in a
     /// [`PhysicalPlanNode::Filter`] for the residual expression.
     PrimaryKeyRangeScan {
@@ -165,12 +166,13 @@ pub enum PhysicalPlanNode {
         table: TableSchema,
         /// Primary-key range to scan.
         range: TableKeyRange,
+        /// Traversal direction in primary-key order.
+        direction: Ordering,
     },
     /// Scan rows from a table through a secondary-index key range.
     ///
-    /// This is selected for predicates on a compatible single-column secondary
-    /// index. The scan produces candidate table rows; the original predicate is
-    /// still applied by a surrounding [`PhysicalPlanNode::Filter`] so the executor
+    /// This is selected for predicates or ordering on a compatible single-column
+    /// secondary index. When a predicate is present, it is still applied by a surrounding [`PhysicalPlanNode::Filter`] so the executor
     /// preserves SQL semantics when the access range is only an approximation.
     SecondaryIndexScan {
         /// Scan metadata and key bounds.
@@ -229,6 +231,8 @@ pub struct SecondaryIndexScanPlan {
     pub(crate) column: BoundColumn,
     /// Human-readable indexed value range.
     pub(crate) value_range: IndexValueRange,
+    /// Traversal direction in index-key order.
+    pub(crate) direction: Ordering,
 }
 
 impl PartialEq<PhysicalPlanNode> for PhysicalPlan {
@@ -315,12 +319,15 @@ fn physical_plan_label(plan: &PhysicalPlanNode) -> String {
         PhysicalPlanNode::FullTableScan { table, .. } => {
             format!("FullTableScan table={}", table.name)
         }
-        PhysicalPlanNode::PrimaryKeyRangeScan { table, range, .. } => {
-            format!("PrimaryKeyRangeScan table={} range=[{}]", table.name, range)
+        PhysicalPlanNode::PrimaryKeyRangeScan { table, range, direction, .. } => {
+            format!(
+                "PrimaryKeyRangeScan table={} range=[{range}] direction={direction}",
+                table.name
+            )
         }
         PhysicalPlanNode::SecondaryIndexScan { scan } => format!(
-            "SecondaryIndexScan table={} index={} column={} range=[{}]",
-            scan.table.name, scan.index.name, scan.column, scan.value_range
+            "SecondaryIndexScan table={} index={} column={} range=[{}] direction={}",
+            scan.table.name, scan.index.name, scan.column, scan.value_range, scan.direction
         ),
         PhysicalPlanNode::Filter { predicate, .. } => format!("Filter predicate={predicate}"),
         PhysicalPlanNode::Sort { terms, .. } => format!("Sort terms=[{}]", display_list(terms)),
