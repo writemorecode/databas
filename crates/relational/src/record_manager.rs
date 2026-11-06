@@ -736,11 +736,17 @@ mod tests {
 
     #[test]
     fn table_scan_resumes_logically_while_current_rows_are_deleted() {
-        assert_table_scan_resumes_after_delete(ScanDirection::Forward, (0..32).collect());
-        assert_table_scan_resumes_after_delete(ScanDirection::Reverse, (0..32).rev().collect());
+        assert_table_scan_resumes_after_delete(
+            ScanDirection::Forward,
+            &(0..32).collect::<Vec<_>>(),
+        );
+        assert_table_scan_resumes_after_delete(
+            ScanDirection::Reverse,
+            &(0..32).rev().collect::<Vec<_>>(),
+        );
     }
 
-    fn assert_table_scan_resumes_after_delete(direction: ScanDirection, expected: Vec<TableKey>) {
+    fn assert_table_scan_resumes_after_delete(direction: ScanDirection, expected: &[TableKey]) {
         let file = NamedTempFile::new().unwrap();
         let (_catalog, records) = open(file.path()).unwrap();
         let table = records.catalog.create_table("users", users_schema()).unwrap();
