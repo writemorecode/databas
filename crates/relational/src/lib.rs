@@ -29,7 +29,9 @@ pub use error::{
     StorageResult,
 };
 pub use lock_manager::{LockError, LockMode, TableId};
-pub use types::{CatalogId, IndexKeyBound, IndexKeyRange, TableKey, TableKeyBound, TableKeyRange};
+pub use types::{
+    CatalogId, IndexKeyBound, IndexKeyRange, ScanDirection, TableKey, TableKeyBound, TableKeyRange,
+};
 
 mod index_range;
 pub use index_range::{IndexValueBound, IndexValueRange};

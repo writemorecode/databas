@@ -5,9 +5,9 @@ use crate::cursor::{IndexCursor, TableCursor};
 use crate::error::{ConstraintError, InvalidArgumentError, RelationalError, RelationalResult};
 use crate::index_manager;
 use crate::{
-    CorruptionComponent, CorruptionError, CorruptionKind, DataType, IndexEntry, IndexKeyRange,
-    IndexSchema, OwnedTableRecord, TableKey, TableKeyBound, TableKeyRange, TableRecord,
-    TableSchema, Tuple, Value,
+    CorruptionComponent, CorruptionError, CorruptionKind, DataType, IndexEntry, IndexKeyBound,
+    IndexKeyRange, IndexSchema, OwnedTableRecord, ScanDirection, TableKey, TableKeyBound,
+    TableKeyRange, TableRecord, TableSchema, Tuple, Value,
 };
 
 /// Compatibility wrapper retained for focused relational tests.
@@ -21,6 +21,7 @@ pub(crate) struct RecordManager {
 pub struct TableScan {
     cursor: TableCursor,
     range: TableKeyRange,
+    direction: ScanDirection,
     last_table_key: Option<TableKey>,
     observed_mutation_epoch: u64,
     initialized: bool,
@@ -33,24 +34,32 @@ pub struct IndexScan {
     table_cursor: TableCursor,
     index_cursor: IndexCursor,
     key_range: IndexKeyRange,
+    direction: ScanDirection,
     initialized: bool,
     done: bool,
 }
 
 pub fn scan_table(catalog: &CatalogManager, table: &TableSchema) -> RelationalResult<TableScan> {
-    scan_table_range(catalog, table, TableKeyRange::unbounded())
+    scan_table_range_in_direction(
+        catalog,
+        table,
+        TableKeyRange::unbounded(),
+        ScanDirection::Forward,
+    )
 }
 
-pub fn scan_table_range(
+pub fn scan_table_range_in_direction(
     catalog: &CatalogManager,
     table: &TableSchema,
     range: TableKeyRange,
+    direction: ScanDirection,
 ) -> RelationalResult<TableScan> {
     let cursor = table_cursor(catalog, &table.name)?;
     let observed_mutation_epoch = cursor.mutation_epoch();
     Ok(TableScan {
         cursor,
         range,
+        direction,
         last_table_key: None,
         observed_mutation_epoch,
         initialized: false,
@@ -58,17 +67,19 @@ pub fn scan_table_range(
     })
 }
 
-pub fn scan_index(
+pub fn scan_index_in_direction(
     catalog: &CatalogManager,
     table: &TableSchema,
     index: &IndexSchema,
     key_range: IndexKeyRange,
+    direction: ScanDirection,
 ) -> RelationalResult<IndexScan> {
     Ok(IndexScan {
         table_name: table.name.clone(),
         table_cursor: table_cursor(catalog, &table.name)?,
         index_cursor: index_cursor(catalog, &index.name)?,
         key_range,
+        direction,
         initialized: false,
         done: false,
     })
@@ -149,7 +160,7 @@ impl RecordManager {
         table: &TableSchema,
         range: TableKeyRange,
     ) -> RelationalResult<TableScan> {
-        scan_table_range(&self.catalog, table, range)
+        scan_table_range_in_direction(&self.catalog, table, range, ScanDirection::Forward)
     }
     pub(crate) fn insert_table_row(
         &self,
@@ -185,7 +196,10 @@ impl Iterator for IndexScan {
 
         loop {
             let entry = if self.initialized {
-                self.index_cursor.next_entry()
+                match self.direction {
+                    ScanDirection::Forward => self.index_cursor.next_entry(),
+                    ScanDirection::Reverse => self.index_cursor.previous_entry(),
+                }
             } else {
                 self.initialized = true;
                 self.first_entry()
@@ -195,8 +209,12 @@ impl Iterator for IndexScan {
                 Ok(Some(entry)) => {
                     let table_key = entry.table_key();
                     let entry_state = entry.with_key(|key| {
-                        if self.key_range.is_past_upper(key) {
-                            IndexEntryState::PastUpper
+                        let past_end = match self.direction {
+                            ScanDirection::Forward => self.key_range.is_past_upper(key),
+                            ScanDirection::Reverse => self.key_range.is_before_lower(key),
+                        };
+                        if past_end {
+                            IndexEntryState::PastEnd
                         } else if self.key_range.contains(key) {
                             IndexEntryState::InRange
                         } else {
@@ -204,7 +222,7 @@ impl Iterator for IndexScan {
                         }
                     });
                     match entry_state {
-                        Ok(IndexEntryState::PastUpper) => {
+                        Ok(IndexEntryState::PastEnd) => {
                             self.done = true;
                             return None;
                         }
@@ -247,22 +265,20 @@ impl Iterator for IndexScan {
 
 impl IndexScan {
     fn first_entry(&mut self) -> RelationalResult<Option<IndexEntry>> {
-        match self.key_range.lower.as_ref() {
-            Some(lower) => {
-                if self.index_cursor.seek_to_key(lower.key())? {
-                    self.index_cursor.current_entry()
-                } else {
-                    Ok(None)
+        let positioned = match self.direction {
+            ScanDirection::Forward => match &self.key_range.lower {
+                Some(lower) => self.index_cursor.seek_to_key(lower.key())?,
+                None => self.index_cursor.seek_to_first()?,
+            },
+            ScanDirection::Reverse => match &self.key_range.upper {
+                Some(IndexKeyBound::Inclusive(key)) => {
+                    self.index_cursor.seek_to_key_at_most(key)?
                 }
-            }
-            None => {
-                if self.index_cursor.seek_to_first()? {
-                    self.index_cursor.current_entry()
-                } else {
-                    Ok(None)
-                }
-            }
-        }
+                Some(IndexKeyBound::Exclusive(key)) => self.index_cursor.seek_before_key(key)?,
+                None => self.index_cursor.seek_to_last()?,
+            },
+        };
+        if positioned { self.index_cursor.current_entry() } else { Ok(None) }
     }
 }
 
@@ -277,7 +293,10 @@ impl Iterator for TableScan {
         let mutation_epoch = self.cursor.mutation_epoch();
         let record = if self.initialized {
             if mutation_epoch == self.observed_mutation_epoch {
-                self.cursor.next_record()
+                match self.direction {
+                    ScanDirection::Forward => self.cursor.next_record(),
+                    ScanDirection::Reverse => self.cursor.previous_record(),
+                }
             } else {
                 self.observed_mutation_epoch = mutation_epoch;
                 self.resume_after_mutation()
@@ -313,48 +332,36 @@ impl TableScan {
         let Some(last_table_key) = self.last_table_key else {
             return self.first_record();
         };
-        if self.cursor.seek_after_table_key(last_table_key)? {
-            self.cursor.current_record()
-        } else {
-            Ok(None)
-        }
+        let positioned = match self.direction {
+            ScanDirection::Forward => self.cursor.seek_after_table_key(last_table_key)?,
+            ScanDirection::Reverse => self.cursor.seek_before_table_key(last_table_key)?,
+        };
+        if positioned { self.cursor.current_record() } else { Ok(None) }
     }
 
     fn first_record(&mut self) -> RelationalResult<Option<TableRecord>> {
-        match range_start(self.range.lower) {
-            RangeStart::At(start_key) => {
-                if self.cursor.seek_to_table_key(start_key)? {
-                    self.cursor.current_record()
-                } else {
-                    Ok(None)
+        let positioned = match self.direction {
+            ScanDirection::Forward => match self.range.lower {
+                Some(TableKeyBound::Inclusive(key)) => self.cursor.seek_to_table_key(key)?,
+                Some(TableKeyBound::Exclusive(key)) => self.cursor.seek_after_table_key(key)?,
+                None => self.cursor.seek_to_first()?,
+            },
+            ScanDirection::Reverse => match self.range.upper {
+                Some(TableKeyBound::Inclusive(key)) => {
+                    self.cursor.seek_to_table_key_at_most(key)?
                 }
-            }
-            RangeStart::Unbounded => self.cursor.next_record(),
-            RangeStart::Empty => Ok(None),
-        }
+                Some(TableKeyBound::Exclusive(key)) => self.cursor.seek_before_table_key(key)?,
+                None => self.cursor.seek_to_last()?,
+            },
+        };
+        if positioned { self.cursor.current_record() } else { Ok(None) }
     }
 }
 
 enum IndexEntryState {
-    PastUpper,
+    PastEnd,
     InRange,
     Skip,
-}
-
-enum RangeStart {
-    At(TableKey),
-    Unbounded,
-    Empty,
-}
-
-fn range_start(lower: Option<TableKeyBound>) -> RangeStart {
-    match lower {
-        Some(TableKeyBound::Inclusive(value)) => RangeStart::At(value),
-        Some(TableKeyBound::Exclusive(value)) => {
-            value.checked_add(1).map_or(RangeStart::Empty, RangeStart::At)
-        }
-        None => RangeStart::Unbounded,
-    }
 }
 
 pub fn validate_table_row(table: &TableSchema, values: &[Value]) -> RelationalResult<()> {
@@ -729,6 +736,11 @@ mod tests {
 
     #[test]
     fn table_scan_resumes_logically_while_current_rows_are_deleted() {
+        assert_table_scan_resumes_after_delete(ScanDirection::Forward, (0..32).collect());
+        assert_table_scan_resumes_after_delete(ScanDirection::Reverse, (0..32).rev().collect());
+    }
+
+    fn assert_table_scan_resumes_after_delete(direction: ScanDirection, expected: Vec<TableKey>) {
         let file = NamedTempFile::new().unwrap();
         let (_catalog, records) = open(file.path()).unwrap();
         let table = records.catalog.create_table("users", users_schema()).unwrap();
@@ -747,7 +759,14 @@ mod tests {
         }
 
         let mut deleted_keys = Vec::new();
-        for record in records.scan_table(&table).unwrap() {
+        let scan = scan_table_range_in_direction(
+            &records.catalog,
+            &table,
+            TableKeyRange::unbounded(),
+            direction,
+        )
+        .unwrap();
+        for record in scan {
             let record = record.unwrap();
             let owned = record.to_owned_record().unwrap();
             deleted_keys.push(owned.table_key);
@@ -755,7 +774,7 @@ mod tests {
             records.delete_table_row(&table, &owned).unwrap();
         }
 
-        assert_eq!(deleted_keys, (0..32).collect::<Vec<_>>());
+        assert_eq!(deleted_keys, expected);
         assert!(records.scan_table(&table).unwrap().next().is_none());
     }
 
