@@ -91,14 +91,14 @@ impl IndexValueRange {
 }
 /// Encodes the first index entry key allowed by a lower value bound.
 fn index_lower_key(value: &Value, inclusive: bool) -> RelationalResult<Vec<u8>> {
-    let prefix = TupleRef::new(&[ValueRef::from(value)]).to_bytes()?;
+    let prefix = TupleRef::new(&[ValueRef::from(value)]).to_index_key()?;
     let table_key = if inclusive { TableKey::MIN } else { TableKey::MAX };
     Ok(encode_index_entry_key(&prefix, table_key))
 }
 
 /// Encodes the last index entry key allowed by an upper value bound.
 fn index_upper_key(value: &Value, inclusive: bool) -> RelationalResult<Vec<u8>> {
-    let prefix = TupleRef::new(&[ValueRef::from(value)]).to_bytes()?;
+    let prefix = TupleRef::new(&[ValueRef::from(value)]).to_index_key()?;
     let table_key = if inclusive { TableKey::MAX } else { TableKey::MIN };
     Ok(encode_index_entry_key(&prefix, table_key))
 }

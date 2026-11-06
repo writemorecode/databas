@@ -450,7 +450,7 @@ mod tests {
     use crate::cursor::{IndexCursor, encode_index_entry_key};
     use crate::index_manager::IndexManager;
     use crate::storage::Storage;
-    use crate::{ColumnSchema, TableKeyBound, TableKeyRange, TupleSchema};
+    use crate::{ColumnSchema, TableKeyBound, TableKeyRange, TupleRef, TupleSchema, ValueRef};
 
     fn open(
         path: impl AsRef<std::path::Path>,
@@ -489,12 +489,9 @@ mod tests {
         Tuple::from_bytes(&record.record).unwrap().into_values()
     }
 
-    fn name_key(name: &str) -> Vec<u8> {
-        Tuple::new(vec![Value::String(name.to_owned())]).to_bytes().unwrap()
-    }
-
     fn name_entry_key(name: &str, table_key: TableKey) -> Vec<u8> {
-        encode_index_entry_key(&name_key(name), table_key)
+        let key = TupleRef::new(&[ValueRef::String(name)]).to_index_key().unwrap();
+        encode_index_entry_key(&key, table_key)
     }
 
     #[test]

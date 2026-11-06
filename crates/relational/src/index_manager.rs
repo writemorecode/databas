@@ -141,7 +141,7 @@ fn index_key_from_record_bytes(
         values.push(value);
     }
 
-    TupleRef::new(&values).to_bytes().map_err(RelationalError::from)
+    TupleRef::new(&values).to_index_key().map_err(RelationalError::from)
 }
 
 fn invalid_table_record(
@@ -164,7 +164,7 @@ mod tests {
     use crate::catalog_manager::CatalogManager;
     use crate::record_manager::RecordManager;
     use crate::storage::Storage;
-    use crate::{ColumnSchema, DataType, Tuple, TupleSchema, Value};
+    use crate::{ColumnSchema, DataType, TupleSchema, Value, ValueRef};
 
     fn open(path: impl AsRef<std::path::Path>) -> RelationalResult<(CatalogManager, IndexManager)> {
         let catalog = CatalogManager::from_storage(Storage::open_or_create(path)?)?;
@@ -197,12 +197,9 @@ mod tests {
         }
     }
 
-    fn name_key(name: &str) -> Vec<u8> {
-        Tuple::new(vec![Value::String(name.to_owned())]).to_bytes().unwrap()
-    }
-
     fn name_entry_key(name: &str, table_key: TableKey) -> Vec<u8> {
-        encode_index_entry_key(&name_key(name), table_key)
+        let key = TupleRef::new(&[ValueRef::String(name)]).to_index_key().unwrap();
+        encode_index_entry_key(&key, table_key)
     }
 
     #[test]

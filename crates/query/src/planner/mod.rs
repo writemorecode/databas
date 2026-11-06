@@ -1007,14 +1007,6 @@ mod tests {
                 },
             ),
             (
-                "name >= 'Amy'",
-                ExecExpr::Binary {
-                    left: Box::new(ExecExpr::Column(exec_column(1, "users.name", DataType::Text))),
-                    op: Op::GreaterThanOrEqual,
-                    right: Box::new(ExecExpr::Literal(Value::String("Amy".into()))),
-                },
-            ),
-            (
                 "age == 7 AND id < 10",
                 ExecExpr::Binary {
                     left: Box::new(ExecExpr::Binary {

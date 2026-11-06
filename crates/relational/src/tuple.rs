@@ -1,6 +1,6 @@
 //! Count-prefixed tuples of tagged values. The count is little-endian; each
-//! field has a one-byte tag, a big-endian u32 length, and a payload. Numeric
-//! payloads use big-endian order-preserving encodings for index keys.
+//! row field has a one-byte tag, a big-endian u32 length, and a payload.
+//! Index keys reuse the numeric encodings and use terminated text fields.
 
 use std::io;
 
@@ -12,6 +12,12 @@ const INTEGER: u8 = 3;
 const FLOAT: u8 = 4;
 const NULL: u8 = 5;
 const UNSIGNED_INTEGER: u8 = 6;
+
+#[derive(Clone, Copy)]
+enum Encoding {
+    Row,
+    IndexKey,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -98,7 +104,7 @@ impl Tuple {
     }
 
     pub fn to_bytes(&self) -> io::Result<Vec<u8>> {
-        encode(self.0.iter().map(ValueRef::from), self.0.len())
+        encode(self.0.iter().map(ValueRef::from), self.0.len(), Encoding::Row)
     }
 }
 
@@ -120,7 +126,11 @@ impl<'a> TupleRef<'a> {
     }
 
     pub fn to_bytes(&self) -> io::Result<Vec<u8>> {
-        encode(self.0.iter().copied(), self.0.len())
+        encode(self.0.iter().copied(), self.0.len(), Encoding::Row)
+    }
+
+    pub(crate) fn to_index_key(&self) -> io::Result<Vec<u8>> {
+        encode(self.0.iter().copied(), self.0.len(), Encoding::IndexKey)
     }
 }
 
@@ -215,7 +225,11 @@ fn decode(tag: u8, payload: &[u8]) -> io::Result<ValueRef<'_>> {
     }
 }
 
-fn encode<'a>(values: impl Iterator<Item = ValueRef<'a>>, count: usize) -> io::Result<Vec<u8>> {
+fn encode<'a>(
+    values: impl Iterator<Item = ValueRef<'a>>,
+    count: usize,
+    encoding: Encoding,
+) -> io::Result<Vec<u8>> {
     let count = u32::try_from(count).map_err(|_count_out_of_range| {
         io::Error::new(io::ErrorKind::InvalidInput, "too many tuple values")
     })?;
@@ -229,6 +243,14 @@ fn encode<'a>(values: impl Iterator<Item = ValueRef<'a>>, count: usize) -> io::R
             ValueRef::Null => {
                 tag = NULL;
                 payload = &[];
+            }
+            ValueRef::String(v) if matches!(encoding, Encoding::IndexKey) => {
+                // Valid UTF-8 bytes are at most 0xf4. Shifting them preserves
+                // order and leaves zero as a terminator that sorts before any byte.
+                bytes.push(STRING);
+                bytes.extend(v.bytes().map(|byte| byte + 1));
+                bytes.push(0);
+                continue;
             }
             ValueRef::String(v) => {
                 tag = STRING;
