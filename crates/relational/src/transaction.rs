@@ -8,7 +8,8 @@ use crate::record_manager;
 use crate::record_manager::{IndexScan, TableScan};
 use crate::storage::TxnId;
 use crate::{
-    IndexSchema, IndexValueRange, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
+    IndexSchema, IndexValueRange, OwnedTableRecord, ScanDirection, TableKeyRange, TableSchema,
+    TupleSchema, Value,
 };
 
 use super::Database;
@@ -72,22 +73,27 @@ impl RelationalAccess for Transaction<'_> {
         Ok(OwnedScan(Transaction::scan_table(self, table)?, std::marker::PhantomData))
     }
 
-    fn scan_table_range(
+    fn scan_table_range_in_direction(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
+        direction: ScanDirection,
     ) -> RelationalResult<Self::TableScan<'_>> {
-        Ok(OwnedScan(Transaction::scan_table_range(self, table, range)?, std::marker::PhantomData))
+        Ok(OwnedScan(
+            Transaction::scan_table_range_in_direction(self, table, range, direction)?,
+            std::marker::PhantomData,
+        ))
     }
 
-    fn scan_index(
+    fn scan_index_in_direction(
         &self,
         table: &TableSchema,
         index: &IndexSchema,
         range: IndexValueRange,
+        direction: ScanDirection,
     ) -> RelationalResult<Self::IndexScan<'_>> {
         Ok(OwnedScan(
-            Transaction::scan_index(self, table, index, &range)?,
+            Transaction::scan_index_in_direction(self, table, index, &range, direction)?,
             std::marker::PhantomData,
         ))
     }
@@ -181,24 +187,27 @@ impl Transaction<'_> {
         record_manager::scan_table(&self.database.catalog().for_transaction(self.txn_id), table)
     }
 
-    fn scan_table_range(
+    fn scan_table_range_in_direction(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
+        direction: ScanDirection,
     ) -> RelationalResult<TableScan> {
         self.require_table(table, LockMode::Shared)?;
-        record_manager::scan_table_range(
+        record_manager::scan_table_range_in_direction(
             &self.database.catalog().for_transaction(self.txn_id),
             table,
             range,
+            direction,
         )
     }
 
-    fn scan_index(
+    fn scan_index_in_direction(
         &self,
         table: &TableSchema,
         index: &IndexSchema,
         key_range: &IndexValueRange,
+        direction: ScanDirection,
     ) -> RelationalResult<IndexScan> {
         self.require_table(table, LockMode::Shared)?;
         if !self.database.catalog().index_schemas_for_table(table)?.contains(index) {
@@ -206,11 +215,12 @@ impl Transaction<'_> {
                 crate::InvalidArgumentError::SchemaMismatch { name: index.name.clone() },
             ));
         }
-        record_manager::scan_index(
+        record_manager::scan_index_in_direction(
             &self.database.catalog().for_transaction(self.txn_id),
             table,
             index,
             key_range.encode()?,
+            direction,
         )
     }
 

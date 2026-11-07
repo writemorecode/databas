@@ -1,6 +1,7 @@
 use crate::error::RelationalResult;
 use crate::{
-    IndexSchema, IndexValueRange, OwnedTableRecord, TableKeyRange, TableSchema, TupleSchema, Value,
+    IndexSchema, IndexValueRange, OwnedTableRecord, ScanDirection, TableKeyRange, TableSchema,
+    TupleSchema, Value,
 };
 
 /// Minimal catalog seam used by the planner and its lightweight tests.
@@ -37,12 +38,31 @@ pub trait RelationalAccess {
         &self,
         table: &TableSchema,
         range: TableKeyRange,
+    ) -> RelationalResult<Self::TableScan<'_>> {
+        self.scan_table_range_in_direction(table, range, ScanDirection::Forward)
+    }
+    /// Scans table records within the given key range in the specified direction.
+    fn scan_table_range_in_direction(
+        &self,
+        table: &TableSchema,
+        range: TableKeyRange,
+        direction: ScanDirection,
     ) -> RelationalResult<Self::TableScan<'_>>;
     fn scan_index(
         &self,
         table: &TableSchema,
         index: &IndexSchema,
         range: IndexValueRange,
+    ) -> RelationalResult<Self::IndexScan<'_>> {
+        self.scan_index_in_direction(table, index, range, ScanDirection::Forward)
+    }
+    /// Scans records within the given range in the specified index key direction.
+    fn scan_index_in_direction(
+        &self,
+        table: &TableSchema,
+        index: &IndexSchema,
+        range: IndexValueRange,
+        direction: ScanDirection,
     ) -> RelationalResult<Self::IndexScan<'_>>;
     fn insert_table_row(
         &self,
