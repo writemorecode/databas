@@ -213,6 +213,7 @@ mod tests {
         };
         PhysicalPlanNode::SecondaryIndexScan {
             scan: SecondaryIndexScanPlan {
+                direction: Ordering::Ascending,
                 relation,
                 table: users_table(),
                 index: catalog.indexes[index].clone(),
@@ -320,6 +321,7 @@ mod tests {
             physical_plan(
                 vec![
                     PhysicalPlanNode::PrimaryKeyRangeScan {
+                        direction: Ordering::Ascending,
                         relation,
                         table: users_table(),
                         range: TableKeyRange {
@@ -360,14 +362,15 @@ mod tests {
         let relation = RelationId::new(0);
         assert_physical_plan(
             &MemoryCatalog::default(),
-            "SELECT u.name FROM users AS u WHERE u.id == 7 ORDER BY u.age DESC;",
+            "SELECT u.name FROM users AS u WHERE u.id <= 7 ORDER BY u.age DESC;",
             physical_plan(
                 vec![
                     PhysicalPlanNode::PrimaryKeyRangeScan {
+                        direction: Ordering::Ascending,
                         relation,
                         table: users_table(),
                         range: TableKeyRange {
-                            lower: Some(TableKeyBound::Inclusive(7)),
+                            lower: None,
                             upper: Some(TableKeyBound::Inclusive(7)),
                         },
                     },
@@ -375,7 +378,7 @@ mod tests {
                         input: NodeId::new(0),
                         terms: vec![SortTerm {
                             column: exec_column(2, "u.age", DataType::Integer),
-                            direction: Some(Ordering::Descending),
+                            direction: Ordering::Descending,
                         }],
                     },
                     PhysicalPlanNode::Project {
@@ -436,6 +439,7 @@ mod tests {
                 vec![
                     PhysicalPlanNode::SecondaryIndexScan {
                         scan: SecondaryIndexScanPlan {
+                            direction: Ordering::Ascending,
                             relation,
                             table: users_table(),
                             index: catalog.indexes[0].clone(),
@@ -507,6 +511,7 @@ mod tests {
             physical_plan(
                 vec![
                     PhysicalPlanNode::PrimaryKeyRangeScan {
+                        direction: Ordering::Ascending,
                         relation,
                         table: users_table(),
                         range: TableKeyRange {
@@ -541,6 +546,7 @@ mod tests {
             physical_plan(
                 vec![
                     PhysicalPlanNode::PrimaryKeyRangeScan {
+                        direction: Ordering::Ascending,
                         relation,
                         table: users_table(),
                         range: TableKeyRange {
@@ -700,6 +706,7 @@ mod tests {
                 physical_plan(
                     vec![
                         PhysicalPlanNode::PrimaryKeyRangeScan {
+                            direction: Ordering::Ascending,
                             relation,
                             table: users_table(),
                             range,
@@ -728,6 +735,7 @@ mod tests {
             physical_plan(
                 vec![
                     PhysicalPlanNode::PrimaryKeyRangeScan {
+                        direction: Ordering::Ascending,
                         relation,
                         table: users_table(),
                         range: TableKeyRange {
@@ -869,6 +877,7 @@ mod tests {
             physical_plan(
                 vec![
                     PhysicalPlanNode::PrimaryKeyRangeScan {
+                        direction: Ordering::Ascending,
                         relation,
                         table: users_table(),
                         range: TableKeyRange {
@@ -1061,28 +1070,109 @@ mod tests {
             "SELECT name FROM users ORDER BY id DESC LIMIT 10 OFFSET 5;",
             physical_plan(
                 vec![
-                    PhysicalPlanNode::FullTableScan { relation, table: users_table() },
-                    PhysicalPlanNode::Sort {
-                        input: NodeId::new(0),
-                        terms: vec![SortTerm {
-                            column: exec_column(0, "users.id", DataType::Integer),
-                            direction: Some(Ordering::Descending),
-                        }],
+                    PhysicalPlanNode::PrimaryKeyRangeScan {
+                        relation,
+                        table: users_table(),
+                        range: TableKeyRange::unbounded(),
+                        direction: Ordering::Descending,
                     },
                     PhysicalPlanNode::Project {
-                        input: NodeId::new(1),
+                        input: NodeId::new(0),
                         expressions: vec![ExecExpr::Column(exec_column(
                             1,
                             "users.name",
                             DataType::Text,
                         ))],
                     },
-                    PhysicalPlanNode::Offset { input: NodeId::new(2), offset: 5 },
-                    PhysicalPlanNode::Limit { input: NodeId::new(3), limit: 10 },
+                    PhysicalPlanNode::Offset { input: NodeId::new(1), offset: 5 },
+                    PhysicalPlanNode::Limit { input: NodeId::new(2), limit: 10 },
                 ],
                 Some(users_output(relation, "users", &[1])),
             ),
         );
+    }
+
+    #[test]
+    fn order_by_uses_a_bounded_primary_scan_and_preserves_the_residual() {
+        let plan = plan(
+            &MemoryCatalog::default(),
+            "EXPLAIN SELECT name FROM users AS u WHERE u.id < 10 AND u.age == 7 ORDER BY u.id DESC;",
+        )
+        .physical
+        .to_string();
+
+        assert!(plan.contains("Filter predicate=(u.age == 7)"), "{plan}");
+        assert!(plan.contains("PrimaryKeyRangeScan table=users"), "{plan}");
+        assert!(plan.contains("upper=10 exclusive"), "{plan}");
+        assert!(plan.contains("direction=DESC"), "{plan}");
+        assert!(!plan.contains("Sort"), "{plan}");
+    }
+
+    #[test]
+    fn order_by_prefers_a_bounded_secondary_scan_on_the_ordering_column() {
+        let catalog = MemoryCatalog::with_indexes(&[("users_age", 2), ("users_name", 1)]);
+        let plan = plan(
+            &catalog,
+            "SELECT id FROM users WHERE age == 7 AND name >= 'Ada' ORDER BY name DESC;",
+        )
+        .physical
+        .to_string();
+
+        assert!(plan.contains("index=users_name"), "{plan}");
+        assert!(plan.contains("direction=DESC"), "{plan}");
+        assert!(plan.contains("Filter predicate="), "{plan}");
+        assert!(plan.contains("age == 7") && plan.contains("name >="), "{plan}");
+        assert!(!plan.contains("Sort"), "{plan}");
+    }
+
+    #[test]
+    fn order_by_uses_an_unbounded_nonnullable_index_scan() {
+        let catalog = MemoryCatalog::with_indexes(&[("users_name", 1)]);
+        let plan = plan(&catalog, "SELECT id FROM users WHERE age == 7 ORDER BY name;")
+            .physical
+            .to_string();
+
+        assert!(plan.contains("index=users_name"), "{plan}");
+        assert!(plan.contains("direction=ASC"), "{plan}");
+        assert!(plan.contains("Filter predicate=(users.age == 7)"), "{plan}");
+        assert!(!plan.contains("Sort"), "{plan}");
+    }
+
+    #[test]
+    fn order_by_sorts_when_ordering_requires_discarding_bounded_access() {
+        let catalog = MemoryCatalog::with_indexes(&[("users_name", 1), ("users_age", 2)]);
+        for (sql, access) in [
+            ("SELECT id FROM users WHERE id < 10 ORDER BY name;", "PrimaryKeyRangeScan"),
+            ("SELECT id FROM users WHERE age == 7 ORDER BY name DESC;", "index=users_age"),
+        ] {
+            let plan = plan(&catalog, sql).physical.to_string();
+            assert!(plan.contains("Sort") && plan.contains(access), "{plan}");
+        }
+    }
+
+    #[test]
+    fn order_by_nullable_column_uses_sort() {
+        let catalog = MemoryCatalog::with_indexes(&[("users_age", 2)]);
+        for (sql, access) in [
+            ("SELECT id FROM users ORDER BY age DESC;", "FullTableScan"),
+            ("SELECT id FROM users WHERE age == 7 ORDER BY age;", "SecondaryIndexScan"),
+        ] {
+            let plan = plan(&catalog, sql).physical.to_string();
+            assert!(plan.contains("Sort") && plan.contains(access), "{plan}");
+        }
+    }
+
+    #[test]
+    fn order_by_omits_sort_for_an_empty_or_single_key_primary_range() {
+        for predicate in ["id == 7", "id < 7 AND id >= 7"] {
+            let plan = plan(
+                &MemoryCatalog::default(),
+                &format!("SELECT id FROM users WHERE {predicate} ORDER BY name DESC;"),
+            )
+            .physical
+            .to_string();
+            assert!(!plan.contains("Sort"), "{plan}");
+        }
     }
 
     #[test]

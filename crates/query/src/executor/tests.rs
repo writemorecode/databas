@@ -1,4 +1,7 @@
-use std::{cell::RefCell, collections::BTreeMap};
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+};
 
 use super::*;
 use crate::planner::{ExecExpr, PhysicalPlan, PhysicalPlanNode, Planner};
@@ -68,14 +71,23 @@ impl Default for MemoryState {
 #[derive(Default)]
 struct MemoryStore {
     state: RefCell<MemoryState>,
+    scans_opened: Cell<usize>,
+    rows_read: Cell<usize>,
 }
 
 fn missing_table(name: &str) -> StorageError {
     StorageError::InvalidArgument(InvalidArgumentError::TableNotFound { name: name.to_owned() })
 }
 
-fn scan(records: Vec<OwnedTableRecord>) -> std::vec::IntoIter<StorageResult<OwnedTableRecord>> {
-    records.into_iter().map(Ok).collect::<Vec<_>>().into_iter()
+type MemoryScan<'a> = Box<dyn Iterator<Item = StorageResult<OwnedTableRecord>> + 'a>;
+
+impl MemoryStore {
+    fn scan(&self, records: Vec<OwnedTableRecord>) -> MemoryScan<'_> {
+        self.scans_opened.set(self.scans_opened.get() + 1);
+        Box::new(
+            records.into_iter().inspect(|_| self.rows_read.set(self.rows_read.get() + 1)).map(Ok),
+        )
+    }
 }
 
 fn entry_key(
@@ -111,8 +123,8 @@ impl CatalogRead for MemoryStore {
 }
 
 impl RelationalAccess for MemoryStore {
-    type TableScan<'txn> = std::vec::IntoIter<StorageResult<OwnedTableRecord>>;
-    type IndexScan<'txn> = std::vec::IntoIter<StorageResult<OwnedTableRecord>>;
+    type TableScan<'txn> = MemoryScan<'txn>;
+    type IndexScan<'txn> = MemoryScan<'txn>;
 
     fn drop_table(&self, name: &str) -> StorageResult<()> {
         let table = self.table_schema_by_name(name)?;
@@ -218,13 +230,14 @@ impl RelationalAccess for MemoryStore {
         self.scan_table_range(table, TableKeyRange::unbounded())
     }
 
-    fn scan_table_range(
+    fn scan_table_range_in_direction(
         &self,
         table: &TableSchema,
         range: TableKeyRange,
+        direction: crate::relational::ScanDirection,
     ) -> StorageResult<Self::TableScan<'_>> {
         let state = self.state.borrow();
-        let records = state
+        let mut records: Vec<_> = state
             .tables
             .get(&table.table_id)
             .ok_or_else(|| missing_table(&table.name))?
@@ -233,14 +246,18 @@ impl RelationalAccess for MemoryStore {
             .filter(|(key, _)| range.contains(**key))
             .map(|(_, record)| record.clone())
             .collect();
-        Ok(scan(records))
+        if direction == crate::relational::ScanDirection::Reverse {
+            records.reverse();
+        }
+        Ok(self.scan(records))
     }
 
-    fn scan_index(
+    fn scan_index_in_direction(
         &self,
         table: &TableSchema,
         index: &IndexSchema,
         range: IndexValueRange,
+        direction: crate::relational::ScanDirection,
     ) -> StorageResult<Self::IndexScan<'_>> {
         let range = crate::relational::testing::encode_range(&range)?;
         let state = self.state.borrow();
@@ -251,7 +268,7 @@ impl RelationalAccess for MemoryStore {
         })?;
         let table_data =
             state.tables.get(&table.table_id).ok_or_else(|| missing_table(&table.name))?;
-        let records = index
+        let mut records: Vec<_> = index
             .entries
             .iter()
             .filter(|(key, _)| crate::relational::testing::contains(&range, key))
@@ -263,7 +280,10 @@ impl RelationalAccess for MemoryStore {
                     .ok_or(StorageError::InvalidArgument(InvalidArgumentError::KeyNotFound))
             })
             .collect::<StorageResult<Vec<_>>>()?;
-        Ok(scan(records))
+        if direction == crate::relational::ScanDirection::Reverse {
+            records.reverse();
+        }
+        Ok(self.scan(records))
     }
 
     fn insert_table_row(
@@ -553,6 +573,98 @@ fn limit_and_offset_select_the_requested_window() {
     );
     assert!(query(&database, "SELECT id FROM numbers OFFSET 10;").is_empty());
     assert!(query(&database, "SELECT id FROM numbers LIMIT 0;").is_empty());
+}
+
+#[test]
+fn ordered_limit_only_reads_the_rows_needed_after_filtering_and_offset() {
+    let database = MemoryStore::default();
+    execute(&database, "CREATE TABLE numbers (id INT PRIMARY KEY, score INT);").unwrap();
+    execute(
+        &database,
+        "INSERT INTO numbers (id, score) VALUES (1, 0), (2, 2), (3, 0), (4, 2), (5, 2);",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query(
+            &database,
+            "SELECT id FROM numbers WHERE score == 2 ORDER BY id DESC LIMIT 1 OFFSET 2;"
+        ),
+        vec![vec![Value::Integer(2)]]
+    );
+    assert_eq!(database.scans_opened.get(), 1);
+    assert_eq!(database.rows_read.get(), 4);
+}
+
+#[test]
+fn limit_zero_never_opens_its_input_scan() {
+    let database = MemoryStore::default();
+    execute(&database, "CREATE TABLE numbers (id INT PRIMARY KEY);").unwrap();
+    let statement = Parser::new("SELECT id FROM numbers;").stmt().unwrap();
+    let plan = Planner::with_schema(&database).plan_physical_statement(&statement).unwrap();
+    let (mut nodes, input, schema) = plan.into_parts();
+    let root = NodeId::new(nodes.len());
+    nodes.push(PhysicalPlanNode::Limit { input, limit: 0 });
+
+    let output = Executor::in_transaction(&database)
+        .execute(PhysicalPlan::from_parts(nodes, root, schema))
+        .unwrap();
+    assert!(try_rows(output).unwrap().is_empty());
+    assert_eq!(database.scans_opened.get(), 0);
+}
+
+#[test]
+fn offset_reports_errors_from_the_rows_it_consumes() {
+    let database = MemoryStore::default();
+    execute(&database, "CREATE TABLE numbers (id INT PRIMARY KEY);").unwrap();
+    execute(&database, "INSERT INTO numbers (id) VALUES (1), (2), (3);").unwrap();
+
+    assert!(matches!(
+        try_rows(
+            execute(&database, "SELECT id FROM numbers WHERE 10 / (2 - id) > 0 OFFSET 2;").unwrap()
+        ),
+        Err(ExecutorError::DivisionByZero)
+    ));
+    assert_eq!(database.rows_read.get(), 3);
+}
+
+#[test]
+fn fallback_sort_orders_an_unprojected_nullable_text_key_and_keeps_duplicates() {
+    let database = MemoryStore::default();
+    execute(&database, "CREATE TABLE items (id INT PRIMARY KEY, name TEXT NULLABLE, score INT);")
+        .unwrap();
+    execute(
+        &database,
+        "INSERT INTO items (id, name, score) VALUES              (1, 'é', 40), (2, 'ab', 30), (3, 'a', 20), (4, 'a', 20);",
+    )
+    .unwrap();
+    execute(&database, "INSERT INTO items (id, score) VALUES (5, 10);").unwrap();
+
+    assert_eq!(
+        query(&database, "SELECT score FROM items ORDER BY name;"),
+        [10, 20, 20, 30, 40].map(|score| vec![Value::Integer(score)])
+    );
+    assert_eq!(
+        query(&database, "SELECT score FROM items ORDER BY name DESC LIMIT 3 OFFSET 1;"),
+        [30, 20, 20].map(|score| vec![Value::Integer(score)])
+    );
+}
+
+#[test]
+fn fallback_sort_surfaces_an_input_failure_before_returning_a_window() {
+    let database = MemoryStore::default();
+    execute(&database, "CREATE TABLE numbers (id INT PRIMARY KEY, score INT);").unwrap();
+    execute(&database, "INSERT INTO numbers (id, score) VALUES (1, 10), (2, 20), (3, 30);")
+        .unwrap();
+
+    assert!(matches!(
+        execute(
+            &database,
+            "SELECT id FROM numbers WHERE 10 / (3 - id) > 0 ORDER BY score LIMIT 1 OFFSET 1;"
+        ),
+        Err(TestDatabaseError::Executor(ExecutorError::DivisionByZero))
+    ));
+    assert_eq!(database.rows_read.get(), 3);
 }
 
 #[test]

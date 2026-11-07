@@ -12,12 +12,14 @@
 use crate::planner::{NodeId, PhysicalPlan, PhysicalPlanNode, RelationId};
 use crate::relational::access::RelationalAccess;
 use crate::relational::error::StorageError;
-use crate::relational::{OwnedTableRecord, Tuple, Value};
+use crate::relational::{OwnedTableRecord, ScanDirection, Tuple, Value};
 #[cfg(test)]
 use crate::relational::{StorageResult, TupleRef, ValueRef};
 use crate::sql_parser::parser::op::Op;
+use crate::sql_parser::parser::stmt::select::Ordering;
 
 mod expression;
+mod sort;
 
 use expression::{
     EvaluationContext, empty_record, evaluate_expressions, evaluate_value, execute_delete,
@@ -211,12 +213,16 @@ impl std::fmt::Display for ExecutorRow {
 }
 
 /// Internal iterator used while an execution operator is being drained.
-pub(crate) type RowStream = Box<dyn Iterator<Item = ExecutorResult<ExecutorRow>>>;
+type RowStream<'txn> = Box<dyn Iterator<Item = ExecutorResult<ExecutorRow>> + 'txn>;
 
-fn collect_rows(
-    rows: impl Iterator<Item = ExecutorResult<ExecutorRow>>,
-) -> Vec<ExecutorResult<ExecutorRow>> {
-    rows.collect()
+fn take_node(
+    nodes: &mut [Option<PhysicalPlanNode>],
+    node_id: NodeId,
+) -> ExecutorResult<PhysicalPlanNode> {
+    nodes
+        .get_mut(node_id.index())
+        .and_then(Option::take)
+        .ok_or(ExecutorError::UnsupportedOperator { operator: "INVALID PLAN" })
 }
 
 /// Result of executing one physical plan.
@@ -238,16 +244,15 @@ pub enum ExecutionOutput {
     CommandOk,
 }
 
+#[cfg(test)]
 impl ExecutionOutput {
-    /// Extracts the row stream from this output.
-    ///
-    /// Row operators call this when they expect their child plan to produce
-    /// rows. Non-row outputs become [`ExecutorError::ExpectedRows`] tagged with
-    /// the requesting operator name.
-    fn into_rows(self, operator: &'static str) -> ExecutorResult<RowStream> {
+    fn into_rows(
+        self,
+        operator: &'static str,
+    ) -> ExecutorResult<impl Iterator<Item = ExecutorResult<ExecutorRow>>> {
         match self {
             Self::Explain(_) => Err(ExecutorError::ExpectedRows { operator }),
-            Self::Rows { rows, .. } => Ok(Box::new(rows.into_iter())),
+            Self::Rows { rows, .. } => Ok(rows.into_iter()),
             Self::RowsAffected(_) | Self::SchemaAffected | Self::CommandOk => {
                 Err(ExecutorError::ExpectedRows { operator })
             }
@@ -313,24 +318,7 @@ where
         }
         let (nodes, root, output_schema) = plan.into_parts();
         let mut nodes = nodes.into_iter().map(Some).collect::<Vec<_>>();
-        let mut output = self.execute_node(&mut nodes, root)?;
-        if let ExecutionOutput::Rows { columns, .. } = &mut output {
-            *columns = output_schema
-                .map(|schema| schema.columns.into_iter().map(|column| column.name).collect())
-                .unwrap_or_default();
-        }
-        Ok(output)
-    }
-
-    fn execute_node(
-        &mut self,
-        nodes: &mut [Option<PhysicalPlanNode>],
-        node_id: NodeId,
-    ) -> ExecutorResult<ExecutionOutput> {
-        let Some(node) = nodes.get_mut(node_id.index()).and_then(Option::take) else {
-            return Err(ExecutorError::UnsupportedOperator { operator: "INVALID PLAN" });
-        };
-        match node {
+        match take_node(&mut nodes, root)? {
             PhysicalPlanNode::DropTable { name } => {
                 self.transaction.drop_table(&name)?;
                 Ok(ExecutionOutput::SchemaAffected)
@@ -351,106 +339,136 @@ where
                 self.transaction.create_index(&name, &table.name, &column_names)?;
                 Ok(ExecutionOutput::SchemaAffected)
             }
-            PhysicalPlanNode::Values { rows } => Ok(execute_values(rows)),
             PhysicalPlanNode::InsertValues { table, columns, values } => {
                 execute_insert_values(self.transaction, &table, &columns, values)
             }
             PhysicalPlanNode::Update { relation, table, assignments, input } => {
-                let output_inner = self.execute_node(nodes, input)?;
-                execute_update(
-                    self.transaction,
-                    relation,
-                    &table,
-                    &assignments,
-                    output_inner.into_rows("UPDATE")?,
-                )
+                let input = take_node(&mut nodes, input)?;
+                // Materialize the target rows before writing to the scanned table or index.
+                let rows = self.execute_rows(&mut nodes, input, "UPDATE")?.collect::<Vec<_>>();
+                execute_update(self.transaction, relation, &table, &assignments, rows.into_iter())
             }
             PhysicalPlanNode::Delete { relation, table, input } => {
-                let output_inner = self.execute_node(nodes, input)?;
-                execute_delete(
-                    self.transaction,
-                    relation,
-                    &table,
-                    output_inner.into_rows("DELETE")?,
-                )
+                let input = take_node(&mut nodes, input)?;
+                let rows = self.execute_rows(&mut nodes, input, "DELETE")?.collect::<Vec<_>>();
+                execute_delete(self.transaction, relation, &table, rows.into_iter())
             }
-            PhysicalPlanNode::OneRow => Ok(ExecutionOutput::Rows {
-                columns: Vec::new(),
-                rows: collect_rows(std::iter::once_with(|| Ok(empty_record()))),
-            }),
-            PhysicalPlanNode::Empty => Ok(ExecutionOutput::Rows {
-                columns: Vec::new(),
-                rows: collect_rows(std::iter::empty()),
-            }),
+            node => {
+                let rows = self.execute_rows(&mut nodes, node, "SELECT")?.collect();
+                let columns = output_schema
+                    .map(|schema| schema.columns.into_iter().map(|column| column.name).collect())
+                    .unwrap_or_default();
+                Ok(ExecutionOutput::Rows { columns, rows })
+            }
+        }
+    }
+
+    fn execute_rows(
+        &self,
+        nodes: &mut [Option<PhysicalPlanNode>],
+        node: PhysicalPlanNode,
+        operator: &'static str,
+    ) -> ExecutorResult<RowStream<'txn>> {
+        match node {
+            PhysicalPlanNode::Values { rows } => Ok(Box::new(execute_values(rows))),
+            PhysicalPlanNode::OneRow => Ok(Box::new(std::iter::once_with(|| Ok(empty_record())))),
+            PhysicalPlanNode::Empty => Ok(Box::new(std::iter::empty())),
             PhysicalPlanNode::FullTableScan { relation, table } => {
                 let rows = self.transaction.scan_table(&table)?.map(move |record| {
                     let record = record.map_err(ExecutorError::from)?;
                     ExecutorRow::from_table_record(relation, record)
                 });
-                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
+                Ok(Box::new(rows))
             }
-            PhysicalPlanNode::PrimaryKeyRangeScan { relation, table, range } => {
-                let rows = self.transaction.scan_table_range(&table, range)?.map(move |record| {
-                    let record = record.map_err(ExecutorError::from)?;
-                    ExecutorRow::from_table_record(relation, record)
-                });
-                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
+            PhysicalPlanNode::PrimaryKeyRangeScan { relation, table, range, direction } => {
+                let rows = self
+                    .transaction
+                    .scan_table_range_in_direction(&table, range, scan_direction(&direction))?
+                    .map(move |record| {
+                        let record = record.map_err(ExecutorError::from)?;
+                        ExecutorRow::from_table_record(relation, record)
+                    });
+                Ok(Box::new(rows))
             }
             PhysicalPlanNode::SecondaryIndexScan { scan } => {
                 let relation = scan.relation;
                 let rows = self
                     .transaction
-                    .scan_index(&scan.table, &scan.index, scan.value_range)?
+                    .scan_index_in_direction(
+                        &scan.table,
+                        &scan.index,
+                        scan.value_range,
+                        scan_direction(&scan.direction),
+                    )?
                     .map(move |record| {
                         let record = record.map_err(ExecutorError::from)?;
                         ExecutorRow::from_table_record(relation, record)
                     });
-                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
+                Ok(Box::new(rows))
             }
             PhysicalPlanNode::Filter { input, predicate } => {
-                let output_inner = self.execute_node(nodes, input)?;
-                let rows = output_inner.into_rows("FILTER")?.filter_map(move |row| match row {
-                    Ok(row) => {
-                        let context = EvaluationContext::from_row(&row);
-                        let result = evaluate_value(&predicate, &context);
-                        match result {
-                            Ok(Value::Boolean(true)) => Some(Ok(row)),
-                            Ok(Value::Boolean(false)) => None,
-                            Ok(value) => Some(Err(ExecutorError::NonBooleanPredicate { value })),
-                            Err(error) => Some(Err(error)),
+                let input = take_node(nodes, input)?;
+                let rows =
+                    self.execute_rows(nodes, input, "FILTER")?.filter_map(move |row| match row {
+                        Ok(row) => {
+                            let context = EvaluationContext::from_row(&row);
+                            let result = evaluate_value(&predicate, &context);
+                            match result {
+                                Ok(Value::Boolean(true)) => Some(Ok(row)),
+                                Ok(Value::Boolean(false)) => None,
+                                Ok(value) => {
+                                    Some(Err(ExecutorError::NonBooleanPredicate { value }))
+                                }
+                                Err(error) => Some(Err(error)),
+                            }
                         }
-                    }
-                    Err(error) => Some(Err(error)),
-                });
-                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
+                        Err(error) => Some(Err(error)),
+                    });
+                Ok(Box::new(rows))
             }
-            PhysicalPlanNode::Sort { input: _, terms: _ } => {
-                // TODO: Change tuple serialization format to allow value comparison from raw byte slices
-                Err(ExecutorError::UnsupportedOperator { operator: "SORT" })
+            PhysicalPlanNode::Sort { input, terms } => {
+                let [term] = terms.as_slice() else {
+                    return Err(ExecutorError::UnsupportedOperator { operator: "SORT" });
+                };
+                let input = take_node(nodes, input)?;
+                let rows = sort::sort_rows(self.execute_rows(nodes, input, "SORT")?, term)?;
+                Ok(Box::new(rows.into_iter().map(Ok)))
             }
             PhysicalPlanNode::Project { input, expressions } => {
-                let output_inner = self.execute_node(nodes, input)?;
-                let rows = output_inner
-                    .into_rows("PROJECT")?
+                let input = take_node(nodes, input)?;
+                let rows = self
+                    .execute_rows(nodes, input, "PROJECT")?
                     .map(move |row| row.and_then(|row| evaluate_expressions(&expressions, row)));
-                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
+                Ok(Box::new(rows))
             }
-
             PhysicalPlanNode::Offset { input, offset } => {
-                let output_inner = self.execute_node(nodes, input)?;
-                // TODO: Make `offset` a usize value.
-                let offset = offset as usize;
-                let rows = offset_rows(output_inner.into_rows("OFFSET")?, offset);
-                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
+                let input = take_node(nodes, input)?;
+                Ok(Box::new(offset_rows(
+                    self.execute_rows(nodes, input, "OFFSET")?,
+                    offset as usize,
+                )))
             }
+            PhysicalPlanNode::Limit { limit: 0, .. } => Ok(Box::new(std::iter::empty())),
             PhysicalPlanNode::Limit { input, limit } => {
-                let output_inner = self.execute_node(nodes, input)?;
-                // TODO: Make `limit` a usize value.
-                let limit = limit as usize;
-                let rows = output_inner.into_rows("LIMIT")?.take(limit);
-                Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
+                let input = take_node(nodes, input)?;
+                Ok(Box::new(self.execute_rows(nodes, input, "LIMIT")?.take(limit as usize)))
             }
+            PhysicalPlanNode::DropTable { .. }
+            | PhysicalPlanNode::DropIndex { .. }
+            | PhysicalPlanNode::Explain { .. }
+            | PhysicalPlanNode::CreateTable { .. }
+            | PhysicalPlanNode::CreateIndex { .. }
+            | PhysicalPlanNode::InsertValues { .. }
+            | PhysicalPlanNode::Update { .. }
+            | PhysicalPlanNode::Delete { .. } => Err(ExecutorError::ExpectedRows { operator }),
         }
+    }
+}
+
+fn scan_direction(ordering: &Ordering) -> ScanDirection {
+    match ordering {
+        Ordering::Ascending => ScanDirection::Forward,
+        Ordering::Descending => ScanDirection::Reverse,
     }
 }
 
