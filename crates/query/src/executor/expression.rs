@@ -3,15 +3,16 @@ use crate::relational::access::RelationalAccess;
 use crate::relational::{TableSchema, Tuple, Value};
 use crate::sql_parser::parser::op::Op;
 
-use super::{ExecutionOutput, ExecutorError, ExecutorResult, ExecutorRow, RowStream, collect_rows};
+use super::{ExecutionOutput, ExecutorError, ExecutorResult, ExecutorRow};
 
 /// Executes a `VALUES` plan as a stream of evaluated literal rows.
-pub(super) fn execute_values(rows: Vec<Vec<ExecExpr>>) -> ExecutionOutput {
-    let rows = rows.into_iter().map(|expressions| {
+pub(super) fn execute_values(
+    rows: Vec<Vec<ExecExpr>>,
+) -> impl Iterator<Item = ExecutorResult<ExecutorRow>> {
+    rows.into_iter().map(|expressions| {
         let input = empty_record();
         evaluate_values(&expressions, &input).map(ExecutorRow::from_values)
-    });
-    ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) }
+    })
 }
 
 /// Skips rows from a child stream while still surfacing skipped-row errors.
@@ -19,8 +20,11 @@ pub(super) fn execute_values(rows: Vec<Vec<ExecExpr>>) -> ExecutionOutput {
 /// SQL `OFFSET` cannot silently swallow errors from rows it discards: if the
 /// child stream fails before enough rows have been skipped, the offset operator
 /// yields that error and continues counting it as one consumed input row.
-pub(super) fn offset_rows(mut rows: RowStream, mut remaining: usize) -> RowStream {
-    Box::new(std::iter::from_fn(move || {
+pub(super) fn offset_rows(
+    mut rows: impl Iterator<Item = ExecutorResult<ExecutorRow>>,
+    mut remaining: usize,
+) -> impl Iterator<Item = ExecutorResult<ExecutorRow>> {
+    std::iter::from_fn(move || {
         while remaining > 0 {
             match rows.next()? {
                 Ok(_) => remaining -= 1,
@@ -32,7 +36,7 @@ pub(super) fn offset_rows(mut rows: RowStream, mut remaining: usize) -> RowStrea
         }
 
         rows.next()
-    }))
+    })
 }
 
 /// Executes an `INSERT ... VALUES` plan.
@@ -83,7 +87,7 @@ pub(super) fn execute_update(
     relation: RelationId,
     table: &TableSchema,
     assignments: &[UpdateAssignment],
-    target_rows: RowStream,
+    target_rows: impl Iterator<Item = ExecutorResult<ExecutorRow>>,
 ) -> ExecutorResult<ExecutionOutput> {
     let mut affected = 0;
 
@@ -121,7 +125,7 @@ pub(super) fn execute_delete(
     transaction: &impl RelationalAccess,
     relation: RelationId,
     table: &TableSchema,
-    target_rows: RowStream,
+    target_rows: impl Iterator<Item = ExecutorResult<ExecutorRow>>,
 ) -> ExecutorResult<ExecutionOutput> {
     let mut affected = 0;
 
@@ -328,7 +332,7 @@ fn comparison_type_mismatch(left: Value, op: Op, right: Value) -> ExecutorError 
     }
 }
 
-fn value_type_name(value: &Value) -> &'static str {
+pub(super) fn value_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "NULL",
         Value::String(_) => "text",
