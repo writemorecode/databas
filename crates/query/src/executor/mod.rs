@@ -389,7 +389,7 @@ where
                 });
                 Ok(ExecutionOutput::Rows { columns: Vec::new(), rows: collect_rows(rows) })
             }
-            PhysicalPlanNode::PrimaryKeyRangeScan { relation, table, range } => {
+            PhysicalPlanNode::PrimaryKeyRangeScan { relation, table, range, .. } => {
                 let rows = self.transaction.scan_table_range(&table, range)?.map(move |record| {
                     let record = record.map_err(ExecutorError::from)?;
                     ExecutorRow::from_table_record(relation, record)

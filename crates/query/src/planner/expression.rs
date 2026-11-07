@@ -147,8 +147,8 @@ impl fmt::Display for UpdateAssignment {
 pub struct BoundSortTerm {
     /// Bound source column used as the sort key.
     pub(crate) column: BoundColumn,
-    /// Requested direction, or `None` for the SQL default.
-    pub(crate) direction: Option<Ordering>,
+    /// Sort direction, with the SQL default resolved to ascending.
+    pub(crate) direction: Ordering,
 }
 
 /// One executable `ORDER BY` term.
@@ -156,17 +156,13 @@ pub struct BoundSortTerm {
 pub struct SortTerm {
     /// Input slot used as the sort key.
     pub(crate) column: ExecColumn,
-    /// Requested direction, or `None` for the SQL default.
-    pub(crate) direction: Option<Ordering>,
+    /// Sort direction, with the SQL default resolved to ascending.
+    pub(crate) direction: Ordering,
 }
 
 impl fmt::Display for SortTerm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.column)?;
-        if let Some(direction) = &self.direction {
-            write!(f, " {direction}")?;
-        }
-        Ok(())
+        write!(f, "{} {}", self.column, self.direction)
     }
 }
 

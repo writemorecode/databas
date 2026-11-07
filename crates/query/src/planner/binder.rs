@@ -14,7 +14,7 @@ use crate::sql_parser::parser::stmt::create_table::{
 };
 use crate::sql_parser::parser::stmt::delete::DeleteQuery;
 use crate::sql_parser::parser::stmt::insert::InsertQuery;
-use crate::sql_parser::parser::stmt::select::SelectQuery;
+use crate::sql_parser::parser::stmt::select::{Ordering, SelectQuery};
 use crate::sql_parser::parser::stmt::update::UpdateQuery;
 
 use super::{
@@ -329,21 +329,18 @@ impl<'catalog> Binder<'catalog> {
         }
 
         if let Some(order_by) = &query.order_by {
-            let terms = order_by
-                .terms
-                .iter()
-                .map(|term| {
-                    Ok(BoundSortTerm {
-                        column: bind_column_reference(&scope, &term.column)?,
-                        direction: term.order.clone(),
-                    })
-                })
-                .collect::<PlannerResult<Vec<_>>>()?;
+            let [term] = order_by.terms.as_slice() else {
+                return Err(PlannerError::OrderByTermCount { terms: order_by.terms.len() });
+            };
+            let term = BoundSortTerm {
+                column: bind_column_reference(&scope, &term.column)?,
+                direction: term.order.clone().unwrap_or(Ordering::Ascending),
+            };
             current_input = push_logical_node(
                 nodes,
                 LogicalPlanNode::Sort {
                     input: current_input,
-                    terms,
+                    terms: vec![term],
                     output: current_output.clone(),
                 },
             );
@@ -728,7 +725,10 @@ mod tests {
         });
         let sort = expected.push(LogicalPlanNode::Sort {
             input: filter,
-            terms: vec![BoundSortTerm { column: users_name.clone(), direction: None }],
+            terms: vec![BoundSortTerm {
+                column: users_name.clone(),
+                direction: Ordering::Ascending,
+            }],
             output: join_output,
         });
         let expressions = vec![BoundExpr::Column(users_name), BoundExpr::Column(orders_total)];
@@ -740,6 +740,13 @@ mod tests {
         });
 
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn select_rejects_multiple_order_by_terms() {
+        let catalog = TestCatalog { tables: vec![table(1, "users", &["id", "name"])] };
+        let result = bind_select(&catalog, "SELECT name FROM users ORDER BY name, id DESC;");
+        assert!(matches!(result, Err(PlannerError::OrderByTermCount { terms: 2 })));
     }
 
     #[test]

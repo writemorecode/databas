@@ -36,8 +36,7 @@ pub(super) fn primary_key_range_predicate(
     relation: RelationId,
     predicate: &BoundExpr,
 ) -> Option<RangePredicate> {
-    let primary_key = table.row.columns.first()?;
-    if !primary_key.primary_key || primary_key.data_type != DataType::Integer {
+    if !has_integer_primary_key(table) {
         return None;
     }
 
@@ -255,6 +254,36 @@ fn combine_index_ranges(
         }
     }
     Some(())
+}
+
+/// Reports whether the first column is the table's physical integer key.
+fn has_integer_primary_key(table: &TableSchema) -> bool {
+    table
+        .row
+        .columns
+        .first()
+        .is_some_and(|column| column.primary_key && column.data_type == DataType::Integer)
+}
+
+pub(super) fn primary_key_orders_column(
+    table: &TableSchema,
+    relation: RelationId,
+    column: &BoundColumn,
+) -> bool {
+    column.relation == relation && column.ordinal == 0 && has_integer_primary_key(table)
+}
+
+pub(super) fn ordered_secondary_index<'a>(
+    table: &TableSchema,
+    relation: RelationId,
+    column: &BoundColumn,
+    indexes: &'a [IndexSchema],
+) -> Option<&'a IndexSchema> {
+    // The NULL tag does not match SQL NULL placement in either direction.
+    if column.relation != relation || table.row.columns.get(column.ordinal)?.nullable {
+        return None;
+    }
+    indexes.iter().find(|index| exact_single_column_index(index, table, column))
 }
 
 /// Reports whether an index belongs to the table and exactly covers a column.
