@@ -156,9 +156,8 @@ pub enum PhysicalPlanNode {
     /// Scan rows from a table whose primary key falls in a given range.
     ///
     /// The planner emits this for compatible comparisons against the first
-    /// integer primary-key column or to provide primary-key order. If only part of the `WHERE` predicate can be
-    /// expressed as a key range, the range scan is wrapped in a
-    /// [`PhysicalPlanNode::Filter`] for the residual expression.
+    /// integer primary-key column or to provide primary-key order. Any remaining
+    /// `WHERE` predicate is applied by a surrounding [`PhysicalPlanNode::Filter`].
     PrimaryKeyRangeScan {
         /// Query-local identity of the scanned table occurrence.
         relation: RelationId,
@@ -172,8 +171,8 @@ pub enum PhysicalPlanNode {
     /// Scan rows from a table through a secondary-index key range.
     ///
     /// This is selected for predicates or ordering on a compatible single-column
-    /// secondary index. When a predicate is present, it is still applied by a surrounding [`PhysicalPlanNode::Filter`] so the executor
-    /// preserves SQL semantics when the access range is only an approximation.
+    /// secondary index. A surrounding [`PhysicalPlanNode::Filter`] applies the
+    /// original predicate when present.
     SecondaryIndexScan {
         /// Scan metadata and key bounds.
         scan: SecondaryIndexScanPlan,

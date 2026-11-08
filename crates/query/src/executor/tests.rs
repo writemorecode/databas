@@ -576,7 +576,7 @@ fn limit_and_offset_select_the_requested_window() {
 }
 
 #[test]
-fn limit_only_reads_the_rows_needed_after_filtering_and_offset() {
+fn ordered_limit_only_reads_the_rows_needed_after_filtering_and_offset() {
     let database = MemoryStore::default();
     execute(&database, "CREATE TABLE numbers (id INT PRIMARY KEY, score INT);").unwrap();
     execute(
@@ -586,8 +586,11 @@ fn limit_only_reads_the_rows_needed_after_filtering_and_offset() {
     .unwrap();
 
     assert_eq!(
-        query(&database, "SELECT id FROM numbers WHERE score == 2 LIMIT 1 OFFSET 1;"),
-        vec![vec![Value::Integer(4)]]
+        query(
+            &database,
+            "SELECT id FROM numbers WHERE score == 2 ORDER BY id DESC LIMIT 1 OFFSET 2;"
+        ),
+        vec![vec![Value::Integer(2)]]
     );
     assert_eq!(database.scans_opened.get(), 1);
     assert_eq!(database.rows_read.get(), 4);
