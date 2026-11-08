@@ -12,10 +12,11 @@
 use crate::planner::{NodeId, PhysicalPlan, PhysicalPlanNode, RelationId};
 use crate::relational::access::RelationalAccess;
 use crate::relational::error::StorageError;
-use crate::relational::{OwnedTableRecord, Tuple, Value};
+use crate::relational::{OwnedTableRecord, ScanDirection, Tuple, Value};
 #[cfg(test)]
 use crate::relational::{StorageResult, TupleRef, ValueRef};
 use crate::sql_parser::parser::op::Op;
+use crate::sql_parser::parser::stmt::select::Ordering;
 
 mod expression;
 mod sort;
@@ -379,18 +380,26 @@ where
                 });
                 Ok(Box::new(rows))
             }
-            PhysicalPlanNode::PrimaryKeyRangeScan { relation, table, range, .. } => {
-                let rows = self.transaction.scan_table_range(&table, range)?.map(move |record| {
-                    let record = record.map_err(ExecutorError::from)?;
-                    ExecutorRow::from_table_record(relation, record)
-                });
+            PhysicalPlanNode::PrimaryKeyRangeScan { relation, table, range, direction } => {
+                let rows = self
+                    .transaction
+                    .scan_table_range_in_direction(&table, range, scan_direction(&direction))?
+                    .map(move |record| {
+                        let record = record.map_err(ExecutorError::from)?;
+                        ExecutorRow::from_table_record(relation, record)
+                    });
                 Ok(Box::new(rows))
             }
             PhysicalPlanNode::SecondaryIndexScan { scan } => {
                 let relation = scan.relation;
                 let rows = self
                     .transaction
-                    .scan_index(&scan.table, &scan.index, scan.value_range)?
+                    .scan_index_in_direction(
+                        &scan.table,
+                        &scan.index,
+                        scan.value_range,
+                        scan_direction(&scan.direction),
+                    )?
                     .map(move |record| {
                         let record = record.map_err(ExecutorError::from)?;
                         ExecutorRow::from_table_record(relation, record)
@@ -453,6 +462,13 @@ where
             | PhysicalPlanNode::Update { .. }
             | PhysicalPlanNode::Delete { .. } => Err(ExecutorError::ExpectedRows { operator }),
         }
+    }
+}
+
+fn scan_direction(ordering: &Ordering) -> ScanDirection {
+    match ordering {
+        Ordering::Ascending => ScanDirection::Forward,
+        Ordering::Descending => ScanDirection::Reverse,
     }
 }
 
