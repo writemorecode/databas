@@ -33,7 +33,7 @@ pub(super) fn sort_rows(
         sorted.push(row);
     }
 
-    let descending = matches!(term.direction, Some(SortDirection::Descending));
+    let descending = matches!(term.direction, SortDirection::Descending);
     sorted.sort_unstable_by(|left, right| {
         let ordering = compare_values(&left.values()[slot], &right.values()[slot]);
         if descending { ordering.reverse() } else { ordering }
