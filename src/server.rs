@@ -674,17 +674,11 @@ mod tests {
         client.execute("COMMIT;").unwrap();
         assert!(matches!(
             client.execute("BEGIN; INSERT INTO items (id, name) VALUES (2, 'two'); COMMIT"),
-            Err(ClientError::Server(crate::client::ServerError {
-                code: ErrorCode::SyntaxError,
-                ..
-            }))
+            Err(ClientError::Server(error)) if error.code() == ErrorCode::SyntaxError
         ));
         assert!(matches!(
             client.execute("COMMIT;"),
-            Err(ClientError::Server(crate::client::ServerError {
-                code: ErrorCode::TransactionError,
-                ..
-            }))
+            Err(ClientError::Server(error)) if error.code() == ErrorCode::TransactionError
         ));
         assert_eq!(
             client
@@ -702,7 +696,7 @@ mod tests {
         let error = client.execute("SELECT FROM;").unwrap_err();
         assert!(matches!(
             error,
-            ClientError::Server(crate::client::ServerError { code: ErrorCode::SyntaxError, .. })
+            ClientError::Server(server_error) if server_error.code() == ErrorCode::SyntaxError
         ));
 
         drop(client);
@@ -735,10 +729,8 @@ mod tests {
         let error = Client::connect(address_receiver.recv().unwrap(), "other").unwrap_err();
         assert!(matches!(
             error,
-            ClientError::Server(crate::client::ServerError {
-                code: ErrorCode::DatabaseNotFound,
-                ..
-            })
+            ClientError::Server(server_error)
+                if server_error.code() == ErrorCode::DatabaseNotFound
         ));
         server_thread.join().unwrap();
     }
