@@ -1,7 +1,7 @@
 use super::{
     CorruptionComponent, CorruptionError, CorruptionKind, NO_OVERFLOW_PAGE_ID,
     OVERFLOW_NEXT_PAGE_ID_SIZE, Ordering, PAGE_SIZE, PageCache, PageId, StorageError,
-    StorageResult, TxnId, overflow, page,
+    StorageResult, overflow, page,
 };
 
 type MaterializedLeafCell = (Box<[u8]>, Box<[u8]>);
@@ -26,60 +26,12 @@ fn read_overflow_next_page_id(page: &[u8; PAGE_SIZE]) -> Option<PageId> {
     page::format::read_optional_u64(page, 0)
 }
 
-pub(super) fn write_overflow_chain_from_slices(
-    page_cache: &PageCache,
-    txn_id: Option<TxnId>,
-    mut first: &[u8],
-    mut second: &[u8],
-) -> StorageResult<Option<PageId>> {
-    if first.is_empty() && second.is_empty() {
-        return Ok(None);
-    }
-
-    let mut first_page_id = None;
-    let mut previous_page_id = None;
-    while !first.is_empty() || !second.is_empty() {
-        let (page_id, pin) = page_cache.new_page(txn_id)?;
-        {
-            let mut page = pin.write(txn_id)?;
-            page.page_mut().fill(0);
-            page::format::write_optional_u64(page.page_mut(), 0, None);
-
-            let mut write_offset = OVERFLOW_NEXT_PAGE_ID_SIZE;
-            while write_offset < PAGE_SIZE && (!first.is_empty() || !second.is_empty()) {
-                let source = if !first.is_empty() { first } else { second };
-                let take = source.len().min(PAGE_SIZE - write_offset);
-                page.page_mut()[write_offset..write_offset + take].copy_from_slice(&source[..take]);
-                write_offset += take;
-                if !first.is_empty() {
-                    first = &first[take..];
-                } else {
-                    second = &second[take..];
-                }
-            }
-        }
-        drop(pin);
-
-        if first_page_id.is_none() {
-            first_page_id = Some(page_id);
-        }
-        if let Some(previous_page_id) = previous_page_id {
-            let previous_pin = page_cache.fetch_page(previous_page_id)?;
-            let mut previous_page = previous_pin.write(txn_id)?;
-            page::format::write_optional_u64(previous_page.page_mut(), 0, Some(page_id));
-        }
-        previous_page_id = Some(page_id);
-    }
-
-    Ok(first_page_id)
-}
-
-fn append_overflow_chain_exact(
+fn append_overflow_bytes(
     page_cache: &PageCache,
     first_overflow_page_id: PageId,
     payload: &mut Vec<u8>,
     total_payload_len: usize,
-) -> StorageResult<()> {
+) -> StorageResult<Option<PageId>> {
     let initial_len = payload.len();
     let expected_overflow_len = total_payload_len - initial_len;
     let mut page_id = Some(first_overflow_page_id);
@@ -115,6 +67,18 @@ fn append_overflow_chain_exact(
         page_id = read_overflow_next_page_id(page.page());
     }
 
+    Ok(page_id)
+}
+
+fn append_overflow_chain_exact(
+    page_cache: &PageCache,
+    first_overflow_page_id: PageId,
+    payload: &mut Vec<u8>,
+    total_payload_len: usize,
+) -> StorageResult<()> {
+    let expected_overflow_len = total_payload_len - payload.len();
+    let page_id =
+        append_overflow_bytes(page_cache, first_overflow_page_id, payload, total_payload_len)?;
     if page_id.is_some() {
         return Err(overflow_corruption(
             page_id,
@@ -131,41 +95,7 @@ pub(super) fn append_overflow_prefix(
     payload: &mut Vec<u8>,
     total_payload_len: usize,
 ) -> StorageResult<()> {
-    let initial_len = payload.len();
-    let expected_overflow_len = total_payload_len - initial_len;
-    let mut page_id = Some(first_overflow_page_id);
-
-    while payload.len() < total_payload_len {
-        let Some(current_page_id) = page_id else {
-            return Err(overflow_corruption(
-                None,
-                CorruptionKind::OverflowChainTooShort {
-                    expected: expected_overflow_len,
-                    actual: payload.len() - initial_len,
-                },
-            ));
-        };
-
-        if current_page_id == NO_OVERFLOW_PAGE_ID {
-            return Err(overflow_corruption(
-                Some(current_page_id),
-                CorruptionKind::OverflowChainTooShort {
-                    expected: expected_overflow_len,
-                    actual: payload.len() - initial_len,
-                },
-            ));
-        }
-
-        let pin = page_cache.fetch_page(current_page_id)?;
-        let page = pin.read()?;
-        let remaining = total_payload_len - payload.len();
-        let take = remaining.min(overflow::OVERFLOW_PAYLOAD_SIZE);
-        payload.extend_from_slice(
-            &page.page()[OVERFLOW_NEXT_PAGE_ID_SIZE..OVERFLOW_NEXT_PAGE_ID_SIZE + take],
-        );
-        page_id = read_overflow_next_page_id(page.page());
-    }
-
+    append_overflow_bytes(page_cache, first_overflow_page_id, payload, total_payload_len)?;
     Ok(())
 }
 
@@ -311,4 +241,79 @@ pub(super) fn compare_overflow_key(
     }
 
     Ok(key_len.cmp(&key.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        database_header::DatabaseHeader, disk_manager::DiskManager, storage_runtime::StorageRuntime,
+    };
+    use proptest::{prelude::*, test_runner::TestCaseResult};
+    use std::sync::Arc;
+
+    fn cache() -> StorageResult<(tempfile::TempDir, PageCache)> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("db");
+        let mut disk = DiskManager::new(&path)?;
+        disk.new_page()?;
+        disk.write_page(0, &DatabaseHeader::encode_page())?;
+        let runtime = Arc::new(StorageRuntime::new(path, disk)?);
+        Ok((dir, PageCache::new(runtime, 2)?))
+    }
+
+    #[test]
+    fn overflow_slice_boundaries_preserve_payload_and_exact_length_validation() -> TestCaseResult {
+        let (_dir, cache) = cache()?;
+        let capacity = overflow::OVERFLOW_PAYLOAD_SIZE;
+        let payload: Vec<u8> = (0u8..251).cycle().take(2 * capacity + 17).collect();
+        prop_assert!(overflow::write_chain(&cache, None, &[])?.is_none());
+        for split in [0, 1, capacity - 1, capacity, capacity + 1, 2 * capacity, payload.len()] {
+            let root = overflow::write_chain_from_slices(
+                &cache,
+                None,
+                &payload[..split],
+                &payload[split..],
+            )?
+            .unwrap();
+            prop_assert_eq!(
+                &materialize_payload(&cache, root, &[], Some(root), payload.len())?,
+                &payload
+            );
+            let mut prefix = Vec::new();
+            append_overflow_prefix(&cache, root, &mut prefix, capacity)?;
+            prop_assert_eq!(prefix.as_slice(), &payload[..capacity]);
+            prop_assert!(
+                matches!(
+                    materialize_payload(&cache, root, &[], Some(root), capacity),
+                    Err(StorageError::Corruption(CorruptionError {
+                        kind: CorruptionKind::OverflowChainTooLong { .. },
+                        ..
+                    }))
+                ),
+                "unexpected overflow validation result"
+            );
+            prop_assert!(
+                matches!(
+                    materialize_payload(&cache, root, &[], Some(root), 4 * capacity),
+                    Err(StorageError::Corruption(CorruptionError {
+                        kind: CorruptionKind::OverflowChainTooShort { .. },
+                        ..
+                    }))
+                ),
+                "unexpected overflow validation result"
+            );
+            prop_assert!(
+                matches!(
+                    append_overflow_prefix(&cache, root, &mut Vec::new(), 4 * capacity),
+                    Err(StorageError::Corruption(CorruptionError {
+                        kind: CorruptionKind::OverflowChainTooShort { .. },
+                        ..
+                    }))
+                ),
+                "unexpected overflow validation result"
+            );
+        }
+        Ok(())
+    }
 }

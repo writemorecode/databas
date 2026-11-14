@@ -1,4 +1,4 @@
-use super::payload::{cell_corruption, write_overflow_chain_from_slices};
+use super::payload::cell_corruption;
 use super::{
     CorruptionComponent, CorruptionError, CorruptionKind, INTERIOR_CELL_PREFIX_SIZE,
     LEAF_CELL_PREFIX_SIZE, Leaf, MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, PageError, PageId, RawInterior,
@@ -39,7 +39,7 @@ impl TreeCursor {
             if key.len() >= MAX_INLINE_OVERFLOW_PAYLOAD_BYTES {
                 inline_payload.copy_from_slice(&key[..MAX_INLINE_OVERFLOW_PAYLOAD_BYTES]);
                 Some(
-                    write_overflow_chain_from_slices(
+                    overflow::write_chain_from_slices(
                         &self.page_cache,
                         self.txn_id,
                         &key[MAX_INLINE_OVERFLOW_PAYLOAD_BYTES..],
