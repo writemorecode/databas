@@ -109,7 +109,8 @@ impl Server {
         database_name: impl Into<String>,
     ) -> Result<Self, ServerError> {
         let database_name = database_name.into();
-        validate_database_name(&database_name)?;
+        protocol::validate_database_name(&database_name)
+            .map_err(ServerError::InvalidDatabaseName)?;
         Ok(Self { listener, database: Arc::new(database), database_name })
     }
 
@@ -268,19 +269,6 @@ fn configure_stream(stream: &TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_database_name(name: &str) -> Result<(), ServerError> {
-    if name.is_empty() {
-        return Err(ServerError::InvalidDatabaseName("name cannot be empty"));
-    }
-    if name.len() > 255 {
-        return Err(ServerError::InvalidDatabaseName("name cannot exceed 255 bytes"));
-    }
-    if name.as_bytes().contains(&0) {
-        return Err(ServerError::InvalidDatabaseName("name cannot contain NUL"));
-    }
-    Ok(())
-}
-
 #[derive(Debug, Error)]
 enum ConnectionError {
     #[error(transparent)]
@@ -315,10 +303,7 @@ fn handle_connection(
             return Ok(());
         }
     };
-    if requested_name.is_empty()
-        || requested_name.len() > 255
-        || requested_name.as_bytes().contains(&0)
-    {
+    if protocol::validate_database_name(requested_name).is_err() {
         send_error(stream, ErrorCode::InvalidRequest, "database name is invalid")?;
         return Ok(());
     }

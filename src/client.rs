@@ -114,7 +114,8 @@ impl Client {
     /// Returns an error if the name is invalid, TCP connection fails, the
     /// handshake is malformed, or the server rejects the database name.
     pub fn connect(address: impl ToSocketAddrs, database_name: &str) -> Result<Self, ClientError> {
-        validate_database_name(database_name)?;
+        protocol::validate_database_name(database_name)
+            .map_err(ClientError::InvalidDatabaseName)?;
         let mut stream = TcpStream::connect(address).map_err(protocol::ProtocolError::from)?;
         stream.set_nodelay(true).map_err(protocol::ProtocolError::from)?;
         protocol::write_frame(&mut stream, STARTUP, database_name.as_bytes())?;
@@ -190,19 +191,6 @@ impl Client {
             }
         }
     }
-}
-
-fn validate_database_name(name: &str) -> Result<(), ClientError> {
-    if name.is_empty() {
-        return Err(ClientError::InvalidDatabaseName("name cannot be empty"));
-    }
-    if name.len() > 255 {
-        return Err(ClientError::InvalidDatabaseName("name cannot exceed 255 bytes"));
-    }
-    if name.as_bytes().contains(&0) {
-        return Err(ClientError::InvalidDatabaseName("name cannot contain NUL"));
-    }
-    Ok(())
 }
 
 fn read_required_frame(

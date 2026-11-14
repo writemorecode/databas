@@ -117,6 +117,20 @@ impl ErrorCode {
     }
 }
 
+/// Validates the database name constraints shared by startup clients and servers.
+pub(crate) fn validate_database_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("name cannot be empty");
+    }
+    if name.len() > 255 {
+        return Err("name cannot exceed 255 bytes");
+    }
+    if name.as_bytes().contains(&0) {
+        return Err("name cannot contain NUL");
+    }
+    Ok(())
+}
+
 /// Failure while reading or writing protocol data.
 #[derive(Debug, Error)]
 pub enum ProtocolError {
@@ -431,5 +445,18 @@ mod tests {
     fn unknown_error_codes_are_preserved() {
         assert_eq!(ErrorCode::from_u16(777), ErrorCode::Unknown(777));
         assert_eq!(ErrorCode::Unknown(777).as_u16(), 777);
+    }
+
+    #[test]
+    fn database_name_validation_uses_byte_length_and_rejects_nul() {
+        assert_eq!(validate_database_name(""), Err("name cannot be empty"));
+        assert!(validate_database_name(&"a".repeat(255)).is_ok());
+        assert_eq!(validate_database_name(&"a".repeat(256)), Err("name cannot exceed 255 bytes"));
+        assert!(validate_database_name(&"é".repeat(127)).is_ok());
+        assert_eq!(
+            validate_database_name(&format!("{}é", "a".repeat(254))),
+            Err("name cannot exceed 255 bytes")
+        );
+        assert_eq!(validate_database_name("a\0b"), Err("name cannot contain NUL"));
     }
 }
