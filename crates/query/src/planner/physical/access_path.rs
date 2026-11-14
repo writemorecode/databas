@@ -46,8 +46,9 @@ pub(super) fn primary_key_range_predicate(
 /// Derives an index-key range from predicates that constrain an exact,
 /// single-column secondary index.
 ///
-/// All compatible comparisons for the selected indexed column are intersected
-/// into the returned value and encoded-key ranges.
+/// Only the leading comparisons known to evaluate without error contribute
+/// bounds. A later comparison could otherwise skip a row whose earlier
+/// conjunct would have failed before the executor reached that comparison.
 pub(super) fn secondary_index_predicate(
     table: &TableSchema,
     relation: RelationId,
@@ -57,28 +58,23 @@ pub(super) fn secondary_index_predicate(
     let mut conjuncts = Vec::new();
     flatten_conjuncts(predicate, &mut conjuncts);
 
-    for conjunct in &conjuncts {
-        let Some(candidate) = secondary_index_comparison(table, relation, conjunct, indexes) else {
-            continue;
-        };
-        let mut value_range = IndexValueRange::default();
+    let comparisons = conjuncts
+        .into_iter()
+        .map_while(|conjunct| index_comparison(table, relation, conjunct))
+        .collect::<Vec<_>>();
+    let (index, column) = comparisons.iter().find_map(|comparison| {
+        indexes
+            .iter()
+            .find(|index| exact_single_column_index(index, table, comparison.column))
+            .map(|index| (index, comparison.column))
+    })?;
 
-        for conjunct in &conjuncts {
-            if let Some(comparison) =
-                index_comparison_for_column(table, relation, conjunct, &candidate.column)
-            {
-                combine_index_ranges(&mut value_range, comparison.value, comparison.kind)?;
-            }
-        }
-
-        return Some(IndexPredicate {
-            index: candidate.index,
-            column: candidate.column,
-            value_range,
-        });
+    let mut value_range = IndexValueRange::default();
+    for comparison in comparisons.into_iter().filter(|comparison| comparison.column == column) {
+        combine_index_ranges(&mut value_range, comparison.value, comparison.kind)?;
     }
 
-    None
+    Some(IndexPredicate { index: index.clone(), column: column.clone(), value_range })
 }
 
 /// Flattens a tree of `AND` expressions into individual conjuncts.
@@ -117,38 +113,6 @@ struct IndexComparison<'a> {
     kind: IndexComparisonKind,
 }
 
-/// An index and column that can satisfy one predicate conjunct.
-struct SecondaryIndexCandidate {
-    /// The matching single-column secondary index.
-    index: IndexSchema,
-    /// The indexed column constrained by the conjunct.
-    column: BoundColumn,
-}
-
-/// Finds an indexed column comparison suitable for secondary-index access.
-fn secondary_index_comparison(
-    table: &TableSchema,
-    relation: RelationId,
-    comparison: &BoundExpr,
-    indexes: &[IndexSchema],
-) -> Option<SecondaryIndexCandidate> {
-    let comparison = index_comparison(table, relation, comparison)?;
-    let index =
-        indexes.iter().find(|index| exact_single_column_index(index, table, comparison.column))?;
-    Some(SecondaryIndexCandidate { index: index.clone(), column: comparison.column.clone() })
-}
-
-/// Extracts a comparison when it targets the requested bound column.
-fn index_comparison_for_column<'a>(
-    table: &TableSchema,
-    relation: RelationId,
-    comparison: &'a BoundExpr,
-    column: &BoundColumn,
-) -> Option<IndexComparison<'a>> {
-    let comparison = index_comparison(table, relation, comparison)?;
-    (*comparison.column == *column).then_some(comparison)
-}
-
 /// Parses a planned expression as a column-to-literal comparison.
 ///
 /// Comparisons written with the literal on the left are normalized so the
@@ -164,15 +128,9 @@ fn index_comparison<'a>(
     let comparison = index_comparison_from_operands(relation, left, *op, right)
         .or_else(|| index_comparison_from_reversed_operands(relation, left, *op, right))?;
     let column = table.row.columns.get(comparison.column.ordinal)?;
-    // The executor errors on ordered comparisons with NULL. Keep the full
-    // scan for nullable TEXT ranges so an index cannot hide that error.
-    if column.data_type == DataType::Text
-        && column.nullable
-        && comparison.kind != IndexComparisonKind::Equals
-    {
-        return None;
-    }
-    Some(comparison)
+    // A comparison with a non-null literal can error on a NULL row that
+    // the bound would otherwise exclude.
+    (!column.nullable).then_some(comparison)
 }
 
 /// Builds an index comparison from a column followed by a literal operand.

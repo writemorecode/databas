@@ -101,7 +101,7 @@ mod tests {
                     ColumnSchema {
                         name: "age".into(),
                         data_type: DataType::Integer,
-                        nullable: true,
+                        nullable: false,
                         primary_key: false,
                     },
                 ],
@@ -112,6 +112,7 @@ mod tests {
     #[derive(Default)]
     struct MemoryCatalog {
         indexes: Vec<IndexSchema>,
+        nullable_age: bool,
     }
 
     impl MemoryCatalog {
@@ -135,17 +136,20 @@ mod tests {
                     }
                 })
                 .collect();
-            Self { indexes }
+            Self { indexes, nullable_age: false }
         }
     }
 
     impl CatalogRead for MemoryCatalog {
         fn table_schema_by_name(&self, name: &str) -> Result<TableSchema, StorageError> {
-            (name == "users").then(users_table).ok_or_else(|| {
-                StorageError::InvalidArgument(InvalidArgumentError::TableNotFound {
+            if name != "users" {
+                return Err(StorageError::InvalidArgument(InvalidArgumentError::TableNotFound {
                     name: name.into(),
-                })
-            })
+                }));
+            }
+            let mut table = users_table();
+            table.row.columns[2].nullable = self.nullable_age;
+            Ok(table)
         }
 
         fn index_schemas_for_table(
@@ -228,6 +232,8 @@ mod tests {
 
     #[test]
     fn create_table_preserves_the_declared_schema() {
+        let mut schema = users_table().row;
+        schema.columns[2].nullable = true;
         assert_eq!(
             plan(
                 &MemoryCatalog::default(),
@@ -237,15 +243,12 @@ mod tests {
                 logical: LogicalPlan::from_parts(
                     vec![LogicalPlanNode::CreateTable {
                         name: "users".into(),
-                        schema: users_table().row.clone(),
+                        schema: schema.clone(),
                     }],
                     NodeId::new(0),
                 ),
                 physical: physical_plan(
-                    vec![PhysicalPlanNode::CreateTable {
-                        name: "users".into(),
-                        schema: users_table().row,
-                    }],
+                    vec![PhysicalPlanNode::CreateTable { name: "users".into(), schema }],
                     None,
                 ),
             }
@@ -1119,6 +1122,7 @@ mod tests {
         .to_string();
 
         assert!(plan.contains("index=users_name"), "{plan}");
+        assert!(plan.contains("lower=Ada inclusive"), "{plan}");
         assert!(plan.contains("direction=DESC"), "{plan}");
         assert!(plan.contains("Filter predicate="), "{plan}");
         assert!(plan.contains("age == 7") && plan.contains("name >="), "{plan}");
@@ -1152,13 +1156,15 @@ mod tests {
 
     #[test]
     fn order_by_nullable_column_uses_sort() {
-        let catalog = MemoryCatalog::with_indexes(&[("users_age", 2)]);
-        for (sql, access) in [
-            ("SELECT id FROM users ORDER BY age DESC;", "FullTableScan"),
-            ("SELECT id FROM users WHERE age == 7 ORDER BY age;", "SecondaryIndexScan"),
+        let mut catalog = MemoryCatalog::with_indexes(&[("users_age", 2)]);
+        catalog.nullable_age = true;
+        catalog.indexes[0].columns[0].column.nullable = true;
+        for sql in [
+            "SELECT id FROM users ORDER BY age DESC;",
+            "SELECT id FROM users WHERE age == 7 ORDER BY age;",
         ] {
             let plan = plan(&catalog, sql).physical.to_string();
-            assert!(plan.contains("Sort") && plan.contains(access), "{plan}");
+            assert!(plan.contains("Sort") && plan.contains("FullTableScan"), "{plan}");
         }
     }
 

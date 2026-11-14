@@ -589,6 +589,70 @@ fn primary_and_secondary_index_scans_return_matching_rows() {
 }
 
 #[test]
+fn secondary_index_respects_where_short_circuit_order() {
+    let database = MemoryStore::default();
+    execute(&database, "CREATE TABLE numbers (id INT PRIMARY KEY, score INT);").unwrap();
+    execute(&database, "INSERT INTO numbers (id, score) VALUES (1, 8), (2, 7);").unwrap();
+
+    let failing = [
+        "SELECT id FROM numbers WHERE 10 / (id - 1) > 0 AND score == 7;",
+        "SELECT id FROM numbers WHERE score >= 7 AND 10 / (id - 1) > 0 AND score <= 7;",
+    ];
+    let guarded = "SELECT id FROM numbers WHERE score == 7 AND 10 / (id - 1) > 0;";
+    for sql in failing {
+        assert!(matches!(
+            try_rows(execute(&database, sql).unwrap()),
+            Err(ExecutorError::DivisionByZero)
+        ));
+    }
+    assert_eq!(query(&database, guarded), [vec![Value::Integer(2)]]);
+
+    execute(&database, "CREATE INDEX numbers_score ON numbers (score);").unwrap();
+    for sql in failing {
+        assert!(matches!(
+            try_rows(execute(&database, sql).unwrap()),
+            Err(ExecutorError::DivisionByZero)
+        ));
+    }
+    database.rows_read.set(0);
+    assert_eq!(query(&database, guarded), [vec![Value::Integer(2)]]);
+    assert_eq!(database.rows_read.get(), 1);
+}
+
+#[test]
+fn secondary_indexes_preserve_errors_from_nullable_comparisons() {
+    let database = MemoryStore::default();
+    execute(
+        &database,
+        "CREATE TABLE items (id INT PRIMARY KEY, name TEXT NULLABLE, score INT NULLABLE, amount FLOAT NULLABLE);",
+    )
+    .unwrap();
+    execute(&database, "INSERT INTO items (id) VALUES (1);").unwrap();
+
+    let queries = [
+        "SELECT id FROM items WHERE name == 'a';",
+        "SELECT id FROM items WHERE score == 7;",
+        "SELECT id FROM items WHERE amount < 1.5;",
+        "SELECT id FROM items WHERE score == 7 AND id == 2;",
+    ];
+    for sql in queries {
+        assert!(matches!(
+            try_rows(execute(&database, sql).unwrap()),
+            Err(ExecutorError::ComparisonTypeMismatch { .. })
+        ));
+    }
+    execute(&database, "CREATE INDEX items_name ON items (name);").unwrap();
+    execute(&database, "CREATE INDEX items_score ON items (score);").unwrap();
+    execute(&database, "CREATE INDEX items_amount ON items (amount);").unwrap();
+    for sql in queries {
+        assert!(matches!(
+            try_rows(execute(&database, sql).unwrap()),
+            Err(ExecutorError::ComparisonTypeMismatch { .. })
+        ));
+    }
+}
+
+#[test]
 fn limit_and_offset_select_the_requested_window() {
     let database = MemoryStore::default();
     execute(&database, "CREATE TABLE numbers (id INT PRIMARY KEY);").unwrap();
