@@ -1,6 +1,7 @@
 use databas_relational::{
     ColumnSchema, DataType, Database, InvalidArgumentError, LockMode, RelationalError,
-    StatementTransactionMode as Mode, StorageResult, TableSchema, Tuple, TupleSchema, Value,
+    RelationalResult, StatementTransactionMode as Mode, StorageResult, TableSchema, Tuple,
+    TupleSchema, Value,
     access::{CatalogRead, RelationalAccess},
 };
 
@@ -48,6 +49,67 @@ fn direct_relational_statements_restore_failed_writes_and_preserve_prior_work() 
         access.scan_table(&table)?.map(|row| row.map(|row| row.table_key)).collect()
     });
     assert_eq!(keys.unwrap(), vec![7]);
+    transaction.commit().unwrap();
+}
+
+#[test]
+#[cfg(panic = "unwind")]
+#[allow(clippy::panic)]
+fn a_panicking_statement_restores_its_savepoint_and_preserves_prior_work() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    let database = Database::create(&path).unwrap();
+    let table = create_table(&database);
+    let mut ddl = database.begin(Mode::Ddl).unwrap();
+    let index = ddl
+        .statement(Mode::Ddl, &[], |access| access.create_index("items_id", "items", &["id"]))
+        .unwrap();
+    ddl.commit().unwrap();
+    drop(ddl);
+
+    let mut transaction = database.begin(Mode::Ordinary).unwrap();
+    let locks = [(table.table_id.into(), LockMode::Exclusive)];
+    transaction
+        .statement(Mode::Ordinary, &locks, |access| {
+            access.insert_table_row(&table, vec![Value::Integer(7)])
+        })
+        .unwrap();
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        transaction.statement::<(), RelationalError>(Mode::Ordinary, &locks, |access| {
+            access.insert_table_row(&table, vec![Value::Integer(8)])?;
+            panic!("callback failed");
+        })
+    }))
+    .unwrap_err();
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"callback failed"));
+    transaction
+        .statement(Mode::Ordinary, &locks, |access| {
+            access.insert_table_row(&table, vec![Value::Integer(9)])
+        })
+        .unwrap();
+    transaction.commit().unwrap();
+    drop(transaction);
+    drop(database);
+
+    let database = Database::open(&path).unwrap();
+    let mut transaction = database.begin(Mode::Ordinary).unwrap();
+    transaction
+        .statement(Mode::Ordinary, &locks, |access| {
+            let keys = access
+                .scan_table(&table)?
+                .map(|row| row.map(|row| row.table_key))
+                .collect::<RelationalResult<Vec<_>>>()?;
+            let index_keys = access
+                .scan_index(&table, &index, Default::default())?
+                .map(|row| row.map(|row| row.table_key))
+                .collect::<RelationalResult<Vec<_>>>()?;
+            assert_eq!(keys, [7, 9]);
+            assert_eq!(index_keys, keys);
+            Ok::<_, RelationalError>(())
+        })
+        .unwrap();
     transaction.commit().unwrap();
 }
 
