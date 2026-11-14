@@ -304,6 +304,15 @@ impl IndexCursor {
         self.inner.insert(key, &encode_index_table_key(table_key)).map_err(Into::into)
     }
 
+    pub(crate) fn contains_key(&mut self, key: &[u8]) -> RelationalResult<bool> {
+        Ok(self.inner.get(key)?.is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mutation_epoch(&self) -> u64 {
+        self.inner.mutation_epoch()
+    }
+
     /// Looks up an index entry by key.
     #[cfg(test)]
     pub(crate) fn get(&mut self, key: &[u8]) -> RelationalResult<Option<OwnedIndexEntry>> {

@@ -3,7 +3,8 @@
 use crate::catalog_manager::CatalogManager;
 use crate::cursor::encode_index_entry_key;
 use crate::error::{
-    CorruptionComponent, CorruptionError, CorruptionKind, RelationalError, RelationalResult,
+    CorruptionComponent, CorruptionError, CorruptionKind, InvalidArgumentError, RelationalError,
+    RelationalResult,
 };
 use crate::{
     IndexSchema, OwnedTableRecord, TableKey, TableRecord, TableSchema, TupleRef, TupleView,
@@ -46,6 +47,32 @@ pub fn delete_index_entries(
         let key = encode_index_entry_key(&key, record.table_key);
         let mut index_cursor = index_cursor(catalog, &index.name)?;
         index_cursor.delete(&key)?;
+    }
+    Ok(())
+}
+
+pub fn update_index_entries(
+    catalog: &CatalogManager,
+    table: &TableSchema,
+    old_record: &OwnedTableRecord,
+    new_record: &OwnedTableRecord,
+) -> RelationalResult<()> {
+    for index in catalog.index_schemas_for_table(table)? {
+        let old_key = index_key_from_record(table, &index, old_record)?;
+        let new_key = index_key_from_record(table, &index, new_record)?;
+        let old_entry_key = encode_index_entry_key(&old_key, old_record.table_key);
+        let mut cursor = index_cursor(catalog, &index.name)?;
+        if old_key == new_key {
+            // An outdated record may point to an index entry that no longer
+            // exists. Keep the same missing-key check as a changed entry.
+            if !cursor.contains_key(&old_entry_key)? {
+                return Err(RelationalError::InvalidArgument(InvalidArgumentError::KeyNotFound));
+            }
+            continue;
+        }
+        cursor.delete(&old_entry_key)?;
+        let new_entry_key = encode_index_entry_key(&new_key, new_record.table_key);
+        cursor.insert(&new_entry_key, new_record.table_key)?;
     }
     Ok(())
 }

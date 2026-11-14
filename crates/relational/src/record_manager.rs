@@ -131,10 +131,9 @@ pub fn update_table_row(
     let updated =
         OwnedTableRecord { table_key: record.table_key, record: updated.into_boxed_slice() };
 
-    index_manager::delete_index_entries(catalog, table, record)?;
     let mut table_cursor = table_cursor(catalog, &table.name)?;
+    index_manager::update_index_entries(catalog, table, record, &updated)?;
     table_cursor.update(record.table_key, &updated.record)?;
-    index_manager::insert_index_entries(catalog, table, &updated)?;
 
     Ok(updated)
 }
@@ -639,6 +638,7 @@ mod tests {
         let indexes = IndexManager::new(catalog.clone());
         let table = catalog.create_table("users", users_schema()).unwrap();
         indexes.create_index("idx_users_name", "users", &["name"]).unwrap();
+        indexes.create_index("idx_users_active", "users", &["active"]).unwrap();
 
         let first = records
             .insert_table_row(
@@ -661,6 +661,8 @@ mod tests {
             )
             .unwrap();
 
+        let mut active_index = catalog.index_cursor_by_name("idx_users_active").unwrap();
+        let active_epoch = active_index.mutation_epoch();
         records
             .update_table_row(
                 &table,
@@ -673,6 +675,16 @@ mod tests {
         assert!(index.get(&name_entry_key("Engineering", 1)).unwrap().is_none());
         assert_eq!(index.get(&name_entry_key("Engineering", 2)).unwrap().unwrap().table_key, 2);
         assert_eq!(index.get(&name_entry_key("Sales", 1)).unwrap().unwrap().table_key, 1);
+        assert_eq!(active_index.mutation_epoch(), active_epoch);
+        let active_key = TupleRef::new(&[ValueRef::Boolean(true)]).to_index_key().unwrap();
+        let active_entry = encode_index_entry_key(&active_key, 1);
+        assert_eq!(active_index.get(&active_entry).unwrap().unwrap().table_key, 1);
+
+        // A stale snapshot still refers to Engineering, and must not recreate it.
+        assert!(matches!(
+            records.update_table_row(&table, &first, values(&first)),
+            Err(RelationalError::InvalidArgument(InvalidArgumentError::KeyNotFound))
+        ));
     }
 
     #[test]
