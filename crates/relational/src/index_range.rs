@@ -21,7 +21,7 @@ impl fmt::Display for IndexValueBound {
     }
 }
 
-/// Logical range over values in a single-column secondary index.
+/// Logical range over a secondary index. Bounds require a single-column index.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct IndexValueRange {
     /// Optional lower value bound.

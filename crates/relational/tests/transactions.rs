@@ -183,7 +183,7 @@ fn reverse_ranges_use_inclusive_and_exclusive_bounds_across_duplicate_index_entr
     let dir = tempfile::tempdir().unwrap();
     let database = Database::create(dir.path().join("test.db")).unwrap();
     let mut ddl = database.begin(Mode::Ddl).unwrap();
-    let (table, index) = ddl
+    let (table, index, composite_index) = ddl
         .statement(Mode::Ddl, &[], |access| {
             let table = access.create_table(
                 "items",
@@ -205,7 +205,8 @@ fn reverse_ranges_use_inclusive_and_exclusive_bounds_across_duplicate_index_entr
                 },
             )?;
             let index = access.create_index("items_name", "items", &["name"])?;
-            Ok::<_, databas_relational::RelationalError>((table, index))
+            let composite_index = access.create_index("items_name_id", "items", &["name", "id"])?;
+            Ok::<_, databas_relational::RelationalError>((table, index, composite_index))
         })
         .unwrap();
     ddl.commit().unwrap();
@@ -229,6 +230,18 @@ fn reverse_ranges_use_inclusive_and_exclusive_bounds_across_duplicate_index_entr
                 lower: Some(IndexValueBound::Exclusive(low.clone())),
                 upper: Some(IndexValueBound::Inclusive(middle.clone())),
             };
+            for direction in [ScanDirection::Forward, ScanDirection::Reverse] {
+                assert!(matches!(
+                    access.scan_index_in_direction(&table, &composite_index, index_range.clone(), direction),
+                    Err(RelationalError::InvalidArgument(InvalidArgumentError::BoundedCompositeIndexScan { name }))
+                        if name == composite_index.name
+                ));
+                assert_eq!(
+                    access.scan_index_in_direction(&table, &composite_index, IndexValueRange::default(), direction)?
+                        .collect::<StorageResult<Vec<_>>>()?.len(),
+                    66
+                );
+            }
             let rows = access
                 .scan_index_in_direction(&table, &index, index_range, ScanDirection::Reverse)?
                 .map(|record| record.map(|record| record.table_key))

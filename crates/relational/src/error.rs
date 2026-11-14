@@ -72,6 +72,8 @@ pub enum InvalidArgumentError {
     ColumnNotFound { table: String, column: String },
     #[error("index column list cannot be empty")]
     EmptyIndexColumns,
+    #[error("bounded scans require a single-column index: {name}")]
+    BoundedCompositeIndexScan { name: String },
     #[error("table {table} row has {values} values for {columns} columns")]
     TableRowValueCount { table: String, columns: usize, values: usize },
     #[error("invalid primary key for table {table}: {reason}")]

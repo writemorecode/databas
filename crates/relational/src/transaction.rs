@@ -221,6 +221,11 @@ impl Transaction<'_> {
                 crate::InvalidArgumentError::SchemaMismatch { name: index.name.clone() },
             ));
         }
+        if index.columns.len() != 1 && (key_range.lower.is_some() || key_range.upper.is_some()) {
+            return Err(RelationalError::InvalidArgument(
+                InvalidArgumentError::BoundedCompositeIndexScan { name: index.name.clone() },
+            ));
+        }
         record_manager::scan_index_in_direction(
             &self.database.catalog().for_transaction(self.txn_id),
             table,
