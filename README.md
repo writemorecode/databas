@@ -8,8 +8,10 @@ See also:
 [simpledb](https://github.com/redixhumayun/simpledb), and
 [Turso](https://github.com/tursodatabase/turso).
 
-The workspace contains the storage engine, relational layer, SQL parser, and
-SQL/session facade. See [architecture and API contracts](docs/architecture.md).
+The workspace is split into storage, relational, SQL parser, and query crates.
+`crates/query/` owns planning, optimization, and execution; root `src/` owns
+sessions, the TCP protocol, client, and server. See `AGENTS.md` for crate
+boundaries and development commands.
 
 ```sh
 cargo test --workspace

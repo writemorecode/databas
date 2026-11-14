@@ -5,8 +5,9 @@
 - `crates/storage/` owns byte-oriented B+-trees, pages, disk I/O, page caching, WAL, recovery, and physical transactions. It has no SQL or relational dependencies.
 - `crates/relational/` builds SQL-independent schemas, tuples, catalog, tables, indexes, locking, and scoped transactions on storage.
 - `crates/sql-parser/` owns the lexer, parser, AST, and parser property tests, with no engine dependencies.
-- The root `src/` owns planning, optimization, execution, sessions, protocol, client, and server. `src/core/` is a compatibility re-export facade, not an implementation layer. Binaries live in `src/bin/`.
-Unit tests are colocated with their modules; crate-level integration tests live in each crate's `tests/`, and SQL integration tests live in the root `tests/`. See `docs/architecture.md` for API and format contracts.
+- `crates/query/` owns logical and physical planning, optimization, and query execution over the relational crate.
+- The root `src/` owns sessions, the TCP protocol, client, server, and error mapping. `src/core/` is a compatibility re-export facade, not an implementation layer. Binaries live in `src/bin/`.
+Unit tests are colocated with their modules; crate-level integration tests live in each crate's `tests/`, and SQL integration tests live in the root `tests/`.
 
 ## Build, Test, and Development Commands
 - `cargo test --workspace`: runs unit, integration, and doc tests. Slow fsync-heavy tests are ignored by default.

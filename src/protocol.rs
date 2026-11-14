@@ -1,9 +1,9 @@
 //! Databas TCP wire-protocol primitives.
 //!
-//! The protocol is a versioned, length-prefixed binary protocol. See
-//! `docs/wire-protocol.md` for the byte-level specification and compatibility
-//! rules. This module exposes stable server error codes; frame codecs remain an
-//! implementation detail shared by the client and server.
+//! The protocol uses versioned, length-prefixed frames with a 12-byte header,
+//! `DBAS` magic, and a 16 MiB payload limit. This module exposes stable server
+//! error codes; frame codecs remain an implementation detail shared by the
+//! client and server.
 
 use std::io::{self, Read, Write};
 
