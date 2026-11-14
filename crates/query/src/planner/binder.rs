@@ -329,18 +329,24 @@ impl<'catalog> Binder<'catalog> {
         }
 
         if let Some(order_by) = &query.order_by {
-            let [term] = order_by.terms.as_slice() else {
-                return Err(PlannerError::OrderByTermCount { terms: order_by.terms.len() });
-            };
-            let term = BoundSortTerm {
-                column: bind_column_reference(&scope, &term.column)?,
-                direction: term.order.clone().unwrap_or(Ordering::Ascending),
-            };
+            if order_by.terms.is_empty() {
+                return Err(PlannerError::OrderByTermCount { terms: 0 });
+            }
+            let terms = order_by
+                .terms
+                .iter()
+                .map(|term| {
+                    Ok(BoundSortTerm {
+                        column: bind_column_reference(&scope, &term.column)?,
+                        direction: term.order.clone().unwrap_or(Ordering::Ascending),
+                    })
+                })
+                .collect::<PlannerResult<Vec<_>>>()?;
             current_input = push_logical_node(
                 nodes,
                 LogicalPlanNode::Sort {
                     input: current_input,
-                    terms: vec![term],
+                    terms,
                     output: current_output.clone(),
                 },
             );
@@ -743,10 +749,12 @@ mod tests {
     }
 
     #[test]
-    fn select_rejects_multiple_order_by_terms() {
+    fn select_validates_each_order_by_term() {
         let catalog = TestCatalog { tables: vec![table(1, "users", &["id", "name"])] };
-        let result = bind_select(&catalog, "SELECT name FROM users ORDER BY name, id DESC;");
-        assert!(matches!(result, Err(PlannerError::OrderByTermCount { terms: 2 })));
+        let result = bind_select(&catalog, "SELECT name FROM users ORDER BY name, missing DESC;");
+        assert!(
+            matches!(result, Err(PlannerError::ColumnNotFound { column }) if column == "missing")
+        );
     }
 
     #[test]

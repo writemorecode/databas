@@ -742,6 +742,30 @@ fn fallback_sort_orders_an_unprojected_nullable_text_key_and_keeps_duplicates() 
 }
 
 #[test]
+fn order_by_compares_unprojected_terms_lexicographically_before_pagination() {
+    let database = MemoryStore::default();
+    execute(
+        &database,
+        "CREATE TABLE items (id INT PRIMARY KEY, category INT, label TEXT NULLABLE);",
+    )
+    .unwrap();
+    execute(
+        &database,
+        "INSERT INTO items (id, category, label) VALUES
+             (1, 1, 'a'), (2, 2, 'z'), (3, 1, 'z'), (4, 1, 'z'), (5, 2, 'a');",
+    )
+    .unwrap();
+    execute(&database, "INSERT INTO items (id, category) VALUES (6, 1);").unwrap();
+    execute(&database, "CREATE INDEX items_category ON items (category);").unwrap();
+
+    let sql = "SELECT i.id FROM items AS i ORDER BY i.category, i.label DESC, i.id DESC;";
+    assert_eq!(query(&database, sql), [4, 3, 1, 6, 2, 5].map(|id| vec![Value::Integer(id)]));
+    let paginated = "SELECT i.id FROM items AS i
+                     ORDER BY i.category, i.label ASC, i.id DESC LIMIT 3 OFFSET 1;";
+    assert_eq!(query(&database, paginated), [1, 4, 3].map(|id| vec![Value::Integer(id)]));
+}
+
+#[test]
 fn fallback_sort_surfaces_an_input_failure_before_returning_a_window() {
     let database = MemoryStore::default();
     execute(&database, "CREATE TABLE numbers (id INT PRIMARY KEY, score INT);").unwrap();

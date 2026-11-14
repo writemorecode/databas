@@ -46,8 +46,8 @@ pub enum PlannerError {
     /// A values row does not provide exactly one value for each target column.
     #[error("insert row has {values} values for {columns} columns")]
     InsertColumnValueCount { columns: usize, values: usize },
-    /// An `ORDER BY` clause did not contain exactly one term.
-    #[error("ORDER BY requires exactly one term, got {terms}")]
+    /// An `ORDER BY` clause did not contain any terms.
+    #[error("ORDER BY requires at least one term, got {terms}")]
     OrderByTermCount { terms: usize },
     /// The parser accepted a statement kind the planner cannot lower.
     #[error("unsupported statement: {statement}")]

@@ -427,11 +427,11 @@ where
                 Ok(Box::new(rows))
             }
             PhysicalPlanNode::Sort { input, terms } => {
-                let [term] = terms.as_slice() else {
+                if terms.is_empty() {
                     return Err(ExecutorError::UnsupportedOperator { operator: "SORT" });
-                };
+                }
                 let input = take_node(nodes, input)?;
-                let rows = sort::sort_rows(self.execute_rows(nodes, input, "SORT")?, term)?;
+                let rows = sort::sort_rows(self.execute_rows(nodes, input, "SORT")?, &terms)?;
                 Ok(Box::new(rows.into_iter().map(Ok)))
             }
             PhysicalPlanNode::Project { input, expressions } => {

@@ -8,35 +8,45 @@ use crate::sql_parser::parser::stmt::select::Ordering as SortDirection;
 use super::{ExecutorError, ExecutorResult, ExecutorRow};
 use crate::scalar::value_type_name;
 
-/// Buffers the input and orders it by the requested slot. Return input failures
+/// Buffers the input and orders it by the requested terms. Return input failures
 /// before making the sorted rows available to a downstream window.
 pub(super) fn sort_rows(
     rows: impl Iterator<Item = ExecutorResult<ExecutorRow>>,
-    term: &SortTerm,
+    terms: &[SortTerm],
 ) -> ExecutorResult<Vec<ExecutorRow>> {
-    let slot = term.column.slot;
     let mut sorted = Vec::new();
     for row in rows {
         let row = row?;
-        let key =
-            row.values().get(slot).ok_or_else(|| ExecutorError::ColumnOrdinalOutOfBounds {
-                column: term.column.name.clone(),
-                ordinal: slot,
-                len: row.values().len(),
-            })?;
-        if matches!(key, Value::Float(value) if value.is_nan()) {
-            return Err(ExecutorError::InvalidTuple(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "NaN tuple float",
-            )));
+        for term in terms {
+            let slot = term.column.slot;
+            let key =
+                row.values().get(slot).ok_or_else(|| ExecutorError::ColumnOrdinalOutOfBounds {
+                    column: term.column.name.clone(),
+                    ordinal: slot,
+                    len: row.values().len(),
+                })?;
+            if matches!(key, Value::Float(value) if value.is_nan()) {
+                return Err(ExecutorError::InvalidTuple(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "NaN tuple float",
+                )));
+            }
         }
         sorted.push(row);
     }
 
-    let descending = matches!(term.direction, SortDirection::Descending);
     sorted.sort_unstable_by(|left, right| {
-        let ordering = compare_values(&left.values()[slot], &right.values()[slot]);
-        if descending { ordering.reverse() } else { ordering }
+        for term in terms {
+            let slot = term.column.slot;
+            let ordering = compare_values(&left.values()[slot], &right.values()[slot]);
+            if ordering != Ordering::Equal {
+                return match term.direction {
+                    SortDirection::Ascending => ordering,
+                    SortDirection::Descending => ordering.reverse(),
+                };
+            }
+        }
+        Ordering::Equal
     });
     Ok(sorted)
 }
