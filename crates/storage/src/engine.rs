@@ -167,7 +167,9 @@ impl Storage {
     }
 
     pub fn transaction_create_tree(&self, txn_id: TxnId) -> StorageResult<TreeCursor> {
+        self.runtime.validate_transaction_write(txn_id)?;
         let root_page_id = initialize_empty_root(&self.page_cache, Some(txn_id))?;
+        self.runtime.validate_transaction_write(txn_id)?;
         Ok(TreeCursor::new(self.page_cache.clone(), root_page_id)?.for_transaction(txn_id))
     }
 
@@ -181,14 +183,9 @@ impl Storage {
         txn_id: TxnId,
         root_page_id: PageId,
     ) -> StorageResult<()> {
-        if !self.transaction_is_active(txn_id)? {
-            return Err(crate::error::StorageError::Internal(
-                crate::error::InternalError::InvariantViolation(
-                    crate::error::InvariantViolation::NoActiveTransaction,
-                ),
-            ));
-        }
-        crate::btree::destroy_tree(&self.page_cache, txn_id, root_page_id)
+        self.runtime.validate_transaction_write(txn_id)?;
+        crate::btree::destroy_tree(&self.page_cache, txn_id, root_page_id)?;
+        self.runtime.validate_transaction_write(txn_id)
     }
 
     /// Returns a raw cursor rooted at an existing tree.
@@ -196,11 +193,16 @@ impl Storage {
         TreeCursor::new(self.page_cache.clone(), root_page_id)
     }
 
+    /// Opens a cursor for an active, writable transaction.
+    ///
+    /// Serialize transaction completion with all mutations using its cursors.
+    /// A retained cursor rejects mutations after the transaction ends.
     pub fn transaction_tree_cursor(
         &self,
         txn_id: TxnId,
         root_page_id: PageId,
     ) -> StorageResult<TreeCursor> {
+        self.runtime.validate_transaction_write(txn_id)?;
         Ok(self.tree_cursor(root_page_id)?.for_transaction(txn_id))
     }
 

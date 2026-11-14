@@ -30,7 +30,7 @@ use std::sync::{
 
 use thiserror::Error;
 
-use crate::error::StorageError;
+use crate::error::{StorageError, StorageResult};
 use crate::log_manager::ZERO_LSN;
 use crate::page::{NodeMarker, Page, PageResult, Read, Write};
 use crate::page_replacement::ClockPolicy;
@@ -249,6 +249,13 @@ impl PageCache {
             self.select_victim_frame(&mut meta).ok_or(PageCacheError::NoEvictableFrame)?;
         self.replace_frame(&mut meta, frame_id, page_id)?;
         Ok(PinGuard::new(Arc::clone(&self.inner), frame_id, page_id))
+    }
+
+    pub(crate) fn validate_transaction_write(&self, txn_id: Option<TxnId>) -> StorageResult<()> {
+        if let Some(txn_id) = txn_id {
+            self.inner.runtime.validate_transaction_write(txn_id)?;
+        }
+        Ok(())
     }
 
     /// Allocates a new on-disk page and returns it pinned in the cache.
@@ -501,6 +508,9 @@ impl PinGuard {
     /// same frame. Acquiring a write guard marks the frame dirty even if the
     /// caller later decides not to mutate the page bytes.
     pub(crate) fn write(&self, txn_id: Option<TxnId>) -> PageCacheResult<PageWriteGuard<'_>> {
+        if let Some(txn_id) = txn_id {
+            self.page_cache.runtime.validate_transaction_write(txn_id).map_err(runtime_error)?;
+        }
         let frame = &self.page_cache.frames[self.frame_id];
         let page = try_write_page_data(&frame.data, self.page_id)?;
         let before = *page;

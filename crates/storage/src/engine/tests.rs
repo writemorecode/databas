@@ -141,3 +141,79 @@ fn invalid_options_release_ownership_and_leave_a_reopenable_file() -> TestCaseRe
     check_usable(open(&path, 2)?, &path)?;
     Ok(())
 }
+
+#[test]
+fn ended_transaction_cursors_reject_all_mutations_and_preserve_contents() -> TestCaseResult {
+    for committed in [false, true] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("db");
+        let storage = open(&path, 2)?;
+        let mut raw = storage.create_tree()?;
+        let root = raw.root_page_id();
+        raw.insert(b"key", b"original")?;
+        storage.flush()?;
+        let txn = storage.begin_transaction()?;
+        let mut writer = storage.transaction_tree_cursor(txn, root)?;
+        writer.update(b"key", b"transaction")?;
+        if committed {
+            storage.commit_transaction(txn)?;
+        } else {
+            storage.rollback_transaction(txn)?;
+        }
+        let expected = if committed { b"transaction".as_slice() } else { b"original".as_slice() };
+        prop_assert!(storage.transaction_tree_cursor(txn, root).is_err());
+        prop_assert!(storage.transaction_tree_cursor(u64::MAX, root).is_err());
+        prop_assert!(writer.insert(b"new", b"value").is_err());
+        prop_assert!(writer.update(b"key", b"unlogged").is_err());
+        prop_assert!(writer.delete(b"key").is_err());
+        prop_assert!(raw.get(b"new")?.is_none());
+        prop_assert_eq!(raw.get(b"key")?.unwrap().with_value(<[u8]>::to_vec)?, expected);
+        drop(writer);
+        drop(raw);
+        storage.flush()?;
+        drop(storage);
+        let storage = open(&path, 1)?;
+        let mut cursor = storage.tree_cursor(root)?;
+        prop_assert!(cursor.get(b"new")?.is_none());
+        prop_assert_eq!(cursor.get(b"key")?.unwrap().with_value(<[u8]>::to_vec)?, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn cursor_mutation_reports_wal_failure_and_rejects_further_writes() -> TestCaseResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("db");
+    let storage = open(&path, 2)?;
+    let mut cursor = storage.create_tree()?;
+    let root = cursor.root_page_id();
+    cursor.insert(b"key", b"original")?;
+    storage.flush()?;
+    drop(cursor);
+    drop(storage);
+    crate::log_manager::truncate_wal(&path, u64::MAX - 1, 0)?;
+    let storage = open(&path, 1)?;
+    let txn = storage.begin_transaction()?;
+    let mut cursor = storage.transaction_tree_cursor(txn, root)?;
+    prop_assert!(cursor.update(b"key", b"new").is_err());
+    prop_assert!(storage.transaction_is_poisoned(txn)?);
+    prop_assert!(cursor.insert(b"new", b"value").is_err());
+    prop_assert!(cursor.delete(b"key").is_err());
+    prop_assert_eq!(cursor.get(b"key")?.unwrap().with_value(<[u8]>::to_vec)?, b"original");
+    Ok(())
+}
+
+#[test]
+fn tree_creation_reports_initial_page_logging_failure() -> TestCaseResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("db");
+    drop(open(&path, 2)?);
+    // Begin and allocation fit, but initializing the B+-tree page cannot log.
+    crate::log_manager::truncate_wal(&path, u64::MAX - 2, 0)?;
+    let storage = open(&path, 1)?;
+    let txn = storage.begin_transaction()?;
+    prop_assert!(storage.transaction_create_tree(txn).is_err());
+    prop_assert!(storage.transaction_is_poisoned(txn)?);
+    prop_assert!(storage.commit_transaction(txn).is_err());
+    Ok(())
+}

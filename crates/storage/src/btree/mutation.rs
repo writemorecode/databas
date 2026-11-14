@@ -165,6 +165,13 @@ impl TreeCursor {
 
     /// Inserts a new raw key/value record into the tree.
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
+        self.page_cache.validate_transaction_write(self.txn_id)?;
+        self.insert_inner(key, value)?;
+        // A write guard can discover a WAL failure when it is dropped.
+        self.page_cache.validate_transaction_write(self.txn_id)
+    }
+
+    fn insert_inner(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
         let (leaf_page_id, leaf_pin_guard, tree_path) = self.leaf_page_pin_path_for_key(key)?;
         let (slot_index, has_capacity, old_slot_count) = {
             let leaf_read_guard = leaf_pin_guard.read()?;
@@ -207,6 +214,13 @@ impl TreeCursor {
 
     /// Replaces the value stored for an existing `key`.
     pub fn update(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
+        self.page_cache.validate_transaction_write(self.txn_id)?;
+        self.update_inner(key, value)?;
+        // A write guard can discover a WAL failure when it is dropped.
+        self.page_cache.validate_transaction_write(self.txn_id)
+    }
+
+    fn update_inner(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
         let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
         let slot_index = match self.search_leaf_slot(leaf_page_id, key)? {
             SearchResult::Found(slot_index) => slot_index,
@@ -243,6 +257,13 @@ impl TreeCursor {
 
     /// Deletes the record identified by `key`.
     pub fn delete(&mut self, key: &[u8]) -> StorageResult<()> {
+        self.page_cache.validate_transaction_write(self.txn_id)?;
+        self.delete_inner(key)?;
+        // A write guard can discover a WAL failure when it is dropped.
+        self.page_cache.validate_transaction_write(self.txn_id)
+    }
+
+    fn delete_inner(&mut self, key: &[u8]) -> StorageResult<()> {
         let (leaf_page_id, tree_path) = self.leaf_page_path_for_key(key)?;
         let slot_index = match self.search_leaf_slot(leaf_page_id, key)? {
             SearchResult::Found(slot_index) => slot_index,

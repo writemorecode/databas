@@ -152,3 +152,29 @@ fn invalid_cache_capacities_are_rejected() -> TestCaseResult {
     );
     Ok(())
 }
+
+#[test]
+fn transaction_end_during_write_guard_restores_bytes_at_the_wal_boundary() -> TestCaseResult {
+    for previously_dirty in [false, true] {
+        let (_dir, runtime, model) = setup_runtime(1, 0)?;
+        let cache = PageCache::new(runtime.clone(), 1)?;
+        let pin = cache.fetch_page(1)?;
+        let before = if previously_dirty {
+            pin.write(None)?.page_mut().copy_from_slice(&image(18));
+            image(18)
+        } else {
+            model[0]
+        };
+        let txn = runtime.begin_transaction()?;
+        let mut write = pin.write(Some(txn))?;
+        write.page_mut().copy_from_slice(&image(47));
+        // Unsupported caller interleaving must still never turn a transaction
+        // write into a raw write when the guard reaches the WAL boundary.
+        runtime.commit_transaction(txn)?;
+        drop(write);
+        prop_assert_eq!(snapshot(&pin)?, before);
+        prop_assert!(pin.write(Some(txn)).is_err());
+        prop_assert!(pin.write(Some(u64::MAX)).is_err());
+    }
+    Ok(())
+}

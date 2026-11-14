@@ -203,11 +203,10 @@ impl TransactionManager {
         Ok(lsn)
     }
 
-    /// Appends a full-page update record for a transaction, if any.
+    /// Appends a full-page update record for an active, writable transaction.
     ///
-    /// When the transaction is not active, the update is not logged and `Ok(None)`
-    /// is returned. With an active transaction, this method obtains the next WAL
-    /// position, stamps it into the redo image for current B+-tree pages, appends
+    /// Inactive or poisoned transactions are rejected. This method obtains the
+    /// next WAL position, stamps it into the redo image for current B+-tree pages, appends
     /// the update containing both redo and undo full-page images, and remembers
     /// the undo image for explicit rollback.
     ///
@@ -221,10 +220,8 @@ impl TransactionManager {
         page_id: PageId,
         before: &[u8; PAGE_SIZE],
         after: &[u8; PAGE_SIZE],
-    ) -> StorageResult<Option<LoggedPageUpdate>> {
-        if !self.transactions.contains_key(&txn_id) {
-            return Ok(None);
-        }
+    ) -> StorageResult<LoggedPageUpdate> {
+        self.validate_transaction_write(txn_id)?;
 
         let expected_lsn = match log.next_lsn() {
             Ok(lsn) => lsn,
@@ -256,7 +253,7 @@ impl TransactionManager {
 
         let active = self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
         active.undo_pages.push(PageUndo { page_id, before: *before, after: redo, lsn });
-        Ok(Some(LoggedPageUpdate { lsn, redo }))
+        Ok(LoggedPageUpdate { lsn, redo })
     }
 
     /// Marks a transaction as unsafe to commit.
@@ -272,6 +269,13 @@ impl TransactionManager {
     pub(crate) fn transaction_is_active(&self, txn_id: TxnId) -> bool {
         self.transactions.contains_key(&txn_id)
     }
+    pub(crate) fn validate_transaction_write(&self, txn_id: TxnId) -> StorageResult<()> {
+        if self.transaction(txn_id)?.poisoned {
+            return Err(invariant(InvariantViolation::TransactionPoisoned { txn_id }));
+        }
+        Ok(())
+    }
+
     /// Returns whether a transaction has observed an unrecoverable error.
     pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
         Ok(self.transaction(txn_id)?.poisoned)

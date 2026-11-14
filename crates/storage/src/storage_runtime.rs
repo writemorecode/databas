@@ -176,12 +176,16 @@ impl StorageRuntime {
         if result.is_err() {
             transactions.record_failure(txn_id);
         }
-        result
+        result.map(Some)
     }
 
     pub(crate) fn record_transaction_failure(&self, txn_id: TxnId) -> StorageResult<()> {
         Self::lock(&self.transactions, "transaction manager")?.record_failure(txn_id);
         Ok(())
+    }
+
+    pub(crate) fn validate_transaction_write(&self, txn_id: TxnId) -> StorageResult<()> {
+        Self::lock(&self.transactions, "transaction manager")?.validate_transaction_write(txn_id)
     }
 
     pub(crate) fn transaction_is_active(&self, txn_id: TxnId) -> StorageResult<bool> {
