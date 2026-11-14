@@ -1,7 +1,7 @@
 use crate::planner::{BoundColumn, ExecColumn, ExecExpr, RelationId, UpdateAssignment};
 use crate::relational::access::RelationalAccess;
 use crate::relational::{TableSchema, Tuple, Value};
-use crate::sql_parser::parser::op::Op;
+use crate::scalar::{evaluate_binary, evaluate_unary};
 
 use super::{ExecutionOutput, ExecutorError, ExecutorResult, ExecutorRow};
 
@@ -173,11 +173,7 @@ pub(super) fn evaluate_value(
         }
         ExecExpr::Binary { left, op, right } => {
             let left = evaluate_value(left, context)?;
-            if matches!(op, Op::And | Op::Or) {
-                return evaluate_logical_binary(left, *op, right, context);
-            }
-            let right = evaluate_value(right, context)?;
-            evaluate_binary(left, *op, right)
+            evaluate_binary(left, *op, || evaluate_value(right, context))
         }
     }
 }
@@ -205,152 +201,6 @@ impl<'a> EvaluationContext<'a> {
             ordinal,
             len,
         })
-    }
-}
-
-/// Evaluates a unary operator against one value.
-fn evaluate_unary(op: Op, value: Value) -> ExecutorResult<Value> {
-    match (op, value) {
-        (Op::Not, Value::Boolean(value)) => Ok(Value::Boolean(!value)),
-        (Op::Sub, Value::Integer(value)) => {
-            value.checked_neg().map(Value::Integer).ok_or(ExecutorError::IntegerOverflow { op })
-        }
-        (Op::Sub, Value::Float(value)) => Ok(Value::Float(-value)),
-        (op, value) => Err(ExecutorError::UnsupportedUnary { op, value }),
-    }
-}
-
-/// Evaluates a non-short-circuiting binary operator.
-fn evaluate_binary(left: Value, op: Op, right: Value) -> ExecutorResult<Value> {
-    match op {
-        Op::And | Op::Or => evaluate_eager_boolean_binary(left, op, right),
-        Op::Add | Op::Sub | Op::Mul | Op::Div => evaluate_arithmetic(left, op, right),
-        Op::EqualsEquals | Op::NotEquals => evaluate_equality(left, op, right),
-        Op::LessThan | Op::GreaterThan | Op::LessThanOrEqual | Op::GreaterThanOrEqual => {
-            evaluate_ordering(left, op, right)
-        }
-        Op::Not => Err(ExecutorError::UnsupportedBinary { left, op, right }),
-    }
-}
-
-/// Evaluates short-circuiting boolean `AND` and `OR`.
-fn evaluate_logical_binary(
-    left: Value,
-    op: Op,
-    right: &ExecExpr,
-    context: &EvaluationContext<'_>,
-) -> ExecutorResult<Value> {
-    match (left, op) {
-        (Value::Boolean(false), Op::And) => Ok(Value::Boolean(false)),
-        (Value::Boolean(true), Op::Or) => Ok(Value::Boolean(true)),
-        (Value::Boolean(_), op @ (Op::And | Op::Or)) => {
-            let right = evaluate_value(right, context)?;
-            match right {
-                Value::Boolean(right) => Ok(Value::Boolean(right)),
-                value => Err(ExecutorError::NonBooleanLogicalOperand { op, value }),
-            }
-        }
-        (value, op @ (Op::And | Op::Or)) => {
-            Err(ExecutorError::NonBooleanLogicalOperand { op, value })
-        }
-        (_, op) => Err(ExecutorError::InvalidLogicalOperator { op }),
-    }
-}
-
-/// Evaluates boolean operators when both operands have already been evaluated.
-fn evaluate_eager_boolean_binary(left: Value, op: Op, right: Value) -> ExecutorResult<Value> {
-    match (left, op, right) {
-        (Value::Boolean(left), Op::And, Value::Boolean(right)) => Ok(Value::Boolean(left && right)),
-        (Value::Boolean(left), Op::Or, Value::Boolean(right)) => Ok(Value::Boolean(left || right)),
-        (left, op, right) => Err(ExecutorError::UnsupportedBinary { left, op, right }),
-    }
-}
-
-/// Evaluates arithmetic over supported numeric value pairs.
-fn evaluate_arithmetic(left: Value, op: Op, right: Value) -> ExecutorResult<Value> {
-    match (left, op, right) {
-        (Value::Integer(left), Op::Add, Value::Integer(right)) => {
-            left.checked_add(right).map(Value::Integer).ok_or(ExecutorError::IntegerOverflow { op })
-        }
-        (Value::Integer(left), Op::Sub, Value::Integer(right)) => {
-            left.checked_sub(right).map(Value::Integer).ok_or(ExecutorError::IntegerOverflow { op })
-        }
-        (Value::Integer(left), Op::Mul, Value::Integer(right)) => {
-            left.checked_mul(right).map(Value::Integer).ok_or(ExecutorError::IntegerOverflow { op })
-        }
-        (Value::Integer(_), Op::Div, Value::Integer(0)) => Err(ExecutorError::DivisionByZero),
-        (Value::Integer(left), Op::Div, Value::Integer(right)) => {
-            left.checked_div(right).map(Value::Integer).ok_or(ExecutorError::IntegerOverflow { op })
-        }
-        (Value::Float(left), Op::Add, Value::Float(right)) => Ok(Value::Float(left + right)),
-        (Value::Float(left), Op::Sub, Value::Float(right)) => Ok(Value::Float(left - right)),
-        (Value::Float(left), Op::Mul, Value::Float(right)) => Ok(Value::Float(left * right)),
-        (Value::Float(_), Op::Div, Value::Float(0.0)) => Err(ExecutorError::DivisionByZero),
-        (Value::Float(left), Op::Div, Value::Float(right)) => Ok(Value::Float(left / right)),
-        (left, op, right) => Err(ExecutorError::UnsupportedBinary { left, op, right }),
-    }
-}
-
-/// Evaluates equality and inequality for same-type values.
-fn evaluate_equality(left: Value, op: Op, right: Value) -> ExecutorResult<Value> {
-    match (&left, &right) {
-        (Value::Null, Value::Null)
-        | (Value::String(_), Value::String(_))
-        | (Value::Boolean(_), Value::Boolean(_))
-        | (Value::Integer(_), Value::Integer(_))
-        | (Value::Float(_), Value::Float(_))
-        | (Value::UnsignedInteger(_), Value::UnsignedInteger(_)) => {
-            let equal = left == right;
-            Ok(Value::Boolean(if matches!(op, Op::EqualsEquals) { equal } else { !equal }))
-        }
-        _ => Err(comparison_type_mismatch(left, op, right)),
-    }
-}
-
-/// Evaluates ordering comparisons for same-type ordered values.
-fn evaluate_ordering(left: Value, op: Op, right: Value) -> ExecutorResult<Value> {
-    let result = match (&left, &right) {
-        (Value::String(left), Value::String(right)) => compare_ordered(left, op, right)?,
-        (Value::Boolean(left), Value::Boolean(right)) => compare_ordered(left, op, right)?,
-        (Value::Integer(left), Value::Integer(right)) => compare_ordered(left, op, right)?,
-        (Value::Float(left), Value::Float(right)) => compare_ordered(left, op, right)?,
-        (Value::UnsignedInteger(left), Value::UnsignedInteger(right)) => {
-            compare_ordered(left, op, right)?
-        }
-        _ => return Err(comparison_type_mismatch(left, op, right)),
-    };
-    Ok(Value::Boolean(result))
-}
-
-fn comparison_type_mismatch(left: Value, op: Op, right: Value) -> ExecutorError {
-    ExecutorError::ComparisonTypeMismatch {
-        expected: value_type_name(&left),
-        actual: value_type_name(&right),
-        left,
-        op,
-        right,
-    }
-}
-
-pub(super) fn value_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "NULL",
-        Value::String(_) => "text",
-        Value::Boolean(_) => "boolean",
-        Value::Integer(_) => "integer",
-        Value::Float(_) => "float",
-        Value::UnsignedInteger(_) => "unsigned integer",
-    }
-}
-
-/// Applies an ordering operator to values with a Rust [`PartialOrd`] relation.
-fn compare_ordered<T: PartialOrd>(left: &T, op: Op, right: &T) -> ExecutorResult<bool> {
-    match op {
-        Op::LessThan => Ok(left < right),
-        Op::GreaterThan => Ok(left > right),
-        Op::LessThanOrEqual => Ok(left <= right),
-        Op::GreaterThanOrEqual => Ok(left >= right),
-        op => Err(ExecutorError::InvalidOrderingOperator { op }),
     }
 }
 

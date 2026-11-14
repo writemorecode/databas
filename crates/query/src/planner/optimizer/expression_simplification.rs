@@ -1,6 +1,7 @@
 //! Simplification of scalar expressions in logical plans.
 
 use crate::relational::{DataType, Value};
+use crate::scalar::{evaluate_binary, evaluate_unary};
 use crate::sql_parser::parser::op::Op;
 
 use super::super::{BoundExpr, LogicalPlan, LogicalPlanNode};
@@ -76,7 +77,7 @@ fn simplify_expression(expression: BoundExpr) -> BoundExpr {
 /// Folds a unary operation or applies safe boolean/comparison rewrites.
 fn simplify_unary(op: Op, expression: BoundExpr) -> BoundExpr {
     if let BoundExpr::Literal(value) = &expression
-        && let Some(value) = evaluate_unary(op, value)
+        && let Ok(value) = evaluate_unary(op, value.clone())
     {
         return BoundExpr::Literal(value);
     }
@@ -99,7 +100,7 @@ fn simplify_unary(op: Op, expression: BoundExpr) -> BoundExpr {
 /// Folds literal binary operations and applies boolean identity rewrites.
 fn simplify_binary(left: BoundExpr, op: Op, right: BoundExpr) -> BoundExpr {
     if let (BoundExpr::Literal(left_value), BoundExpr::Literal(right_value)) = (&left, &right)
-        && let Some(value) = evaluate_binary(left_value, op, right_value)
+        && let Ok(value) = evaluate_binary(left_value.clone(), op, || Ok(right_value.clone()))
     {
         return BoundExpr::Literal(value);
     }
@@ -164,104 +165,6 @@ fn invert_comparison(expression: &BoundExpr) -> Option<BoundExpr> {
         _ => return None,
     };
     Some(BoundExpr::Binary { left: left.clone(), op, right: right.clone() })
-}
-
-/// Evaluates a supported unary operator on a literal value.
-fn evaluate_unary(op: Op, value: &Value) -> Option<Value> {
-    match (op, value) {
-        (Op::Not, Value::Boolean(value)) => Some(Value::Boolean(!value)),
-        (Op::Sub, Value::Integer(value)) => value.checked_neg().map(Value::Integer),
-        (Op::Sub, Value::Float(value)) => Some(Value::Float(-value)),
-        _ => None,
-    }
-}
-
-/// Evaluates a supported binary operator on two literal values.
-fn evaluate_binary(left: &Value, op: Op, right: &Value) -> Option<Value> {
-    match op {
-        Op::And | Op::Or => evaluate_boolean(left, op, right),
-        Op::Add | Op::Sub | Op::Mul | Op::Div => evaluate_arithmetic(left, op, right),
-        Op::EqualsEquals | Op::NotEquals => evaluate_equality(left, op, right),
-        Op::LessThan | Op::GreaterThan | Op::LessThanOrEqual | Op::GreaterThanOrEqual => {
-            evaluate_ordering(left, op, right)
-        }
-        Op::Not => None,
-    }
-}
-
-/// Evaluates boolean conjunction or disjunction when both operands are boolean.
-fn evaluate_boolean(left: &Value, op: Op, right: &Value) -> Option<Value> {
-    let (Value::Boolean(left), Value::Boolean(right)) = (left, right) else {
-        return None;
-    };
-    Some(Value::Boolean(match op {
-        Op::And => *left && *right,
-        Op::Or => *left || *right,
-        _ => return None,
-    }))
-}
-
-/// Evaluates supported same-type integer or floating-point arithmetic.
-fn evaluate_arithmetic(left: &Value, op: Op, right: &Value) -> Option<Value> {
-    match (left, op, right) {
-        (Value::Integer(left), Op::Add, Value::Integer(right)) => {
-            left.checked_add(*right).map(Value::Integer)
-        }
-        (Value::Integer(left), Op::Sub, Value::Integer(right)) => {
-            left.checked_sub(*right).map(Value::Integer)
-        }
-        (Value::Integer(left), Op::Mul, Value::Integer(right)) => {
-            left.checked_mul(*right).map(Value::Integer)
-        }
-        (Value::Integer(left), Op::Div, Value::Integer(right)) => {
-            left.checked_div(*right).map(Value::Integer)
-        }
-        (Value::Float(left), Op::Add, Value::Float(right)) => Some(Value::Float(left + right)),
-        (Value::Float(left), Op::Sub, Value::Float(right)) => Some(Value::Float(left - right)),
-        (Value::Float(left), Op::Mul, Value::Float(right)) => Some(Value::Float(left * right)),
-        (Value::Float(left), Op::Div, Value::Float(right)) if *right != 0.0 => {
-            Some(Value::Float(left / right))
-        }
-        _ => None,
-    }
-}
-
-/// Evaluates equality or inequality for compatible literal types.
-fn evaluate_equality(left: &Value, op: Op, right: &Value) -> Option<Value> {
-    let equal = match (left, right) {
-        (Value::Null, Value::Null) => true,
-        (Value::String(left), Value::String(right)) => left == right,
-        (Value::Boolean(left), Value::Boolean(right)) => left == right,
-        (Value::Integer(left), Value::Integer(right)) => left == right,
-        (Value::Float(left), Value::Float(right)) => left == right,
-        (Value::UnsignedInteger(left), Value::UnsignedInteger(right)) => left == right,
-        _ => return None,
-    };
-    Some(Value::Boolean(if op == Op::EqualsEquals { equal } else { !equal }))
-}
-
-/// Evaluates an ordering comparison for compatible literal types.
-fn evaluate_ordering(left: &Value, op: Op, right: &Value) -> Option<Value> {
-    macro_rules! compare {
-        ($left:expr, $right:expr) => {
-            match op {
-                Op::LessThan => $left < $right,
-                Op::GreaterThan => $left > $right,
-                Op::LessThanOrEqual => $left <= $right,
-                Op::GreaterThanOrEqual => $left >= $right,
-                _ => return None,
-            }
-        };
-    }
-    let result = match (left, right) {
-        (Value::String(left), Value::String(right)) => compare!(left, right),
-        (Value::Boolean(left), Value::Boolean(right)) => compare!(left, right),
-        (Value::Integer(left), Value::Integer(right)) => compare!(left, right),
-        (Value::Float(left), Value::Float(right)) => compare!(left, right),
-        (Value::UnsignedInteger(left), Value::UnsignedInteger(right)) => compare!(left, right),
-        _ => return None,
-    };
-    Some(Value::Boolean(result))
 }
 
 #[cfg(test)]

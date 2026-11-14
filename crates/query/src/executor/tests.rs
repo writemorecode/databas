@@ -486,6 +486,33 @@ fn invalid_expressions_return_precise_errors() {
 }
 
 #[test]
+fn folded_and_row_expressions_agree_on_results_and_errors() {
+    let database = MemoryStore::default();
+    execute(&database, "CREATE TABLE numbers (id INT PRIMARY KEY, n INT, x FLOAT, z FLOAT);")
+        .unwrap();
+    execute(&database, "INSERT INTO numbers (id, n, x, z) VALUES (1, 2147483647, 1.5, 0.0);")
+        .unwrap();
+
+    assert_eq!(
+        query(&database, "SELECT 1.5 > 0.0, NOT (1.5 <= 0.0), 0.0 == -0.0;"),
+        query(&database, "SELECT x > z, NOT (x <= z), z == -z FROM numbers;")
+    );
+    for (constant, row) in [
+        ("2147483647 + 1", "n + 1"),
+        ("1.5 / -0.0", "x / -z"),
+        ("2147483647 == 1.5", "n == x"),
+        ("TRUE AND 2147483647", "TRUE AND n"),
+    ] {
+        let folded_error =
+            try_rows(execute(&database, &format!("SELECT {constant};")).unwrap()).unwrap_err();
+        let row_error =
+            try_rows(execute(&database, &format!("SELECT {row} FROM numbers;")).unwrap())
+                .unwrap_err();
+        assert_eq!(folded_error.to_string(), row_error.to_string());
+    }
+}
+
+#[test]
 fn select_scans_filters_and_projects_rows() {
     let database = MemoryStore::default();
     execute(&database, "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, score INT);").unwrap();

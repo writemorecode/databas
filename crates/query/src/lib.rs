@@ -5,3 +5,5 @@ pub use databas_sql_parser as sql_parser;
 
 pub mod executor;
 pub mod planner;
+
+mod scalar;

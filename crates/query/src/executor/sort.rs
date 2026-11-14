@@ -5,8 +5,8 @@ use crate::planner::SortTerm;
 use crate::relational::Value;
 use crate::sql_parser::parser::stmt::select::Ordering as SortDirection;
 
-use super::expression::value_type_name;
 use super::{ExecutorError, ExecutorResult, ExecutorRow};
+use crate::scalar::value_type_name;
 
 /// Buffers the input and orders it by the requested slot. Return input failures
 /// before making the sorted rows available to a downstream window.
