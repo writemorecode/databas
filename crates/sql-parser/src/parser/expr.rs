@@ -157,7 +157,10 @@ impl Display for AggregateFunction<'_> {
 impl Display for Literal<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Literal::String(s) => write!(f, "\"{}\"", s),
+            Literal::String(s) => {
+                let quote = if s.contains('"') && !s.contains('\'') { '\'' } else { '"' };
+                write!(f, "{quote}{s}{quote}")
+            }
             Literal::Number(n) => write!(f, "{}", n),
             Literal::Boolean(b) => write!(f, "{}", b),
         }
