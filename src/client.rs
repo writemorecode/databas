@@ -225,6 +225,11 @@ fn decode_complete(
     let Some((&kind, data)) = payload.split_first() else {
         return Err(ClientError::UnexpectedMessage("COMPLETE payload is empty"));
     };
+    if kind != COMPLETE_ROWS && columns.is_some() {
+        return Err(ClientError::UnexpectedMessage(
+            "ROW_DESCRIPTION preceded a non-row completion",
+        ));
+    }
     match kind {
         COMPLETE_ROWS => {
             let expected = decode_completion_count(data, "row completion count is invalid")?;
@@ -239,24 +244,16 @@ fn decode_complete(
             Ok(QueryResult::Rows { columns, rows })
         }
         COMPLETE_EXPLAIN => {
-            require_no_rows(&rows)?;
             let plan = std::str::from_utf8(data)
                 .map_err(|source| ClientError::InvalidExplainUtf8 { source })?;
             Ok(QueryResult::Explain(plan.to_owned()))
         }
         COMPLETE_ROWS_AFFECTED => {
-            require_no_rows(&rows)?;
             let count = decode_completion_count(data, "rows-affected count is invalid")?;
             Ok(QueryResult::RowsAffected(count))
         }
-        COMPLETE_SCHEMA_AFFECTED if data.is_empty() => {
-            require_no_rows(&rows)?;
-            Ok(QueryResult::SchemaAffected)
-        }
-        COMPLETE_COMMAND_OK if data.is_empty() => {
-            require_no_rows(&rows)?;
-            Ok(QueryResult::CommandOk)
-        }
+        COMPLETE_SCHEMA_AFFECTED if data.is_empty() => Ok(QueryResult::SchemaAffected),
+        COMPLETE_COMMAND_OK if data.is_empty() => Ok(QueryResult::CommandOk),
         COMPLETE_SCHEMA_AFFECTED | COMPLETE_COMMAND_OK => {
             Err(ClientError::UnexpectedMessage("completion payload has trailing bytes"))
         }
@@ -271,10 +268,24 @@ fn decode_completion_count(data: &[u8], invalid_message: &'static str) -> Result
     Ok(u64::from_be_bytes([*b0, *b1, *b2, *b3, *b4, *b5, *b6, *b7]))
 }
 
-fn require_no_rows(rows: &[Vec<Value>]) -> Result<(), ClientError> {
-    if rows.is_empty() {
-        Ok(())
-    } else {
-        Err(ClientError::UnexpectedMessage("non-row result followed ROW frames"))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_description_is_rejected_for_non_row_completions() {
+        for completion in [
+            vec![COMPLETE_EXPLAIN],
+            [COMPLETE_ROWS_AFFECTED, 0, 0, 0, 0, 0, 0, 0, 0].to_vec(),
+            vec![COMPLETE_SCHEMA_AFFECTED],
+            vec![COMPLETE_COMMAND_OK],
+        ] {
+            assert!(matches!(
+                decode_complete(&completion, Some(vec![]), vec![]),
+                Err(ClientError::UnexpectedMessage(
+                    "ROW_DESCRIPTION preceded a non-row completion"
+                ))
+            ));
+        }
     }
 }
