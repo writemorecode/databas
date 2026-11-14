@@ -1,7 +1,8 @@
 //! Scoped relational operations. Scans cannot outlive the statement access handle.
 
 use crate::access::RelationalAccess;
-use crate::error::{RelationalError, RelationalResult};
+use crate::catalog::is_system_table;
+use crate::error::{InvalidArgumentError, RelationalError, RelationalResult};
 use crate::index_manager;
 use crate::lock_manager::{LockError, LockMode, TableId, TableLease};
 use crate::record_manager;
@@ -148,6 +149,11 @@ impl<'db> Transaction<'db> {
             return Err(RelationalError::InvalidArgument(
                 crate::InvalidArgumentError::SchemaMismatch { name: table.name.clone() },
             ));
+        }
+        if mode == LockMode::Exclusive && is_system_table(table.table_id) {
+            return Err(RelationalError::InvalidArgument(InvalidArgumentError::SystemTableWrite {
+                name: table.name.clone(),
+            }));
         }
         let table_id = TableId::from(table.table_id);
         if self.leases.iter().any(|lease| lease.authorize_mode(self.txn_id, table_id, mode).is_ok())

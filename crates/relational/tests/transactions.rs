@@ -1,6 +1,6 @@
 use databas_relational::{
-    ColumnSchema, DataType, Database, LockMode, StatementTransactionMode as Mode, StorageResult,
-    TableSchema, TupleSchema, Value,
+    ColumnSchema, DataType, Database, InvalidArgumentError, LockMode, RelationalError,
+    StatementTransactionMode as Mode, StorageResult, TableSchema, Tuple, TupleSchema, Value,
     access::{CatalogRead, RelationalAccess},
 };
 
@@ -49,6 +49,50 @@ fn direct_relational_statements_restore_failed_writes_and_preserve_prior_work() 
     });
     assert_eq!(keys.unwrap(), vec![7]);
     transaction.commit().unwrap();
+}
+
+#[test]
+fn system_catalogs_allow_reads_and_reject_caller_writes_and_new_indexes() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = Database::create(dir.path().join("test.db")).unwrap();
+    let user_table = create_table(&database);
+    let table = database.table_schema_by_name("sys_tables").unwrap();
+    let locks = [(table.table_id.into(), LockMode::Exclusive)];
+    let mut transaction = database.begin(Mode::Ordinary).unwrap();
+    transaction.statement(Mode::Ordinary, &locks, |access| {
+        let row = access.scan_table(&table)?
+            .find_map(|row| match row {
+                Ok(row) if row.table_key != user_table.table_id => None,
+                result => Some(result),
+            })
+            .unwrap()?;
+        let mut values = Tuple::from_bytes(&row.record)?.into_values();
+        values[1] = Value::String("tampered".into());
+        let update = access.update_table_row(&table, &row, values.clone()).map(|_| ());
+        let delete = access.delete_table_row(&table, &row);
+        values[0] = Value::Integer(42);
+        let insert = access.insert_table_row(&table, values).map(|_| ());
+        for result in [update, delete, insert] {
+            assert!(matches!(
+                result,
+                Err(RelationalError::InvalidArgument(InvalidArgumentError::SystemTableWrite { name }))
+                    if name == table.name
+            ));
+        }
+        Ok::<_, RelationalError>(())
+    }).unwrap();
+    transaction.commit().unwrap();
+    let mut ddl = database.begin(Mode::Ddl).unwrap();
+    let result = ddl.statement(Mode::Ddl, &[], |access| {
+        access.create_index("catalog_names", &table.name, &["name"])
+    });
+    assert!(matches!(
+        result,
+        Err(RelationalError::InvalidArgument(InvalidArgumentError::SystemTableIndex { name }))
+            if name == table.name
+    ));
+    ddl.commit().unwrap();
+    assert_eq!(database.table_schema_by_name(&user_table.name).unwrap(), user_table);
 }
 
 #[test]

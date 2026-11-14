@@ -494,6 +494,10 @@ pub fn system_table_schemas() -> &'static [SystemTableSchema<'static>] {
     SYSTEM_TABLE_SCHEMAS
 }
 
+pub fn is_system_table(table_id: CatalogId) -> bool {
+    system_table_schemas().iter().any(|schema| schema.table_id == table_id)
+}
+
 /// Returns the fixed `sys_columns` rows that describe the system catalog tables.
 pub fn system_column_rows() -> Vec<SystemColumnCatalogRow<'static>> {
     let mut column_id = 1;

@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::catalog::{
     CatalogError, CatalogObjectKind, ColumnCatalogRow, ColumnSchema, IndexCatalogRow,
     IndexColumnSchema, SYS_COLUMNS_ROOT_PAGE_ID, SYS_INDEXES_ROOT_PAGE_ID, SYS_TABLES_ROOT_PAGE_ID,
-    TableCatalogRow, system_column_rows, system_table_schemas,
+    TableCatalogRow, is_system_table, system_column_rows, system_table_schemas,
 };
 use crate::cursor::{IndexCursor, TableCursor};
 use crate::error::{
@@ -107,6 +107,11 @@ impl CatalogManager {
         }
 
         let table = self.table_schema_by_name(table_name)?;
+        if is_system_table(table.table_id) {
+            return Err(RelationalError::InvalidArgument(InvalidArgumentError::SystemTableIndex {
+                name: table.name,
+            }));
+        }
         let index_id = self.next_object_id()?;
         let mut index_columns = Vec::new();
         let mut catalog_columns = Vec::new();
@@ -172,7 +177,7 @@ impl CatalogManager {
                     })
                 },
             )?;
-        if system_table_schemas().iter().any(|schema| schema.table_id == table.table_id) {
+        if is_system_table(table.table_id) {
             return Err(RelationalError::InvalidArgument(InvalidArgumentError::SystemTableDrop {
                 name: name.to_owned(),
             }));
@@ -378,6 +383,11 @@ impl CatalogManager {
         &self,
         table: &TableSchema,
     ) -> RelationalResult<Vec<IndexSchema>> {
+        // Catalog maintenance writes directly to the system trees. Legacy indexes
+        // on those tables may be stale, but remain in sys_indexes for DROP INDEX.
+        if is_system_table(table.table_id) {
+            return Ok(Vec::new());
+        }
         let mut indexes: Vec<_> = self
             .index_catalog_rows()?
             .into_iter()
@@ -839,6 +849,76 @@ mod tests {
                 table,
                 column,
             }) if table == "users" && column == "missing"
+        ));
+    }
+
+    #[test]
+    fn legacy_system_indexes_are_visible_in_the_catalog_and_can_be_dropped() {
+        use crate::access::{CatalogRead, RelationalAccess};
+        use crate::{Database, IndexValueRange, LockMode, StatementTransactionMode as Mode};
+
+        let file = NamedTempFile::new().unwrap();
+        let manager = open(file.path()).unwrap();
+        let table = manager.table_schema_by_name("sys_tables").unwrap();
+        let root_page_id = manager.storage.create_tree().unwrap().root_page_id();
+        let index = IndexSchema {
+            index_id: manager.next_object_id().unwrap(),
+            name: "legacy_catalog_index".into(),
+            table_id: table.table_id,
+            unique: false,
+            columns: vec![IndexColumnSchema {
+                source_column_ordinal: 1,
+                column: table.row.columns[1].clone(),
+            }],
+        };
+        manager.insert_index_catalog_row(&index.catalog_row(root_page_id)).unwrap();
+        manager
+            .insert_column_catalog_row(&ColumnCatalogRow {
+                column_id: manager.next_column_id().unwrap(),
+                object_kind: CatalogObjectKind::Index,
+                object_id: index.index_id,
+                ordinal: 0,
+                name: "name".into(),
+                data_type: DataType::Text,
+                nullable: false,
+                primary_key: false,
+                source_table_id: Some(table.table_id),
+                source_column_ordinal: Some(1),
+            })
+            .unwrap();
+        manager.flush().unwrap();
+        drop(manager);
+
+        let database = Database::open(file.path()).unwrap();
+        assert!(database.index_schemas_for_table(&table).unwrap().is_empty());
+        let indexes = database.table_schema_by_name("sys_indexes").unwrap();
+        let mut reader = database.begin(Mode::Ordinary).unwrap();
+        let locks = [
+            (table.table_id.into(), LockMode::Shared),
+            (indexes.table_id.into(), LockMode::Shared),
+        ];
+        reader
+            .statement(Mode::Ordinary, &locks, |access| {
+                let rows = access.scan_table(&indexes)?.collect::<RelationalResult<Vec<_>>>()?;
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].table_key, index.index_id);
+                assert!(matches!(
+                    access.scan_index(&table, &index, IndexValueRange::default()),
+                    Err(RelationalError::InvalidArgument(
+                        InvalidArgumentError::SchemaMismatch { .. }
+                    ))
+                ));
+                Ok::<_, RelationalError>(())
+            })
+            .unwrap();
+        reader.commit().unwrap();
+
+        let mut ddl = database.begin(Mode::Ddl).unwrap();
+        ddl.statement(Mode::Ddl, &[], |access| access.drop_index(&index.name)).unwrap();
+        ddl.commit().unwrap();
+        assert!(matches!(
+            database.catalog().index_root(&index.name),
+            Err(RelationalError::InvalidArgument(InvalidArgumentError::IndexNotFound { .. }))
         ));
     }
 

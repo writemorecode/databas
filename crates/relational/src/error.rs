@@ -54,6 +54,10 @@ pub enum ConstraintError {
 pub enum InvalidArgumentError {
     #[error("cannot drop system table: {name}")]
     SystemTableDrop { name: String },
+    #[error("cannot write to system table: {name}")]
+    SystemTableWrite { name: String },
+    #[error("cannot create an index on system table: {name}")]
+    SystemTableIndex { name: String },
     #[error("schema does not match the catalog object: {name}")]
     SchemaMismatch { name: String },
     #[error("schema changes require a DDL statement")]
