@@ -331,7 +331,7 @@ impl TransactionManager {
         log: &mut LogManager,
         savepoint: TransactionSavepoint,
     ) -> StorageResult<Vec<PageRestore>> {
-        let rollback = {
+        let rollback = (|| {
             let active = self.transaction(savepoint.txn_id)?;
             if savepoint.undo_len > active.undo_pages.len() {
                 return Err(invariant(InvariantViolation::InvalidTransactionSavepoint {
@@ -402,7 +402,7 @@ impl TransactionManager {
             }
             active.allocation_changes.extend(changes);
             Ok(restore_pages)
-        };
+        })();
 
         rollback.inspect_err(|_| self.record_failure(savepoint.txn_id))
     }
@@ -530,4 +530,43 @@ fn transaction_mismatch(expected: TxnId, actual: TxnId) -> StorageError {
 
 fn invariant(kind: InvariantViolation) -> StorageError {
     StorageError::Internal(InternalError::InvariantViolation(kind))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::{prelude::*, test_runner::TestCaseResult};
+
+    #[test]
+    fn failed_savepoint_compensation_poisons_transaction_and_retains_undo() -> TestCaseResult {
+        for successful_compensations in [0, 1] {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("db");
+            // Begin and two updates succeed; zero or one compensation fits.
+            crate::log_manager::truncate_wal(&path, u64::MAX - 3 - successful_compensations, 0)?;
+            let mut log = LogManager::new(&path)?;
+            let mut transactions = TransactionManager::new(0);
+            let txn = transactions.begin(&mut log)?;
+            let savepoint = transactions.statement_savepoint(txn)?;
+            transactions.record_page_update(&mut log, txn, 1, &[0; PAGE_SIZE], &[1; PAGE_SIZE])?;
+            transactions.record_page_update(&mut log, txn, 1, &[1; PAGE_SIZE], &[2; PAGE_SIZE])?;
+            prop_assert!(transactions.rollback_to_savepoint(&mut log, savepoint).is_err());
+            prop_assert!(transactions.transaction_is_poisoned(txn)?);
+            prop_assert!(transactions.transaction_is_active(txn));
+            let undo = transactions.prepare_rollback_pages(txn)?;
+            prop_assert_eq!(undo.pages.len(), 2);
+            prop_assert_eq!(undo.pages[0].image, [1; PAGE_SIZE]);
+            prop_assert_eq!(undo.pages[1].image, [0; PAGE_SIZE]);
+            prop_assert!(
+                matches!(
+                    transactions.commit(&mut log, txn),
+                    Err(StorageError::Internal(InternalError::InvariantViolation(
+                        InvariantViolation::TransactionPoisoned { .. }
+                    )))
+                ),
+                "poisoned transaction must reject commit"
+            );
+        }
+        Ok(())
+    }
 }
