@@ -171,7 +171,8 @@ impl<'a> Iterator for Lexer<'a> {
                 Some(Ok(token))
             }
             Started::Keyword => {
-                let is_not_part_of_keyword = |c: char| !(c.is_alphabetic() || c == '_');
+                let is_not_part_of_keyword =
+                    |c: char| !(c.is_alphabetic() || c.is_ascii_digit() || c == '_');
                 let literal = c_rest.split(is_not_part_of_keyword).next()?;
 
                 let kind = TokenKind::from(literal);
@@ -405,5 +406,12 @@ mod tests {
         let got = lexer.next();
         let expected = Token { kind: TokenKind::Identifier("åäö"), offset: 0 };
         assert_eq!(Some(Ok(expected)), got);
+    }
+
+    #[test]
+    fn test_identifier_digits_after_first_character() {
+        let mut lexer = Lexer::new("user2 SELECT1");
+        lexer.expect(TokenKind::Identifier("user2"), 0);
+        lexer.expect(TokenKind::Identifier("SELECT1"), 6);
     }
 }
