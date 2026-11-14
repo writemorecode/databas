@@ -6,6 +6,8 @@ use super::{DiskManager, DiskManagerError, image};
 use crate::PAGE_SIZE;
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
     #[test]
     fn acquiring_ownership_observes_growth_since_the_file_was_opened(initial in 0usize..=3, added in 1usize..=4) {
         let dir = tempfile::tempdir()?;

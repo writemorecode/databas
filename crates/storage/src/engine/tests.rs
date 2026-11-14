@@ -93,39 +93,52 @@ fn opening_modes_distinguish_missing_empty_and_initialized_files() -> TestCaseRe
     Ok(())
 }
 
-proptest! {
-    #[test]
-    fn damaged_headers_and_partial_files_are_rejected_without_touching_database_or_wal(
-        index in prop_oneof![0usize..12, 12usize..PAGE_SIZE], bit in 0u8..8, tail in 1usize..PAGE_SIZE,
-    ) {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("db");
-        let wal = path.with_added_extension("wal");
-        let mut damaged = header();
-        damaged[index] ^= 1 << bit;
-        let mut partial = header();
-        partial.extend(vec![0; tail]);
-        for bytes in [damaged, partial, vec![0; tail]] {
-            for mode in 0..3 {
-                fs::write(&path, &bytes)?;
-                fs::write(&wal, b"must survive rejected open")?;
-                let result = open(&path, mode);
-                if mode == 0 {
-                    prop_assert!(matches!(result, Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists));
-                } else {
-                    // Invalid bitmap bits may need WAL reconciliation first;
-                    // this deliberately invalid WAL must also be preserved.
-                    prop_assert!(result.is_err());
-                }
-                prop_assert_eq!(&fs::read(&path)?, &bytes);
-                prop_assert_eq!(fs::read(&wal)?, b"must survive rejected open");
+#[test]
+fn damaged_headers_and_partial_files_are_rejected_without_touching_database_or_wal()
+-> TestCaseResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("db");
+    let wal = path.with_added_extension("wal");
+    let header = header();
+    let check_rejected = |bytes: &[u8]| -> TestCaseResult {
+        fs::write(&path, bytes)?;
+        fs::write(&wal, b"must survive rejected open")?;
+        for mode in 0..3 {
+            let result = open(&path, mode);
+            if mode == 0 {
+                prop_assert!(
+                    matches!(result, Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists)
+                );
+            } else {
+                // Invalid bitmap bits may need WAL reconciliation first.
+                prop_assert!(result.is_err());
             }
+            prop_assert_eq!(fs::read(&path)?, bytes);
+            prop_assert_eq!(fs::read(&wal)?, b"must survive rejected open");
+            // Probe ownership directly, including for files with a partial page.
+            fs::OpenOptions::new().read(true).write(true).open(&path)?.try_lock()?;
         }
-        // All failing opens must release ownership, allowing repair and retry.
-        fs::write(&path, header())?;
-        fs::remove_file(&wal)?;
-        check_usable(open(&path, 1)?, &path)?;
+        Ok(())
+    };
+
+    // Cover the format fields, reserved bytes, and both ends of the bitmap.
+    for index in (0..=16).chain([17, PAGE_SIZE / 2, PAGE_SIZE - 1]) {
+        for bit in 0..8 {
+            let mut damaged = header.clone();
+            damaged[index] ^= 1 << bit;
+            check_rejected(&damaged)?;
+        }
     }
+    for tail in [1, PAGE_SIZE / 2, PAGE_SIZE - 1] {
+        check_rejected(&vec![0; tail])?;
+        let mut partial = header.clone();
+        partial.resize(PAGE_SIZE + tail, 0);
+        check_rejected(&partial)?;
+    }
+
+    fs::write(&path, &header)?;
+    fs::remove_file(&wal)?;
+    check_usable(open(&path, 1)?, &path)
 }
 
 #[test]

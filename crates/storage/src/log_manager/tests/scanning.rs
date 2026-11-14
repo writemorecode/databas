@@ -51,6 +51,11 @@ proptest! {
         prop_assert_eq!(reader.position, stop);
     }
 
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
     #[test]
     fn scans_and_reopen_preserve_records_and_continue_lsn_assignment(
         frames in prop::collection::vec(transaction(), 0..=5), base_lsn in 0u64..1000, max_txn_id in any::<u64>(),

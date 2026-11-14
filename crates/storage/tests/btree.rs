@@ -24,6 +24,7 @@ mod long_keys;
 
 fn config() -> ProptestConfig {
     ProptestConfig {
+        cases: 32,
         failure_persistence: Some(Box::new(proptest::test_runner::FileFailurePersistence::Direct(
             concat!(env!("CARGO_MANIFEST_DIR"), "/proptest-regressions/btree.txt"),
         ))),

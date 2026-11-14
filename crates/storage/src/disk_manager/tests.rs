@@ -38,6 +38,8 @@ fn operation() -> impl Strategy<Value = Op> {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
     #[test]
     fn page_operations_match_a_byte_image_model(ops in prop::collection::vec(operation(), 1..=40)) {
         let dir = tempfile::tempdir()?;

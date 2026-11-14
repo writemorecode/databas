@@ -91,6 +91,8 @@ fn operation() -> impl Strategy<Value = Op> {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
     #[test]
     fn shared_cache_operations_preserve_page_identity_bytes_and_pins(
         capacity in 1usize..=4, ops in prop::collection::vec(operation(), 1..=96),

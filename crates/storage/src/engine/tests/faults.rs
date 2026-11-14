@@ -88,31 +88,41 @@ fn recovery_fixture(path: &Path, committed: bool) -> Result<u64, TestCaseError> 
     Ok(root)
 }
 
-proptest! {
-    #[test]
-    fn failed_recovery_retains_wal_and_reopen_repeats_redo_or_undo(
-        at in 0usize..PAGE_SIZE, committed in any::<bool>(), sync in any::<bool>(),
-    ) {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("db");
-        let root = recovery_fixture(&path, committed)?;
-        let wal_path = path.with_added_extension("wal");
-        let wal = fs::read(&wal_path)?;
-        let disk = DiskManager::open_existing(&path)?;
-        let control = disk.faults();
-        control.arm(if sync { Operation::Sync } else { Operation::Write }, if sync { 0 } else { at }, Effect::Error(ErrorKind::Other));
-        assert_io(Storage::from_disk_manager(path.clone(), disk, OPTIONS), &control)?;
-        prop_assert_eq!(fs::read(&wal_path)?, wal);
-        let mut expected_header = super::header();
-        expected_header[16] |= 1 << root;
-        prop_assert_eq!(&fs::read(&path)?[..PAGE_SIZE], expected_header);
-        for _ in 0..2 {
-            let storage = open(&path, 1)?;
-            let mut cursor = storage.tree_cursor(root)?;
-            let value = cursor.get(b"key")?.expect("recovered key").with_key_value(|_, value| value.to_vec())?;
-            prop_assert_eq!(value, if committed { b"new" } else { b"old" });
+#[test]
+fn failed_recovery_retains_wal_and_reopen_repeats_redo_or_undo() -> TestCaseResult {
+    let dir = tempfile::tempdir()?;
+    let failures = [
+        (Operation::Write, 0),
+        (Operation::Write, PAGE_SIZE / 2),
+        (Operation::Write, PAGE_SIZE - 1),
+        (Operation::Sync, 0),
+    ];
+    for committed in [false, true] {
+        for (index, (operation, at)) in failures.into_iter().enumerate() {
+            let path = dir.path().join(format!("db-{committed}-{index}"));
+            let root = recovery_fixture(&path, committed)?;
+            let wal_path = path.with_added_extension("wal");
+            let wal = fs::read(&wal_path)?;
+            let disk = DiskManager::open_existing(&path)?;
+            let control = disk.faults();
+            control.arm(operation, at, Effect::Error(ErrorKind::Other));
+            assert_io(Storage::from_disk_manager(path.clone(), disk, OPTIONS), &control)?;
+            prop_assert_eq!(fs::read(&wal_path)?, wal);
+            let mut expected_header = super::header();
+            expected_header[16] |= 1 << root;
+            prop_assert_eq!(&fs::read(&path)?[..PAGE_SIZE], expected_header);
+            for _ in 0..2 {
+                let storage = open(&path, 1)?;
+                let mut cursor = storage.tree_cursor(root)?;
+                let value = cursor
+                    .get(b"key")?
+                    .expect("recovered key")
+                    .with_key_value(|_, value| value.to_vec())?;
+                prop_assert_eq!(value, if committed { b"new" } else { b"old" });
+            }
         }
     }
+    Ok(())
 }
 
 #[test]

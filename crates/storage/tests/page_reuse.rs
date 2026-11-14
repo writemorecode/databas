@@ -68,6 +68,12 @@ fn allocated_count(path: &Path) -> usize {
         .sum()
 }
 
+#[allow(clippy::unwrap_used)]
+fn copy_checkpointed_database(source: &Path, destination: &Path) {
+    fs::copy(source, destination).unwrap();
+    fs::copy(source.with_added_extension("wal"), destination.with_added_extension("wal")).unwrap();
+}
+
 #[test]
 fn destroying_a_tree_reclaims_every_leaf_interior_and_overflow_page() {
     let dir = tempfile::tempdir().unwrap();
@@ -127,8 +133,8 @@ fn deleting_all_records_reclaims_merges_root_children_and_overflow_chains() {
     assert_eq!(allocated_count(&path), 2); // Header and stable empty root.
     let size = fs::metadata(&path).unwrap().len();
     let txn = storage.begin_transaction().unwrap();
+    tree = storage.transaction_tree_cursor(txn, root).unwrap();
     for id in 0..ROWS {
-        tree = storage.transaction_tree_cursor(txn, root).unwrap();
         tree.insert(&key(id), &value(id)).unwrap();
     }
     storage.commit_transaction(txn).unwrap();
@@ -143,12 +149,18 @@ fn deleting_all_records_reclaims_merges_root_children_and_overflow_chains() {
 
 #[test]
 fn savepoint_and_full_rollback_restore_deleted_trees_and_their_overflow() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let fixture = fixture_dir.path().join("db");
+    let storage = open(&fixture);
+    let root = seed(&storage);
+    drop(storage);
+    let before = allocated_count(&fixture);
+
     for commit in [true, false] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
+        copy_checkpointed_database(&fixture, &path);
         let storage = open(&path);
-        let root = seed(&storage);
-        let before = allocated_count(&path);
         let txn = storage.begin_transaction().unwrap();
         let point = storage.statement_savepoint(txn).unwrap();
         storage.transaction_destroy_tree(txn, root).unwrap();
@@ -226,12 +238,17 @@ fn crash_probe() {
 
 #[test]
 fn abrupt_exit_recovers_tree_deletion_and_merges_for_winners_and_losers() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let fixture = fixture_dir.path().join("db");
+    let storage = open(&fixture);
+    let root = seed(&storage);
+    drop(storage);
+
     for mode in ["destroy-commit", "destroy-loser", "merge-commit", "merge-loser"] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
-        let storage = open(&path);
-        let root = seed(&storage);
-        drop(storage);
+        // Start each child from its own copy of the checkpointed database and WAL.
+        copy_checkpointed_database(&fixture, &path);
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "crash_probe", "--nocapture"])
             .env("DATABAS_REUSE_CRASH_PATH", &path)

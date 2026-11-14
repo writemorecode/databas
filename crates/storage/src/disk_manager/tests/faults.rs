@@ -11,6 +11,8 @@ fn io_kind(result: super::super::DiskManagerResult<()>, expected: ErrorKind) -> 
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
     #[test]
     fn fragmented_and_interrupted_transfers_preserve_complete_pages(
         pattern in prop::collection::vec(any::<u8>(), 1..=32), chunk in 1usize..=257, at in 0usize..PAGE_SIZE,

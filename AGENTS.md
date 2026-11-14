@@ -12,6 +12,7 @@ Unit tests are colocated with their modules; crate-level integration tests live 
 ## Build, Test, and Development Commands
 - `cargo test --workspace`: runs unit, integration, and doc tests. Slow fsync-heavy tests are ignored by default.
 - `cargo test --workspace -- --ignored`: runs ignored stress tests.
+- `PROPTEST_CASES=256 cargo test -p databas-storage`: increases the sample count for randomized storage tests, including the file-backed properties with lower defaults.
 - `cargo fmt --all --check`: verifies formatting using `rustfmt.toml`.
 - `cargo clippy --workspace --all-targets --all-features`: runs lint checks across library, binary, tests, and examples.
 - `cargo run --bin client`: starts the TCP database client; `cargo run --bin server` starts the server.
