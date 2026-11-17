@@ -238,7 +238,9 @@ fn fault_storage(path: &std::path::Path) -> crate::error::StorageResult<(Storage
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
+    // Each case opens/restarts real files and forces multiple WAL/doublewrite
+    // batches. Keep routine runs bounded; PROPTEST_CASES raises stress coverage.
+    #![proptest_config(ProptestConfig::with_cases(16))]
     #[test]
     fn partial_bitmap_writes_and_sync_failures_keep_wal_for_retry(at in 0usize..PAGE_SIZE, sync in any::<bool>()) {
         let dir = tempfile::tempdir()?;

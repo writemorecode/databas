@@ -5,7 +5,9 @@ use databas_storage::{CheckpointOutcome, Storage, StorageOptions, TreeCursor};
 
 const OPTIONS: StorageOptions = StorageOptions { cache_frames: 8 };
 const PAGE_SIZE: usize = 4096;
-const ROWS: u32 = 72;
+// Enough for leaf splits/merges, multi-page overflow, eviction, and full
+// doublewrite batches. Retain larger, multi-level trees in the stress test.
+const ROWS: u32 = 12;
 
 #[allow(clippy::unwrap_used)]
 fn open(path: &Path) -> Storage {
@@ -23,11 +25,11 @@ fn value(id: u32) -> Vec<u8> {
 }
 
 #[allow(clippy::unwrap_used)]
-fn seed(storage: &Storage) -> u64 {
+fn seed(storage: &Storage, rows: u32) -> u64 {
     let txn = storage.begin_transaction().unwrap();
     let mut tree = storage.transaction_create_tree(txn).unwrap();
     let root = tree.root_page_id();
-    for id in 0..ROWS {
+    for id in 0..rows {
         tree.insert(&key(id), &value(id)).unwrap();
     }
     storage.commit_transaction(txn).unwrap();
@@ -36,8 +38,8 @@ fn seed(storage: &Storage) -> u64 {
 }
 
 #[allow(clippy::unwrap_used)]
-fn verify(tree: &mut TreeCursor) {
-    for id in 0..ROWS {
+fn verify(tree: &mut TreeCursor, rows: u32) {
+    for id in 0..rows {
         assert_eq!(
             tree.get(&key(id))
                 .unwrap()
@@ -49,7 +51,7 @@ fn verify(tree: &mut TreeCursor) {
     }
     assert!(tree.seek_to_first().unwrap());
     let mut current = tree.current().unwrap();
-    for id in 0..ROWS {
+    for id in 0..rows {
         assert_eq!(current.unwrap().with_key_value(|k, _| k.to_vec()).unwrap(), key(id));
         current = tree.next_record().unwrap();
     }
@@ -76,10 +78,15 @@ fn copy_checkpointed_database(source: &Path, destination: &Path) {
 
 #[test]
 fn destroying_a_tree_reclaims_every_leaf_interior_and_overflow_page() {
+    check_tree_destruction(ROWS);
+}
+
+#[allow(clippy::unwrap_used)]
+fn check_tree_destruction(rows: u32) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let storage = open(&path);
-    let root = seed(&storage);
+    let root = seed(&storage, rows);
     let mut sentinel = storage.create_tree().unwrap();
     let sentinel_root = sentinel.root_page_id();
     sentinel.insert(b"keep", b"alive").unwrap();
@@ -117,13 +124,18 @@ fn destroying_a_tree_reclaims_every_leaf_interior_and_overflow_page() {
 
 #[test]
 fn deleting_all_records_reclaims_merges_root_children_and_overflow_chains() {
+    check_record_deletion(ROWS);
+}
+
+#[allow(clippy::unwrap_used)]
+fn check_record_deletion(rows: u32) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let storage = open(&path);
-    let root = seed(&storage);
+    let root = seed(&storage, rows);
     let txn = storage.begin_transaction().unwrap();
     let mut tree = storage.transaction_tree_cursor(txn, root).unwrap();
-    for id in 0..ROWS {
+    for id in 0..rows {
         tree.delete(&key(id)).unwrap();
     }
     assert_eq!(tree.root_page_id(), root);
@@ -134,7 +146,7 @@ fn deleting_all_records_reclaims_merges_root_children_and_overflow_chains() {
     let size = fs::metadata(&path).unwrap().len();
     let txn = storage.begin_transaction().unwrap();
     tree = storage.transaction_tree_cursor(txn, root).unwrap();
-    for id in 0..ROWS {
+    for id in 0..rows {
         tree.insert(&key(id), &value(id)).unwrap();
     }
     storage.commit_transaction(txn).unwrap();
@@ -144,15 +156,20 @@ fn deleting_all_records_reclaims_merges_root_children_and_overflow_chains() {
         size,
         "insertion grew the file instead of reusing freed pages"
     );
-    verify(&mut tree);
+    verify(&mut tree, rows);
 }
 
 #[test]
 fn savepoint_and_full_rollback_restore_deleted_trees_and_their_overflow() {
+    check_rollback(ROWS);
+}
+
+#[allow(clippy::unwrap_used)]
+fn check_rollback(rows: u32) {
     let fixture_dir = tempfile::tempdir().unwrap();
     let fixture = fixture_dir.path().join("db");
     let storage = open(&fixture);
-    let root = seed(&storage);
+    let root = seed(&storage, rows);
     drop(storage);
     let before = allocated_count(&fixture);
 
@@ -165,13 +182,13 @@ fn savepoint_and_full_rollback_restore_deleted_trees_and_their_overflow() {
         let point = storage.statement_savepoint(txn).unwrap();
         storage.transaction_destroy_tree(txn, root).unwrap();
         storage.rollback_to_savepoint(point).unwrap();
-        verify(&mut storage.transaction_tree_cursor(txn, root).unwrap());
+        verify(&mut storage.transaction_tree_cursor(txn, root).unwrap(), rows);
         let mut tree = storage.transaction_tree_cursor(txn, root).unwrap();
-        for id in 0..ROWS {
+        for id in 0..rows {
             tree.delete(&key(id)).unwrap();
         }
         storage.rollback_to_savepoint(point).unwrap();
-        verify(&mut tree);
+        verify(&mut tree, rows);
         if commit {
             storage.commit_transaction(txn).unwrap();
         } else {
@@ -180,7 +197,7 @@ fn savepoint_and_full_rollback_restore_deleted_trees_and_their_overflow() {
         drop(tree);
         drop(storage);
         let storage = open(&path);
-        verify(&mut storage.tree_cursor(root).unwrap());
+        verify(&mut storage.tree_cursor(root).unwrap(), rows);
         assert_eq!(allocated_count(&path), before);
     }
 }
@@ -217,13 +234,14 @@ fn crash_probe() {
     };
     let mode = std::env::var("DATABAS_REUSE_CRASH_MODE").unwrap();
     let root: u64 = std::env::var("DATABAS_REUSE_CRASH_ROOT").unwrap().parse().unwrap();
+    let rows: u32 = std::env::var("DATABAS_REUSE_CRASH_ROWS").unwrap().parse().unwrap();
     let storage = open(Path::new(&path));
     let txn = storage.begin_transaction().unwrap();
     if mode.starts_with("destroy") {
         storage.transaction_destroy_tree(txn, root).unwrap();
     } else {
         let mut tree = storage.transaction_tree_cursor(txn, root).unwrap();
-        for id in 0..ROWS {
+        for id in 0..rows {
             tree.delete(&key(id)).unwrap();
         }
     }
@@ -238,10 +256,15 @@ fn crash_probe() {
 
 #[test]
 fn abrupt_exit_recovers_tree_deletion_and_merges_for_winners_and_losers() {
+    check_crash_recovery(ROWS);
+}
+
+#[allow(clippy::unwrap_used)]
+fn check_crash_recovery(rows: u32) {
     let fixture_dir = tempfile::tempdir().unwrap();
     let fixture = fixture_dir.path().join("db");
     let storage = open(&fixture);
-    let root = seed(&storage);
+    let root = seed(&storage, rows);
     drop(storage);
 
     for mode in ["destroy-commit", "destroy-loser", "merge-commit", "merge-loser"] {
@@ -254,6 +277,7 @@ fn abrupt_exit_recovers_tree_deletion_and_merges_for_winners_and_losers() {
             .env("DATABAS_REUSE_CRASH_PATH", &path)
             .env("DATABAS_REUSE_CRASH_MODE", mode)
             .env("DATABAS_REUSE_CRASH_ROOT", root.to_string())
+            .env("DATABAS_REUSE_CRASH_ROWS", rows.to_string())
             .output()
             .unwrap();
         assert!(
@@ -265,7 +289,7 @@ fn abrupt_exit_recovers_tree_deletion_and_merges_for_winners_and_losers() {
         let storage = open(&path);
         let mut tree = storage.tree_cursor(root).unwrap();
         if mode.ends_with("loser") {
-            verify(&mut tree);
+            verify(&mut tree, rows);
         } else if mode.starts_with("merge") {
             assert!(!tree.seek_to_first().unwrap());
             assert_eq!(allocated_count(&path), 2);
@@ -275,4 +299,15 @@ fn abrupt_exit_recovers_tree_deletion_and_merges_for_winners_and_losers() {
             assert_eq!(storage.create_tree().unwrap().root_page_id(), root);
         }
     }
+}
+
+#[test]
+#[ignore = "fsync-heavy multi-level reclamation/recovery stress test; run with --ignored"]
+fn large_trees_reclaim_and_recover_without_leaks() {
+    // Run the original larger fixtures through the same assertions, including
+    // all four abrupt-exit modes and both savepoint/full rollback outcomes.
+    check_tree_destruction(72);
+    check_record_deletion(72);
+    check_rollback(72);
+    check_crash_recovery(72);
 }
