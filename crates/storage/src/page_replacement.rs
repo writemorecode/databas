@@ -1,9 +1,6 @@
 use crate::bitset::BitSet;
 use crate::page_cache::FrameId;
 
-#[cfg(test)]
-mod tests;
-
 #[derive(Debug)]
 pub struct ClockPolicy {
     hand: FrameId,

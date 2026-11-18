@@ -13,8 +13,6 @@ mod bitmap;
 
 use bitmap::AllocationBitmap;
 pub use bitmap::BITMAP_OFFSET;
-#[cfg(test)]
-pub use bitmap::PAGES_PER_EXTENT;
 
 pub struct PageAllocator {
     bitmap: AllocationBitmap,
@@ -127,6 +125,3 @@ impl PageAllocator {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests;

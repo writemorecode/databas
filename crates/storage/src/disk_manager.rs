@@ -4,10 +4,10 @@ use std::{
     path::Path,
 };
 
+#[cfg(test)]
+use simulation::FaultFile as File;
 #[cfg(not(test))]
 use std::fs::File;
-#[cfg(test)]
-use tests::FaultFile as File;
 
 use thiserror::Error;
 
@@ -159,4 +159,5 @@ impl DiskManager {
 }
 
 #[cfg(test)]
-pub mod tests;
+#[allow(dead_code)] // Fault controls are retained for the simulation harness.
+mod simulation;

@@ -8,7 +8,6 @@ databas-storage = { path = "../storage" }
 thiserror = "2.0.18"
 
 [dev-dependencies]
-loom = "0.7.2"
 tempfile = "3.25.0"
 
 [lints]

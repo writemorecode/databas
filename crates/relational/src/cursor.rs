@@ -324,14 +324,12 @@ impl IndexCursor {
 
     /// Looks up an index entry by key without eagerly copying page-resident bytes.
     #[cfg(test)]
-    #[cfg_attr(all(test, loom), allow(dead_code))]
     fn get_entry(&mut self, key: &[u8]) -> RelationalResult<Option<IndexEntry>> {
         self.inner.get(key)?.map(IndexEntry::try_from).transpose()
     }
 
     /// Replaces the table key stored for an existing index `key`.
     #[cfg(test)]
-    #[cfg_attr(all(test, loom), allow(dead_code))]
     fn update(&mut self, key: &[u8], table_key: TableKey) -> RelationalResult<()> {
         self.inner.update(key, &encode_index_table_key(table_key)).map_err(Into::into)
     }
@@ -432,7 +430,7 @@ impl TryFrom<Record> for IndexEntry {
     }
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

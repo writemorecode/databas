@@ -28,9 +28,6 @@ panic = "abort"
 [lints]
 workspace = true
 
-[workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
-
 [workspace.lints.clippy]
 # Don't panic
 expect_used = "deny"

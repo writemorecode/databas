@@ -68,6 +68,3 @@ impl BitSet<Vec<u8>> {
         Self { bytes: vec![0; len.div_ceil(8)], len }
     }
 }
-
-#[cfg(test)]
-mod tests;

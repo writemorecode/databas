@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::super::DiskManager;
+use super::DiskManager;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {

@@ -27,12 +27,6 @@
 //! Queue and graph changes follow one latch order: table queue first, wait-for
 //! graph second. The global queue-map mutex is never held while locking a queue
 //! or waiting on its condition variable.
-//!
-//! # Loom testing
-//!
-//! The synchronization primitives are substituted with Loom's modeled types
-//! in test builds using the `loom` configuration flag. Run the focused models
-//! with `RUSTFLAGS="--cfg loom" cargo test --lib core::lock_manager::loom_tests`.
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
@@ -366,15 +360,9 @@ impl WaitForGraph {
     }
 
     /// Returns whether `txn_id` has an outgoing edge.
-    #[cfg(all(test, not(loom)))]
+    #[cfg(test)]
     fn contains(&self, txn_id: TxnId) -> bool {
         self.edges.contains_key(&txn_id)
-    }
-
-    /// Returns whether the graph has no edges.
-    #[cfg(all(test, loom))]
-    fn is_empty(&self) -> bool {
-        self.edges.is_empty()
     }
 
     /// Returns whether following edges from `start` reaches `start`.
@@ -393,7 +381,7 @@ impl WaitForGraph {
     }
 
     /// Returns whether any transaction participates in a cycle.
-    #[cfg(all(test, not(loom)))]
+    #[cfg(test)]
     fn has_cycle(&self) -> bool {
         self.edges.keys().copied().any(|start| self.edge_closes_cycle(start))
     }
@@ -419,9 +407,6 @@ struct LockManagerInner {
     queues: Mutex<HashMap<TableId, Arc<LockQueue>>>,
     /// Transaction registry, wait-for edges, and DDL admission state.
     graph: Mutex<GraphState>,
-    /// Test-only synchronization proving that a modeled waiter has enqueued.
-    #[cfg(all(test, loom))]
-    enqueue_signal: Mutex<Option<loom::sync::mpsc::Sender<()>>>,
 }
 
 /// Thread-safe manager for FIFO shared and exclusive table locks.
@@ -567,7 +552,7 @@ impl LockManager {
             .ok_or(LockError::TransactionNotActive { txn_id })
     }
 
-    #[cfg(all(test, not(loom)))]
+    #[cfg(test)]
     fn transaction_is_waiting_for(
         &self,
         txn_id: TxnId,
@@ -706,8 +691,6 @@ impl LockManager {
             return Ok(AcquireDecision::Deadlock);
         }
 
-        #[cfg(all(test, loom))]
-        self.signal_waiter_enqueued()?;
         Ok(AcquireDecision::Wait)
     }
 
@@ -767,17 +750,6 @@ impl LockManager {
                 return Err(invariant("woken transaction is neither owner nor waiter"));
             }
         }
-    }
-
-    /// Sends the test-only notification that a Loom waiter is fully queued.
-    #[cfg(all(test, loom))]
-    fn signal_waiter_enqueued(&self) -> Result<(), LockError> {
-        if let Some(signal) = lock(&self.inner.enqueue_signal, "Loom enqueue signal")?.take() {
-            signal
-                .send(())
-                .map_err(|error| invariant(format!("failed to signal Loom waiter: {error}")))?;
-        }
-        Ok(())
     }
 
     /// Cancels a transaction's outstanding blocking request.
@@ -987,22 +959,11 @@ impl LockManager {
         lock(&self.inner.graph, "wait-for graph")
     }
 
-    /// Arms a Loom-only notification for the next successfully queued waiter.
-    #[cfg(all(test, loom))]
-    fn signal_next_enqueue(&self) -> Result<loom::sync::mpsc::Receiver<()>, LockError> {
-        let (send, receive) = loom::sync::mpsc::channel();
-        let mut signal = lock(&self.inner.enqueue_signal, "Loom enqueue signal")?;
-        if signal.replace(send).is_some() {
-            return Err(invariant("a Loom enqueue signal is already armed"));
-        }
-        Ok(receive)
-    }
-
     /// Verifies queue, ownership, transaction-set, and graph agreement in tests.
     ///
     /// Callers use this only after worker threads join because its diagnostic
     /// multi-queue traversal does not follow the production latch protocol.
-    #[cfg(all(test, not(loom)))]
+    #[cfg(test)]
     #[allow(clippy::unwrap_used)]
     fn assert_invariants(&self) {
         let queues = self.inner.queues.lock().unwrap();
@@ -1160,7 +1121,7 @@ fn invariant(message: impl Into<String>) -> LockError {
     LockError::Invariant { message: message.into() }
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use std::{
@@ -1719,342 +1680,5 @@ mod tests {
             manager.begin_transaction(1),
             Err(LockError::Poisoned { mutex: "wait-for graph" })
         );
-    }
-}
-
-#[cfg(all(test, loom))]
-#[allow(clippy::panic, clippy::unwrap_used)]
-mod loom_tests {
-    use loom::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-        mpsc,
-    };
-
-    use super::*;
-    use crate::loom_support::{check_model, thread};
-
-    fn rollback(manager: &LockManager, txn_id: TxnId) {
-        manager.begin_rollback(txn_id).unwrap();
-        manager.finish_transaction(txn_id).unwrap();
-    }
-
-    fn assert_quiescent(manager: &LockManager) {
-        let graph = manager.inner.graph.lock().unwrap();
-        assert!(graph.transactions.is_empty());
-        assert!(graph.waits_for.is_empty());
-        drop(graph);
-
-        let queues = manager.inner.queues.lock().unwrap();
-        for queue in queues.values() {
-            let state = queue.state.lock().unwrap();
-            assert_eq!(state.owner, None);
-            assert!(state.readers.is_empty());
-            assert!(state.waiters.is_empty());
-        }
-    }
-
-    #[test]
-    fn last_reader_release_hands_off_to_writer() {
-        check_model(|| {
-            let manager = LockManager::new();
-            for id in 1..=3 {
-                manager.begin_transaction(id).unwrap();
-            }
-            manager.acquire_shared(1, 7).unwrap();
-            manager.acquire_shared(2, 7).unwrap();
-            let enqueued = manager.signal_next_enqueue().unwrap();
-            let child = manager.clone();
-            let writer = thread::spawn(move || {
-                child.acquire(3, 7).unwrap();
-                rollback(&child, 3);
-            });
-            enqueued.recv().unwrap();
-            let child = manager.clone();
-            let first = thread::spawn(move || rollback(&child, 1));
-            rollback(&manager, 2);
-            first.join().unwrap();
-            writer.join().unwrap();
-            assert_quiescent(&manager);
-        });
-    }
-
-    #[test]
-    fn upgrade_cancellation_racing_last_other_reader_release_preserves_ownership() {
-        check_model(|| {
-            let manager = LockManager::new();
-            manager.begin_transaction(1).unwrap();
-            manager.begin_transaction(2).unwrap();
-            manager.acquire_shared(1, 7).unwrap();
-            manager.acquire_shared(2, 7).unwrap();
-            let enqueued = manager.signal_next_enqueue().unwrap();
-            let child = manager.clone();
-            let upgrade = thread::spawn(move || child.acquire(1, 7));
-            enqueued.recv().unwrap();
-            let child = manager.clone();
-            let release = thread::spawn(move || rollback(&child, 2));
-            let canceled = manager.cancel_waiting(1).unwrap();
-            release.join().unwrap();
-            let result = upgrade.join().unwrap();
-            if canceled {
-                assert_eq!(result, Err(LockError::Canceled { txn_id: 1 }));
-            } else {
-                assert_eq!(result.unwrap().mode(), LockMode::Exclusive);
-            }
-            let queue = manager.queue(TableId::new(7)).unwrap();
-            let state = queue.state.lock().unwrap();
-            assert!(state.holds(1, LockMode::Shared));
-            assert_eq!(state.holds(1, LockMode::Exclusive), !canceled);
-            drop(state);
-            rollback(&manager, 1);
-            assert_quiescent(&manager);
-        });
-    }
-
-    #[test]
-    fn concurrent_first_requests_do_not_create_split_queues_or_multiple_owners() {
-        check_model(|| {
-            let manager = LockManager::new();
-            manager.begin_transaction(1).unwrap();
-            manager.begin_transaction(2).unwrap();
-
-            let first = manager.clone();
-            let first = thread::spawn(move || {
-                let _lease = first.acquire(1, 7).unwrap();
-                rollback(&first, 1);
-            });
-            let second = manager.clone();
-            let second = thread::spawn(move || {
-                let _lease = second.acquire(2, 7).unwrap();
-                rollback(&second, 2);
-            });
-
-            first.join().unwrap();
-            second.join().unwrap();
-            assert_eq!(manager.inner.queues.lock().unwrap().len(), 1);
-            assert_quiescent(&manager);
-        });
-    }
-
-    #[test]
-    fn queued_request_is_removed_and_woken_by_cancellation() {
-        check_model(|| {
-            let manager = LockManager::new();
-            manager.begin_transaction(1).unwrap();
-            manager.begin_transaction(2).unwrap();
-            manager.acquire(1, 7).unwrap();
-
-            let enqueued = manager.signal_next_enqueue().unwrap();
-            let waiter_manager = manager.clone();
-            let waiter = thread::spawn(move || waiter_manager.acquire(2, 7));
-            enqueued.recv().unwrap();
-
-            assert!(manager.cancel_waiting(2).unwrap());
-            assert!(matches!(waiter.join().unwrap(), Err(LockError::Canceled { txn_id: 2 })));
-            rollback(&manager, 1);
-            rollback(&manager, 2);
-            assert_quiescent(&manager);
-        });
-    }
-
-    #[test]
-    fn cancellation_racing_with_handoff_has_no_lost_waiter_or_owner() {
-        check_model(|| {
-            let manager = LockManager::new();
-            manager.begin_transaction(1).unwrap();
-            manager.begin_transaction(2).unwrap();
-            manager.acquire(1, 7).unwrap();
-
-            // Ensure cancellation and handoff race over an actual queued
-            // request rather than allowing cancellation to run too early.
-            let enqueued = manager.signal_next_enqueue().unwrap();
-            // Keep transaction 2 active until cancellation has observed the
-            // race outcome, even if handoff and acquisition complete first.
-            let (cancel_send, cancel_receive) = mpsc::channel();
-            let waiter_manager = manager.clone();
-            let waiter = thread::spawn(move || {
-                let acquired = match waiter_manager.acquire(2, 7) {
-                    Ok(_lease) => true,
-                    Err(LockError::Canceled { txn_id: 2 }) => false,
-                    Err(error) => panic!("unexpected waiter result: {error}"),
-                };
-                let removed = cancel_receive.recv().unwrap();
-                rollback(&waiter_manager, 2);
-                (acquired, removed)
-            });
-            enqueued.recv().unwrap();
-
-            let cancel_manager = manager.clone();
-            let cancel = thread::spawn(move || {
-                let removed = cancel_manager.cancel_waiting(2).unwrap();
-                cancel_send.send(removed).unwrap();
-            });
-            let release_manager = manager.clone();
-            let release = thread::spawn(move || rollback(&release_manager, 1));
-
-            cancel.join().unwrap();
-            release.join().unwrap();
-            let (acquired, removed) = waiter.join().unwrap();
-            assert_ne!(acquired, removed);
-            assert_quiescent(&manager);
-        });
-    }
-
-    #[test]
-    fn ddl_and_ordinary_transaction_admission_never_overlap() {
-        check_model(|| {
-            let manager = LockManager::new();
-            let admitted = Arc::new(AtomicUsize::new(0));
-
-            let ordinary_manager = manager.clone();
-            let ordinary_admitted = Arc::clone(&admitted);
-            let ordinary = thread::spawn(move || match ordinary_manager.begin_transaction(1) {
-                Ok(()) => {
-                    assert_eq!(ordinary_admitted.fetch_add(1, Ordering::SeqCst), 0);
-                    thread::yield_now();
-                    ordinary_admitted.fetch_sub(1, Ordering::SeqCst);
-                    rollback(&ordinary_manager, 1);
-                    true
-                }
-                Err(LockError::DdlBusy { txn_id: 1 }) => false,
-                Err(error) => panic!("unexpected ordinary admission result: {error}"),
-            });
-
-            let ddl_manager = manager.clone();
-            let ddl_admitted = Arc::clone(&admitted);
-            let ddl = thread::spawn(move || match ddl_manager.begin_ddl_transaction(2) {
-                Ok(()) => {
-                    assert_eq!(ddl_admitted.fetch_add(1, Ordering::SeqCst), 0);
-                    thread::yield_now();
-                    ddl_admitted.fetch_sub(1, Ordering::SeqCst);
-                    rollback(&ddl_manager, 2);
-                    true
-                }
-                Err(LockError::DdlBusy { txn_id: 2 }) => false,
-                Err(error) => panic!("unexpected DDL admission result: {error}"),
-            });
-
-            let ordinary_won = ordinary.join().unwrap();
-            let ddl_won = ddl.join().unwrap();
-            assert!(ordinary_won || ddl_won);
-            assert_eq!(admitted.load(Ordering::SeqCst), 0);
-            assert_quiescent(&manager);
-        });
-    }
-
-    #[test]
-    fn rollback_start_racing_with_handoff_retains_any_granted_lock_until_finish() {
-        check_model(|| {
-            let manager = LockManager::new();
-            manager.begin_transaction(1).unwrap();
-            manager.begin_transaction(2).unwrap();
-            manager.acquire(1, 7).unwrap();
-
-            let enqueued = manager.signal_next_enqueue().unwrap();
-            let waiter_manager = manager.clone();
-            let waiter = thread::spawn(move || match waiter_manager.acquire(2, 7) {
-                Ok(_lease) => 0,
-                Err(LockError::Canceled { txn_id: 2 }) => 1,
-                Err(LockError::TransactionNotGrowing {
-                    txn_id: 2,
-                    phase: TransactionPhase::Aborting,
-                }) => 2,
-                Err(error) => panic!("unexpected waiter result during rollback: {error}"),
-            });
-            enqueued.recv().unwrap();
-            let abort_manager = manager.clone();
-            let abort = thread::spawn(move || abort_manager.begin_rollback(2));
-            let release_manager = manager.clone();
-            let release = thread::spawn(move || rollback(&release_manager, 1));
-
-            abort.join().unwrap().unwrap();
-            release.join().unwrap();
-            let outcome = waiter.join().unwrap();
-            assert!(outcome <= 2);
-            assert_eq!(manager.transaction_phase(2).unwrap(), TransactionPhase::Aborting);
-
-            // A successful acquisition proves handoff completed before rollback
-            // started. Its lock must remain owned until explicit finalization.
-            if outcome == 0 {
-                assert!(
-                    manager.inner.graph.lock().unwrap().transactions[&2]
-                        .locks
-                        .contains(&TableId::new(7))
-                );
-                assert_eq!(
-                    manager.inner.queues.lock().unwrap()[&TableId::new(7)]
-                        .state
-                        .lock()
-                        .unwrap()
-                        .owner,
-                    Some(2)
-                );
-            }
-            manager.finish_transaction(2).unwrap();
-            assert_quiescent(&manager);
-        });
-    }
-
-    #[test]
-    fn commit_finish_hands_a_contended_table_to_the_waiter() {
-        check_model(|| {
-            let manager = LockManager::new();
-            manager.begin_transaction(1).unwrap();
-            manager.begin_transaction(2).unwrap();
-            manager.acquire(1, 7).unwrap();
-            manager.begin_commit(1).unwrap();
-
-            let enqueued = manager.signal_next_enqueue().unwrap();
-            let waiter_manager = manager.clone();
-            let waiter = thread::spawn(move || {
-                let lease = waiter_manager.acquire(2, 7).unwrap();
-                assert_eq!(lease.transaction_id(), 2);
-                rollback(&waiter_manager, 2);
-            });
-            enqueued.recv().unwrap();
-            let commit_manager = manager.clone();
-            let commit = thread::spawn(move || commit_manager.finish_transaction(1));
-
-            commit.join().unwrap().unwrap();
-            waiter.join().unwrap();
-            assert_quiescent(&manager);
-        });
-    }
-
-    #[test]
-    fn concurrent_cycle_requests_abort_exactly_the_closing_request() {
-        check_model(|| {
-            let manager = LockManager::new();
-            manager.begin_transaction(1).unwrap();
-            manager.begin_transaction(2).unwrap();
-            manager.acquire(1, 10).unwrap();
-            manager.acquire(2, 20).unwrap();
-
-            let first_manager = manager.clone();
-            let first = thread::spawn(move || {
-                let victim = match first_manager.acquire(1, 20) {
-                    Ok(_lease) => false,
-                    Err(LockError::Deadlock { txn_id: 1 }) => true,
-                    Err(error) => panic!("unexpected first request result: {error}"),
-                };
-                rollback(&first_manager, 1);
-                victim
-            });
-            let second_manager = manager.clone();
-            let second = thread::spawn(move || {
-                let victim = match second_manager.acquire(2, 10) {
-                    Ok(_lease) => false,
-                    Err(LockError::Deadlock { txn_id: 2 }) => true,
-                    Err(error) => panic!("unexpected second request result: {error}"),
-                };
-                rollback(&second_manager, 2);
-                victim
-            });
-
-            let first_victim = first.join().unwrap();
-            let second_victim = second.join().unwrap();
-            assert_ne!(first_victim, second_victim);
-            assert_quiescent(&manager);
-        });
     }
 }

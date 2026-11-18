@@ -229,7 +229,7 @@ fn plan_table_locks(plan: &PhysicalPlan) -> Vec<(TableId, LockMode)> {
     locks.into_iter().collect()
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::relational::access::CatalogRead;
