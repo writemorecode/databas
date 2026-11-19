@@ -19,6 +19,20 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features
 ```
 
+### Storage simulation
+
+Run the seeded storage workload with engine assertions enabled.
+
+```sh
+CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo run --release -p databas-storage --features simulation --bin storage-sim -- --seed 42 --duration 15m
+```
+
+The simulator runs until the time limit or the first unexpected failure. Its
+clients share the storage engine and keep operating across injected I/O errors
+and power losses. Recovery checks the B+-trees against the client transaction
+history. To replay a failure, use the same build and seed and replace
+`--duration 15m` with the reported `--events N`.
+
 `DROP TABLE name;` removes a user table and all of its secondary indexes.
 `DROP INDEX name;` removes a secondary index while preserving its table.
 Both statements support explicit transactions: `ROLLBACK;` restores the catalog

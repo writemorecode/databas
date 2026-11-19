@@ -255,8 +255,15 @@ impl TreeCursor {
             super::reclaim::overflow_roots(leaf_pin_guard.read()?.page(), leaf_page_id)?;
         let split_index = Self::choose_leaf_split_index(cells)?;
         let (left_cells, right_cells) = cells.split_at(split_index);
+        debug_assert!(!left_cells.is_empty() && !right_cells.is_empty());
+        debug_assert!(Self::leaf_cells_fit(left_cells) && Self::leaf_cells_fit(right_cells));
+        debug_assert!(
+            cells.windows(2).all(|pair| pair[0].key() < pair[1].key()),
+            "split cells must have strictly increasing keys"
+        );
 
         let (right_page_id, right_page_guard) = self.page_cache.new_page(self.txn_id)?;
+        debug_assert_ne!(leaf_page_id, right_page_id, "split pages must be distinct");
         drop(right_page_guard);
 
         let mut left_page_image = [0; PAGE_SIZE];

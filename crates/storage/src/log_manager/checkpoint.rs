@@ -1,7 +1,7 @@
 //! Crash-safe WAL prefix reclamation after covered database pages are synced.
 use super::{
-    BufWriter, LogManager, LogRecord, Lsn, OpenOptions, Path, WAL_WRITE_BUFFER_LEN, Write,
-    read_checkpoint_log, serialize_transaction, sync_parent_directory, write_wal_file_header,
+    BufWriter, LogManager, LogRecord, Lsn, OpenMode, Path, WAL_WRITE_BUFFER_LEN, Write,
+    read_checkpoint_log, serialize_transaction, write_wal_file_header,
 };
 use crate::error::StorageResult;
 
@@ -17,7 +17,7 @@ impl LogManager {
         retain_from: Lsn,
     ) -> StorageResult<CheckpointProgress> {
         self.flush_all()?;
-        let scan = match read_checkpoint_log(path) {
+        let scan = match read_checkpoint_log(&self.fs, path) {
             Ok(scan) => scan,
             Err(error) => {
                 self.poison();
@@ -31,12 +31,7 @@ impl LogManager {
         let base_lsn = scan.records[prefix_len - 1].lsn;
         let wal_path = path.with_added_extension("wal");
         let staged_path = wal_path.with_added_extension("checkpoint");
-        let mut staged = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(true)
-            .open(&staged_path)?;
+        let mut staged = self.fs.open(&staged_path, OpenMode::Truncate)?;
         write_wal_file_header(&mut staged, base_lsn, scan.max_txn_id)?;
         {
             let mut writer = BufWriter::with_capacity(WAL_WRITE_BUFFER_LEN, &mut staged);
@@ -51,9 +46,9 @@ impl LogManager {
         }
         staged.sync_all()?;
         self.poison();
-        std::fs::rename(&staged_path, &wal_path)?;
-        sync_parent_directory(&wal_path)?;
-        *self = Self::new(path)?;
+        self.fs.rename(&staged_path, &wal_path)?;
+        self.fs.sync_parent(&wal_path)?;
+        *self = Self::new(self.fs.clone(), path)?;
         Ok(CheckpointProgress { remaining_records: scan.records.len() - prefix_len })
     }
 }

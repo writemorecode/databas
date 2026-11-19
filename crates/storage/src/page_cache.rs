@@ -367,6 +367,11 @@ impl PageCache {
             return Ok(None);
         };
         self.validate_frame_id(page_id, frame_id)?;
+        debug_assert_eq!(
+            self.inner.frames[frame_id].page_id(),
+            Some(page_id),
+            "page table and resident frame must agree"
+        );
         Ok(Some(frame_id))
     }
 
@@ -394,6 +399,15 @@ impl PageCache {
         frame_id: FrameId,
         new_page_id: PageId,
     ) -> PageCacheResult<()> {
+        debug_assert_eq!(
+            self.inner.frames[frame_id].pin_count.load(Ordering::Acquire),
+            0,
+            "cannot replace a pinned frame"
+        );
+        debug_assert!(
+            meta.page_table.get(&new_page_id).is_none_or(|&resident| resident == frame_id),
+            "a page cannot occupy two cache frames"
+        );
         self.flush_frame_if_dirty(frame_id)?;
 
         let frame = &self.inner.frames[frame_id];
@@ -485,6 +499,8 @@ pub struct PinGuard {
 impl PinGuard {
     /// Creates a new pin guard for a specific frame.
     fn new(page_cache: Arc<PageCacheInner>, frame_id: FrameId, page_id: PageId) -> Self {
+        debug_assert_eq!(page_cache.frames[frame_id].page_id(), Some(page_id));
+        debug_assert!(page_cache.frames[frame_id].pin_count.load(Ordering::Acquire) > 0);
         Self { page_cache, frame_id, page_id }
     }
 
@@ -495,6 +511,7 @@ impl PinGuard {
     /// fails while a write guard is active.
     pub(crate) fn read(&self) -> PageCacheResult<PageReadGuard<'_>> {
         let frame = &self.page_cache.frames[self.frame_id];
+        debug_assert_eq!(frame.page_id(), Some(self.page_id), "pinned frame changed owner");
         let page = try_read_page_data(&frame.data, self.page_id)?;
         Ok(PageReadGuard { page })
     }
@@ -509,6 +526,7 @@ impl PinGuard {
             self.page_cache.runtime.validate_transaction_write(txn_id).map_err(runtime_error)?;
         }
         let frame = &self.page_cache.frames[self.frame_id];
+        debug_assert_eq!(frame.page_id(), Some(self.page_id), "pinned frame changed owner");
         let page = try_write_page_data(&frame.data, self.page_id)?;
         let before = *page;
         let was_dirty = frame.dirty.load(Ordering::Acquire);

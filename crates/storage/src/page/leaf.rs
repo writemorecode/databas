@@ -187,6 +187,7 @@ where
             inline_payload,
         );
         self.insert_slot(slot_index, cell_offset)?;
+        self.debug_assert_valid();
         Ok(slot_index)
     }
 
@@ -216,6 +217,7 @@ where
                 first_overflow_page_id,
                 inline_payload,
             );
+            self.debug_assert_valid();
             return Ok(slot_index);
         }
 
@@ -243,6 +245,7 @@ where
         self.remove_slot(slot_index)?;
         // Do we need to reclaim space after every cell delete?
         self.reclaim_space(cell_offset, cell_len)?;
+        self.debug_assert_valid();
         Ok(slot_index)
     }
 }

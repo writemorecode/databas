@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::disk_manager::DiskManager;
 use crate::error::{InternalError, StorageError, StorageResult};
+use crate::filesystem::FileSystem;
 use crate::log_manager::{LogManager, Lsn, TxnId};
 use crate::page_allocator::PageAllocator;
 use crate::recovery::recover_from_wal;
@@ -34,11 +35,11 @@ pub struct StorageRuntime {
 }
 
 impl StorageRuntime {
-    pub(crate) fn new(path: PathBuf, mut disk: DiskManager) -> StorageResult<Self> {
+    pub(crate) fn new(fs: FileSystem, path: PathBuf, mut disk: DiskManager) -> StorageResult<Self> {
         disk.lock_exclusive()?;
         let _ = PageAllocator::load(&mut disk)?;
-        let recovery = recover_from_wal(&path, &mut disk)?;
-        let log = LogManager::new(&path)?;
+        let recovery = recover_from_wal(&fs, &path, &mut disk)?;
+        let log = LogManager::new(fs, &path)?;
         let allocator = PageAllocator::load(&mut disk)?;
         let max_txn_id = recovery.max_txn_id.max(log.highest_txn_id());
         Ok(Self {

@@ -36,6 +36,8 @@ pub enum InvariantViolation {
     WalFlushLsnNotAppended { requested_lsn: Lsn, highest_appended_lsn: Option<Lsn> },
     #[error("WAL log error: {message}")]
     WalLog { message: String },
+    #[error("WAL manager is poisoned after a failed append")]
+    WalPoisoned,
     #[error("transaction {txn_id} is already active")]
     ActiveTransaction { txn_id: TxnId },
     #[error("no active transaction")]

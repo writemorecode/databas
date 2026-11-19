@@ -7,7 +7,7 @@
 - `crates/sql-parser/` owns the lexer, parser, AST, and parser property tests, with no engine dependencies.
 - `crates/query/` owns logical and physical planning, optimization, and query execution over the relational crate.
 - The root `src/` owns sessions, the TCP protocol, client, server, and error mapping. `src/core/` is a compatibility re-export facade, not an implementation layer. Binaries live in `src/bin/`.
-Unit tests are colocated with their modules; crate-level integration tests live in each crate's `tests/`, and SQL integration tests live in the root `tests/`.
+Outside the storage crate, unit tests are colocated with their modules; crate-level integration tests live in each crate's `tests/`, and SQL integration tests live in the root `tests/`.
 
 ## Build, Test, and Development Commands
 - `cargo test --workspace`: runs unit, integration, and doc tests. Slow fsync-heavy tests are ignored by default.
@@ -20,7 +20,15 @@ Unit tests are colocated with their modules; crate-level integration tests live 
 Use standard Rust formatting with the repository rustfmt settings. Keep modules small and domain-oriented. Use `snake_case` for functions, modules, and variables; `CamelCase` for types and traits; `SCREAMING_SNAKE_CASE` for constants. Prefer explicit error types and `Result` propagation over panics outside tests.
 
 ## Testing Guidelines
-Add unit tests near the behavior they cover and integration tests under `tests/` for cross-module behavior. Name tests after the expected behavior, for example `insert_values_rejects_null_for_non_nullable_columns`. Use `tempfile` for database files and keep deterministic tests in the default `cargo test` set; mark expensive stress tests as ignored.
+For `crates/storage/`, use the deterministic storage simulator as the testing strategy. Do not add separate unit tests or other standalone storage tests for new behavior or assertions. The only permitted exception is a regression test for a real bug discovered by the simulator; record the failing seed and event count so the failure can be replayed. Prefer assertions in storage code paths and exercise them with the simulator, with debug assertions enabled:
+
+```sh
+CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo run --release -p databas-storage --features simulation --bin storage-sim -- --seed 42 --duration 15m
+```
+
+To replay a simulator failure, replace `--duration 15m` with the reported `--events N` and use the same seed and build.
+
+For other crates, add unit tests near the behavior they cover and integration tests under `tests/` for cross-module behavior. Name tests after the expected behavior, for example `insert_values_rejects_null_for_non_nullable_columns`. Use `tempfile` for database files and keep deterministic tests in the default `cargo test` set; mark expensive stress tests as ignored.
 
 ## Commit & Pull Request Guidelines
 Recent commits use imperative, concise subjects such as `Split executor module` and `Route table scans through database`. Follow that style. Pull requests should describe the behavioral change, mention relevant tests run, and call out storage-format, recovery, or public API impacts when applicable.

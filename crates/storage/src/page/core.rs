@@ -255,6 +255,26 @@ where
         Ok(total)
     }
 
+    /// Check completed mutations, never intermediate allocation/reclamation states.
+    pub(crate) fn debug_assert_valid(&self) {
+        #[cfg(debug_assertions)]
+        {
+            let validation = validate_page(self.bytes(), page_kind::<N>());
+            debug_assert!(
+                validation.is_ok(),
+                "page mutation produced invalid layout: {validation:?}"
+            );
+            let accounted_bytes = self.live_cell_bytes().and_then(|live| {
+                self.total_reclaimable_space().map(|free| self.slot_directory_end() + live + free)
+            });
+            debug_assert_eq!(
+                accounted_bytes,
+                Ok(USABLE_SPACE_END),
+                "live cells and free space must account for every usable page byte"
+            );
+        }
+    }
+
     pub(crate) fn is_underoccupied(&self) -> PageResult<bool> {
         let header_size = N::KIND.header_size();
         let slot_bytes = self.slot_count() as usize * format::SLOT_ENTRY_SIZE;
@@ -406,6 +426,7 @@ where
         format::write_u16(&mut packed, FRAGMENTED_FREE_BYTES_OFFSET, 0);
 
         *self.bytes_mut() = packed;
+        self.debug_assert_valid();
         Ok(())
     }
 

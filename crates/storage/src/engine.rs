@@ -5,6 +5,7 @@ use crate::btree::{TreeCursor, initialize_empty_root, validate_tree_page_formats
 use crate::database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header};
 use crate::disk_manager::DiskManager;
 use crate::error::StorageResult;
+use crate::filesystem::{FileSystem, OpenMode};
 use crate::log_manager::TxnId;
 use crate::page_cache::PageCache;
 use crate::storage_runtime::StorageRuntime;
@@ -40,30 +41,12 @@ pub struct Storage {
 impl Storage {
     /// Creates a new database file and initializes its database header.
     pub fn create(path: impl AsRef<Path>) -> StorageResult<Self> {
-        Self::create_with_options(path, StorageOptions::default())
-    }
-
-    /// Creates a new database file with explicit cache settings.
-    fn create_with_options(path: impl AsRef<Path>, options: StorageOptions) -> StorageResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let mut disk_manager = DiskManager::create_new(&path)?;
-        disk_manager.lock_exclusive()?;
-        initialize_header_page(&mut disk_manager)?;
-        Self::from_disk_manager(path, disk_manager, options)
+        Self::open_in(FileSystem::Os, path.as_ref(), StorageOptions::default(), OpenMode::CreateNew)
     }
 
     /// Opens an existing storage with default options.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
-        Self::open_with_options(path, StorageOptions::default())
-    }
-
-    /// Opens an existing storage with explicit cache settings.
-    fn open_with_options(path: impl AsRef<Path>, options: StorageOptions) -> StorageResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let mut disk_manager = DiskManager::open_existing(&path)?;
-        disk_manager.lock_exclusive()?;
-        validate_header_page(&mut disk_manager)?;
-        Self::from_disk_manager(path, disk_manager, options)
+        Self::open_in(FileSystem::Os, path.as_ref(), StorageOptions::default(), OpenMode::Existing)
     }
 
     /// Opens a storage, creating and initializing an empty file if needed.
@@ -76,24 +59,26 @@ impl Storage {
         path: impl AsRef<Path>,
         options: StorageOptions,
     ) -> StorageResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let mut disk_manager = DiskManager::new(&path)?;
+        Self::open_in(FileSystem::Os, path.as_ref(), options, OpenMode::Create)
+    }
+
+    pub(crate) fn open_in(
+        fs: FileSystem,
+        path: &Path,
+        options: StorageOptions,
+        mode: OpenMode,
+    ) -> StorageResult<Self> {
+        let mut disk_manager = DiskManager::open(&fs, path, mode)?;
         disk_manager.lock_exclusive()?;
-        if disk_manager.page_count() == 0 {
+        if matches!(mode, OpenMode::CreateNew)
+            || matches!(mode, OpenMode::Create) && disk_manager.page_count() == 0
+        {
             initialize_header_page(&mut disk_manager)?;
         } else {
             validate_header_page(&mut disk_manager)?;
         }
-        Self::from_disk_manager(path, disk_manager, options)
-    }
-
-    fn from_disk_manager(
-        path: std::path::PathBuf,
-        disk_manager: DiskManager,
-        options: StorageOptions,
-    ) -> StorageResult<Self> {
         let opened_page_count = disk_manager.page_count();
-        let runtime = Arc::new(StorageRuntime::new(path, disk_manager)?);
+        let runtime = Arc::new(StorageRuntime::new(fs, path.to_path_buf(), disk_manager)?);
         let page_cache = PageCache::new(Arc::clone(&runtime), options.cache_frames)?;
         Ok(Self { runtime, page_cache, opened_page_count })
     }
