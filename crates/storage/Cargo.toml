@@ -3,9 +3,18 @@ name = "databas-storage"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+simulation = []
+
+
 [dependencies]
 crc = "3.4.0"
 thiserror = "2.0.18"
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "storage-sim"
+path = "src/bin/storage-sim.rs"
+required-features = ["simulation"]

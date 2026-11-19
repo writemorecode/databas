@@ -1,16 +1,11 @@
 use std::{
-    fs::OpenOptions,
     io::{Read, Seek, Write},
     path::Path,
 };
 
-#[cfg(test)]
-use simulation::FaultFile as File;
-#[cfg(not(test))]
-use std::fs::File;
-
 use thiserror::Error;
 
+use crate::filesystem::{File, FileSystem, OpenMode};
 use crate::{PAGE_SIZE, PageId};
 
 #[derive(Debug, Error)]
@@ -33,32 +28,8 @@ pub struct DiskManager {
 }
 
 impl DiskManager {
-    /// Open a `DiskManager` from a path to a file, creating it if needed.
-    pub(crate) fn new(path: &Path) -> Result<Self, DiskManagerError> {
-        Self::open_with_options(
-            OpenOptions::new().create(true).read(true).write(true).truncate(false).append(false),
-            path,
-        )
-    }
-
-    /// Create a new database file and fail if it already exists.
-    pub(crate) fn create_new(path: &Path) -> Result<Self, DiskManagerError> {
-        Self::open_with_options(
-            OpenOptions::new().create_new(true).read(true).write(true).append(false),
-            path,
-        )
-    }
-
-    /// Open an existing database file.
-    pub(crate) fn open_existing(path: &Path) -> Result<Self, DiskManagerError> {
-        Self::open_with_options(OpenOptions::new().read(true).write(true).append(false), path)
-    }
-
-    fn open_with_options(options: &OpenOptions, path: &Path) -> Result<Self, DiskManagerError> {
-        let file = options.open(path)?;
-        #[cfg(test)]
-        let file = File::from(file);
-
+    pub(crate) fn open(fs: &FileSystem, path: &Path, mode: OpenMode) -> DiskManagerResult<Self> {
+        let file = fs.open(path, mode)?;
         let page_count = Self::file_page_count(&file)?;
         Ok(Self { file, page_count, locked: false })
     }
@@ -66,7 +37,7 @@ impl DiskManager {
     /// Acquire the process-wide exclusive lock held for an open database.
     pub(crate) fn lock_exclusive(&mut self) -> DiskManagerResult<()> {
         if !self.locked {
-            self.file.try_lock().map_err(std::io::Error::from)?;
+            self.file.try_lock()?;
             // Another owner may have grown or initialized the file since open.
             // Only the length observed under ownership is safe for allocation.
             self.page_count = Self::file_page_count(&self.file)?;
@@ -76,7 +47,7 @@ impl DiskManager {
     }
 
     fn file_page_count(file: &File) -> DiskManagerResult<u64> {
-        let size = file.metadata()?.len();
+        let size = file.len()?;
         if !size.is_multiple_of(PAGE_SIZE as u64) {
             return Err(DiskManagerError::InvalidFileSize { size });
         }
@@ -157,7 +128,3 @@ impl DiskManager {
             .ok_or(DiskManagerError::InvalidPageId { page_id })
     }
 }
-
-#[cfg(test)]
-#[allow(dead_code)] // Fault controls are retained for the simulation harness.
-mod simulation;

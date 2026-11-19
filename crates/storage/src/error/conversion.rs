@@ -67,6 +67,7 @@ impl From<LogManagerError> for StorageError {
     fn from(error: LogManagerError) -> Self {
         match error {
             LogManagerError::Io(error) => Self::Io(error),
+            LogManagerError::Poisoned => invariant(InvariantViolation::WalPoisoned),
             error => invariant(InvariantViolation::WalLog { message: error.to_string() }),
         }
     }
@@ -82,9 +83,7 @@ impl From<LogManagerFlushError> for StorageError {
                     highest_appended_lsn,
                 })
             }
-            error @ LogManagerFlushError::Poisoned => {
-                invariant(InvariantViolation::WalLog { message: error.to_string() })
-            }
+            LogManagerFlushError::Poisoned => invariant(InvariantViolation::WalPoisoned),
         }
     }
 }

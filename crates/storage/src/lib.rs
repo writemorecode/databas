@@ -12,6 +12,7 @@ mod database_header;
 mod disk_manager;
 mod engine;
 pub mod error;
+mod filesystem;
 pub(crate) mod log_manager;
 mod overflow;
 mod page;
@@ -19,6 +20,9 @@ mod page_allocator;
 mod page_cache;
 mod page_replacement;
 mod recovery;
+#[cfg(feature = "simulation")]
+pub mod simulation;
+
 mod storage_runtime;
 mod transaction_manager;
 

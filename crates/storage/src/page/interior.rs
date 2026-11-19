@@ -202,6 +202,7 @@ where
             inline_payload,
         );
         self.insert_slot(slot_index, cell_offset)?;
+        self.debug_assert_valid();
         Ok(slot_index)
     }
 }

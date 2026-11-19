@@ -2,6 +2,7 @@ use std::{collections::HashMap, path::Path};
 
 use crate::disk_manager::DiskManager;
 use crate::error::StorageResult;
+use crate::filesystem::FileSystem;
 use crate::log_manager::{Lsn, RecoveryLogRecordKind, TxnId, read_recovery_log, truncate_wal};
 use crate::page_allocator::PageAllocator;
 use crate::{PAGE_SIZE, PageId};
@@ -27,13 +28,17 @@ pub struct RecoveryResult {
     pub(crate) max_txn_id: TxnId,
 }
 
-pub fn recover_from_wal(path: &Path, disk: &mut DiskManager) -> StorageResult<RecoveryResult> {
-    let scan = read_recovery_log(path)?;
+pub fn recover_from_wal(
+    fs: &FileSystem,
+    path: &Path,
+    disk: &mut DiskManager,
+) -> StorageResult<RecoveryResult> {
+    let scan = read_recovery_log(fs, path)?;
     let max_txn_id = scan.max_txn_id;
     if scan.records.is_empty() {
         PageAllocator::load(disk)?.validate_bounds(disk.page_count())?;
         if max_txn_id > 0 || scan.truncated_tail {
-            truncate_wal(path, scan.last_assigned_lsn, max_txn_id)?;
+            truncate_wal(fs, path, scan.last_assigned_lsn, max_txn_id)?;
         }
         return Ok(RecoveryResult { max_txn_id });
     }
@@ -117,6 +122,9 @@ pub fn recover_from_wal(path: &Path, disk: &mut DiskManager) -> StorageResult<Re
         allocator.set_allocated(page_id, allocated);
         latest_allocation.insert(page_id, lsn);
     }
+    // Keep replay order stable even when transaction and page lookup maps
+    // use independently randomized hashers.
+    undone_allocations.sort_unstable_by_key(|&(lsn, _, _)| lsn);
     for (lsn, page_id, allocated) in undone_allocations {
         if !latest_allocation.get(&page_id).is_some_and(|later| *later > lsn)
             && allocator.contains_page(page_id)
@@ -146,7 +154,7 @@ pub fn recover_from_wal(path: &Path, disk: &mut DiskManager) -> StorageResult<Re
     allocator.validate_bounds(disk.page_count())?;
     allocator.flush(disk)?;
     disk.sync()?;
-    truncate_wal(path, last_assigned_lsn, max_txn_id)?;
+    truncate_wal(fs, path, last_assigned_lsn, max_txn_id)?;
     Ok(RecoveryResult { max_txn_id })
 }
 
