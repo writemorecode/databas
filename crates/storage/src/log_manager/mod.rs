@@ -180,6 +180,8 @@ pub enum LogRecordKind<'a> {
     PageAlloc { page_id: PageId },
     /// Deallocation of a database page by a transaction.
     PageDealloc { page_id: PageId },
+    /// System redo image for repairing torn allocation bitmap writes.
+    BitmapImage { page_id: PageId, image: &'a [u8] },
 }
 
 /// Owned WAL record returned by recovery scans.
@@ -211,6 +213,8 @@ pub enum RecoveryLogRecordKind {
     PageAlloc { page_id: PageId },
     /// Deallocation of a database page by a transaction.
     PageDealloc { page_id: PageId },
+    /// System redo image for repairing torn allocation bitmap writes.
+    BitmapImage { page_id: PageId, image: Box<[u8; PAGE_SIZE]> },
 }
 
 /// Result of scanning the WAL for recovery.
@@ -654,6 +658,9 @@ impl RecoveryLogRecordKind {
             Self::Rollback => LogRecordKind::Rollback,
             Self::PageAlloc { page_id } => LogRecordKind::PageAlloc { page_id: *page_id },
             Self::PageDealloc { page_id } => LogRecordKind::PageDealloc { page_id: *page_id },
+            Self::BitmapImage { page_id, image } => {
+                LogRecordKind::BitmapImage { page_id: *page_id, image: image.as_ref() }
+            }
             Self::PageUpdate { page_id, redo_data, undo_data } => LogRecordKind::PageUpdate {
                 page_id: *page_id,
                 redo_data: redo_data.as_ref(),
@@ -674,6 +681,9 @@ impl RecoveryLogRecordKind {
             }),
             LogRecordKind::PageAlloc { page_id } => Ok(Self::PageAlloc { page_id: *page_id }),
             LogRecordKind::PageDealloc { page_id } => Ok(Self::PageDealloc { page_id: *page_id }),
+            LogRecordKind::BitmapImage { page_id, image } => {
+                Ok(Self::BitmapImage { page_id: *page_id, image: page_image_array(image)? })
+            }
         }
     }
 }

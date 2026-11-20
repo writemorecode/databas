@@ -3,7 +3,9 @@ use std::{collections::HashMap, path::Path};
 use crate::disk_manager::DiskManager;
 use crate::error::StorageResult;
 use crate::filesystem::FileSystem;
-use crate::log_manager::{Lsn, RecoveryLogRecordKind, TxnId, read_recovery_log, truncate_wal};
+use crate::log_manager::{
+    LogManager, Lsn, RecoveryLogRecordKind, TxnId, read_recovery_log, truncate_wal,
+};
 use crate::page_allocator::PageAllocator;
 use crate::{PAGE_SIZE, PageId};
 
@@ -42,26 +44,26 @@ pub fn recover_from_wal(
         }
         return Ok(RecoveryResult { max_txn_id });
     }
-    let last_assigned_lsn = scan.last_assigned_lsn;
-
+    let mut bitmap_images = HashMap::new();
     let mut transactions: HashMap<TxnId, TransactionRecovery> = HashMap::new();
     let mut committed_allocations = Vec::new();
     let mut undone_allocations = Vec::new();
     let mut committed_updates = Vec::new();
 
     for record in scan.records {
-        let transaction = transactions.entry(record.txn_id).or_default();
+        let transaction = transactions.entry(record.txn_id);
         match record.kind {
             RecoveryLogRecordKind::Begin => {}
             RecoveryLogRecordKind::Commit => {
+                let transaction = transaction.or_default();
                 transaction.committed = true;
                 transaction.completed = true;
             }
             RecoveryLogRecordKind::Rollback => {
-                transaction.completed = true;
+                transaction.or_default().completed = true;
             }
             RecoveryLogRecordKind::PageUpdate { page_id, redo_data, undo_data } => {
-                transaction.updates.push(RecoveryPageUpdate {
+                transaction.or_default().updates.push(RecoveryPageUpdate {
                     lsn: record.lsn,
                     page_id,
                     redo_data,
@@ -69,10 +71,13 @@ pub fn recover_from_wal(
                 });
             }
             RecoveryLogRecordKind::PageAlloc { page_id } => {
-                transaction.allocations.push((record.lsn, page_id, true));
+                transaction.or_default().allocations.push((record.lsn, page_id, true));
             }
             RecoveryLogRecordKind::PageDealloc { page_id } => {
-                transaction.allocations.push((record.lsn, page_id, false));
+                transaction.or_default().allocations.push((record.lsn, page_id, false));
+            }
+            RecoveryLogRecordKind::BitmapImage { page_id, image } => {
+                bitmap_images.insert(page_id, image);
             }
         }
     }
@@ -99,7 +104,7 @@ pub fn recover_from_wal(
 
     // Page images are replayed before publishing any free bits. Nothing can
     // allocate during recovery, and bitmap durability precedes WAL reclamation.
-    let mut allocator = PageAllocator::load(disk)?;
+    let mut allocator = PageAllocator::load_with_images(disk, &bitmap_images)?;
     committed_allocations.sort_by_key(|&(lsn, _, _)| lsn);
     let mut latest_allocation = HashMap::new();
     for &(lsn, page_id, allocated) in &committed_allocations {
@@ -152,9 +157,12 @@ pub fn recover_from_wal(
     }
 
     allocator.validate_bounds(disk.page_count())?;
-    allocator.flush(disk)?;
+    // Recovery can also be interrupted while writing the repaired bitmaps.
+    let mut log = LogManager::new(fs.clone(), path)?;
+    let image_lsns = allocator.flush(disk, &mut log)?;
     disk.sync()?;
-    truncate_wal(fs, path, last_assigned_lsn, max_txn_id)?;
+    drop(log);
+    truncate_wal(fs, path, image_lsns.end - 1, max_txn_id)?;
     Ok(RecoveryResult { max_txn_id })
 }
 

@@ -3,10 +3,14 @@ use std::{
     path::Path,
 };
 
+use crc::{CRC_32_ISO_HDLC, Crc};
 use thiserror::Error;
 
 use crate::filesystem::{File, FileSystem, OpenMode};
+use crate::types::PAGE_CONTENT_END;
 use crate::{PAGE_SIZE, PageId};
+
+const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 #[derive(Debug, Error)]
 pub enum DiskManagerError {
@@ -16,6 +20,8 @@ pub enum DiskManagerError {
     InvalidPageId { page_id: PageId },
     #[error("invalid file size (not multiple of page size): {size}")]
     InvalidFileSize { size: u64 },
+    #[error("page {page_id} CRC32 mismatch: stored {expected:#010x}, computed {actual:#010x}")]
+    ChecksumMismatch { page_id: PageId, expected: u32, actual: u32 },
 }
 
 pub type DiskManagerResult<T> = Result<T, DiskManagerError>;
@@ -65,9 +71,12 @@ impl DiskManager {
 
         let new_file_size = Self::page_end(page_id)?;
         self.file.set_len(new_file_size)?;
-        self.file.sync_all()?;
+        let first_new_page = self.page_count;
         self.page_count = page_id + 1;
-        Ok(())
+        for id in first_new_page..=page_id {
+            self.write_page(id, &[0; PAGE_SIZE])?;
+        }
+        self.sync()
     }
 
     pub(crate) fn sync(&self) -> DiskManagerResult<()> {
@@ -77,16 +86,38 @@ impl DiskManager {
 
     /// Extends the database file by one page.
     /// Returns page ID of the new page.
-    pub(crate) fn new_page(&mut self) -> DiskManagerResult<PageId> {
+    pub(crate) fn new_page(&mut self, image: &[u8; PAGE_SIZE]) -> DiskManagerResult<PageId> {
         let page_id = self.page_count;
         let new_file_size = Self::page_end(page_id)?;
         self.file.set_len(new_file_size)?;
         self.page_count += 1;
+        self.write_page(page_id, image)?;
         Ok(page_id)
     }
 
-    /// Read page `page_id` from disk and store it in `buf`.
+    /// Verify a disk page and return the logical image (with a zero footer).
     pub(crate) fn read_page(
+        &mut self,
+        page_id: PageId,
+        buf: &mut [u8; PAGE_SIZE],
+    ) -> DiskManagerResult<()> {
+        self.read_page_unchecked(page_id, buf)?;
+        let expected = u32::from_le_bytes([
+            buf[PAGE_CONTENT_END],
+            buf[PAGE_CONTENT_END + 1],
+            buf[PAGE_CONTENT_END + 2],
+            buf[PAGE_CONTENT_END + 3],
+        ]);
+        let actual = CRC32.checksum(&buf[..PAGE_CONTENT_END]);
+        if expected != actual {
+            return Err(DiskManagerError::ChecksumMismatch { page_id, expected, actual });
+        }
+        buf[PAGE_CONTENT_END..].fill(0);
+        Ok(())
+    }
+
+    /// Read the raw header page for format detection before recovery.
+    pub(crate) fn read_page_unchecked(
         &mut self,
         page_id: PageId,
         buf: &mut [u8; PAGE_SIZE],
@@ -111,7 +142,11 @@ impl DiskManager {
         }
         let offset = Self::page_offset(page_id);
         self.file.seek(std::io::SeekFrom::Start(offset))?;
-        self.file.write_all(buf)?;
+        debug_assert!(buf[PAGE_CONTENT_END..].iter().all(|&byte| byte == 0));
+        let mut page = *buf;
+        let checksum = CRC32.checksum(&page[..PAGE_CONTENT_END]);
+        page[PAGE_CONTENT_END..].copy_from_slice(&checksum.to_le_bytes());
+        self.file.write_all(&page)?;
         Ok(())
     }
 

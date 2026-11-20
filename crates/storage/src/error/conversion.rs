@@ -22,6 +22,13 @@ impl From<DiskManagerError> for StorageError {
                 page_id: None,
                 kind: CorruptionKind::InvalidFileSize { size, page_size: PAGE_SIZE },
             }),
+            DiskManagerError::ChecksumMismatch { page_id, expected, actual } => {
+                Self::Corruption(CorruptionError {
+                    component: CorruptionComponent::DiskPage,
+                    page_id: Some(page_id),
+                    kind: CorruptionKind::PageChecksumMismatch { expected, actual },
+                })
+            }
         }
     }
 }

@@ -198,9 +198,8 @@ impl Storage {
 }
 
 fn initialize_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
-    let page_id = disk_manager.new_page()?;
+    let page_id = disk_manager.new_page(&DatabaseHeader::encode_page())?;
     debug_assert_eq!(page_id, DATABASE_HEADER_PAGE_ID);
-    disk_manager.write_page(DATABASE_HEADER_PAGE_ID, &DatabaseHeader::encode_page())?;
     disk_manager.sync()?;
     Ok(())
 }
@@ -211,6 +210,8 @@ fn validate_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
     }
 
     let mut page = [0u8; crate::PAGE_SIZE];
-    disk_manager.read_page(DATABASE_HEADER_PAGE_ID, &mut page)?;
+    // Identify the format before recovery. The allocator validates the checksum
+    // for the entire header/bitmap page, with WAL repair for torn bitmap writes.
+    disk_manager.read_page_unchecked(DATABASE_HEADER_PAGE_ID, &mut page)?;
     DatabaseHeader::validate_page(&page)
 }

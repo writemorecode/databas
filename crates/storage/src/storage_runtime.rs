@@ -10,6 +10,7 @@ use crate::transaction_manager::{
     LoggedPageUpdate, PageRestore, TransactionManager, TransactionRollback, TransactionSavepoint,
 };
 use crate::{CheckpointOutcome, PAGE_SIZE, PageId};
+use std::ops::Range;
 use std::sync::{Mutex, MutexGuard};
 
 type ActiveTransactionManager = TransactionManager;
@@ -37,7 +38,6 @@ pub struct StorageRuntime {
 impl StorageRuntime {
     pub(crate) fn new(fs: FileSystem, path: PathBuf, mut disk: DiskManager) -> StorageResult<Self> {
         disk.lock_exclusive()?;
-        let _ = PageAllocator::load(&mut disk)?;
         let recovery = recover_from_wal(&fs, &path, &mut disk)?;
         let log = LogManager::new(fs, &path)?;
         let allocator = PageAllocator::load(&mut disk)?;
@@ -111,13 +111,12 @@ impl StorageRuntime {
     /// Lock order: cache metadata, transactions, allocator, WAL, disk. Never
     /// enter the cache while holding runtime latches. WAL protects bitmap writes
     /// even when a checkpoint persists reservations belonging to active writers.
-    pub(crate) fn flush_allocations(&self) -> StorageResult<()> {
+    pub(crate) fn flush_allocations(&self) -> StorageResult<Range<Lsn>> {
         let _transactions = Self::lock(&self.transactions, "transaction manager")?;
         let mut allocator = Self::lock(&self.allocator, "page allocator")?;
         let mut log = Self::lock(&self.log, "log manager")?;
-        log.flush_all()?;
         let mut disk = Self::lock(&self.disk, "disk manager")?;
-        allocator.flush(&mut disk)
+        allocator.flush(&mut disk, &mut log)
     }
 
     pub(crate) fn read_page(
@@ -277,8 +276,11 @@ impl Checkpointer {
         if let Some(oldest) = deferred {
             retain_from = retain_from.min(oldest);
         }
-        runtime.flush_allocations()?;
+        let bitmap_images = runtime.flush_allocations()?;
         runtime.sync_database_file()?;
+        if retain_from == bitmap_images.start {
+            retain_from = bitmap_images.end;
+        }
         // Publication serializes with WAL appends, not
         // transaction lifetimes. Never acquire cache latches in this section.
         let _transactions = StorageRuntime::lock(&runtime.transactions, "transaction manager")?;

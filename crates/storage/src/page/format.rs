@@ -2,19 +2,18 @@
 //!
 //! The page layout consists of a small header, a slot directory that grows
 //! upward from the header, a packed cell-content region that grows downward
-//! from the end of usable space, and a zeroed reserved footer.
+//! from the end of usable space, and a CRC32 footer owned by the disk layer.
 
 use crate::log_manager::Lsn;
-use crate::{PAGE_SIZE, PAGE_SIZE_U16, PageId, SlotId};
+use crate::types::{PAGE_CONTENT_END, PAGE_CONTENT_END_U16};
+use crate::{PAGE_SIZE, PageId, SlotId};
 
 /// Current on-disk page format version.
 pub const FORMAT_VERSION: u8 = 5;
-/// Number of bytes reserved at the end of every page.
-pub const RESERVED_FOOTER_SIZE_U16: u16 = 4;
 /// Exclusive end offset of the usable region within a page buffer.
-pub const USABLE_SPACE_END_U16: u16 = PAGE_SIZE_U16 - RESERVED_FOOTER_SIZE_U16;
+pub const USABLE_SPACE_END: usize = PAGE_CONTENT_END;
 /// Exclusive end offset of the usable region within a page buffer.
-pub const USABLE_SPACE_END: usize = USABLE_SPACE_END_U16 as usize;
+pub const USABLE_SPACE_END_U16: u16 = PAGE_CONTENT_END_U16;
 /// Width in bytes of a single slot directory entry.
 pub const SLOT_ENTRY_SIZE: usize = 2;
 /// Width in bytes of the length prefix at the start of every cell.

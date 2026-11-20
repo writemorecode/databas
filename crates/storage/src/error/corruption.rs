@@ -46,6 +46,8 @@ pub enum CorruptionKind {
     DatabaseHeaderReservedBytesNotZero,
     #[error("page ownership graph contains a cycle or shared page")]
     InvalidPageGraph,
+    #[error("page CRC32 mismatch: stored {expected:#010x}, computed {actual:#010x}")]
+    PageChecksumMismatch { expected: u32, actual: u32 },
     #[error("invalid allocation bitmap")]
     InvalidAllocationBitmap,
     #[error("unknown page kind: raw tag {actual}")]

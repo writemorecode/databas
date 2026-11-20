@@ -5,8 +5,12 @@
 //! rather than shared full-page undo images, so transactions changing different
 //! bits never undo one another. Uncommitted frees remain reserved.
 
-use crate::disk_manager::DiskManager;
+use std::collections::{BTreeSet, HashMap};
+use std::ops::Range;
+
+use crate::disk_manager::{DiskManager, DiskManagerError};
 use crate::error::StorageResult;
+use crate::log_manager::{LogManager, LogRecordKind, Lsn};
 use crate::{PAGE_SIZE, PageId};
 
 mod bitmap;
@@ -16,29 +20,50 @@ pub use bitmap::BITMAP_OFFSET;
 
 pub struct PageAllocator {
     bitmap: AllocationBitmap,
-    dirty: bool,
+    dirty: BTreeSet<PageId>,
     next_candidate: PageId,
 }
 
 impl PageAllocator {
     pub(crate) fn load(disk: &mut DiskManager) -> StorageResult<Self> {
+        Self::load_with_images(disk, &HashMap::new())
+    }
+
+    pub(crate) fn load_with_images(
+        disk: &mut DiskManager,
+        images: &HashMap<PageId, Box<[u8; PAGE_SIZE]>>,
+    ) -> StorageResult<Self> {
         let mut bitmap = AllocationBitmap::new();
+        let mut dirty = BTreeSet::new();
         for page_id in AllocationBitmap::metadata_page_ids(disk.page_count()) {
             let mut bytes = [0; PAGE_SIZE];
-            disk.read_page(page_id, &mut bytes)?;
-            // A trailing bitmap with no data pages can be recreated after an
-            // interrupted extent initialization. Existing extents are validated.
-            if page_id != 0 && disk.page_count() == page_id + 1 {
-                let expected = AllocationBitmap::empty_page(page_id);
-                if bytes != expected {
-                    disk.write_page(page_id, &expected)?;
+            let result = disk.read_page(page_id, &mut bytes);
+            let trailing_bitmap = page_id != 0 && disk.page_count() == page_id + 1;
+            if trailing_bitmap
+                && (result.is_ok()
+                    || matches!(result, Err(DiskManagerError::ChecksumMismatch { .. })))
+            {
+                // No data pages follow this bitmap. Extent initialization may
+                // have been interrupted before its first sync.
+                let empty = AllocationBitmap::empty_page(page_id);
+                if result.is_err() || bytes != empty {
+                    disk.write_page(page_id, &empty)?;
                     disk.sync()?;
-                    bytes = expected;
+                    bytes = empty;
                 }
+            } else if let Err(error) = result {
+                let Some(image) = images
+                    .get(&page_id)
+                    .filter(|_| matches!(error, DiskManagerError::ChecksumMismatch { .. }))
+                else {
+                    return Err(error.into());
+                };
+                bytes = **image;
+                dirty.insert(page_id);
             }
             bitmap.push_page(page_id, bytes)?;
         }
-        Ok(Self { bitmap, dirty: false, next_candidate: 0 })
+        Ok(Self { bitmap, dirty, next_candidate: 0 })
     }
 
     /// Validate the physical extent only after WAL has repaired allocations.
@@ -65,12 +90,12 @@ impl PageAllocator {
     pub(crate) fn candidate(&mut self, disk: &mut DiskManager) -> StorageResult<PageId> {
         let page_id = if let Some(page_id) = self.bitmap.first_free_from(self.next_candidate) {
             if page_id == disk.page_count() {
-                disk.new_page()?;
+                disk.new_page(&[0; PAGE_SIZE])?;
             }
             page_id
         } else {
             self.ensure_page(disk, self.bitmap.next_metadata_page_id())?;
-            disk.new_page()?
+            disk.new_page(&[0; PAGE_SIZE])?
         };
         self.next_candidate = page_id;
         Ok(page_id)
@@ -90,8 +115,12 @@ impl PageAllocator {
         while !self.bitmap.contains_page(page_id) {
             let metadata_id = self.bitmap.next_metadata_page_id();
             let bytes = AllocationBitmap::empty_page(metadata_id);
-            disk.ensure_page_exists(metadata_id)?;
-            disk.write_page(metadata_id, &bytes)?;
+            if metadata_id == disk.page_count() {
+                disk.new_page(&bytes)?;
+            } else {
+                disk.ensure_page_exists(metadata_id)?;
+                disk.write_page(metadata_id, &bytes)?;
+            }
             // Publish valid extent metadata before any data page can be logged.
             disk.sync()?;
             self.bitmap.push_page(metadata_id, bytes)?;
@@ -101,7 +130,10 @@ impl PageAllocator {
     }
 
     pub(crate) fn set_allocated(&mut self, page_id: PageId, allocated: bool) {
-        self.bitmap.set_allocated(page_id, allocated);
+        if self.bitmap.is_allocated(page_id) != allocated {
+            self.bitmap.set_allocated(page_id, allocated);
+            self.dirty.insert(AllocationBitmap::metadata_page_id(page_id));
+        }
         if allocated {
             if page_id == self.next_candidate {
                 self.next_candidate += 1;
@@ -109,19 +141,31 @@ impl PageAllocator {
         } else {
             self.next_candidate = self.next_candidate.min(page_id);
         }
-        self.dirty = true;
     }
 
-    /// The caller must flush the WAL first and sync the database before reclaiming it.
-    pub(crate) fn flush(&mut self, disk: &mut DiskManager) -> StorageResult<()> {
-        if self.dirty {
-            for (page_id, bytes) in self.bitmap.pages() {
-                disk.write_page(page_id, bytes)?;
+    /// Log repair images before overwriting bitmap pages: logical allocation
+    /// records alone cannot validate a bitmap with sectors from different writes.
+    /// Returns the range of image LSNs, which are reclaimable after the sync.
+    pub(crate) fn flush(
+        &mut self,
+        disk: &mut DiskManager,
+        log: &mut LogManager,
+    ) -> StorageResult<Range<Lsn>> {
+        let start = log.next_lsn()?;
+        for &page_id in &self.dirty {
+            let image = self.bitmap.page(page_id);
+            log.append_record(0, LogRecordKind::BitmapImage { page_id, image })?;
+        }
+        let end = log.next_lsn()?;
+        log.flush_all()?;
+        if !self.dirty.is_empty() {
+            for &page_id in &self.dirty {
+                disk.write_page(page_id, self.bitmap.page(page_id))?;
             }
             // Keep dirty state on sync failure so an explicit retry writes again.
             disk.sync()?;
-            self.dirty = false;
+            self.dirty.clear();
         }
-        Ok(())
+        Ok(start..end)
     }
 }

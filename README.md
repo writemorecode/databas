@@ -19,6 +19,13 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features
 ```
 
+### Database file format
+
+Format version 5 stores a little-endian CRC32 in the last four bytes of each
+4,096-byte database page. The checksum covers the preceding 4,092 bytes and is
+verified when the page is read from disk. Older database files are not supported
+by this version; there is no in-place migration.
+
 ### Storage simulation
 
 Run the seeded storage workload with engine assertions enabled.

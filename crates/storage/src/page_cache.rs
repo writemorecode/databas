@@ -244,7 +244,7 @@ impl PageCache {
 
         let frame_id =
             self.select_victim_frame(&mut meta).ok_or(PageCacheError::NoEvictableFrame)?;
-        self.replace_frame(&mut meta, frame_id, page_id)?;
+        self.replace_frame(&mut meta, frame_id, page_id, false)?;
         Ok(PinGuard::new(Arc::clone(&self.inner), frame_id, page_id))
     }
 
@@ -270,12 +270,8 @@ impl PageCache {
         if self.inner.frames[frame_id].pin_count.load(Ordering::Acquire) != 0 {
             return Err(PageCacheError::PinnedPage { page_id });
         }
-        self.replace_frame(&mut meta, frame_id, page_id)?;
-        let pin = PinGuard::new(Arc::clone(&self.inner), frame_id, page_id);
-        drop(meta);
-        // Zero reused bytes through the ordinary WAL/undo path.
-        pin.write(txn_id)?.page_mut().fill(0);
-        Ok((page_id, pin))
+        self.replace_frame(&mut meta, frame_id, page_id, true)?;
+        Ok((page_id, PinGuard::new(Arc::clone(&self.inner), frame_id, page_id)))
     }
 
     pub(crate) fn dealloc_page(
@@ -398,6 +394,7 @@ impl PageCache {
         meta: &mut CacheMeta,
         frame_id: FrameId,
         new_page_id: PageId,
+        newly_allocated: bool,
     ) -> PageCacheResult<()> {
         debug_assert_eq!(
             self.inner.frames[frame_id].pin_count.load(Ordering::Acquire),
@@ -414,7 +411,11 @@ impl PageCache {
         let old_page_id = frame.page_id();
 
         let mut data = [0u8; PAGE_SIZE];
-        self.inner.runtime.read_page(new_page_id, &mut data).map_err(runtime_error)?;
+        // Fresh allocations have no previous owner to restore. Their old disk
+        // contents may be torn or absent after an interrupted file extension.
+        if !newly_allocated {
+            self.inner.runtime.read_page(new_page_id, &mut data).map_err(runtime_error)?;
+        }
 
         {
             let mut frame_data =

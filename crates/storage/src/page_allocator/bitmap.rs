@@ -5,10 +5,11 @@ use crate::database_header::DatabaseHeader;
 use crate::error::{
     CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult,
 };
+use crate::types::PAGE_CONTENT_END;
 use crate::{PAGE_SIZE, PageId};
 
 pub const BITMAP_OFFSET: usize = 16;
-const BITMAP_BITS: usize = (PAGE_SIZE - BITMAP_OFFSET) * 8;
+const BITMAP_BITS: usize = (PAGE_CONTENT_END - BITMAP_OFFSET) * 8;
 pub const PAGES_PER_EXTENT: u64 = BITMAP_BITS as u64;
 const BITMAP_MAGIC: &[u8; 8] = b"DBBITMAP";
 
@@ -38,6 +39,16 @@ impl AllocationBitmap {
         page_id.is_multiple_of(PAGES_PER_EXTENT)
     }
 
+    pub(super) fn metadata_page_id(page_id: PageId) -> PageId {
+        page_id - page_id % PAGES_PER_EXTENT
+    }
+
+    pub(super) fn page(&self, page_id: PageId) -> &[u8; PAGE_SIZE] {
+        debug_assert!(Self::is_metadata(page_id));
+        let (extent, _) = Self::location(page_id);
+        &self.pages[extent]
+    }
+
     pub(super) fn empty_page(page_id: PageId) -> [u8; PAGE_SIZE] {
         if page_id == 0 {
             return DatabaseHeader::encode_page();
@@ -45,7 +56,7 @@ impl AllocationBitmap {
         let mut bytes = [0; PAGE_SIZE];
         bytes[..8].copy_from_slice(BITMAP_MAGIC);
         bytes[8..16].copy_from_slice(&page_id.to_le_bytes());
-        BitSet::new(&mut bytes[BITMAP_OFFSET..]).set(0, true);
+        BitSet::new(&mut bytes[BITMAP_OFFSET..PAGE_CONTENT_END]).set(0, true);
         bytes
     }
 
@@ -63,7 +74,7 @@ impl AllocationBitmap {
         } else if &bytes[..8] != BITMAP_MAGIC || bytes[8..16] != page_id.to_le_bytes() {
             return Err(invalid_bitmap(page_id));
         }
-        if !BitSet::new(&bytes[BITMAP_OFFSET..]).contains(0) {
+        if !BitSet::new(&bytes[BITMAP_OFFSET..PAGE_CONTENT_END]).contains(0) {
             return Err(invalid_bitmap(page_id));
         }
         self.pages.push(bytes);
@@ -76,19 +87,23 @@ impl AllocationBitmap {
 
     pub(super) fn is_allocated(&self, page_id: PageId) -> bool {
         let (extent, bit) = Self::location(page_id);
-        self.pages.get(extent).is_some_and(|page| BitSet::new(&page[BITMAP_OFFSET..]).contains(bit))
+        self.pages
+            .get(extent)
+            .is_some_and(|page| BitSet::new(&page[BITMAP_OFFSET..PAGE_CONTENT_END]).contains(bit))
     }
 
     pub(super) fn set_allocated(&mut self, page_id: PageId, allocated: bool) {
         let (extent, bit) = Self::location(page_id);
-        BitSet::new(&mut self.pages[extent][BITMAP_OFFSET..]).set(bit, allocated);
+        BitSet::new(&mut self.pages[extent][BITMAP_OFFSET..PAGE_CONTENT_END]).set(bit, allocated);
     }
 
     pub(super) fn first_free_from(&self, page_id: PageId) -> Option<PageId> {
         let (first_extent, first_bit) = Self::location(page_id);
         for (extent, page) in self.pages.iter().enumerate().skip(first_extent) {
             let start = if extent == first_extent { first_bit } else { 0 };
-            if let Some(bit) = BitSet::new(&page[BITMAP_OFFSET..]).first_clear_from(start) {
+            if let Some(bit) =
+                BitSet::new(&page[BITMAP_OFFSET..PAGE_CONTENT_END]).first_clear_from(start)
+            {
                 return Some(extent as u64 * PAGES_PER_EXTENT + bit as u64);
             }
         }
@@ -99,7 +114,7 @@ impl AllocationBitmap {
         for (page_id, bytes) in self.pages() {
             let end = usize::try_from(page_count.saturating_sub(page_id).min(PAGES_PER_EXTENT))
                 .map_err(|_out_of_range| invalid_bitmap(page_id))?;
-            if BitSet::new(&bytes[BITMAP_OFFSET..]).any_set_from(end) {
+            if BitSet::new(&bytes[BITMAP_OFFSET..PAGE_CONTENT_END]).any_set_from(end) {
                 return Err(invalid_bitmap(page_id));
             }
         }

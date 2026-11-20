@@ -4,9 +4,10 @@ use crate::error::StorageResult;
 use crate::page::format;
 use crate::page::format::OVERFLOW_NEXT_PAGE_ID_SIZE;
 use crate::page_cache::PageCache;
-use crate::{PAGE_SIZE, PageId, TxnId};
+use crate::types::PAGE_CONTENT_END;
+use crate::{PageId, TxnId};
 
-pub const OVERFLOW_PAYLOAD_SIZE: usize = PAGE_SIZE - OVERFLOW_NEXT_PAGE_ID_SIZE;
+pub const OVERFLOW_PAYLOAD_SIZE: usize = PAGE_CONTENT_END - OVERFLOW_NEXT_PAGE_ID_SIZE;
 
 /// Writes `payload` into a newly allocated overflow chain.
 pub fn write_chain(
@@ -38,9 +39,9 @@ pub fn write_chain_from_slices(
             format::write_optional_u64(page.page_mut(), 0, None);
 
             let mut write_offset = OVERFLOW_NEXT_PAGE_ID_SIZE;
-            while write_offset < PAGE_SIZE && (!first.is_empty() || !second.is_empty()) {
+            while write_offset < PAGE_CONTENT_END && (!first.is_empty() || !second.is_empty()) {
                 let source = if !first.is_empty() { first } else { second };
-                let take = source.len().min(PAGE_SIZE - write_offset);
+                let take = source.len().min(PAGE_CONTENT_END - write_offset);
                 page.page_mut()[write_offset..write_offset + take].copy_from_slice(&source[..take]);
                 write_offset += take;
                 if !first.is_empty() {

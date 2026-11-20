@@ -8,7 +8,7 @@ use super::{LogManagerError, LogRecord, LogRecordKind, LogTransaction, TxnId};
 
 const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const FOOTER_MAGIC: [u8; 8] = *b"DBWALFTR";
-const WAL_FORMAT_VERSION: u16 = 2;
+const WAL_FORMAT_VERSION: u16 = 3;
 pub(super) const HEADER_LEN: usize = 8 + 2 + 8 + 4 + 8;
 pub(super) const FOOTER_LEN: usize = 8 + 8 + 4;
 pub(super) const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
@@ -20,6 +20,7 @@ const KIND_ROLLBACK: u8 = 3;
 const KIND_PAGE_UPDATE: u8 = 4;
 const KIND_PAGE_ALLOC: u8 = 5;
 const KIND_PAGE_DEALLOC: u8 = 6;
+const KIND_BITMAP_IMAGE: u8 = 7;
 
 /// Serializes a complete transaction frame to `writer`.
 ///
@@ -200,6 +201,10 @@ fn scan_log_record_payload<R: Read>(
         KIND_PAGE_ALLOC | KIND_PAGE_DEALLOC => {
             read_crc_u64(reader, digest, remaining)?;
             Ok(())
+        }
+        KIND_BITMAP_IMAGE => {
+            read_crc_u64(reader, digest, remaining)?;
+            read_crc_discard(reader, digest, remaining, PAGE_SIZE)
         }
         KIND_PAGE_UPDATE => {
             read_crc_u64(reader, digest, remaining)?;
@@ -400,6 +405,11 @@ fn deserialize_log_record<'a>(
             let page_id = cursor.read_u64()?;
             LogRecordKind::PageDealloc { page_id }
         }
+        KIND_BITMAP_IMAGE => {
+            let page_id = cursor.read_u64()?;
+            let image = cursor.read_slice(PAGE_SIZE)?;
+            LogRecordKind::BitmapImage { page_id, image }
+        }
         kind => return Err(LogManagerError::UnknownRecordKind { kind }),
     };
     Ok(LogRecord { txn_id, kind })
@@ -445,6 +455,10 @@ fn serialized_record_len(kind: &LogRecordKind<'_>) -> Result<u64, LogManagerErro
             Ok(1 + 8 + 4 + 4 + u64::from(redo_len) + u64::from(undo_len))
         }
         LogRecordKind::PageAlloc { .. } | LogRecordKind::PageDealloc { .. } => Ok(1 + 8),
+        LogRecordKind::BitmapImage { image, .. } => {
+            validate_page_image_len(image)?;
+            Ok(1 + 8 + PAGE_SIZE as u64)
+        }
     }
 }
 
@@ -508,6 +522,11 @@ fn write_log_record_payload<W: Write>(
             write_crc_u32(writer, digest, undo_len)?;
             write_crc_bytes(writer, digest, redo_data)?;
             write_crc_bytes(writer, digest, undo_data)?;
+        }
+        LogRecordKind::BitmapImage { page_id, image } => {
+            write_crc_u8(writer, digest, KIND_BITMAP_IMAGE)?;
+            write_crc_u64(writer, digest, *page_id)?;
+            write_crc_bytes(writer, digest, image)?;
         }
         LogRecordKind::PageAlloc { page_id } | LogRecordKind::PageDealloc { page_id } => {
             let kind = if matches!(kind, LogRecordKind::PageAlloc { .. }) {
