@@ -32,3 +32,17 @@ For other crates, add unit tests near the behavior they cover and integration te
 
 ## Commit & Pull Request Guidelines
 Recent commits use imperative, concise subjects such as `Split executor module` and `Route table scans through database`. Follow that style. Pull requests should describe the behavioral change, mention relevant tests run, and call out storage-format, recovery, or public API impacts when applicable.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues for `writemorecode/databas`. Before issue-tracker operations, read `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical triage labels. Before triaging, read `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `GLOSSARY.md` and `docs/adr/`. Before exploring the codebase, read `docs/agents/domain.md`.
