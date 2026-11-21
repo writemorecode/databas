@@ -41,8 +41,8 @@ mod replacement;
 pub(crate) use replacement::retire_empty_wal;
 
 use frame::{
-    CRC32, HEADER_LEN, deserialize_transaction, scan_transaction_frame, serialize_transaction,
-    transaction_frame_len, validate_record_txn_ids, wal_open_error,
+    CRC32, HEADER_LEN, WalFrameHeader, scan_transaction_frame, serialize_transaction,
+    validate_record_txn_ids, wal_open_error,
 };
 
 /// Sentinel LSN used for pages that do not reflect any logged update.
@@ -230,14 +230,6 @@ pub struct RecoveryLogScan {
     pub(crate) max_txn_id: TxnId,
     /// Highest LSN assigned before this WAL segment plus all complete records.
     pub(crate) last_assigned_lsn: Lsn,
-}
-
-#[derive(Debug)]
-pub struct LogTransaction<'a> {
-    /// Transaction id shared by all records in this frame.
-    txn_id: TxnId,
-    /// Records decoded from the frame payload.
-    records: Vec<LogRecord<'a>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -545,8 +537,12 @@ fn read_log(
 
         let mut frame_header = [0; HEADER_LEN];
         wal_file.read_exact(&mut frame_header)?;
-        let frame_len = match transaction_frame_len(&frame_header) {
-            Ok(frame_len) => frame_len,
+        let header_and_len = WalFrameHeader::parse(&frame_header).and_then(|header| {
+            let len = header.frame_len()?;
+            Ok((header, len))
+        });
+        let (header, frame_len) = match header_and_len {
+            Ok(header_and_len) => header_and_len,
             Err(LogManagerError::TruncatedFrame { .. })
             | Err(LogManagerError::InvalidHeaderMagic { .. }) => {
                 truncated_tail = true;
@@ -573,16 +569,18 @@ fn read_log(
         }
         let frame_end = offset + frame_len as u64;
 
-        let mut frame = Vec::new();
-        frame.try_reserve_exact(frame_len).map_err(|source| {
-            LogManagerError::FrameAllocationFailed { byte_count: frame_len, source }
+        // Read the whole frame body first: filesystem errors must propagate
+        // rather than being classified as an invalid frame during recovery.
+        let body_len = frame_len - HEADER_LEN;
+        let mut body = Vec::new();
+        body.try_reserve_exact(body_len).map_err(|source| {
+            LogManagerError::FrameAllocationFailed { byte_count: body_len, source }
         })?;
-        frame.extend_from_slice(&frame_header);
-        frame.resize(frame_len, 0);
-        wal_file.read_exact(&mut frame[HEADER_LEN..])?;
+        body.resize(body_len, 0);
+        wal_file.read_exact(&mut body)?;
 
-        let transaction = match deserialize_transaction(&frame) {
-            Ok(transaction) => transaction,
+        let kinds = match header.decode_records(&body) {
+            Ok(kinds) => kinds,
             Err(_) if mode == LogReadMode::Recovery || frame_end == wal_len => {
                 // A crash can retain later unsynced sectors after a torn frame.
                 // Nothing after the first invalid frame belongs to the valid
@@ -593,14 +591,10 @@ fn read_log(
             }
             Err(error) => return Err(error),
         };
-        max_txn_id = max_txn_id.max(transaction.txn_id);
-        for record in transaction.records {
+        max_txn_id = max_txn_id.max(header.txn_id);
+        for kind in kinds {
             next_lsn = next_lsn.checked_add(1).ok_or(LogManagerError::LsnExhausted)?;
-            records.push(RecoveryLogRecord {
-                lsn: next_lsn,
-                txn_id: record.txn_id,
-                kind: RecoveryLogRecordKind::from_log_record_kind(&record.kind)?,
-            });
+            records.push(RecoveryLogRecord { lsn: next_lsn, txn_id: header.txn_id, kind });
         }
         offset = frame_end;
     }
@@ -634,29 +628,4 @@ impl RecoveryLogRecordKind {
             },
         }
     }
-
-    fn from_log_record_kind(kind: &LogRecordKind<'_>) -> Result<Self, LogManagerError> {
-        match kind {
-            LogRecordKind::Begin => Ok(Self::Begin),
-            LogRecordKind::Commit => Ok(Self::Commit),
-            LogRecordKind::Rollback => Ok(Self::Rollback),
-            LogRecordKind::PageUpdate { page_id, redo_data, undo_data } => Ok(Self::PageUpdate {
-                page_id: *page_id,
-                redo_data: page_image_array(redo_data)?,
-                undo_data: page_image_array(undo_data)?,
-            }),
-            LogRecordKind::PageAlloc { page_id } => Ok(Self::PageAlloc { page_id: *page_id }),
-            LogRecordKind::PageDealloc { page_id } => Ok(Self::PageDealloc { page_id: *page_id }),
-            LogRecordKind::BitmapImage { page_id, image } => {
-                Ok(Self::BitmapImage { page_id: *page_id, image: page_image_array(image)? })
-            }
-        }
-    }
-}
-
-fn page_image_array(image: &[u8]) -> Result<Box<[u8; PAGE_SIZE]>, LogManagerError> {
-    let image = image.try_into().map_err(|_wrong_length| {
-        LogManagerError::InvalidPageImageLength { expected: PAGE_SIZE, actual: image.len() }
-    })?;
-    Ok(Box::new(image))
 }
