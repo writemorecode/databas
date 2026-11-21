@@ -4,7 +4,7 @@ use crate::disk_manager::DiskManager;
 use crate::error::StorageResult;
 use crate::filesystem::FileSystem;
 use crate::log_manager::{
-    LogManager, Lsn, RecoveryLogRecordKind, TxnId, read_recovery_log, truncate_wal,
+    LogManager, Lsn, RecoveryLogRecordKind, TxnId, read_recovery_log, retire_empty_wal,
 };
 use crate::page_allocator::PageAllocator;
 use crate::{PAGE_SIZE, PageId};
@@ -40,7 +40,7 @@ pub fn recover_from_wal(
     if scan.records.is_empty() {
         PageAllocator::load(disk)?.validate_bounds(disk.page_count())?;
         if max_txn_id > 0 || scan.truncated_tail {
-            truncate_wal(fs, path, scan.last_assigned_lsn, max_txn_id)?;
+            retire_empty_wal(fs, path, &scan)?;
         }
         return Ok(RecoveryResult { max_txn_id });
     }
@@ -159,10 +159,9 @@ pub fn recover_from_wal(
     allocator.validate_bounds(disk.page_count())?;
     // Recovery can also be interrupted while writing the repaired bitmaps.
     let mut log = LogManager::new(fs.clone(), path)?;
-    let image_lsns = allocator.flush(disk, &mut log)?;
+    allocator.flush(disk, &mut log)?;
     disk.sync()?;
-    drop(log);
-    truncate_wal(fs, path, image_lsns.end - 1, max_txn_id)?;
+    log.retire_after_recovery()?;
     Ok(RecoveryResult { max_txn_id })
 }
 

@@ -35,8 +35,10 @@ pub use crate::TxnId;
 use crate::filesystem::{File, FileSystem, OpenMode};
 use crate::{PAGE_SIZE, PageId};
 
-mod checkpoint;
 mod frame;
+mod replacement;
+
+pub(crate) use replacement::retire_empty_wal;
 
 use frame::{
     CRC32, HEADER_LEN, deserialize_transaction, scan_transaction_frame, serialize_transaction,
@@ -319,6 +321,7 @@ fn write_wal_file_header(
 #[derive(Debug)]
 pub struct LogManager {
     fs: FileSystem,
+    wal_path: PathBuf,
     wal_writer: ActiveWalWriter,
 
     highest_txn_id: TxnId,
@@ -332,10 +335,6 @@ impl LogManager {
         self.flush_through(self.highest_appended_lsn.unwrap_or(ZERO_LSN))
     }
 
-    fn poison(&mut self) {
-        self.poisoned = true;
-    }
-
     /// Opens or creates the WAL file associated with `db_file_path`.
     ///
     /// Existing complete frames are scanned to reconstruct the highest appended
@@ -343,13 +342,15 @@ impl LogManager {
     /// durable in this process; callers must still use [`Self::flush_through`]
     /// before relying on a newly appended record.
     pub(crate) fn new(fs: FileSystem, db_file_path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let db_file_path = db_file_path.as_ref().to_path_buf();
-        let wal_file_path = db_file_path.with_added_extension("wal");
-        let wal_was_created = !fs.exists(&wal_file_path)?;
-        let mut wal_file = fs.open(&wal_file_path, OpenMode::Create)?;
+        Self::open_wal(fs, db_file_path.as_ref().with_added_extension("wal"))
+    }
+
+    fn open_wal(fs: FileSystem, wal_path: PathBuf) -> std::io::Result<Self> {
+        let wal_was_created = !fs.exists(&wal_path)?;
+        let mut wal_file = fs.open(&wal_path, OpenMode::Create)?;
         let wal_header = ensure_wal_file_header(&mut wal_file).map_err(wal_open_error)?;
         if wal_was_created {
-            fs.sync_parent(&wal_file_path)?;
+            fs.sync_parent(&wal_path)?;
         }
 
         let mut highest_appended_lsn = if wal_header.last_assigned_lsn == ZERO_LSN {
@@ -381,6 +382,7 @@ impl LogManager {
 
         Ok(Self {
             fs,
+            wal_path,
             wal_writer,
             highest_txn_id,
             highest_durable_lsn: None,
@@ -512,27 +514,19 @@ pub fn read_recovery_log(
     fs: &FileSystem,
     db_file_path: impl AsRef<Path>,
 ) -> Result<RecoveryLogScan, LogManagerError> {
-    read_log(fs, db_file_path.as_ref(), LogReadMode::Recovery)
-}
-
-pub fn read_checkpoint_log(
-    fs: &FileSystem,
-    path: &Path,
-) -> Result<RecoveryLogScan, LogManagerError> {
-    read_log(fs, path, LogReadMode::Checkpoint)
+    read_log(fs, &db_file_path.as_ref().with_added_extension("wal"), LogReadMode::Recovery)
 }
 
 fn read_log(
     fs: &FileSystem,
-    db_file_path: &Path,
+    wal_path: &Path,
     mode: LogReadMode,
 ) -> Result<RecoveryLogScan, LogManagerError> {
-    let wal_file_path = db_file_path.with_added_extension("wal");
-    let wal_was_created = !fs.exists(&wal_file_path)?;
-    let mut wal_file = fs.open(&wal_file_path, OpenMode::Create)?;
+    let wal_was_created = !fs.exists(wal_path)?;
+    let mut wal_file = fs.open(wal_path, OpenMode::Create)?;
     let wal_header = ensure_wal_file_header(&mut wal_file)?;
     if wal_was_created {
-        fs.sync_parent(&wal_file_path)?;
+        fs.sync_parent(wal_path)?;
     }
     let wal_len = wal_file.len()?;
     wal_file.seek(SeekFrom::Start(WAL_FILE_HEADER_LEN as u64))?;
@@ -620,34 +614,6 @@ fn read_log(
     }
 
     Ok(RecoveryLogScan { records, truncated_tail, max_txn_id, last_assigned_lsn: next_lsn })
-}
-
-/// Removes all WAL contents after recovery has made the database file consistent.
-pub fn truncate_wal(
-    fs: &FileSystem,
-    db_file_path: impl AsRef<Path>,
-    last_assigned_lsn: Lsn,
-    max_txn_id: TxnId,
-) -> Result<(), LogManagerError> {
-    let wal_file_path = db_file_path.as_ref().with_added_extension("wal");
-    let checkpoint_file_path = wal_file_path.with_added_extension("checkpoint");
-    write_wal_checkpoint_file(fs, &checkpoint_file_path, last_assigned_lsn, max_txn_id)?;
-    fs.rename(&checkpoint_file_path, &wal_file_path)?;
-    fs.sync_parent(&wal_file_path)?;
-    Ok(())
-}
-
-fn write_wal_checkpoint_file(
-    fs: &FileSystem,
-    checkpoint_file_path: &Path,
-    last_assigned_lsn: Lsn,
-    max_txn_id: TxnId,
-) -> Result<(), LogManagerError> {
-    let mut checkpoint_file = fs.open(checkpoint_file_path, OpenMode::Truncate)?;
-    write_wal_file_header(&mut checkpoint_file, last_assigned_lsn, max_txn_id)?;
-    checkpoint_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
-    checkpoint_file.sync_all()?;
-    Ok(())
 }
 
 impl RecoveryLogRecordKind {

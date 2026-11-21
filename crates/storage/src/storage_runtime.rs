@@ -28,7 +28,7 @@ fn make_transaction_manager(max_txn_id: TxnId) -> ActiveTransactionManager {
 /// before the log.
 pub struct StorageRuntime {
     path: PathBuf,
-    checkpoint: Mutex<Checkpointer>,
+    checkpoint: Mutex<()>,
     disk: Mutex<DiskManager>,
     log: Mutex<LogManager>,
     transactions: Mutex<ActiveTransactionManager>,
@@ -43,7 +43,7 @@ impl StorageRuntime {
         let allocator = PageAllocator::load(&mut disk)?;
         let max_txn_id = recovery.max_txn_id.max(log.highest_txn_id());
         Ok(Self {
-            checkpoint: Mutex::new(Checkpointer { path: path.clone() }),
+            checkpoint: Mutex::new(()),
             path,
             allocator: Mutex::new(allocator),
             disk: Mutex::new(disk),
@@ -151,7 +151,35 @@ impl StorageRuntime {
     where
         F: FnOnce() -> StorageResult<Option<Lsn>>,
     {
-        Self::lock(&self.checkpoint, "checkpoint serialization")?.run(self, flush_cache)
+        // Serialize the whole checkpoint, including cache flushing and WAL publication.
+        let _checkpoint = Self::lock(&self.checkpoint, "checkpoint serialization")?;
+        // Capture a fixed horizon and preserve all undo for transactions alive
+        // now. New transactions begin after this horizon and are retained too.
+        let mut retain_from = {
+            let transactions = Self::lock(&self.transactions, "transaction manager")?;
+            let log = Self::lock(&self.log, "log manager")?;
+            let horizon = log.next_lsn()?;
+            transactions.oldest_begin_lsn().map_or(horizon, |oldest| oldest.min(horizon))
+        };
+        // No transaction/log latch is held while entering the page cache.
+        let deferred = flush_cache()?;
+        if let Some(oldest) = deferred {
+            retain_from = retain_from.min(oldest);
+        }
+        let bitmap_images = self.flush_allocations()?;
+        self.sync_database_file()?;
+        if retain_from == bitmap_images.start {
+            retain_from = bitmap_images.end;
+        }
+        // Publication serializes with WAL appends, not
+        // transaction lifetimes. Never acquire cache latches in this section.
+        let _transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let mut log = Self::lock(&self.log, "log manager")?;
+        if log.reclaim_prefix(retain_from)? == 0 && deferred.is_none() {
+            Ok(CheckpointOutcome::Completed)
+        } else {
+            Ok(CheckpointOutcome::Partial)
+        }
     }
 
     pub(crate) fn begin_transaction(&self) -> StorageResult<TxnId> {
@@ -247,49 +275,5 @@ impl StorageRuntime {
             allocator.set_allocated(id, !allocated);
         }
         Ok(())
-    }
-}
-
-/// Owns checkpoint execution and the path used for WAL reclamation.
-///
-/// `run` requires mutable access, so the runtime must hold its checkpoint mutex
-/// throughout horizon capture, cache flushing, and WAL publication.
-struct Checkpointer {
-    path: PathBuf,
-}
-
-impl Checkpointer {
-    fn run<F>(&self, runtime: &StorageRuntime, flush_cache: F) -> StorageResult<CheckpointOutcome>
-    where
-        F: FnOnce() -> StorageResult<Option<Lsn>>,
-    {
-        // Capture a fixed horizon and preserve all undo for transactions alive
-        // now. New transactions begin after this horizon and are retained too.
-        let mut retain_from = {
-            let transactions = StorageRuntime::lock(&runtime.transactions, "transaction manager")?;
-            let log = StorageRuntime::lock(&runtime.log, "log manager")?;
-            let horizon = log.next_lsn()?;
-            transactions.oldest_begin_lsn().map_or(horizon, |oldest| oldest.min(horizon))
-        };
-        // No transaction/log latch is held while entering the page cache.
-        let deferred = flush_cache()?;
-        if let Some(oldest) = deferred {
-            retain_from = retain_from.min(oldest);
-        }
-        let bitmap_images = runtime.flush_allocations()?;
-        runtime.sync_database_file()?;
-        if retain_from == bitmap_images.start {
-            retain_from = bitmap_images.end;
-        }
-        // Publication serializes with WAL appends, not
-        // transaction lifetimes. Never acquire cache latches in this section.
-        let _transactions = StorageRuntime::lock(&runtime.transactions, "transaction manager")?;
-        let mut log = StorageRuntime::lock(&runtime.log, "log manager")?;
-        let progress = log.reclaim_prefix(&self.path, retain_from)?;
-        if progress.remaining_records == 0 && deferred.is_none() {
-            Ok(CheckpointOutcome::Completed)
-        } else {
-            Ok(CheckpointOutcome::Partial)
-        }
     }
 }
