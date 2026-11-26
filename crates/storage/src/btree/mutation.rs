@@ -49,8 +49,8 @@ impl TreeCursor {
         self.page_cache.validate_transaction_write(Some(txn_id))?;
         let root = self.root_page_id();
         let identity = self.root_recovery()?;
-        if !self.page_cache.has_surviving_root(txn_id, identity.incarnation)? {
-            self.apply_edit(key, edit)?;
+        if !self.page_cache.can_retain_structure(txn_id, identity.incarnation)? {
+            self.apply_physical_edit(key, edit)?;
             return self.page_cache.validate_transaction_write(Some(txn_id));
         }
 
@@ -68,14 +68,81 @@ impl TreeCursor {
                 }
             }
         };
+        if let Edit::Insert(value) | Edit::Replace(value) = edit {
+            self.retain_leaf_split_if_needed(txn_id, key, value, matches!(edit, Edit::Replace(_)))?;
+        }
         let boundary = self.page_cache.begin_action(txn_id)?;
-        self.apply_edit(key, edit)?;
-        // Checks for a WAL error discovered when a write guard was dropped.
+        let leaf_to_rebalance = match edit {
+            Edit::Delete => self.delete_preserving_searchability(key)?,
+            _ => {
+                self.apply_physical_edit(key, edit)?;
+                None
+            }
+        };
         self.page_cache.complete_action(
             txn_id,
             boundary,
-            LogicalUndo { root, incarnation: identity.incarnation, key: key.into(), action },
-        )
+            Some(LogicalUndo { root, incarnation: identity.incarnation, key: key.into(), action }),
+        )?;
+        if let Some(leaf) = leaf_to_rebalance {
+            self.retain_leaf_rebalance_if_needed(txn_id, leaf)?;
+        }
+        Ok(())
+    }
+
+    fn retain_leaf_split_if_needed(
+        &mut self,
+        txn_id: TxnId,
+        key: &[u8],
+        value: &[u8],
+        replacing: bool,
+    ) -> StorageResult<()> {
+        let needed = self.leaf_cell_local_size(key, value)?;
+        let (page_id, pin, path) = self.leaf_page_pin_path_for_key(key)?;
+        {
+            let guard = pin.read()?;
+            let leaf = guard.open::<Leaf>()?;
+            let space = leaf.total_reclaimable_space()?;
+            let fits = match (
+                replacing,
+                self.search_leaf_slot_in_page(page_id, guard.page(), &leaf, key)?,
+            ) {
+                (true, SearchResult::Found(slot)) => needed <= space + leaf.cell_len(slot)?,
+                (false, SearchResult::InsertAt(_)) => {
+                    needed + page::format::SLOT_ENTRY_SIZE <= space
+                }
+                (true, SearchResult::InsertAt(_)) => return Err(PageError::KeyNotFound.into()),
+                (false, SearchResult::Found(_)) => return Err(PageError::DuplicateKey.into()),
+            };
+            if fits {
+                return Ok(());
+            }
+        }
+        let boundary = self.page_cache.begin_action(txn_id)?;
+        let pending = self.split_existing_leaf(page_id, &pin)?;
+        drop(pin);
+        self.propagate_split(&path, pending)?;
+        self.refresh_path_separators(&path)?;
+        self.page_cache.complete_action(txn_id, boundary, None)
+    }
+
+    fn retain_leaf_rebalance_if_needed(
+        &mut self,
+        txn_id: TxnId,
+        leaf: PageId,
+    ) -> StorageResult<()> {
+        if !self.leaf_page_underoccupied(leaf)? {
+            return Ok(());
+        }
+        let anchor =
+            self.read_leaf_max_key(leaf)?.ok_or_else(|| Self::missing_child_max_key_error(leaf))?;
+        let (found, path) = self.leaf_page_path_for_key(&anchor)?;
+        if found != leaf {
+            return Err(Self::missing_child_max_key_error(leaf));
+        }
+        let boundary = self.page_cache.begin_action(txn_id)?;
+        self.repair_after_delete(leaf, &path)?;
+        self.page_cache.complete_action(txn_id, boundary, None)
     }
 
     pub(crate) fn apply_inverse(
@@ -85,21 +152,11 @@ impl TreeCursor {
     ) -> StorageResult<()> {
         let mut cursor = Self::new(cache, inverse.root)?.for_transaction(txn_id);
         cursor.root_recovery()?.require_incarnation(inverse.root, inverse.incarnation)?;
-        let edit = match &inverse.action {
-            Inverse::Delete => Edit::Delete,
-            Inverse::Insert(value) => Edit::Insert(value),
-            Inverse::Replace(value) => Edit::Replace(value),
-        };
-        // Physical WAL until the compensation's skip CLR completes the inverse.
-        // A delete inverse only needs to repair structurally invalid children.
-        if matches!(edit, Edit::Delete) {
-            let deleted = cursor.delete_row(&inverse.key)?;
-            if deleted.empty && !deleted.path.is_empty() {
-                return cursor.repair_after_delete(deleted.leaf, &deleted.path);
-            }
-            return cursor.refresh_subtree_separators();
+        match &inverse.action {
+            Inverse::Delete => cursor.delete_preserving_searchability(&inverse.key).map(|_| ()),
+            Inverse::Insert(value) => cursor.insert_inner(&inverse.key, value),
+            Inverse::Replace(value) => cursor.update_inner(&inverse.key, value),
         }
-        cursor.apply_edit(&inverse.key, edit)
     }
 
     fn root_recovery(&self) -> StorageResult<PageRecovery> {
@@ -107,7 +164,7 @@ impl TreeCursor {
         Ok(PageRecovery::read(pin.read()?.page()))
     }
 
-    fn apply_edit(&mut self, key: &[u8], edit: Edit<'_>) -> StorageResult<()> {
+    fn apply_physical_edit(&mut self, key: &[u8], edit: Edit<'_>) -> StorageResult<()> {
         match edit {
             Edit::Insert(value) => self.insert_inner(key, value),
             Edit::Replace(value) => self.update_inner(key, value),
@@ -350,6 +407,16 @@ impl TreeCursor {
     fn delete_inner(&mut self, key: &[u8]) -> StorageResult<()> {
         let deleted = self.delete_row(key)?;
         self.repair_after_delete(deleted.leaf, &deleted.path)
+    }
+
+    fn delete_preserving_searchability(&mut self, key: &[u8]) -> StorageResult<Option<PageId>> {
+        let Deletion { leaf, path, empty } = self.delete_row(key)?;
+        if empty && !path.is_empty() {
+            self.repair_after_delete(leaf, &path)?;
+            return Ok(None);
+        }
+        self.refresh_subtree_separators()?;
+        Ok((!path.is_empty()).then_some(leaf))
     }
 
     fn delete_row(&mut self, key: &[u8]) -> StorageResult<Deletion> {

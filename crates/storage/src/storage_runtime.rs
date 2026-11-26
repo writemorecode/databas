@@ -259,7 +259,7 @@ impl StorageRuntime {
         &self,
         txn_id: TxnId,
         boundary: ActionBoundary,
-        inverse: LogicalUndo,
+        inverse: Option<LogicalUndo>,
     ) -> StorageResult<()> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
         let mut log = Self::lock(&self.log, "log manager")?;
