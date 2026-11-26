@@ -10,7 +10,6 @@ use crate::transaction_manager::{
     LoggedPageUpdate, PageRestore, TransactionManager, TransactionRollback, TransactionSavepoint,
 };
 use crate::{CheckpointOutcome, PAGE_SIZE, PageId};
-use std::ops::Range;
 use std::sync::{Mutex, MutexGuard};
 
 type ActiveTransactionManager = TransactionManager;
@@ -111,7 +110,7 @@ impl StorageRuntime {
     /// Lock order: cache metadata, transactions, allocator, WAL, disk. Never
     /// enter the cache while holding runtime latches. WAL protects bitmap writes
     /// even when a checkpoint persists reservations belonging to active writers.
-    pub(crate) fn flush_allocations(&self) -> StorageResult<Range<Lsn>> {
+    pub(crate) fn flush_allocations(&self) -> StorageResult<()> {
         let _transactions = Self::lock(&self.transactions, "transaction manager")?;
         let mut allocator = Self::lock(&self.allocator, "page allocator")?;
         let mut log = Self::lock(&self.log, "log manager")?;
@@ -166,11 +165,8 @@ impl StorageRuntime {
         if let Some(oldest) = deferred {
             retain_from = retain_from.min(oldest);
         }
-        let bitmap_images = self.flush_allocations()?;
+        self.flush_allocations()?;
         self.sync_database_file()?;
-        if retain_from == bitmap_images.start {
-            retain_from = bitmap_images.end;
-        }
         // Publication serializes with WAL appends, not
         // transaction lifetimes. Never acquire cache latches in this section.
         let _transactions = Self::lock(&self.transactions, "transaction manager")?;
@@ -261,7 +257,9 @@ impl StorageRuntime {
         &self,
         txn_id: TxnId,
     ) -> StorageResult<TransactionRollback> {
-        Self::lock(&self.transactions, "transaction manager")?.prepare_rollback_pages(txn_id)
+        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let mut log = Self::lock(&self.log, "log manager")?;
+        transactions.prepare_rollback_pages(&mut log, txn_id)
     }
 
     pub(crate) fn finish_rollback(&self, txn_id: TxnId) -> StorageResult<()> {

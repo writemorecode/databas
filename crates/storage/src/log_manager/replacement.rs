@@ -43,7 +43,7 @@ impl LogManager {
         Ok(suffix.len())
     }
 
-    /// Discard replayed records, including bitmap images written during recovery.
+    /// Discard replayed records, including compensation written during recovery.
     /// The caller must sync the database before retiring the WAL.
     pub(crate) fn retire_after_recovery(self) -> Result<(), LogManagerError> {
         let header = WalFileHeader {

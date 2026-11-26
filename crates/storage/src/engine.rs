@@ -147,10 +147,8 @@ impl Storage {
     pub fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
         let rollback = self.runtime.prepare_rollback_pages(txn_id)?;
         self.page_cache.restore_rollback_pages(rollback.pages)?;
-        for page_id in rollback.flush_page_ids {
-            self.page_cache.flush_page(page_id)?;
-        }
-        self.runtime.sync_database_file()?;
+        // Completion forces WAL through the CLRs, not the compensated pages.
+        // Restart will redo them if their cache images never reached home.
         self.runtime.finish_rollback(txn_id)?;
         Ok(())
     }

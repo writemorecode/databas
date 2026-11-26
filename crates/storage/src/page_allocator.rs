@@ -5,12 +5,11 @@
 //! rather than shared full-page undo images, so transactions changing different
 //! bits never undo one another. Uncommitted frees remain reserved.
 
-use std::collections::{BTreeSet, HashMap};
-use std::ops::Range;
+use std::collections::BTreeSet;
 
 use crate::disk_manager::{DiskManager, DiskManagerError};
 use crate::error::StorageResult;
-use crate::log_manager::{LogManager, LogRecordKind, Lsn};
+use crate::log_manager::LogManager;
 use crate::{PAGE_SIZE, PageId};
 
 mod bitmap;
@@ -26,15 +25,7 @@ pub struct PageAllocator {
 
 impl PageAllocator {
     pub(crate) fn load(disk: &mut DiskManager) -> StorageResult<Self> {
-        Self::load_with_images(disk, &HashMap::new())
-    }
-
-    pub(crate) fn load_with_images(
-        disk: &mut DiskManager,
-        images: &HashMap<PageId, Box<[u8; PAGE_SIZE]>>,
-    ) -> StorageResult<Self> {
         let mut bitmap = AllocationBitmap::new();
-        let mut dirty = BTreeSet::new();
         for page_id in AllocationBitmap::metadata_page_ids(disk.page_count()) {
             let mut bytes = [0; PAGE_SIZE];
             let result = disk.read_page(page_id, &mut bytes);
@@ -51,29 +42,18 @@ impl PageAllocator {
                     disk.sync()?;
                     bytes = empty;
                 }
-            } else if let Err(error) = result {
-                let Some(image) = images
-                    .get(&page_id)
-                    .filter(|_| matches!(error, DiskManagerError::ChecksumMismatch { .. }))
-                else {
-                    return Err(error.into());
-                };
-                bytes = **image;
-                dirty.insert(page_id);
+            } else {
+                result?;
             }
             bitmap.push_page(page_id, bytes)?;
         }
-        Ok(Self { bitmap, dirty, next_candidate: 0 })
+        Ok(Self { bitmap, dirty: BTreeSet::new(), next_candidate: 0 })
     }
 
     /// Validate the physical extent only after WAL has repaired allocations.
     /// A bitmap sector can reach disk before an unsynced file extension does.
     pub(crate) fn validate_bounds(&self, page_count: u64) -> StorageResult<()> {
         self.bitmap.validate_bounds(page_count)
-    }
-
-    pub(crate) fn contains_page(&self, page_id: PageId) -> bool {
-        self.bitmap.contains_page(page_id)
     }
 
     pub(crate) fn is_metadata(page_id: PageId) -> bool {
@@ -143,20 +123,13 @@ impl PageAllocator {
         }
     }
 
-    /// Log repair images before overwriting bitmap pages: logical allocation
-    /// records alone cannot validate a bitmap with sectors from different writes.
-    /// Returns the range of image LSNs, which are reclaimable after the sync.
+    /// Force the bit transitions before staging any dirty bitmap. Doublewrite
+    /// protects the bitmap baseline, so no full-page WAL repair image is needed.
     pub(crate) fn flush(
         &mut self,
         disk: &mut DiskManager,
         log: &mut LogManager,
-    ) -> StorageResult<Range<Lsn>> {
-        let start = log.next_lsn()?;
-        for &page_id in &self.dirty {
-            let image = self.bitmap.page(page_id);
-            log.append_record(0, LogRecordKind::BitmapImage { page_id, image })?;
-        }
-        let end = log.next_lsn()?;
+    ) -> StorageResult<()> {
         log.flush_all()?;
         if !self.dirty.is_empty() {
             for &page_id in &self.dirty {
@@ -166,6 +139,6 @@ impl PageAllocator {
             disk.sync()?;
             self.dirty.clear();
         }
-        Ok(start..end)
+        Ok(())
     }
 }

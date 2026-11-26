@@ -288,23 +288,6 @@ impl PageCache {
         self.inner.runtime.dealloc_page(txn_id, page_id).map_err(runtime_error)
     }
 
-    /// Flushes one resident page if dirty.
-    ///
-    /// Non-resident pages are a no-op. Pinned pages return `PinnedPage`.
-    pub(crate) fn flush_page(&self, page_id: PageId) -> PageCacheResult<()> {
-        let meta = self.inner.lock_meta()?;
-        let Some(frame_id) = self.resident_frame_id(&meta, page_id)? else {
-            return Ok(());
-        };
-
-        let frame = &self.inner.frames[frame_id];
-        if frame.pin_count.load(Ordering::Acquire) > 0 {
-            return Err(PageCacheError::PinnedPage { page_id });
-        }
-
-        self.flush_frame_if_dirty(frame_id)
-    }
-
     /// Flushes all dirty pages that are currently unpinned.
     ///
     /// Returns `PinnedPage` if a dirty page is pinned.

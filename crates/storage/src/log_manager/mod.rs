@@ -52,7 +52,7 @@ pub const ZERO_LSN: Lsn = 0;
 const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
-const WAL_FILE_HEADER_VERSION: u16 = 3;
+const WAL_FILE_HEADER_VERSION: u16 = 4;
 pub const WAL_FILE_HEADER_LEN: usize = 32;
 const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
 
@@ -126,6 +126,12 @@ pub enum LogManagerError {
     /// The WAL file header failed its integrity checksum.
     #[error("WAL file header checksum mismatch: expected {expected}, got {actual}")]
     FileHeaderChecksumMismatch { expected: u32, actual: u32 },
+    /// A compensation record must encode either allocated or free.
+    #[error("invalid WAL allocation state: {state}")]
+    InvalidAllocationState { state: u8 },
+    /// A transaction/compensation link was forward, missing, or crossed owners.
+    #[error("invalid WAL chain for transaction {txn_id} at LSN {lsn}: {link}")]
+    InvalidChain { txn_id: TxnId, lsn: Lsn, link: Lsn },
     /// A previous append may have left a partial frame in this WAL stream.
     #[error("WAL manager is poisoned after a failed append")]
     Poisoned,
@@ -176,17 +182,17 @@ pub enum LogRecordKind<'a> {
     Rollback,
     /// Full-page physical update.
     ///
-    /// `redo_data` is the complete page image to install while redoing a
-    /// committed transaction. `undo_data` is the complete page image to restore
-    /// while undoing an incomplete transaction during recovery or explicit
-    /// rollback.
+    /// `redo_data` is installed during repeat-history redo, including for
+    /// losers. `undo_data` is the before-image used to construct compensation.
     PageUpdate { page_id: PageId, redo_data: &'a [u8], undo_data: &'a [u8] },
     /// Allocation of a database page by a transaction.
     PageAlloc { page_id: PageId },
     /// Deallocation of a database page by a transaction.
     PageDealloc { page_id: PageId },
-    /// System redo image for repairing torn allocation bitmap writes.
-    BitmapImage { page_id: PageId, image: &'a [u8] },
+    /// Redo-only page compensation with the next LSN to undo.
+    PageCompensation { page_id: PageId, redo_data: &'a [u8], undo_next_lsn: Lsn },
+    /// Redo-only compensation of one allocation bit.
+    AllocationCompensation { page_id: PageId, allocated: bool, undo_next_lsn: Lsn },
 }
 
 /// Owned WAL record returned by recovery scans.
@@ -220,8 +226,10 @@ pub enum RecoveryLogRecordKind {
     PageAlloc { page_id: PageId },
     /// Deallocation of a database page by a transaction.
     PageDealloc { page_id: PageId },
-    /// System redo image for repairing torn allocation bitmap writes.
-    BitmapImage { page_id: PageId, image: Box<[u8; PAGE_SIZE]> },
+    /// Redo-only page compensation with the next LSN to undo.
+    PageCompensation { page_id: PageId, redo_data: Box<[u8; PAGE_SIZE]>, undo_next_lsn: Lsn },
+    /// Redo-only compensation of one allocation bit.
+    AllocationCompensation { page_id: PageId, allocated: bool, undo_next_lsn: Lsn },
 }
 
 /// Result of scanning the WAL for recovery.
@@ -372,9 +380,7 @@ impl LogManager {
                         .ok_or(LogManagerError::LsnExhausted)
                         .map_err(wal_open_error)?;
                     highest_appended_lsn = Some(next_lsn);
-                    if frame.txn_id != 0 {
-                        transaction_heads.insert(frame.txn_id, next_lsn);
-                    }
+                    transaction_heads.insert(frame.txn_id, next_lsn);
                 }
             }
         }
@@ -440,10 +446,9 @@ impl LogManager {
 
         self.highest_txn_id = self.highest_txn_id.max(txn_id);
         self.highest_appended_lsn = Some(lsn);
-        // System bitmap images (txn 0) are independent redo-only records.
         if completed {
             self.transaction_heads.remove(&txn_id);
-        } else if txn_id != 0 {
+        } else {
             self.transaction_heads.insert(txn_id, lsn);
         }
         Ok(lsn)
@@ -623,8 +628,19 @@ impl RecoveryLogRecordKind {
             Self::Rollback => LogRecordKind::Rollback,
             Self::PageAlloc { page_id } => LogRecordKind::PageAlloc { page_id: *page_id },
             Self::PageDealloc { page_id } => LogRecordKind::PageDealloc { page_id: *page_id },
-            Self::BitmapImage { page_id, image } => {
-                LogRecordKind::BitmapImage { page_id: *page_id, image: image.as_ref() }
+            Self::PageCompensation { page_id, redo_data, undo_next_lsn } => {
+                LogRecordKind::PageCompensation {
+                    page_id: *page_id,
+                    redo_data: redo_data.as_ref(),
+                    undo_next_lsn: *undo_next_lsn,
+                }
+            }
+            Self::AllocationCompensation { page_id, allocated, undo_next_lsn } => {
+                LogRecordKind::AllocationCompensation {
+                    page_id: *page_id,
+                    allocated: *allocated,
+                    undo_next_lsn: *undo_next_lsn,
+                }
             }
             Self::PageUpdate { page_id, redo_data, undo_data } => LogRecordKind::PageUpdate {
                 page_id: *page_id,

@@ -38,7 +38,3 @@ pub fn is_current_btree_page(bytes: &[u8; PAGE_SIZE]) -> bool {
     format::PageKind::from_raw(bytes[format::KIND_OFFSET]).is_some()
         && bytes[format::VERSION_OFFSET] == format::FORMAT_VERSION
 }
-
-pub fn is_overflow_page(bytes: &[u8; PAGE_SIZE]) -> bool {
-    !is_current_btree_page(bytes)
-}
