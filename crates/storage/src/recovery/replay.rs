@@ -50,6 +50,7 @@ impl AllocationReplay {
 /// verified page's redo watermark.
 pub(super) fn redo(
     records: &[RecoveryLogRecord],
+    redo_from: Lsn,
     disk: &mut DiskManager,
     allocator: &mut PageAllocator,
 ) -> StorageResult<AllocationReplay> {
@@ -57,13 +58,17 @@ pub(super) fn redo(
     let mut data = DataRedo::new(records);
     for record in records {
         match &record.kind {
-            Kind::PageUpdate { page_id, incarnation, before_lsn, redo, undo } => {
+            Kind::PageUpdate { page_id, incarnation, before_lsn, redo, undo }
+                if record.lsn >= redo_from =>
+            {
                 let target = PageRecovery { incarnation: *incarnation, lsn: record.lsn };
                 data.replay(disk, *page_id, target, Some((*before_lsn, undo)), |image| {
                     redo.apply(image)
                 })?;
             }
-            Kind::PageCompensation { page_id, incarnation, redo, .. } => {
+            Kind::PageCompensation { page_id, incarnation, redo, .. }
+                if record.lsn >= redo_from =>
+            {
                 let target = PageRecovery { incarnation: *incarnation, lsn: record.lsn };
                 data.replay(disk, *page_id, target, None, |image| {
                     Ok(redo.apply(image).map_err(LogManagerError::from)?)
@@ -72,7 +77,9 @@ pub(super) fn redo(
             Kind::PageInit { page_id, kind } => {
                 set_allocation(disk, allocator, *page_id, true, record.lsn)?;
                 allocations.request(record.txn_id, *page_id, true);
-                data.initialize(disk, *page_id, record.lsn, *kind)?;
+                if record.lsn >= redo_from {
+                    data.initialize(disk, *page_id, record.lsn, *kind)?;
+                }
             }
             Kind::PageDealloc { page_id } => allocations.request(record.txn_id, *page_id, false),
             Kind::AllocationCompensation { page_id, allocated, .. } => {
@@ -81,7 +88,11 @@ pub(super) fn redo(
             Kind::Commit | Kind::Rollback => {
                 allocations.publish(disk, allocator, record.txn_id, record.lsn)?;
             }
-            Kind::Begin | Kind::LogicalEdit { .. } | Kind::SkipUndo { .. } => {}
+            Kind::PageUpdate { .. }
+            | Kind::PageCompensation { .. }
+            | Kind::Begin
+            | Kind::LogicalEdit { .. }
+            | Kind::SkipUndo { .. } => {}
         }
     }
     Ok(allocations)

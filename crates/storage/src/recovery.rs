@@ -39,7 +39,7 @@ pub fn repeat_history(
     }
     let mut allocator = PageAllocator::load(disk)?;
     if needs_checkpoint {
-        let mut allocations = replay::redo(&scan.records, disk, &mut allocator)?;
+        let mut allocations = replay::redo(&scan.records, scan.redo_from, disk, &mut allocator)?;
         analysis.restore_losers(&mut transactions, |id| allocations.take_pending(id))?;
         log.retain_transaction_heads(|id| transactions.transaction_is_active(id));
     } else {

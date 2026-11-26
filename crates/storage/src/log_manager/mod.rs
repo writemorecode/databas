@@ -54,8 +54,8 @@ pub const ZERO_LSN: Lsn = 0;
 const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
-const WAL_FILE_HEADER_VERSION: u16 = 7;
-pub const WAL_FILE_HEADER_LEN: usize = 32;
+const WAL_FILE_HEADER_VERSION: u16 = 8;
+pub const WAL_FILE_HEADER_LEN: usize = 40;
 const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
 
 trait DurableWrite: Write {
@@ -134,6 +134,9 @@ pub enum LogManagerError {
     /// The WAL file header failed its integrity checksum.
     #[error("WAL file header checksum mismatch: expected {expected}, got {actual}")]
     FileHeaderChecksumMismatch { expected: u32, actual: u32 },
+    /// A checkpoint's redo horizon requires an absent durable WAL prefix.
+    #[error("invalid checkpoint redo horizon {redo_from} after LSN {last_lsn}")]
+    InvalidRedoHorizon { redo_from: Lsn, last_lsn: Lsn },
     /// An initializer must specify a supported data-page kind.
     #[error("invalid WAL page initialization kind: {tag}")]
     InvalidPageInitKind { tag: u8 },
@@ -271,12 +274,15 @@ pub struct RecoveryLogScan {
     pub(crate) max_txn_id: TxnId,
     /// Highest LSN assigned before this WAL segment plus all complete records.
     pub(crate) last_assigned_lsn: Lsn,
+    /// Earliest data-page redo that might not be durable at home.
+    pub(crate) redo_from: Lsn,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct WalFileHeader {
     last_assigned_lsn: Lsn,
     max_txn_id: TxnId,
+    redo_from: Lsn,
 }
 
 fn ensure_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
@@ -326,7 +332,10 @@ fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManager
     let mut max_txn_id_bytes = [0; 8];
     max_txn_id_bytes.copy_from_slice(&header[24..32]);
     let max_txn_id = u64::from_le_bytes(max_txn_id_bytes);
-    Ok(WalFileHeader { last_assigned_lsn, max_txn_id })
+    let mut redo_from_bytes = [0; 8];
+    redo_from_bytes.copy_from_slice(&header[32..40]);
+    let redo_from = u64::from_le_bytes(redo_from_bytes);
+    Ok(WalFileHeader { last_assigned_lsn, max_txn_id, redo_from })
 }
 
 fn write_wal_file_header(wal_file: &mut File, wal: WalFileHeader) -> Result<(), LogManagerError> {
@@ -335,6 +344,7 @@ fn write_wal_file_header(wal_file: &mut File, wal: WalFileHeader) -> Result<(), 
     header[8..10].copy_from_slice(&WAL_FILE_HEADER_VERSION.to_le_bytes());
     header[16..24].copy_from_slice(&wal.last_assigned_lsn.to_le_bytes());
     header[24..32].copy_from_slice(&wal.max_txn_id.to_le_bytes());
+    header[32..40].copy_from_slice(&wal.redo_from.to_le_bytes());
     let checksum = CRC32.checksum(&header);
     header[WAL_FILE_HEADER_CHECKSUM_RANGE].copy_from_slice(&checksum.to_le_bytes());
     wal_file.seek(SeekFrom::Start(0))?;
@@ -358,6 +368,7 @@ pub struct LogManager {
     transaction_heads: HashMap<TxnId, Lsn>,
     highest_appended_lsn: Option<Lsn>,
     highest_durable_lsn: Option<Lsn>,
+    redo_from: Lsn,
     poisoned: bool,
 }
 
@@ -420,6 +431,7 @@ impl LogManager {
             highest_txn_id,
             transaction_heads,
             highest_durable_lsn: None,
+            redo_from: wal_header.redo_from,
             highest_appended_lsn,
             poisoned: false,
         })
@@ -641,6 +653,12 @@ fn read_log(
         offset = frame_end;
     }
 
+    if wal_header.redo_from > next_lsn.saturating_add(1) {
+        return Err(LogManagerError::InvalidRedoHorizon {
+            redo_from: wal_header.redo_from,
+            last_lsn: next_lsn,
+        });
+    }
     if truncated_tail {
         if mode == LogReadMode::Checkpoint {
             return Err(LogManagerError::TruncatedFrame { needed: 1, remaining: 0 });
@@ -649,7 +667,13 @@ fn read_log(
         wal_file.sync_all()?;
     }
 
-    Ok(RecoveryLogScan { records, truncated_tail, max_txn_id, last_assigned_lsn: next_lsn })
+    Ok(RecoveryLogScan {
+        records,
+        truncated_tail,
+        max_txn_id,
+        last_assigned_lsn: next_lsn,
+        redo_from: wal_header.redo_from,
+    })
 }
 
 impl RecoveryLogRecordKind {

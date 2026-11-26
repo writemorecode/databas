@@ -14,7 +14,11 @@ use crate::filesystem::{FileSystem, OpenMode};
 
 impl LogManager {
     /// Retain suffix records at their original LSNs without invoking recovery.
-    pub(crate) fn reclaim_prefix(&mut self, retain_from: Lsn) -> StorageResult<usize> {
+    pub(crate) fn reclaim_prefix(
+        &mut self,
+        retain_from: Lsn,
+        redo_from: Lsn,
+    ) -> StorageResult<usize> {
         self.flush_all()?;
         let scan = match read_log(&self.fs, &self.wal_path, LogReadMode::Checkpoint) {
             Ok(scan) => scan,
@@ -24,13 +28,17 @@ impl LogManager {
             }
         };
         let prefix_len = scan.records.partition_point(|record| record.lsn < retain_from);
-        if prefix_len == 0 {
+        let redo_from = redo_from.max(self.redo_from);
+        if prefix_len == 0 && redo_from == self.redo_from {
             return Ok(scan.records.len());
         }
         let suffix = &scan.records[prefix_len..];
         let header = WalFileHeader {
-            last_assigned_lsn: scan.records[prefix_len - 1].lsn,
+            last_assigned_lsn: suffix
+                .first()
+                .map_or(scan.last_assigned_lsn, |record| record.lsn - 1),
             max_txn_id: scan.max_txn_id,
+            redo_from,
         };
         publish_replacement(&self.fs, &self.wal_path, header, suffix, Some(&mut self.poisoned))?;
         let mut reopened = Self::open_wal(self.fs.clone(), self.wal_path.clone())?;
