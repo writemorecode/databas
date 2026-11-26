@@ -56,6 +56,7 @@ struct Stats {
 impl Simulation {
     pub fn new(seed: u64) -> RunResult<Self> {
         super::compatibility::check_incompatible_opens()?;
+        super::doublewrite::sweep_repair()?;
         check_outcome_retries()?;
         super::restart::sweep_unpublished_wal()?;
         super::restart::sweep_retained_structure()?;

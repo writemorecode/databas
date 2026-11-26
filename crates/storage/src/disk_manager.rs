@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io::{Read, Seek, Write},
     path::Path,
 };
@@ -10,6 +11,7 @@ use crate::database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_he
 use crate::doublewrite::Doublewrite;
 use crate::error::StorageResult;
 use crate::filesystem::{File, FileSystem, OpenMode};
+use crate::page_recovery::PageRecovery;
 use crate::types::PAGE_CHECKSUM_OFFSET;
 use crate::{PAGE_SIZE, PageId};
 
@@ -32,7 +34,8 @@ pub type DiskManagerResult<T> = Result<T, DiskManagerError>;
 /// A checked bootstrap and its staged prefix. Preparation must not change either file.
 pub struct PendingRepair {
     protection: Doublewrite,
-    pending: Vec<(PageId, [u8; PAGE_SIZE])>,
+    latest: BTreeMap<PageId, [u8; PAGE_SIZE]>,
+    home_len: u64,
     required_len: u64,
 }
 
@@ -47,7 +50,7 @@ pub struct DiskManager {
 impl DiskManager {
     pub(crate) fn open(fs: &FileSystem, path: &Path, mode: OpenMode) -> DiskManagerResult<Self> {
         let file = fs.open(path, mode)?;
-        let page_count = Self::file_page_count(&file)?;
+        let page_count = file.len()?.div_ceil(PAGE_SIZE as u64);
         Ok(Self { file, page_count, locked: false, doublewrite: None })
     }
 
@@ -57,18 +60,12 @@ impl DiskManager {
             self.file.try_lock()?;
             // Another owner may have grown or initialized the file since open.
             // Only the length observed under ownership is safe for allocation.
-            self.page_count = Self::file_page_count(&self.file)?;
+            // Count a partial final page as nonempty; repair must either
+            // supply its complete image or reject the file before use.
+            self.page_count = self.file.len()?.div_ceil(PAGE_SIZE as u64);
             self.locked = true;
         }
         Ok(())
-    }
-
-    fn file_page_count(file: &File) -> DiskManagerResult<u64> {
-        let size = file.len()?;
-        if !size.is_multiple_of(PAGE_SIZE as u64) {
-            return Err(DiskManagerError::InvalidFileSize { size });
-        }
-        Ok(size / PAGE_SIZE as u64)
     }
 
     pub(crate) fn create_doublewrite(
@@ -91,48 +88,79 @@ impl DiskManager {
         path: &Path,
     ) -> StorageResult<PendingRepair> {
         debug_assert!(self.locked && self.doublewrite.is_none());
-        if self.page_count == 0 {
+        let home_len = self.file.len()?;
+        if home_len == 0 {
             return Err(missing_header());
         }
+        let complete_pages = home_len / PAGE_SIZE as u64;
+        let short_tail = !home_len.is_multiple_of(PAGE_SIZE as u64);
         let mut home = [0; PAGE_SIZE];
-        self.read_page_unchecked(DATABASE_HEADER_PAGE_ID, &mut home)?;
-        let home_checksum = Self::verify_checksum(DATABASE_HEADER_PAGE_ID, &home);
-        if home_checksum.is_ok() {
-            // A staged copy must never mask an intact, incompatible database.
-            DatabaseHeader::validate_page(&home)?;
-        }
+        let home_checksum = if complete_pages > 0 {
+            self.read_page_unchecked(DATABASE_HEADER_PAGE_ID, &mut home)?;
+            let checksum = Self::verify_checksum(DATABASE_HEADER_PAGE_ID, &home);
+            if checksum.is_ok() {
+                // A staged copy must never mask an intact, incompatible database.
+                DatabaseHeader::validate_page(&home)?;
+            }
+            checksum
+        } else {
+            Err(DiskManagerError::InvalidFileSize { size: home_len })
+        };
         let Some(mut protection) = Doublewrite::open(fs, path, &self.file)? else {
+            if short_tail {
+                return Err(DiskManagerError::InvalidFileSize { size: home_len }.into());
+            }
             // Legacy formats predate the checksum and bootstrap sidecar.
             DatabaseHeader::validate_page(&home)?;
             return Err(missing_doublewrite().into());
         };
-        let pending = protection.pending()?;
-        let mut required_len = self.page_count * PAGE_SIZE as u64;
-        let mut staged_header = false;
-        for (page_id, image) in &pending {
-            Self::verify_checksum(*page_id, image)?;
-            if *page_id == DATABASE_HEADER_PAGE_ID {
-                DatabaseHeader::validate_page(image)?;
-                staged_header = true;
+        let mut latest = BTreeMap::new();
+        let mut required_len = home_len;
+        // Validate even superseded slots. Installing intermediate versions would
+        // expose them to a second crash during repair.
+        for (id, image) in protection.pending()? {
+            Self::verify_checksum(id, &image)?;
+            if id == DATABASE_HEADER_PAGE_ID {
+                DatabaseHeader::validate_page(&image)?;
             }
-            required_len = required_len.max(Self::page_end(*page_id)?);
+            required_len = required_len.max(Self::page_end(id)?);
+            if latest.get(&id).is_none_or(|prior| version(&image) >= version(prior)) {
+                latest.insert(id, image);
+            }
         }
-        if !staged_header {
+        if short_tail && !latest.contains_key(&complete_pages) {
+            return Err(DiskManagerError::InvalidFileSize { size: home_len }.into());
+        }
+        if !latest.contains_key(&DATABASE_HEADER_PAGE_ID) {
             home_checksum?;
         }
-        Ok(PendingRepair { protection, pending, required_len })
+        Ok(PendingRepair { protection, latest, home_len, required_len })
     }
 
     pub(crate) fn repair_doublewrite(&mut self, repair: PendingRepair) -> DiskManagerResult<()> {
-        let PendingRepair { mut protection, pending, required_len } = repair;
-        if required_len > self.page_count * PAGE_SIZE as u64 {
+        let PendingRepair { mut protection, latest, home_len, required_len } = repair;
+        let complete_pages = home_len / PAGE_SIZE as u64;
+        if required_len > home_len {
             self.file.set_len(required_len)?;
             self.page_count = required_len / PAGE_SIZE as u64;
         }
-        for (page_id, image) in pending {
-            // The existing slot protects this repair, including another crash.
-            Self::write_home(&mut self.file, page_id, &image)?;
+        let mut home = [0; PAGE_SIZE];
+        for (id, image) in latest {
+            if id < complete_pages {
+                // Retry partial reads via read_exact. Failure reading a page known
+                // to exist is not evidence that its bytes are torn or older.
+                self.read_page_unchecked(id, &mut home)?;
+                if Self::verify_checksum(id, &home).is_ok()
+                    && (version(&home) > version(&image) || home == image)
+                {
+                    continue;
+                }
+            }
+            // Equal stamps need not imply equal bytes. The last protected write
+            // breaks ties (e.g. multiple bitmap changes at one commit LSN).
+            Self::write_home(&mut self.file, id, &image)?;
         }
+        // Even skipped home writes may only be in the OS cache.
         self.file.sync_all()?;
         protection.retire()?;
         self.doublewrite = Some(protection);
@@ -284,6 +312,13 @@ impl DiskManager {
             .and_then(|count| count.checked_mul(PAGE_SIZE as u64))
             .ok_or(DiskManagerError::InvalidPageId { page_id })
     }
+}
+
+// PageInit LSN orders data-page incarnations. On page zero and the other
+// fixed-address bitmaps the incarnation is zero, so only the page LSN varies.
+fn version(page: &[u8; PAGE_SIZE]) -> (crate::Lsn, crate::Lsn) {
+    let PageRecovery { incarnation, lsn } = PageRecovery::read(page);
+    (incarnation, lsn)
 }
 
 pub fn missing_doublewrite() -> std::io::Error {
