@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::error::{InternalError, InvariantViolation, StorageError, StorageResult};
 use crate::log_manager::{LogManager, LogRecordKind, Lsn, TxnId};
+use crate::page_operation::{LeafOperation, PageOperation};
 use crate::page_patch::PagePatch;
 use crate::page_recovery::{PageInitKind, PageRecovery};
 use crate::{PAGE_SIZE, PageId};
@@ -171,13 +172,25 @@ impl TransactionManager {
         page_id: PageId,
         before: &[u8; PAGE_SIZE],
         after: &[u8; PAGE_SIZE],
+        leaf_redo: Option<LeafOperation>,
     ) -> StorageResult<Lsn> {
         self.validate_transaction_write(txn_id)?;
         let result = (|| {
             let prev_lsn = log.transaction_head(txn_id);
             let PageRecovery { incarnation, lsn: before_lsn } = PageRecovery::read(before);
             debug_assert!(incarnation != 0 && incarnation <= before_lsn);
-            let (redo, undo) = PagePatch::between(before, after);
+            let (patch, undo) = PagePatch::between(before, after);
+            let redo = leaf_redo.map_or(PageOperation::Patch(patch), PageOperation::Leaf);
+            #[cfg(debug_assertions)]
+            {
+                // Physical undo depends on redo reproducing the exact layout,
+                // including slot offsets and freeblocks, not just the same rows.
+                let mut replayed = *before;
+                debug_assert!(redo.apply(&mut replayed).is_ok());
+                debug_assert!(replayed == *after);
+                debug_assert!(undo.apply(&mut replayed).is_ok());
+                debug_assert!(replayed == *before);
+            }
             let lsn = log.append_record(
                 txn_id,
                 LogRecordKind::PageUpdate {

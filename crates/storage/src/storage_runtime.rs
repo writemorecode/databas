@@ -5,6 +5,7 @@ use crate::error::{InternalError, StorageError, StorageResult};
 use crate::filesystem::FileSystem;
 use crate::log_manager::{LogManager, Lsn, TxnId};
 use crate::page_allocator::PageAllocator;
+use crate::page_operation::LeafOperation;
 use crate::page_recovery::PageInitKind;
 use crate::recovery::recover_from_wal;
 use crate::transaction_manager::{
@@ -185,10 +186,12 @@ impl StorageRuntime {
         page_id: PageId,
         before: &[u8; PAGE_SIZE],
         after: &[u8; PAGE_SIZE],
+        leaf_redo: Option<LeafOperation>,
     ) -> StorageResult<Lsn> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
         let mut log = Self::lock(&self.log, "log manager")?;
-        let result = transactions.record_page_update(&mut log, txn_id, page_id, before, after);
+        let result =
+            transactions.record_page_update(&mut log, txn_id, page_id, before, after, leaf_redo);
         if result.is_err() {
             transactions.record_failure(txn_id);
         }

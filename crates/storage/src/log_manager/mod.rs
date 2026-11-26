@@ -35,6 +35,7 @@ pub(crate) use crate::Lsn;
 use crate::PageId;
 pub use crate::TxnId;
 use crate::filesystem::{File, FileSystem, OpenMode};
+use crate::page_operation::PageOperation;
 use crate::page_patch::{InvalidPagePatch, PagePatch};
 use crate::page_recovery::PageInitKind;
 
@@ -54,7 +55,7 @@ pub const ZERO_LSN: Lsn = 0;
 const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
-const WAL_FILE_HEADER_VERSION: u16 = 6;
+const WAL_FILE_HEADER_VERSION: u16 = 7;
 pub const WAL_FILE_HEADER_LEN: usize = 32;
 const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
 
@@ -125,6 +126,9 @@ pub enum LogManagerError {
     /// Page patches must be ordered, nonoverlapping runs within the page body.
     #[error(transparent)]
     InvalidPagePatch(#[from] InvalidPagePatch),
+    /// A page operation has an unknown tag or invalid payload.
+    #[error("invalid WAL page operation with tag {tag}")]
+    InvalidPageOperation { tag: u8 },
     /// The WAL file header failed its integrity checksum.
     #[error("WAL file header checksum mismatch: expected {expected}, got {actual}")]
     FileHeaderChecksumMismatch { expected: u32, actual: u32 },
@@ -185,12 +189,12 @@ pub enum LogRecordKind<'a> {
     Commit,
     /// Transaction rollback-complete marker.
     Rollback,
-    /// Reversible byte runs within one page incarnation.
+    /// Page-local redo and inverse byte runs within one page incarnation.
     PageUpdate {
         page_id: PageId,
         incarnation: Lsn,
         before_lsn: Lsn,
-        redo: &'a PagePatch,
+        redo: &'a PageOperation,
         undo: &'a PagePatch,
     },
     /// Reserve a page and initialize a new incarnation without logging an image.
@@ -205,7 +209,7 @@ pub enum LogRecordKind<'a> {
 
 /// Owned WAL record returned by recovery scans.
 ///
-/// Unlike [`LogRecord`], this form owns page patches and includes the LSN
+/// Unlike [`LogRecord`], this form owns page operations and includes the LSN
 /// assigned from the record's position in the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryLogRecord {
@@ -228,12 +232,12 @@ pub enum RecoveryLogRecordKind {
     Commit,
     /// Transaction rollback-complete marker.
     Rollback,
-    /// Reversible byte runs within one page incarnation.
+    /// Page-local redo and inverse byte runs within one page incarnation.
     PageUpdate {
         page_id: PageId,
         incarnation: Lsn,
         before_lsn: Lsn,
-        redo: PagePatch,
+        redo: PageOperation,
         undo: PagePatch,
     },
     /// Reserve a page and initialize a new incarnation without logging an image.

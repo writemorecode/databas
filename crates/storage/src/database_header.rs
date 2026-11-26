@@ -6,8 +6,8 @@ use crate::{PAGE_SIZE, PAGE_SIZE_U16, PageId};
 pub const DATABASE_HEADER_PAGE_ID: PageId = 0;
 
 const MAGIC: &[u8; 8] = b"DATABAS\0";
-// Version 12 replaces data-page WAL images with checked byte patches.
-pub const FORMAT_VERSION: u16 = 12;
+// Version 13 adds typed leaf redo operations to the WAL.
+pub const FORMAT_VERSION: u16 = 13;
 const HEADER_LEN: usize = 12;
 
 /// Fixed-format database file header stored on page 0.

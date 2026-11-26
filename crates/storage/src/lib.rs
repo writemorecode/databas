@@ -19,6 +19,7 @@ mod overflow;
 mod page;
 mod page_allocator;
 mod page_cache;
+mod page_operation;
 mod page_patch;
 mod page_recovery;
 mod page_replacement;

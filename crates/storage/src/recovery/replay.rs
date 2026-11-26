@@ -14,7 +14,7 @@ use crate::page_recovery::PageRecovery;
 use crate::{Lsn, PAGE_SIZE, PageId, TxnId};
 
 use super::analysis::{Analysis, undo_next};
-use super::data::{DataRedo, apply_patch};
+use super::data::{DataRedo, apply_operation};
 
 /// Allocations reserve bits at PageInit. Frees and allocation CLRs change only
 /// the pending state until Commit/Rollback, exactly as during normal execution.
@@ -58,11 +58,15 @@ pub(super) fn redo(
         match &record.kind {
             Kind::PageUpdate { page_id, incarnation, before_lsn, redo, undo } => {
                 let target = PageRecovery { incarnation: *incarnation, lsn: record.lsn };
-                data.patch(disk, *page_id, target, redo, Some((*before_lsn, undo)))?;
+                data.replay(disk, *page_id, target, Some((*before_lsn, undo)), |image| {
+                    redo.apply(image)
+                })?;
             }
             Kind::PageCompensation { page_id, incarnation, redo, .. } => {
                 let target = PageRecovery { incarnation: *incarnation, lsn: record.lsn };
-                data.patch(disk, *page_id, target, redo, None)?;
+                data.replay(disk, *page_id, target, None, |image| {
+                    Ok(redo.apply(image).map_err(LogManagerError::from)?)
+                })?;
             }
             Kind::PageInit { page_id, kind } => {
                 set_allocation(disk, allocator, *page_id, true, record.lsn)?;
@@ -100,7 +104,9 @@ pub(super) fn undo(
                 disk.read_page(*page_id, &mut image)?;
                 debug_assert!(PageRecovery::read(&image).lsn >= record.lsn);
                 let target = PageRecovery { incarnation: *incarnation, lsn: log.next_lsn()? };
-                apply_patch(*page_id, &mut image, target, undo)?;
+                apply_operation(*page_id, &mut image, target, |image| {
+                    Ok(undo.apply(image).map_err(LogManagerError::from)?)
+                })?;
                 let lsn = log.append_record(
                     txn_id,
                     LogRecordKind::PageCompensation {

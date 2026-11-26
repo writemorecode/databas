@@ -4,6 +4,8 @@ use std::io::{Read, Write};
 
 use crc::{CRC_32_ISO_HDLC, Crc, Digest};
 
+use crate::page::format::MAX_INLINE_OVERFLOW_PAYLOAD_BYTES;
+use crate::page_operation::{LeafOperation, LeafPayload, PageOperation};
 use crate::page_patch::{InvalidPagePatch, MAX_PATCH_BYTES, PagePatch};
 use crate::page_recovery::PageInitKind;
 
@@ -13,7 +15,7 @@ pub(super) type DecodedRecord = (Lsn, RecoveryLogRecordKind);
 
 const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const FOOTER_MAGIC: [u8; 8] = *b"DBWALFTR";
-const WAL_FORMAT_VERSION: u16 = 7;
+const WAL_FORMAT_VERSION: u16 = 8;
 pub(super) const HEADER_LEN: usize = 8 + 2 + 8 + 4 + 8;
 const FOOTER_LEN: usize = 8 + 8 + 4;
 pub(super) const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
@@ -26,6 +28,11 @@ const KIND_PAGE_INIT: u8 = 5;
 const KIND_PAGE_DEALLOC: u8 = 6;
 const KIND_PAGE_COMPENSATION: u8 = 7;
 const KIND_ALLOCATION_COMPENSATION: u8 = 8;
+
+const OP_PATCH: u8 = 1;
+const OP_LEAF_INSERT: u8 = 2;
+const OP_LEAF_REPLACE: u8 = 3;
+const OP_LEAF_DELETE: u8 = 4;
 
 /// Serializes a complete transaction frame to `writer`.
 ///
@@ -200,7 +207,7 @@ impl<R: Read> FramePayload<'_, R> {
                 let page_id = u64::from_le_bytes(self.read_array()?);
                 let incarnation = u64::from_le_bytes(self.read_array()?);
                 let before_lsn = u64::from_le_bytes(self.read_array()?);
-                let redo = self.read_patch(collect)?;
+                let redo = self.read_operation(collect)?;
                 let undo = self.read_patch(collect)?;
                 redo.zip(undo).map(|(redo, undo)| Kind::PageUpdate {
                     page_id,
@@ -213,6 +220,40 @@ impl<R: Read> FramePayload<'_, R> {
             kind => return Err(LogManagerError::UnknownRecordKind { kind }),
         };
         Ok(kind.map(|kind| (prev_lsn, kind)))
+    }
+
+    fn read_operation(&mut self, collect: bool) -> Result<Option<PageOperation>, LogManagerError> {
+        let tag = self.read_array::<1>()?[0];
+        match tag {
+            OP_PATCH => Ok(self.read_patch(collect)?.map(PageOperation::Patch)),
+            OP_LEAF_DELETE => {
+                let slot = u16::from_le_bytes(self.read_array()?);
+                Ok(collect.then_some(PageOperation::Leaf(LeafOperation::Delete { slot })))
+            }
+            OP_LEAF_INSERT | OP_LEAF_REPLACE => {
+                let slot = u16::from_le_bytes(self.read_array()?);
+                let key_len = u16::from_le_bytes(self.read_array()?);
+                let value_len = u16::from_le_bytes(self.read_array()?);
+                let overflow = match u64::from_le_bytes(self.read_array()?) {
+                    u64::MAX => None,
+                    page_id => Some(page_id),
+                };
+                let len = LeafPayload::inline_len(key_len, value_len, overflow)
+                    .ok_or(LogManagerError::InvalidPageOperation { tag })?;
+                let mut buffer = [0; MAX_INLINE_OVERFLOW_PAYLOAD_BYTES];
+                let inline = &mut buffer[..len];
+                self.read_payload(inline)?;
+                Ok(collect.then(|| {
+                    let cell = LeafPayload { key_len, value_len, overflow, inline: inline.into() };
+                    PageOperation::Leaf(if tag == OP_LEAF_INSERT {
+                        LeafOperation::Insert { slot, cell }
+                    } else {
+                        LeafOperation::Replace { slot, cell }
+                    })
+                }))
+            }
+            _ => Err(LogManagerError::InvalidPageOperation { tag }),
+        }
     }
 
     fn read_patch(&mut self, collect: bool) -> Result<Option<PagePatch>, LogManagerError> {
@@ -327,7 +368,7 @@ fn serialized_record_len(kind: &LogRecordKind<'_>) -> u64 {
     match kind {
         LogRecordKind::Begin | LogRecordKind::Commit | LogRecordKind::Rollback => 1,
         LogRecordKind::PageUpdate { redo, undo, .. } => {
-            1 + 8 + 8 + 8 + 2 + redo.bytes().len() as u64 + 2 + undo.bytes().len() as u64
+            1 + 8 + 8 + 8 + operation_len(redo) + 2 + undo.bytes().len() as u64
         }
         LogRecordKind::PageInit { .. } => 1 + 8 + 1,
         LogRecordKind::PageDealloc { .. } => 1 + 8,
@@ -335,6 +376,16 @@ fn serialized_record_len(kind: &LogRecordKind<'_>) -> u64 {
             1 + 8 + 8 + 8 + 2 + redo.bytes().len() as u64
         }
         LogRecordKind::AllocationCompensation { .. } => 1 + 8 + 8 + 1,
+    }
+}
+
+fn operation_len(operation: &PageOperation) -> u64 {
+    1 + match operation {
+        PageOperation::Patch(patch) => 2 + patch.bytes().len() as u64,
+        PageOperation::Leaf(
+            LeafOperation::Insert { cell, .. } | LeafOperation::Replace { cell, .. },
+        ) => 2 + 2 + 2 + 8 + cell.inline.len() as u64,
+        PageOperation::Leaf(LeafOperation::Delete { .. }) => 2,
     }
 }
 
@@ -375,7 +426,7 @@ fn write_log_record_payload<W: Write>(
             write_crc_u64(writer, digest, *page_id)?;
             write_crc_u64(writer, digest, *incarnation)?;
             write_crc_u64(writer, digest, *before_lsn)?;
-            write_patch(writer, digest, redo)?;
+            write_operation(writer, digest, redo)?;
             write_patch(writer, digest, undo)?;
         }
         LogRecordKind::PageCompensation { page_id, incarnation, redo, undo_next_lsn } => {
@@ -410,6 +461,44 @@ fn write_crc_u8<W: Write>(
     value: u8,
 ) -> std::io::Result<()> {
     write_crc_bytes(writer, digest, &[value])
+}
+
+fn write_operation<W: Write>(
+    writer: &mut W,
+    digest: &mut Digest<'_, u32>,
+    operation: &PageOperation,
+) -> Result<(), LogManagerError> {
+    match operation {
+        PageOperation::Patch(patch) => {
+            write_crc_u8(writer, digest, OP_PATCH)?;
+            write_patch(writer, digest, patch)?;
+        }
+        PageOperation::Leaf(LeafOperation::Delete { slot }) => {
+            write_crc_u8(writer, digest, OP_LEAF_DELETE)?;
+            write_crc_bytes(writer, digest, &slot.to_le_bytes())?;
+        }
+        PageOperation::Leaf(
+            op @ (LeafOperation::Insert { slot, cell } | LeafOperation::Replace { slot, cell }),
+        ) => {
+            let tag = if matches!(op, LeafOperation::Insert { .. }) {
+                OP_LEAF_INSERT
+            } else {
+                OP_LEAF_REPLACE
+            };
+            if LeafPayload::inline_len(cell.key_len, cell.value_len, cell.overflow)
+                != Some(cell.inline.len())
+            {
+                return Err(LogManagerError::InvalidPageOperation { tag });
+            }
+            write_crc_u8(writer, digest, tag)?;
+            write_crc_bytes(writer, digest, &slot.to_le_bytes())?;
+            write_crc_bytes(writer, digest, &cell.key_len.to_le_bytes())?;
+            write_crc_bytes(writer, digest, &cell.value_len.to_le_bytes())?;
+            write_crc_u64(writer, digest, cell.overflow.unwrap_or(u64::MAX))?;
+            write_crc_bytes(writer, digest, &cell.inline)?;
+        }
+    }
+    Ok(())
 }
 
 fn write_patch<W: Write>(
