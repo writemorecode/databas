@@ -14,6 +14,7 @@ use crate::page_recovery::PageRecovery;
 use crate::{Lsn, PAGE_SIZE, PageId, TxnId};
 
 use super::analysis::{Analysis, undo_next};
+use super::data::{DataRedo, unexpected_incarnation, validate_data};
 
 /// Allocations reserve bits at PageInit. Frees and allocation CLRs change only
 /// the pending state until Commit/Rollback, exactly as during normal execution.
@@ -44,24 +45,25 @@ impl AllocationReplay {
     }
 }
 
-/// Apply retained effects in LSN order, including losers and CLRs.
-/// Data-page incarnations are persisted, but redo still installs each update.
+/// Repeat retained history, including losers and CLRs, subject to each
+/// verified page's redo watermark.
 pub(super) fn redo(
     records: &[RecoveryLogRecord],
     disk: &mut DiskManager,
     allocator: &mut PageAllocator,
 ) -> StorageResult<AllocationReplay> {
     let mut allocations = AllocationReplay::default();
+    let mut data = DataRedo::new(records);
     for record in records {
         match &record.kind {
             Kind::PageUpdate { page_id, redo_data, .. }
             | Kind::PageCompensation { page_id, redo_data, .. } => {
-                write_image(disk, *page_id, redo_data)?;
+                data.install(disk, *page_id, record.lsn, redo_data)?;
             }
             Kind::PageInit { page_id, kind } => {
                 set_allocation(disk, allocator, *page_id, true, record.lsn)?;
                 allocations.request(record.txn_id, *page_id, true);
-                disk.write_page(*page_id, &kind.image(record.lsn))?;
+                data.initialize(disk, *page_id, record.lsn, *kind)?;
             }
             Kind::PageDealloc { page_id } => allocations.request(record.txn_id, *page_id, false),
             Kind::AllocationCompensation { page_id, allocated, .. } => {
@@ -90,7 +92,18 @@ pub(super) fn undo(
         let next = undo_next(record);
         match &record.kind {
             Kind::PageUpdate { page_id, undo_data, .. } => {
+                let mut current = [0; PAGE_SIZE];
+                disk.read_page(*page_id, &mut current)?;
+                let current = validate_data(*page_id, &current)?;
                 let mut image = **undo_data;
+                let before = validate_data(*page_id, &image)?;
+                if current.incarnation != before.incarnation {
+                    return Err(unexpected_incarnation(
+                        *page_id,
+                        before.incarnation,
+                        current.incarnation,
+                    ));
+                }
                 PageRecovery::stamp_lsn(&mut image, log.next_lsn()?);
                 let lsn = log.append_record(
                     txn_id,
@@ -101,7 +114,7 @@ pub(super) fn undo(
                     },
                 )?;
                 log.flush_through(lsn)?;
-                write_image(disk, *page_id, &image)?;
+                disk.write_page(*page_id, &image)?;
             }
             Kind::PageInit { page_id, .. } | Kind::PageDealloc { page_id } => {
                 // Undo the reservation, not the initializer: restoring a former
@@ -157,15 +170,5 @@ fn set_allocation(
     if allocator.bitmap_lsn(page_id) <= lsn {
         allocator.set_allocated(page_id, allocated, lsn);
     }
-    Ok(())
-}
-
-fn write_image(
-    disk: &mut DiskManager,
-    page_id: PageId,
-    image: &[u8; PAGE_SIZE],
-) -> StorageResult<()> {
-    disk.ensure_page_exists(page_id)?;
-    disk.write_page(page_id, image)?;
     Ok(())
 }

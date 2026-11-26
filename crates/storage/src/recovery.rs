@@ -1,8 +1,8 @@
 //! Repair the database from the valid WAL prefix before opening it to transactions.
 //!
 //! Analyze transaction chains, repeat physical history, then undo incomplete
-//! transactions with redo-only compensation (`recovery_protocol`, R1). Redo
-//! remains image-based until all pages have the required recovery metadata.
+//! transactions with redo-only compensation (`recovery_protocol`, R1). Page
+//! LSNs bound redo only after checksum and incarnation verification.
 
 use std::path::Path;
 
@@ -13,6 +13,7 @@ use crate::log_manager::{LogManager, TxnId, read_recovery_log, retire_empty_wal}
 use crate::page_allocator::PageAllocator;
 
 mod analysis;
+mod data;
 mod replay;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

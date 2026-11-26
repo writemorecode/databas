@@ -96,7 +96,9 @@ impl StorageRuntime {
     pub(crate) fn page_is_live(&self, page_id: PageId) -> StorageResult<bool> {
         let transactions = Self::lock(&self.transactions, "transaction manager")?;
         let allocator = Self::lock(&self.allocator, "page allocator")?;
-        Ok(allocator.is_allocated(page_id) && !transactions.page_pending_dealloc(page_id))
+        Ok(!PageAllocator::is_metadata(page_id)
+            && allocator.is_allocated(page_id)
+            && !transactions.page_pending_dealloc(page_id))
     }
 
     /// Lock order: cache metadata, transactions, allocator, WAL, disk. Never

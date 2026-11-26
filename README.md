@@ -31,8 +31,9 @@ Older database files are not supported; there is no in-place migration.
 Restart recovery analyzes WAL transaction chains, repeats history, and logs
 compensation for incomplete transactions. `PageInit` derives a typed empty
 page from its WAL record. The allocator reserves pages at initialization but
-publishes frees only at a durable transaction outcome. Ordinary page updates
-still log before- and after-images.
+publishes frees only at a durable transaction outcome. Redo uses verified
+page LSNs and incarnations to skip effects already reflected on disk. Ordinary
+page updates still log before- and after-images.
 
 ### Storage simulation
 
