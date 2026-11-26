@@ -249,7 +249,7 @@ impl TreeCursor {
         prev_page_id: Option<PageId>,
         next_page_id: Option<PageId>,
         cells: &[LeafSplitCell<'_>],
-        target_key: &[u8],
+        target_key: Option<&[u8]>,
     ) -> StorageResult<PendingSplit> {
         let old_roots =
             super::reclaim::overflow_roots(leaf_pin_guard.read()?.page(), leaf_page_id)?;
@@ -313,23 +313,38 @@ impl TreeCursor {
             .key()
             .to_vec();
 
-        let target_page_id =
-            if target_key <= separator.as_slice() { leaf_page_id } else { right_page_id };
-        let target_cells = if target_page_id == leaf_page_id { left_cells } else { right_cells };
-        let target_slot_index = target_cells
-            .iter()
-            .position(|cell| cell.key() == target_key)
-            .ok_or(StorageError::Internal(InternalError::InvariantViolation(
-                InvariantViolation::LeafSplitTargetMissing,
-            )))?;
-        let target_slot_index = u16::try_from(target_slot_index).map_err(|_out_of_range| {
-            StorageError::Internal(InternalError::InvariantViolation(
-                InvariantViolation::LeafSplitTargetSlotOutOfRange { slot_index: target_slot_index },
-            ))
-        })?;
-        self.set_positioned_state(target_page_id, target_slot_index);
-
+        if let Some(target_key) = target_key {
+            let target_page_id =
+                if target_key <= separator.as_slice() { leaf_page_id } else { right_page_id };
+            let target_cells =
+                if target_page_id == leaf_page_id { left_cells } else { right_cells };
+            let target_slot_index = target_cells
+                .iter()
+                .position(|cell| cell.key() == target_key)
+                .ok_or(StorageError::Internal(
+                InternalError::InvariantViolation(InvariantViolation::LeafSplitTargetMissing),
+            ))?;
+            let target_slot_index = u16::try_from(target_slot_index).map_err(|_out_of_range| {
+                StorageError::Internal(InternalError::InvariantViolation(
+                    InvariantViolation::LeafSplitTargetSlotOutOfRange {
+                        slot_index: target_slot_index,
+                    },
+                ))
+            })?;
+            self.set_positioned_state(target_page_id, target_slot_index);
+        }
         Ok(PendingSplit { separator, left_page_id: leaf_page_id, right_page_id })
+    }
+
+    pub(super) fn split_existing_leaf(
+        &mut self,
+        page_id: PageId,
+        pin: &PinGuard,
+    ) -> StorageResult<PendingSplit> {
+        let snapshot = *pin.read()?.page();
+        let leaf = RawLeaf::<Read<'_>>::open(&snapshot)?;
+        let cells = self.read_leaf_cells_from_snapshot(page_id, &snapshot, &leaf)?;
+        self.split_leaf_cells(page_id, pin, leaf.prev_page_id(), leaf.next_page_id(), &cells, None)
     }
 
     /// Splits a full leaf page while inserting a new key/value cell.
@@ -357,7 +372,14 @@ impl TreeCursor {
         };
         cells.insert(idx, LeafSplitCell::owned(key.to_vec(), value.to_vec()));
 
-        self.split_leaf_cells(leaf_page_id, leaf_pin_guard, prev_page_id, next_page_id, &cells, key)
+        self.split_leaf_cells(
+            leaf_page_id,
+            leaf_pin_guard,
+            prev_page_id,
+            next_page_id,
+            &cells,
+            Some(key),
+        )
     }
 
     /// Splits a full leaf page while replacing one existing cell value.
@@ -390,7 +412,7 @@ impl TreeCursor {
             prev_page_id,
             next_page_id,
             &cells,
-            &target_key,
+            Some(&target_key),
         )
     }
 

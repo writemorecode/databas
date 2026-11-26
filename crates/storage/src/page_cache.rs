@@ -295,7 +295,7 @@ impl PageCache {
         })
     }
 
-    pub(crate) fn has_surviving_root(
+    pub(crate) fn can_retain_structure(
         &self,
         txn_id: TxnId,
         incarnation: Lsn,
@@ -311,7 +311,7 @@ impl PageCache {
         &self,
         txn_id: TxnId,
         boundary: ActionBoundary,
-        inverse: LogicalUndo,
+        inverse: Option<LogicalUndo>,
     ) -> StorageResult<()> {
         self.inner.runtime.complete_action(txn_id, boundary, inverse)
     }

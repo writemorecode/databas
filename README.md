@@ -36,8 +36,11 @@ page LSNs and incarnations to skip effects already reflected on disk. Data-page
 updates log page-local operations instead of full images. Ordinary leaf edits
 redo by slot; structural and overflow writes use byte runs.
 
-On existing trees, completed row edits undo by tree incarnation and key.
-Interrupted edits and edits on newly created trees are undone physically.
+On existing trees, completed row edits undo by tree incarnation and key. A
+split can complete before a row is inserted, and a merge can complete after a
+deletion has left a searchable tree. These completed structural actions can
+survive transaction or savepoint rollback. An interrupted action is undone
+physically; a tree created by an aborted transaction is reclaimed in full.
 
 ### Storage simulation
 
@@ -50,7 +53,9 @@ CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo run --release -p databas-stora
 The simulator runs until the time limit or the first unexpected failure. Its
 clients share the storage engine and keep operating across injected I/O errors
 and power losses. Recovery checks the B+-trees against the client transaction
-history. To replay a randomized failure, use the same build and seed and replace
+history. Focused crash sweeps also verify interrupted splits and restartable
+undo across retained splits and merges. To replay a randomized failure, use
+the same build and seed and replace
 `--duration 15m` with the reported `--events N`.
 
 `DROP TABLE name;` removes a user table and all of its secondary indexes.

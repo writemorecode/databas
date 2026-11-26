@@ -344,7 +344,7 @@ impl TransactionManager {
     }
 
     /// Trees created by this transaction remain entirely physically undoable.
-    /// A logical inverse cannot rely on a root that will itself be undone.
+    /// There is no surviving owner for pages from a retained split on such a tree.
     pub(crate) fn has_surviving_root(
         &self,
         txn_id: TxnId,
@@ -376,7 +376,7 @@ impl TransactionManager {
         log: &mut LogManager,
         txn_id: TxnId,
         boundary: ActionBoundary,
-        inverse: LogicalUndo,
+        inverse: Option<LogicalUndo>,
     ) -> StorageResult<()> {
         self.validate_transaction_write(txn_id)?;
         let active = self.active_mut(txn_id)?;
@@ -387,17 +387,21 @@ impl TransactionManager {
             active.open_action = None;
             return Ok(());
         }
-        let kind =
-            LogRecordKind::LogicalEdit { undo: &inverse, undo_next_lsn: boundary.predecessor };
+        let kind = match &inverse {
+            Some(undo) => LogRecordKind::LogicalEdit { undo, undo_next_lsn: boundary.predecessor },
+            None => LogRecordKind::SkipUndo { undo_next_lsn: boundary.predecessor },
+        };
         let lsn = log.append_record(txn_id, kind).inspect_err(|_| self.record_failure(txn_id))?;
         let active = self.active_mut(txn_id)?;
         active.undo.truncate(boundary.undo_len);
         active.open_action = None;
-        active.undo.push(UndoEntry {
-            lsn,
-            prev_lsn: boundary.predecessor,
-            kind: UndoKind::Logical(inverse),
-        });
+        if let Some(undo) = inverse {
+            active.undo.push(UndoEntry {
+                lsn,
+                prev_lsn: boundary.predecessor,
+                kind: UndoKind::Logical(undo),
+            });
+        }
         Ok(())
     }
 
