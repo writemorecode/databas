@@ -34,7 +34,9 @@ impl LogManager {
         };
         let suffix = &scan.records[prefix_len..];
         publish_replacement(&self.fs, &self.wal_path, header, suffix, Some(&mut self.poisoned))?;
-        let reopened = Self::open_wal(self.fs.clone(), self.wal_path.clone())?;
+        let mut reopened = Self::open_wal(self.fs.clone(), self.wal_path.clone())?;
+        reopened.transaction_heads.retain(|txn, _| self.transaction_heads.contains_key(txn));
+        debug_assert_eq!(self.transaction_heads, reopened.transaction_heads);
         debug_assert_eq!(self.highest_appended_lsn, reopened.highest_appended_lsn);
         debug_assert_eq!(self.highest_txn_id, reopened.highest_txn_id);
         *self = reopened;
@@ -81,7 +83,11 @@ fn publish_replacement(
             serialize_transaction(
                 &mut writer,
                 record.txn_id,
-                &[LogRecord { txn_id: record.txn_id, kind: record.kind.as_log_record_kind() }],
+                &[LogRecord {
+                    txn_id: record.txn_id,
+                    prev_lsn: record.prev_lsn,
+                    kind: record.kind.as_log_record_kind(),
+                }],
             )?;
         }
         writer.flush()?;

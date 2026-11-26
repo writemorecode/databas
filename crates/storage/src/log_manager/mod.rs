@@ -23,6 +23,7 @@
 #![allow(clippy::redundant_pub_crate)]
 
 use std::{
+    collections::HashMap,
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
@@ -42,7 +43,7 @@ pub(crate) use replacement::retire_empty_wal;
 
 use frame::{
     CRC32, HEADER_LEN, WalFrameHeader, scan_transaction_frame, serialize_transaction,
-    validate_record_txn_ids, wal_open_error,
+    wal_open_error,
 };
 
 /// Sentinel LSN used for pages that do not reflect any logged update.
@@ -51,7 +52,7 @@ pub const ZERO_LSN: Lsn = 0;
 const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
-const WAL_FILE_HEADER_VERSION: u16 = 2;
+const WAL_FILE_HEADER_VERSION: u16 = 3;
 pub const WAL_FILE_HEADER_LEN: usize = 32;
 const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
 
@@ -158,6 +159,8 @@ pub enum LogManagerFlushError {
 pub struct LogRecord<'a> {
     /// Transaction that owns this record.
     pub(crate) txn_id: TxnId,
+    /// Checksummed link to the previous record owned by this transaction.
+    pub(crate) prev_lsn: Lsn,
     /// Record payload.
     pub(crate) kind: LogRecordKind<'a>,
 }
@@ -194,6 +197,8 @@ pub enum LogRecordKind<'a> {
 pub struct RecoveryLogRecord {
     /// Logical LSN assigned to this record.
     pub(crate) lsn: Lsn,
+    /// Transaction-chain link preserved verbatim across WAL replacement.
+    pub(crate) prev_lsn: Lsn,
     /// Transaction that owns this record.
     pub(crate) txn_id: TxnId,
     /// Owned record payload.
@@ -317,6 +322,7 @@ pub struct LogManager {
     wal_writer: ActiveWalWriter,
 
     highest_txn_id: TxnId,
+    transaction_heads: HashMap<TxnId, Lsn>,
     highest_appended_lsn: Option<Lsn>,
     highest_durable_lsn: Option<Lsn>,
     poisoned: bool,
@@ -351,6 +357,7 @@ impl LogManager {
             Some(wal_header.last_assigned_lsn)
         };
         let mut highest_txn_id = wal_header.max_txn_id;
+        let mut transaction_heads = HashMap::new();
         wal_file.seek(SeekFrom::Start(WAL_FILE_HEADER_LEN as u64))?;
         {
             let mut wal_reader = BufReader::with_capacity(WAL_READ_BUFFER_LEN, &mut wal_file);
@@ -365,6 +372,9 @@ impl LogManager {
                         .ok_or(LogManagerError::LsnExhausted)
                         .map_err(wal_open_error)?;
                     highest_appended_lsn = Some(next_lsn);
+                    if frame.txn_id != 0 {
+                        transaction_heads.insert(frame.txn_id, next_lsn);
+                    }
                 }
             }
         }
@@ -377,10 +387,16 @@ impl LogManager {
             wal_path,
             wal_writer,
             highest_txn_id,
+            transaction_heads,
             highest_durable_lsn: None,
             highest_appended_lsn,
             poisoned: false,
         })
+    }
+
+    /// Last appended record of a transaction, or zero for a new transaction.
+    pub(crate) fn transaction_head(&self, txn_id: TxnId) -> Lsn {
+        self.transaction_heads.get(&txn_id).copied().unwrap_or(ZERO_LSN)
     }
 
     /// Returns the largest transaction id observed in the WAL.
@@ -406,34 +422,14 @@ impl LogManager {
         txn_id: TxnId,
         kind: LogRecordKind<'_>,
     ) -> Result<Lsn, LogManagerError> {
-        self.append_transaction(txn_id, &[LogRecord { txn_id, kind }])
-    }
-
-    /// Appends a transaction frame containing `records`.
-    ///
-    /// All records must belong to `txn_id`. LSNs are assigned one per record in
-    /// frame order, and the return value is the highest LSN assigned by this
-    /// append. Empty frames are allowed for serializer symmetry and return the
-    /// current highest appended LSN without advancing it.
-    pub(crate) fn append_transaction(
-        &mut self,
-        txn_id: TxnId,
-        records: &[LogRecord<'_>],
-    ) -> Result<Lsn, LogManagerError> {
         if self.poisoned {
             return Err(LogManagerError::Poisoned);
         }
-        validate_record_txn_ids(txn_id, records)?;
-
-        let record_count = u64::try_from(records.len())
-            .map_err(|_out_of_range| LogManagerError::TooManyRecords { count: records.len() })?;
-        let lsn = self
-            .highest_appended_lsn
-            .unwrap_or(ZERO_LSN)
-            .checked_add(record_count)
-            .ok_or(LogManagerError::LsnExhausted)?;
-
-        if let Err(error) = serialize_transaction(&mut self.wal_writer, txn_id, records) {
+        let lsn = self.next_lsn()?;
+        let prev_lsn = self.transaction_head(txn_id);
+        let completed = matches!(kind, LogRecordKind::Commit | LogRecordKind::Rollback);
+        let record = LogRecord { txn_id, prev_lsn, kind };
+        if let Err(error) = serialize_transaction(&mut self.wal_writer, txn_id, &[record]) {
             // Serialization validates and sizes the complete transaction before emitting bytes,
             // so only an I/O error can leave a partial frame in the WAL stream.
             if matches!(&error, LogManagerError::Io(_)) {
@@ -443,8 +439,12 @@ impl LogManager {
         }
 
         self.highest_txn_id = self.highest_txn_id.max(txn_id);
-        if record_count > 0 {
-            self.highest_appended_lsn = Some(lsn);
+        self.highest_appended_lsn = Some(lsn);
+        // System bitmap images (txn 0) are independent redo-only records.
+        if completed {
+            self.transaction_heads.remove(&txn_id);
+        } else if txn_id != 0 {
+            self.transaction_heads.insert(txn_id, lsn);
         }
         Ok(lsn)
     }
@@ -592,9 +592,14 @@ fn read_log(
             Err(error) => return Err(error),
         };
         max_txn_id = max_txn_id.max(header.txn_id);
-        for kind in kinds {
+        for (prev_lsn, kind) in kinds {
             next_lsn = next_lsn.checked_add(1).ok_or(LogManagerError::LsnExhausted)?;
-            records.push(RecoveryLogRecord { lsn: next_lsn, txn_id: header.txn_id, kind });
+            records.push(RecoveryLogRecord {
+                lsn: next_lsn,
+                txn_id: header.txn_id,
+                prev_lsn,
+                kind,
+            });
         }
         offset = frame_end;
     }
