@@ -6,7 +6,9 @@ use std::{
 use crc::{CRC_32_ISO_HDLC, Crc};
 use thiserror::Error;
 
+use crate::database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header};
 use crate::doublewrite::Doublewrite;
+use crate::error::StorageResult;
 use crate::filesystem::{File, FileSystem, OpenMode};
 use crate::types::PAGE_CHECKSUM_OFFSET;
 use crate::{PAGE_SIZE, PageId};
@@ -26,6 +28,13 @@ pub enum DiskManagerError {
 }
 
 pub type DiskManagerResult<T> = Result<T, DiskManagerError>;
+
+/// A checked bootstrap and its staged prefix. Preparation must not change either file.
+pub struct PendingRepair {
+    protection: Doublewrite,
+    pending: Vec<(PageId, [u8; PAGE_SIZE])>,
+    required_len: u64,
+}
 
 /// Reads and writes pages to and from a database file.
 pub struct DiskManager {
@@ -72,24 +81,50 @@ impl DiskManager {
         Ok(())
     }
 
-    /// Repair before trusting any home page. A missing sidecar is reported
-    /// separately so the caller can detect an incompatible database format.
-    pub(crate) fn repair_doublewrite(
+    pub(crate) fn identity(&self) -> std::io::Result<[u8; 16]> {
+        self.file.identity()
+    }
+
+    pub(crate) fn prepare_doublewrite(
         &mut self,
         fs: &FileSystem,
         path: &Path,
-    ) -> DiskManagerResult<bool> {
+    ) -> StorageResult<PendingRepair> {
         debug_assert!(self.locked && self.doublewrite.is_none());
+        if self.page_count == 0 {
+            return Err(missing_header());
+        }
+        let mut home = [0; PAGE_SIZE];
+        self.read_page_unchecked(DATABASE_HEADER_PAGE_ID, &mut home)?;
+        let home_checksum = Self::verify_checksum(DATABASE_HEADER_PAGE_ID, &home);
+        if home_checksum.is_ok() {
+            // A staged copy must never mask an intact, incompatible database.
+            DatabaseHeader::validate_page(&home)?;
+        }
         let Some(mut protection) = Doublewrite::open(fs, path, &self.file)? else {
-            return Ok(false);
+            // Legacy formats predate the checksum and bootstrap sidecar.
+            DatabaseHeader::validate_page(&home)?;
+            return Err(missing_doublewrite().into());
         };
         let pending = protection.pending()?;
         let mut required_len = self.page_count * PAGE_SIZE as u64;
-        // Validate the entire staged prefix before performing any home I/O.
+        let mut staged_header = false;
         for (page_id, image) in &pending {
             Self::verify_checksum(*page_id, image)?;
+            if *page_id == DATABASE_HEADER_PAGE_ID {
+                DatabaseHeader::validate_page(image)?;
+                staged_header = true;
+            }
             required_len = required_len.max(Self::page_end(*page_id)?);
         }
+        if !staged_header {
+            home_checksum?;
+        }
+        Ok(PendingRepair { protection, pending, required_len })
+    }
+
+    pub(crate) fn repair_doublewrite(&mut self, repair: PendingRepair) -> DiskManagerResult<()> {
+        let PendingRepair { mut protection, pending, required_len } = repair;
         if required_len > self.page_count * PAGE_SIZE as u64 {
             self.file.set_len(required_len)?;
             self.page_count = required_len / PAGE_SIZE as u64;
@@ -101,7 +136,7 @@ impl DiskManager {
         self.file.sync_all()?;
         protection.retire()?;
         self.doublewrite = Some(protection);
-        Ok(true)
+        Ok(())
     }
 
     pub(crate) fn page_count(&self) -> u64 {

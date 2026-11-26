@@ -7,10 +7,11 @@ use std::{
 
 use super::{
     LogManager, LogManagerError, LogReadMode, LogRecord, Lsn, RecoveryLogRecord,
-    WAL_WRITE_BUFFER_LEN, WalFileHeader, read_log, serialize_transaction, write_wal_file_header,
+    WAL_WRITE_BUFFER_LEN, WalFileHeader, make_wal_writer, read_log, serialize_transaction,
+    write_wal_file_header,
 };
 use crate::error::StorageResult;
-use crate::filesystem::{FileSystem, OpenMode};
+use crate::filesystem::{File, FileSystem, OpenMode};
 
 impl LogManager {
     /// Retain suffix records at their original LSNs without invoking recovery.
@@ -20,7 +21,12 @@ impl LogManager {
         redo_from: Lsn,
     ) -> StorageResult<usize> {
         self.flush_all()?;
-        let scan = match read_log(&self.fs, &self.wal_path, LogReadMode::Checkpoint) {
+        let (_, scan) = match read_log(
+            &self.fs,
+            &self.wal_path,
+            self.database_identity,
+            LogReadMode::Checkpoint,
+        ) {
             Ok(scan) => scan,
             Err(error) => {
                 self.poisoned = true;
@@ -34,19 +40,18 @@ impl LogManager {
         }
         let suffix = &scan.records[prefix_len..];
         let header = WalFileHeader {
+            database_identity: self.database_identity,
             last_assigned_lsn: suffix
                 .first()
                 .map_or(scan.last_assigned_lsn, |record| record.lsn - 1),
             max_txn_id: scan.max_txn_id,
             redo_from,
         };
-        publish_replacement(&self.fs, &self.wal_path, header, suffix, Some(&mut self.poisoned))?;
-        let mut reopened = Self::open_wal(self.fs.clone(), self.wal_path.clone())?;
-        reopened.transaction_heads.retain(|txn, _| self.transaction_heads.contains_key(txn));
-        debug_assert_eq!(self.transaction_heads, reopened.transaction_heads);
-        debug_assert_eq!(self.highest_appended_lsn, reopened.highest_appended_lsn);
-        debug_assert_eq!(self.highest_txn_id, reopened.highest_txn_id);
-        *self = reopened;
+        let file =
+            publish_replacement(&self.fs, &self.wal_path, header, suffix, &mut self.poisoned)?;
+        self.wal_writer = make_wal_writer(file);
+        self.redo_from = redo_from;
+        self.poisoned = false;
         Ok(suffix.len())
     }
 }
@@ -56,8 +61,8 @@ fn publish_replacement(
     wal_path: &Path,
     header: WalFileHeader,
     suffix: &[RecoveryLogRecord],
-    live_writer_poisoned: Option<&mut bool>,
-) -> Result<(), LogManagerError> {
+    live_writer_poisoned: &mut bool,
+) -> Result<File, LogManagerError> {
     let staged_path = wal_path.with_added_extension("checkpoint");
     let mut staged = fs.open(&staged_path, OpenMode::Truncate)?;
     write_wal_file_header(&mut staged, header)?;
@@ -78,11 +83,9 @@ fn publish_replacement(
     }
     staged.sync_all()?;
     // Once replacement begins, a handle to the old file must not accept appends
-    // even if publication or reopening reports an error.
-    if let Some(poisoned) = live_writer_poisoned {
-        *poisoned = true;
-    }
+    // even if publication reports an error.
+    *live_writer_poisoned = true;
     fs.rename(&staged_path, wal_path)?;
     fs.sync_parent(wal_path)?;
-    Ok(())
+    Ok(staged)
 }

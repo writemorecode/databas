@@ -55,6 +55,7 @@ struct Stats {
 
 impl Simulation {
     pub fn new(seed: u64) -> RunResult<Self> {
+        super::compatibility::check_incompatible_opens()?;
         check_outcome_retries()?;
         super::restart::sweep_unpublished_wal()?;
         super::restart::sweep_retained_structure()?;
@@ -449,7 +450,8 @@ fn check_outcome_retries() -> RunResult<()> {
         let last_lsn = || {
             let probe = FileSystem::Memory(fs.fork_for_recovery());
             let path = Path::new(DATABASE);
-            crate::log_manager::read_recovery_log(&probe, path)
+            let identity = probe.open(path, OpenMode::Existing)?.identity()?;
+            crate::log_manager::read_recovery_log(&probe, path, identity)
                 .map(|log| log.last_assigned_lsn)
                 .map_err(StorageError::from)
         };

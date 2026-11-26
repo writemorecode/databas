@@ -2,8 +2,7 @@ use std::path::PathBuf;
 
 use crate::disk_manager::DiskManager;
 use crate::error::{InternalError, StorageError, StorageResult};
-use crate::filesystem::FileSystem;
-use crate::log_manager::{LogManager, Lsn, TxnId};
+use crate::log_manager::{LogManager, Lsn, RecoveryLogScan, TxnId};
 use crate::logical_undo::LogicalUndo;
 use crate::page_allocator::PageAllocator;
 use crate::page_operation::LeafOperation;
@@ -34,13 +33,13 @@ pub struct StorageRuntime {
 
 impl StorageRuntime {
     pub(crate) fn new(
-        fs: FileSystem,
         path: PathBuf,
         mut disk: DiskManager,
+        log: LogManager,
+        scan: RecoveryLogScan,
     ) -> StorageResult<(Self, bool)> {
-        disk.lock_exclusive()?;
         let Restart { log, allocator, transactions, needs_checkpoint } =
-            repeat_history(fs, &path, &mut disk)?;
+            repeat_history(log, scan, &mut disk)?;
         Ok((
             Self {
                 checkpoint: Mutex::new(()),
