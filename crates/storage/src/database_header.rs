@@ -6,8 +6,8 @@ use crate::{PAGE_SIZE, PAGE_SIZE_U16, PageId};
 pub const DATABASE_HEADER_PAGE_ID: PageId = 0;
 
 const MAGIC: &[u8; 8] = b"DATABAS\0";
-// Version 9 gives overflow pages a tagged, LSN-bearing data-page header.
-pub const FORMAT_VERSION: u16 = 9;
+// Version 10 adds the common recovery trailer, changing bitmap geometry.
+pub const FORMAT_VERSION: u16 = 10;
 const HEADER_LEN: usize = 12;
 
 /// Fixed-format database file header stored on page 0.

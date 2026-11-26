@@ -262,7 +262,8 @@ impl TreeCursor {
             "split cells must have strictly increasing keys"
         );
 
-        let (right_page_id, right_page_guard) = self.page_cache.new_page(self.txn_id)?;
+        let (right_page_id, right_page_guard) =
+            self.page_cache.new_page(self.txn_id, crate::page_recovery::PageInitKind::Leaf)?;
         debug_assert_ne!(leaf_page_id, right_page_id, "split pages must be distinct");
         drop(right_page_guard);
 
@@ -414,7 +415,8 @@ impl TreeCursor {
             ChildEntry { page_id: incoming_right_page_id, max_key: original_max_key },
         );
 
-        let (right_page_id, right_page_guard) = self.page_cache.new_page(self.txn_id)?;
+        let (right_page_id, right_page_guard) =
+            self.page_cache.new_page(self.txn_id, crate::page_recovery::PageInitKind::Interior)?;
         drop(right_page_guard);
 
         let split_index = Self::choose_interior_fitting_split(&children)
@@ -467,7 +469,8 @@ impl TreeCursor {
             *root_guard.page()
         };
 
-        let (left_page_id, left_page_pin) = self.page_cache.new_page(self.txn_id)?;
+        let left_kind = super::root::read_page_kind(&root_snapshot, root_page_id)?.into();
+        let (left_page_id, left_page_pin) = self.page_cache.new_page(self.txn_id, left_kind)?;
         {
             let mut left_guard = left_page_pin.write(self.txn_id)?;
             *left_guard.page_mut() = root_snapshot;

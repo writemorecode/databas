@@ -16,7 +16,8 @@ use std::collections::HashMap;
 
 use crate::error::{InternalError, InvariantViolation, StorageError, StorageResult};
 use crate::log_manager::{LogManager, LogRecordKind, Lsn, TxnId};
-use crate::{PAGE_SIZE, PageId, page};
+use crate::page_recovery::{PageInitKind, PageRecovery};
+use crate::{PAGE_SIZE, PageId};
 
 #[derive(Debug, Clone)]
 struct UndoEntry {
@@ -119,13 +120,14 @@ impl TransactionManager {
             .any(|active| active.allocation_states.get(&page_id) == Some(&false))
     }
 
-    pub(crate) fn record_page_alloc(
+    pub(crate) fn record_page_init(
         &mut self,
         log: &mut LogManager,
         txn_id: TxnId,
         page_id: PageId,
+        kind: PageInitKind,
     ) -> StorageResult<Lsn> {
-        self.record_allocation_change(log, txn_id, page_id, true)
+        self.record_allocation_change(log, txn_id, page_id, Some(kind))
     }
 
     pub(crate) fn record_page_dealloc(
@@ -134,7 +136,7 @@ impl TransactionManager {
         txn_id: TxnId,
         page_id: PageId,
     ) -> StorageResult<()> {
-        self.record_allocation_change(log, txn_id, page_id, false).map(|_| ())
+        self.record_allocation_change(log, txn_id, page_id, None).map(|_| ())
     }
 
     fn record_allocation_change(
@@ -142,15 +144,15 @@ impl TransactionManager {
         log: &mut LogManager,
         txn_id: TxnId,
         page_id: PageId,
-        allocated: bool,
+        init: Option<PageInitKind>,
     ) -> StorageResult<Lsn> {
         self.validate_transaction_write(txn_id)?;
         let prev_lsn = log.transaction_head(txn_id);
-        let kind = if allocated {
-            LogRecordKind::PageAlloc { page_id }
-        } else {
-            LogRecordKind::PageDealloc { page_id }
+        let kind = match init {
+            Some(kind) => LogRecordKind::PageInit { page_id, kind },
+            None => LogRecordKind::PageDealloc { page_id },
         };
+        let allocated = init.is_some();
         let lsn = log.append_record(txn_id, kind).inspect_err(|_| self.record_failure(txn_id))?;
         let active = self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
         active.undo.push(UndoEntry { prev_lsn, kind: UndoKind::Allocation { page_id, allocated } });
@@ -172,7 +174,7 @@ impl TransactionManager {
             let prev_lsn = log.transaction_head(txn_id);
             let expected = log.next_lsn()?;
             let mut redo = *after;
-            stamp_page_lsn(&mut redo, expected);
+            PageRecovery::stamp_lsn(&mut redo, expected);
             let lsn = log.append_record(
                 txn_id,
                 LogRecordKind::PageUpdate { page_id, redo_data: &redo, undo_data: before },
@@ -267,7 +269,7 @@ impl TransactionManager {
                 match entry.kind {
                     UndoKind::Page { page_id, before } => {
                         let mut image = *before;
-                        stamp_page_lsn(&mut image, log.next_lsn()?);
+                        PageRecovery::stamp_lsn(&mut image, log.next_lsn()?);
                         let lsn = log.append_record(
                             txn_id,
                             LogRecordKind::PageCompensation {
@@ -370,15 +372,6 @@ impl TransactionManager {
             }));
         }
         Err(no_active_transaction())
-    }
-}
-
-/// B-tree and overflow data pages share a tagged header and LSN location.
-/// Bitmap recovery still uses authoritative bit records; checksums and data-page
-/// LSNs alone do not authorize redo skipping without allocation incarnations.
-pub fn stamp_page_lsn(bytes: &mut [u8; PAGE_SIZE], lsn: Lsn) {
-    if page::is_current_btree_page(bytes) || crate::overflow::is_current_page(bytes) {
-        page::format::write_u64(bytes, page::format::LSN_OFFSET, lsn);
     }
 }
 

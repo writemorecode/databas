@@ -8,9 +8,7 @@ use crate::page_cache::PageCache;
 use crate::types::PAGE_CONTENT_END;
 use crate::{PAGE_SIZE, PageId, TxnId};
 
-// A raw next-page ID must never masquerade as a B-tree kind/version and cause
-// LSN stamping to overwrite payload. All data pages now share a tagged header,
-// sibling/next fields, and LSN location. Bitmap recovery metadata is separate.
+// Overflow chains use the data-page kind/version tags and next-page field.
 const KIND: u8 = 3;
 pub const HEADER_SIZE: usize = format::SHARED_HEADER_SIZE;
 pub const OVERFLOW_PAYLOAD_SIZE: usize = PAGE_CONTENT_END - HEADER_SIZE;
@@ -21,10 +19,6 @@ pub fn initialize(bytes: &mut [u8; PAGE_SIZE]) {
     bytes[format::VERSION_OFFSET] = format::FORMAT_VERSION;
     format::write_optional_u64(bytes, format::PREV_PAGE_ID_OFFSET, None);
     format::write_optional_u64(bytes, format::NEXT_PAGE_ID_OFFSET, None);
-}
-
-pub fn is_current_page(bytes: &[u8; PAGE_SIZE]) -> bool {
-    bytes[format::KIND_OFFSET] == KIND && bytes[format::VERSION_OFFSET] == format::FORMAT_VERSION
 }
 
 /// Validate type/version before following a chain or interpreting its payload.
@@ -80,10 +74,10 @@ pub fn write_chain_from_slices(
     let mut first_page_id = None;
     let mut previous_page_id = None;
     while !first.is_empty() || !second.is_empty() {
-        let (page_id, pin) = page_cache.new_page(txn_id)?;
+        let (page_id, pin) =
+            page_cache.new_page(txn_id, crate::page_recovery::PageInitKind::Overflow)?;
         {
             let mut page = pin.write(txn_id)?;
-            initialize(page.page_mut());
 
             let mut write_offset = HEADER_SIZE;
             while write_offset < PAGE_CONTENT_END && (!first.is_empty() || !second.is_empty()) {

@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use crc::{CRC_32_ISO_HDLC, Crc, Digest};
 
 use crate::PAGE_SIZE;
+use crate::page_recovery::PageInitKind;
 
 use super::{LogManagerError, LogRecord, LogRecordKind, Lsn, RecoveryLogRecordKind, TxnId};
 
@@ -12,7 +13,7 @@ pub(super) type DecodedRecord = (Lsn, RecoveryLogRecordKind);
 
 const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const FOOTER_MAGIC: [u8; 8] = *b"DBWALFTR";
-const WAL_FORMAT_VERSION: u16 = 5;
+const WAL_FORMAT_VERSION: u16 = 6;
 pub(super) const HEADER_LEN: usize = 8 + 2 + 8 + 4 + 8;
 const FOOTER_LEN: usize = 8 + 8 + 4;
 pub(super) const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
@@ -21,7 +22,7 @@ const KIND_BEGIN: u8 = 1;
 const KIND_COMMIT: u8 = 2;
 const KIND_ROLLBACK: u8 = 3;
 const KIND_PAGE_UPDATE: u8 = 4;
-const KIND_PAGE_ALLOC: u8 = 5;
+const KIND_PAGE_INIT: u8 = 5;
 const KIND_PAGE_DEALLOC: u8 = 6;
 const KIND_PAGE_COMPENSATION: u8 = 7;
 const KIND_ALLOCATION_COMPENSATION: u8 = 8;
@@ -159,13 +160,16 @@ impl<R: Read> FramePayload<'_, R> {
             KIND_BEGIN => collect.then_some(Kind::Begin),
             KIND_COMMIT => collect.then_some(Kind::Commit),
             KIND_ROLLBACK => collect.then_some(Kind::Rollback),
-            tag @ (KIND_PAGE_ALLOC | KIND_PAGE_DEALLOC) => {
+            KIND_PAGE_INIT => {
                 let page_id = u64::from_le_bytes(self.read_array()?);
-                collect.then_some(if tag == KIND_PAGE_ALLOC {
-                    Kind::PageAlloc { page_id }
-                } else {
-                    Kind::PageDealloc { page_id }
-                })
+                let tag = self.read_array::<1>()?[0];
+                let kind = PageInitKind::from_tag(tag)
+                    .ok_or(LogManagerError::InvalidPageInitKind { tag })?;
+                collect.then_some(Kind::PageInit { page_id, kind })
+            }
+            KIND_PAGE_DEALLOC => {
+                let page_id = u64::from_le_bytes(self.read_array()?);
+                collect.then_some(Kind::PageDealloc { page_id })
             }
             KIND_PAGE_COMPENSATION => {
                 let page_id = u64::from_le_bytes(self.read_array()?);
@@ -324,7 +328,8 @@ fn serialized_record_len(kind: &LogRecordKind<'_>) -> Result<u64, LogManagerErro
             })?;
             Ok(1 + 8 + 4 + 4 + u64::from(redo_len) + u64::from(undo_len))
         }
-        LogRecordKind::PageAlloc { .. } | LogRecordKind::PageDealloc { .. } => Ok(1 + 8),
+        LogRecordKind::PageInit { .. } => Ok(1 + 8 + 1),
+        LogRecordKind::PageDealloc { .. } => Ok(1 + 8),
         LogRecordKind::PageCompensation { redo_data, .. } => {
             validate_page_image_len(redo_data)?;
             Ok(1 + 8 + 8 + 4 + PAGE_SIZE as u64)
@@ -408,13 +413,13 @@ fn write_log_record_payload<W: Write>(
             write_crc_u64(writer, digest, *undo_next_lsn)?;
             write_crc_u8(writer, digest, u8::from(*allocated))?;
         }
-        LogRecordKind::PageAlloc { page_id } | LogRecordKind::PageDealloc { page_id } => {
-            let kind = if matches!(kind, LogRecordKind::PageAlloc { .. }) {
-                KIND_PAGE_ALLOC
-            } else {
-                KIND_PAGE_DEALLOC
-            };
-            write_crc_u8(writer, digest, kind)?;
+        LogRecordKind::PageInit { page_id, kind } => {
+            write_crc_u8(writer, digest, KIND_PAGE_INIT)?;
+            write_crc_u64(writer, digest, *page_id)?;
+            write_crc_u8(writer, digest, *kind as u8)?;
+        }
+        LogRecordKind::PageDealloc { page_id } => {
+            write_crc_u8(writer, digest, KIND_PAGE_DEALLOC)?;
             write_crc_u64(writer, digest, *page_id)?;
         }
     }
