@@ -16,7 +16,7 @@ use crate::error::{
 };
 use crate::page::format::{
     INTERIOR_CELL_PREFIX_SIZE, KIND_OFFSET, LEAF_CELL_PREFIX_SIZE,
-    MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, NO_OVERFLOW_PAGE_ID, OVERFLOW_NEXT_PAGE_ID_SIZE, PageKind,
+    MAX_INLINE_OVERFLOW_PAYLOAD_BYTES, NO_OVERFLOW_PAGE_ID, PageKind,
 };
 use crate::page::{
     BoundResult, Interior, Leaf, PageError, RawInterior, RawLeaf, Read, SearchResult, Write,

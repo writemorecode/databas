@@ -1,7 +1,6 @@
 use super::{
-    CorruptionComponent, CorruptionError, CorruptionKind, NO_OVERFLOW_PAGE_ID,
-    OVERFLOW_NEXT_PAGE_ID_SIZE, Ordering, PAGE_SIZE, PageCache, PageId, StorageError,
-    StorageResult, overflow, page,
+    CorruptionComponent, CorruptionError, CorruptionKind, NO_OVERFLOW_PAGE_ID, Ordering, PageCache,
+    PageId, StorageError, StorageResult, overflow,
 };
 
 type MaterializedLeafCell = (Box<[u8]>, Box<[u8]>);
@@ -20,10 +19,6 @@ fn overflow_corruption(page_id: Option<PageId>, kind: CorruptionKind) -> Storage
         page_id,
         kind,
     })
-}
-
-fn read_overflow_next_page_id(page: &[u8; PAGE_SIZE]) -> Option<PageId> {
-    page::format::read_optional_u64(page, 0)
 }
 
 fn append_overflow_bytes(
@@ -59,12 +54,12 @@ fn append_overflow_bytes(
 
         let pin = page_cache.fetch_page(current_page_id)?;
         let page = pin.read()?;
+        let next = overflow::next_page_id(current_page_id, page.page())?;
         let remaining = total_payload_len - payload.len();
         let take = remaining.min(overflow::OVERFLOW_PAYLOAD_SIZE);
-        payload.extend_from_slice(
-            &page.page()[OVERFLOW_NEXT_PAGE_ID_SIZE..OVERFLOW_NEXT_PAGE_ID_SIZE + take],
-        );
-        page_id = read_overflow_next_page_id(page.page());
+        payload
+            .extend_from_slice(&page.page()[overflow::HEADER_SIZE..overflow::HEADER_SIZE + take]);
+        page_id = next;
     }
 
     Ok(page_id)
@@ -224,12 +219,12 @@ pub(super) fn compare_overflow_key(
 
         let pin = page_cache.fetch_page(current_page_id)?;
         let page = pin.read()?;
+        let next = overflow::next_page_id(current_page_id, page.page())?;
         let remaining = key_len - compared;
         let take = remaining.min(overflow::OVERFLOW_PAYLOAD_SIZE);
         if compared < key.len() {
             let compare_len = (key.len() - compared).min(take);
-            let ordering = page.page()
-                [OVERFLOW_NEXT_PAGE_ID_SIZE..OVERFLOW_NEXT_PAGE_ID_SIZE + compare_len]
+            let ordering = page.page()[overflow::HEADER_SIZE..overflow::HEADER_SIZE + compare_len]
                 .cmp(&key[compared..compared + compare_len]);
             if ordering != Ordering::Equal {
                 return Ok(ordering);
@@ -237,7 +232,7 @@ pub(super) fn compare_overflow_key(
         }
 
         compared += take;
-        page_id = read_overflow_next_page_id(page.page());
+        page_id = next;
     }
 
     Ok(key_len.cmp(&key.len()))

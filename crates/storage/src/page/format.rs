@@ -32,8 +32,6 @@ pub const NO_OVERFLOW_PAGE_ID: PageId = PageId::MAX;
 pub const MIN_INLINE_OVERFLOW_PAYLOAD_BYTES: usize = 64;
 /// Maximum number of logical payload bytes an overflow cell may keep inline.
 pub const MAX_INLINE_OVERFLOW_PAYLOAD_BYTES: usize = 512;
-/// Width in bytes of the next-page field at the start of every overflow page.
-pub const OVERFLOW_NEXT_PAGE_ID_SIZE: usize = 8;
 /// Width in bytes of a freeblock header: next freeblock plus total span size.
 pub const FREEBLOCK_HEADER_SIZE: usize = 4;
 /// Maximum fragmented free bytes permitted on a page before defragmentation.
@@ -57,7 +55,7 @@ pub const PREV_PAGE_ID_OFFSET: usize = 10;
 pub const NEXT_PAGE_ID_OFFSET: usize = PREV_PAGE_ID_OFFSET + 8;
 /// Offset of the page LSN in the shared page header.
 pub const LSN_OFFSET: usize = NEXT_PAGE_ID_OFFSET + 8;
-/// Number of bytes in the header shared by all page kinds.
+/// Number of bytes in the header shared by B-tree and overflow data pages.
 pub const SHARED_HEADER_SIZE: usize = LSN_OFFSET + size_of::<Lsn>();
 /// Offset of the rightmost-child pointer in an interior-page header.
 pub const RIGHTMOST_CHILD_OFFSET: usize = SHARED_HEADER_SIZE;
