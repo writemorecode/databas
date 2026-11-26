@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::PageId;
 use crate::btree::{TreeCursor, initialize_empty_root, validate_tree_page_formats};
 use crate::database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header};
-use crate::disk_manager::DiskManager;
+use crate::disk_manager::{DiskManager, missing_doublewrite};
 use crate::error::StorageResult;
 use crate::filesystem::{FileSystem, OpenMode};
 use crate::log_manager::TxnId;
@@ -73,9 +73,19 @@ impl Storage {
         if matches!(mode, OpenMode::CreateNew)
             || matches!(mode, OpenMode::Create) && disk_manager.page_count() == 0
         {
+            disk_manager.create_doublewrite(&fs, path)?;
             initialize_header_page(&mut disk_manager)?;
-        } else {
+        } else if disk_manager.repair_doublewrite(&fs, path)? {
             validate_header_page(&mut disk_manager)?;
+        } else {
+            if disk_manager.page_count() == 0 {
+                return Err(missing_header());
+            }
+            // Detect older formats without creating or modifying their sidecars.
+            let mut page = [0; crate::PAGE_SIZE];
+            disk_manager.read_page_unchecked(DATABASE_HEADER_PAGE_ID, &mut page)?;
+            DatabaseHeader::validate_page(&page)?;
+            return Err(missing_doublewrite().into());
         }
         let opened_page_count = disk_manager.page_count();
         let runtime = Arc::new(StorageRuntime::new(fs, path.to_path_buf(), disk_manager)?);
@@ -210,8 +220,6 @@ fn validate_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
     }
 
     let mut page = [0u8; crate::PAGE_SIZE];
-    // Identify the format before recovery. The allocator validates the checksum
-    // for the entire header/bitmap page, with WAL repair for torn bitmap writes.
-    disk_manager.read_page_unchecked(DATABASE_HEADER_PAGE_ID, &mut page)?;
+    disk_manager.read_page(DATABASE_HEADER_PAGE_ID, &mut page)?;
     DatabaseHeader::validate_page(&page)
 }

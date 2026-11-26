@@ -396,6 +396,12 @@ pub struct MemoryFile {
 }
 
 impl MemoryFile {
+    pub fn identity(&self) -> [u8; 16] {
+        let mut identity = [0; 16];
+        identity[8..].copy_from_slice(&self.id.to_le_bytes());
+        identity
+    }
+
     pub fn len(&self) -> io::Result<u64> {
         self.fs
             .state()

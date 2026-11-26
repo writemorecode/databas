@@ -10,6 +10,7 @@ mod bitset;
 mod btree;
 mod database_header;
 mod disk_manager;
+mod doublewrite;
 mod engine;
 pub mod error;
 mod filesystem;

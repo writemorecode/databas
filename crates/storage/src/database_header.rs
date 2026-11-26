@@ -6,7 +6,8 @@ use crate::{PAGE_SIZE, PAGE_SIZE_U16, PageId};
 pub const DATABASE_HEADER_PAGE_ID: PageId = 0;
 
 const MAGIC: &[u8; 8] = b"DATABAS\0";
-const FORMAT_VERSION: u16 = 5;
+// Version 6 requires a doublewrite sidecar and binds page CRCs to their address.
+pub const FORMAT_VERSION: u16 = 6;
 const HEADER_LEN: usize = 12;
 
 /// Fixed-format database file header stored on page 0.
