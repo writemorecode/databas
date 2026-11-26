@@ -257,7 +257,9 @@ impl StorageRuntime {
         &self,
         txn_id: TxnId,
     ) -> StorageResult<TransactionRollback> {
-        Self::lock(&self.transactions, "transaction manager")?.prepare_rollback_pages(txn_id)
+        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let mut log = Self::lock(&self.log, "log manager")?;
+        transactions.prepare_rollback_pages(&mut log, txn_id)
     }
 
     pub(crate) fn finish_rollback(&self, txn_id: TxnId) -> StorageResult<()> {

@@ -6,8 +6,8 @@ use crate::{PAGE_SIZE, PAGE_SIZE_U16, PageId};
 pub const DATABASE_HEADER_PAGE_ID: PageId = 0;
 
 const MAGIC: &[u8; 8] = b"DATABAS\0";
-// Version 7 adds stable transaction-chain links to the WAL format.
-pub const FORMAT_VERSION: u16 = 7;
+// Version 8 adds redo-only compensation records and repeat-history recovery.
+pub const FORMAT_VERSION: u16 = 8;
 const HEADER_LEN: usize = 12;
 
 /// Fixed-format database file header stored on page 0.

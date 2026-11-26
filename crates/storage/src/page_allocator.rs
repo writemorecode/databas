@@ -56,10 +56,6 @@ impl PageAllocator {
         self.bitmap.validate_bounds(page_count)
     }
 
-    pub(crate) fn contains_page(&self, page_id: PageId) -> bool {
-        self.bitmap.contains_page(page_id)
-    }
-
     pub(crate) fn is_metadata(page_id: PageId) -> bool {
         AllocationBitmap::is_metadata(page_id)
     }

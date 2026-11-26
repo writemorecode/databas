@@ -1,4 +1,8 @@
 //! Repair the database from the valid WAL prefix before opening it to transactions.
+//!
+//! Analyze transaction chains, repeat physical history, then undo incomplete
+//! transactions with redo-only compensation (`recovery_protocol`, R1). Redo
+//! remains image-based until all pages have the required recovery metadata.
 
 use std::path::Path;
 
@@ -22,7 +26,6 @@ pub fn recover_from_wal(
     disk: &mut DiskManager,
 ) -> StorageResult<RecoveryResult> {
     let scan = read_recovery_log(fs, path)?;
-    analysis::validate(&scan.records)?;
     let max_txn_id = scan.max_txn_id;
     if scan.records.is_empty() {
         PageAllocator::load(disk)?.validate_bounds(disk.page_count())?;
@@ -32,10 +35,15 @@ pub fn recover_from_wal(
         return Ok(RecoveryResult { max_txn_id });
     }
 
-    // Replay page images before publishing free bits,.
-    // Doublewrite protects the bitmap baseline if recovery is interrupted.
-    let mut allocator = replay::repair(disk, scan.records)?;
+    let analysis = analysis::Analysis::new(&scan.records)?;
     let mut log = LogManager::new(fs.clone(), path)?;
+    // A valid prefix can include bytes that survived without an earlier sync.
+    // Force them before depending on them for any protected home write.
+    log.flush_all()?;
+    let mut allocator = PageAllocator::load(disk)?;
+    replay::redo(&scan.records, disk, &mut allocator)?;
+    replay::undo(analysis, &mut log, disk, &mut allocator)?;
+    allocator.validate_bounds(disk.page_count())?;
     allocator.flush(disk, &mut log)?;
     disk.sync()?;
     log.retire_after_recovery()?;

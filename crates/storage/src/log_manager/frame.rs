@@ -12,7 +12,7 @@ pub(super) type DecodedRecord = (Lsn, RecoveryLogRecordKind);
 
 const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const FOOTER_MAGIC: [u8; 8] = *b"DBWALFTR";
-const WAL_FORMAT_VERSION: u16 = 4;
+const WAL_FORMAT_VERSION: u16 = 5;
 pub(super) const HEADER_LEN: usize = 8 + 2 + 8 + 4 + 8;
 const FOOTER_LEN: usize = 8 + 8 + 4;
 pub(super) const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
@@ -23,6 +23,8 @@ const KIND_ROLLBACK: u8 = 3;
 const KIND_PAGE_UPDATE: u8 = 4;
 const KIND_PAGE_ALLOC: u8 = 5;
 const KIND_PAGE_DEALLOC: u8 = 6;
+const KIND_PAGE_COMPENSATION: u8 = 7;
+const KIND_ALLOCATION_COMPENSATION: u8 = 8;
 
 /// Serializes a complete transaction frame to `writer`.
 ///
@@ -165,6 +167,31 @@ impl<R: Read> FramePayload<'_, R> {
                     Kind::PageDealloc { page_id }
                 })
             }
+            KIND_PAGE_COMPENSATION => {
+                let page_id = u64::from_le_bytes(self.read_array()?);
+                let undo_next_lsn = u64::from_le_bytes(self.read_array()?);
+                let len = u32::from_le_bytes(self.read_array()?) as usize;
+                validate_page_image_len_value(len)?;
+                self.read_image(collect)?.map(|redo_data| Kind::PageCompensation {
+                    page_id,
+                    redo_data,
+                    undo_next_lsn,
+                })
+            }
+            KIND_ALLOCATION_COMPENSATION => {
+                let page_id = u64::from_le_bytes(self.read_array()?);
+                let undo_next_lsn = u64::from_le_bytes(self.read_array()?);
+                let allocated = match self.read_array::<1>()?[0] {
+                    0 => false,
+                    1 => true,
+                    state => return Err(LogManagerError::InvalidAllocationState { state }),
+                };
+                collect.then_some(Kind::AllocationCompensation {
+                    page_id,
+                    allocated,
+                    undo_next_lsn,
+                })
+            }
             KIND_PAGE_UPDATE => {
                 let page_id = u64::from_le_bytes(self.read_array()?);
                 let redo_len = u32::from_le_bytes(self.read_array()?) as usize;
@@ -298,6 +325,11 @@ fn serialized_record_len(kind: &LogRecordKind<'_>) -> Result<u64, LogManagerErro
             Ok(1 + 8 + 4 + 4 + u64::from(redo_len) + u64::from(undo_len))
         }
         LogRecordKind::PageAlloc { .. } | LogRecordKind::PageDealloc { .. } => Ok(1 + 8),
+        LogRecordKind::PageCompensation { redo_data, .. } => {
+            validate_page_image_len(redo_data)?;
+            Ok(1 + 8 + 8 + 4 + PAGE_SIZE as u64)
+        }
+        LogRecordKind::AllocationCompensation { .. } => Ok(1 + 8 + 8 + 1),
     }
 }
 
@@ -361,6 +393,20 @@ fn write_log_record_payload<W: Write>(
             write_crc_u32(writer, digest, undo_len)?;
             write_crc_bytes(writer, digest, redo_data)?;
             write_crc_bytes(writer, digest, undo_data)?;
+        }
+        LogRecordKind::PageCompensation { page_id, redo_data, undo_next_lsn } => {
+            validate_page_image_len(redo_data)?;
+            write_crc_u8(writer, digest, KIND_PAGE_COMPENSATION)?;
+            write_crc_u64(writer, digest, *page_id)?;
+            write_crc_u64(writer, digest, *undo_next_lsn)?;
+            write_crc_u32(writer, digest, u32::from(crate::PAGE_SIZE_U16))?;
+            write_crc_bytes(writer, digest, redo_data)?;
+        }
+        LogRecordKind::AllocationCompensation { page_id, allocated, undo_next_lsn } => {
+            write_crc_u8(writer, digest, KIND_ALLOCATION_COMPENSATION)?;
+            write_crc_u64(writer, digest, *page_id)?;
+            write_crc_u64(writer, digest, *undo_next_lsn)?;
+            write_crc_u8(writer, digest, u8::from(*allocated))?;
         }
         LogRecordKind::PageAlloc { page_id } | LogRecordKind::PageDealloc { page_id } => {
             let kind = if matches!(kind, LogRecordKind::PageAlloc { .. }) {
