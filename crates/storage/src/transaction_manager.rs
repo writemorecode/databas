@@ -68,9 +68,32 @@ pub struct TransactionSavepoint {
 pub struct TransactionManager {
     max_txn_id: TxnId,
     transactions: HashMap<TxnId, ActiveTransaction>,
-    // A failed outcome flush must be retried in place or resolved on reopen
-    // before a newer allocation change can advance the same bitmap's LSN.
-    finishing: Option<TxnId>,
+    unflushed_outcome: Option<PendingOutcome>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Commit,
+    Rollback,
+}
+
+pub struct CompletedTransaction {
+    pub(crate) lsn: Lsn,
+    pub(crate) allocation_states: BTreeMap<PageId, bool>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingOutcome {
+    txn_id: TxnId,
+    outcome: Outcome,
+    lsn: Lsn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InverseState {
+    Idle,
+    Writable,
+    Failed,
 }
 
 #[derive(Debug)]
@@ -80,11 +103,8 @@ struct ActiveTransaction {
     // The final state to publish at Commit or Rollback. The physical bitmap
     // keeps all reservations until the outcome is durable.
     allocation_states: BTreeMap<PageId, bool>,
-    rollback_lsn: Option<Lsn>,
-    commit_lsn: Option<Lsn>,
     poisoned: bool,
-    inverse_writable: bool,
-    inverse_failed: bool,
+    inverse: InverseState,
     pending_restore: Option<PageRestore>,
     open_action: Option<ActionBoundary>,
 }
@@ -95,11 +115,8 @@ impl ActiveTransaction {
             begin_lsn,
             undo: Vec::new(),
             allocation_states,
-            rollback_lsn: None,
-            commit_lsn: None,
             poisoned: false,
-            inverse_writable: false,
-            inverse_failed: false,
+            inverse: InverseState::Idle,
             pending_restore: None,
             open_action: None,
         }
@@ -108,7 +125,7 @@ impl ActiveTransaction {
 
 impl TransactionManager {
     pub(crate) fn new(max_txn_id: TxnId) -> Self {
-        Self { max_txn_id, transactions: HashMap::new(), finishing: None }
+        Self { max_txn_id, transactions: HashMap::new(), unflushed_outcome: None }
     }
 
     pub(crate) fn oldest_begin_lsn(&self) -> Option<Lsn> {
@@ -166,9 +183,9 @@ impl TransactionManager {
         Ok(active.undo.last().map_or(active.begin_lsn, |entry| entry.lsn))
     }
 
-    /// No newer change may pass a transaction with uncertain completion.
+    /// Block newer changes while an uncertain outcome can still advance a bitmap LSN.
     pub(crate) fn validate_can_append(&self) -> StorageResult<()> {
-        if let Some(txn_id) = self.finishing {
+        if let Some(PendingOutcome { txn_id, .. }) = self.unflushed_outcome {
             return Err(invariant(InvariantViolation::UncertainTransactionOutcome { txn_id }));
         }
         Ok(())
@@ -184,10 +201,6 @@ impl TransactionManager {
         self.max_txn_id = txn_id;
         self.transactions.insert(txn_id, ActiveTransaction::new(begin_lsn, BTreeMap::new()));
         Ok(txn_id)
-    }
-
-    pub(crate) fn allocation_states(&self, txn_id: TxnId) -> StorageResult<BTreeMap<PageId, bool>> {
-        Ok(self.transaction(txn_id)?.allocation_states.clone())
     }
 
     pub(crate) fn page_pending_dealloc(&self, page_id: PageId) -> bool {
@@ -290,8 +303,8 @@ impl TransactionManager {
     pub(crate) fn record_failure(&mut self, txn_id: TxnId) {
         if let Some(active) = self.transactions.get_mut(&txn_id) {
             active.poisoned = true;
-            if active.inverse_writable {
-                active.inverse_failed = true;
+            if active.inverse == InverseState::Writable {
+                active.inverse = InverseState::Failed;
             }
         }
     }
@@ -303,7 +316,7 @@ impl TransactionManager {
     pub(crate) fn validate_transaction_write(&self, txn_id: TxnId) -> StorageResult<()> {
         self.validate_can_append()?;
         let active = self.transaction(txn_id)?;
-        if active.poisoned && (!active.inverse_writable || active.inverse_failed) {
+        if active.poisoned && active.inverse != InverseState::Writable {
             return Err(invariant(InvariantViolation::TransactionPoisoned { txn_id }));
         }
         Ok(())
@@ -311,32 +324,6 @@ impl TransactionManager {
 
     pub(crate) fn transaction_is_poisoned(&self, txn_id: TxnId) -> StorageResult<bool> {
         Ok(self.transaction(txn_id)?.poisoned)
-    }
-
-    /// Retain an uncertain Commit and its reservations for a flush retry. Never
-    /// permit explicit abort after Commit may already have reached stable storage.
-    pub(crate) fn commit(&mut self, log: &mut LogManager, txn_id: TxnId) -> StorageResult<Lsn> {
-        let active = self.transaction(txn_id)?;
-        if active.open_action.is_some() || active.inverse_writable {
-            return Err(invariant(InvariantViolation::UnfinishedTreeAction { txn_id }));
-        }
-        let commit_lsn = if let Some(lsn) = active.commit_lsn {
-            lsn
-        } else {
-            self.validate_transaction_write(txn_id)?;
-            let lsn = log
-                .append_record(txn_id, LogRecordKind::Commit)
-                .inspect_err(|_| self.record_failure(txn_id))?;
-            let active = self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
-            active.commit_lsn = Some(lsn);
-            active.poisoned = true;
-            self.finishing = Some(txn_id);
-            lsn
-        };
-        log.flush_through(commit_lsn)?;
-        self.transactions.remove(&txn_id);
-        self.finishing = None;
-        Ok(commit_lsn)
     }
 
     pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
@@ -418,12 +405,13 @@ impl TransactionManager {
         txn_id: TxnId,
         savepoint: Option<TransactionSavepoint>,
     ) -> StorageResult<UndoStep> {
-        let active = self.transaction(txn_id)?;
-        if active.commit_lsn.is_some() {
-            return Err(invariant(InvariantViolation::TransactionPoisoned { txn_id }));
-        }
-        if active.rollback_lsn.is_some() && savepoint.is_none() {
-            return Ok(UndoStep::Done);
+        self.transaction(txn_id)?;
+        match self.pending_outcome(txn_id).map(|pending| pending.outcome) {
+            Some(Outcome::Commit) => {
+                return Err(invariant(InvariantViolation::TransactionPoisoned { txn_id }));
+            }
+            Some(Outcome::Rollback) if savepoint.is_none() => return Ok(UndoStep::Done),
+            _ => {}
         }
         self.validate_can_append()?;
         let undo_len = savepoint.map_or(0, |savepoint| savepoint.undo_len);
@@ -481,8 +469,7 @@ impl TransactionManager {
                 Ok(UndoStep::Allocation)
             }
             UndoKind::Logical(inverse) => {
-                active.inverse_writable = true;
-                active.inverse_failed = false;
+                active.inverse = InverseState::Writable;
                 Ok(UndoStep::Logical {
                     inverse: inverse.clone(),
                     boundary: ActionBoundary {
@@ -510,8 +497,8 @@ impl TransactionManager {
         completed: bool,
     ) -> StorageResult<()> {
         let active = self.active_mut(txn_id)?;
-        active.inverse_writable = false;
-        if !completed || active.inverse_failed {
+        let inverse = std::mem::replace(&mut active.inverse, InverseState::Idle);
+        if !completed || inverse == InverseState::Failed {
             active.poisoned = true;
             return Ok(()); // The inverse's physical prefix is still undoable.
         }
@@ -524,32 +511,60 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Force the outcome and its CLR prefix, not restored home pages. Recovery
-    /// replays CLRs even for completed aborts; they never enter the undo chain.
-    pub(crate) fn finish_rollback(
+    fn pending_outcome(&self, txn_id: TxnId) -> Option<PendingOutcome> {
+        self.unflushed_outcome.filter(|pending| pending.txn_id == txn_id)
+    }
+
+    /// Release the allocation changes only after the outcome's WAL flush succeeds.
+    pub(crate) fn finish_outcome(
         &mut self,
         log: &mut LogManager,
         txn_id: TxnId,
-    ) -> StorageResult<Lsn> {
+        outcome: Outcome,
+    ) -> StorageResult<CompletedTransaction> {
         let active = self.transaction(txn_id)?;
-        if active.commit_lsn.is_some() {
-            return Err(invariant(InvariantViolation::TransactionPoisoned { txn_id }));
+        match outcome {
+            Outcome::Commit => {
+                if active.open_action.is_some() || active.inverse != InverseState::Idle {
+                    return Err(invariant(InvariantViolation::UnfinishedTreeAction { txn_id }));
+                }
+            }
+            Outcome::Rollback => {
+                if self
+                    .pending_outcome(txn_id)
+                    .is_some_and(|pending| pending.outcome == Outcome::Commit)
+                {
+                    return Err(invariant(InvariantViolation::TransactionPoisoned { txn_id }));
+                }
+                debug_assert!(active.undo.is_empty() && active.pending_restore.is_none());
+            }
         }
-        let rollback_lsn = if let Some(lsn) = active.rollback_lsn {
-            lsn
+        let lsn = if let Some(pending) = self.unflushed_outcome {
+            if pending.txn_id != txn_id || pending.outcome != outcome {
+                return Err(invariant(InvariantViolation::UncertainTransactionOutcome {
+                    txn_id: pending.txn_id,
+                }));
+            }
+            pending.lsn
         } else {
-            self.validate_can_append()?;
-            let lsn = log.append_record(txn_id, LogRecordKind::Rollback)?;
-            let active = self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
-            active.poisoned = true;
-            active.rollback_lsn = Some(lsn);
-            self.finishing = Some(txn_id);
+            let record = match outcome {
+                Outcome::Commit => {
+                    self.validate_transaction_write(txn_id)?;
+                    LogRecordKind::Commit
+                }
+                Outcome::Rollback => LogRecordKind::Rollback,
+            };
+            // An append error leaves the transaction rollback-only, without an
+            // outcome LSN. Only a successful append can be retried as a flush.
+            self.active_mut(txn_id)?.poisoned = true;
+            let lsn = log.append_record(txn_id, record)?;
+            self.unflushed_outcome = Some(PendingOutcome { txn_id, outcome, lsn });
             lsn
         };
-        log.flush_through(rollback_lsn)?;
-        self.transactions.remove(&txn_id);
-        self.finishing = None;
-        Ok(rollback_lsn)
+        log.flush_through(lsn)?;
+        let active = self.transactions.remove(&txn_id).ok_or_else(no_active_transaction)?;
+        self.unflushed_outcome = None;
+        Ok(CompletedTransaction { lsn, allocation_states: active.allocation_states })
     }
 
     fn active_mut(&mut self, txn_id: TxnId) -> StorageResult<&mut ActiveTransaction> {
