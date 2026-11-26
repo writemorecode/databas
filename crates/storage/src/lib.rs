@@ -2,9 +2,9 @@
 //!
 //! Use [`Storage`] to open files and access trees. Physical transactions provide
 //! rollback and durability; callers must serialize conflicting tree access for
-//! isolation. Raw cursors without a transaction are for exclusive initialization
-//! and require an explicit flush. Page, cache, WAL, and runtime implementation
-//! details are private.
+//! isolation. Each mutation through a raw cursor without an explicit transaction
+//! commits its own physical transaction. Page, cache, WAL, and runtime details
+//! are private.
 
 mod bitset;
 mod btree;

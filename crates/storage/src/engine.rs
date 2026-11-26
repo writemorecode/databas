@@ -145,18 +145,21 @@ impl Storage {
     }
 
     pub fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        let rollback = self.runtime.prepare_rollback_pages(txn_id)?;
-        self.page_cache.restore_rollback_pages(rollback.pages)?;
-        // Completion forces WAL through the CLRs, not the compensated pages.
-        // Restart will redo them if their cache images never reached home.
-        self.runtime.finish_rollback(txn_id)?;
-        Ok(())
+        self.page_cache.rollback_transaction(txn_id)
     }
 
-    /// Creates a new empty raw tree and returns a cursor rooted at it.
+    /// Creates a new empty raw tree in an implicit physical transaction.
     pub fn create_tree(&self) -> StorageResult<TreeCursor> {
-        let root_page_id = initialize_empty_root(&self.page_cache, None)?;
-        TreeCursor::new(self.page_cache.clone(), root_page_id)
+        self.page_cache.autocommit(|txn_id| {
+            let root_page_id = initialize_empty_root(&self.page_cache, Some(txn_id))?;
+            TreeCursor::new(self.page_cache.clone(), root_page_id)
+        })
+    }
+
+    /// Reports whether a known tree root's page is allocated. A file may have
+    /// grown past an unallocated root while an attempted creation rolled back.
+    pub fn tree_root_is_allocated(&self, root_page_id: PageId) -> StorageResult<bool> {
+        self.runtime.page_is_live(root_page_id)
     }
 
     pub fn transaction_create_tree(&self, txn_id: TxnId) -> StorageResult<TreeCursor> {

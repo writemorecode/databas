@@ -61,29 +61,21 @@ impl StorageRuntime {
         &self.path
     }
 
-    pub(crate) fn new_page(&self, txn_id: Option<TxnId>) -> StorageResult<PageId> {
+    pub(crate) fn new_page(&self, txn_id: TxnId) -> StorageResult<PageId> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
-        if let Some(id) = txn_id
-            && !transactions.transaction_is_active(id)
-        {
-            return Err(StorageError::Internal(InternalError::InvariantViolation(
-                crate::error::InvariantViolation::NoActiveTransaction,
-            )));
-        }
+        transactions.validate_transaction_write(txn_id)?;
         let mut allocator = Self::lock(&self.allocator, "page allocator")?;
         let mut log = Self::lock(&self.log, "log manager")?;
         let mut disk = Self::lock(&self.disk, "disk manager")?;
         let page_id = allocator.candidate(&mut disk)?;
-        if let Some(id) = txn_id {
-            transactions.record_page_alloc(&mut log, id, page_id)?;
-        }
+        transactions.record_page_alloc(&mut log, txn_id, page_id)?;
         allocator.set_allocated(page_id, true);
         Ok(page_id)
     }
 
-    pub(crate) fn dealloc_page(&self, txn_id: Option<TxnId>, page_id: PageId) -> StorageResult<()> {
+    pub(crate) fn dealloc_page(&self, txn_id: TxnId, page_id: PageId) -> StorageResult<()> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
-        let mut allocator = Self::lock(&self.allocator, "page allocator")?;
+        let allocator = Self::lock(&self.allocator, "page allocator")?;
         if PageAllocator::is_metadata(page_id)
             || !allocator.is_allocated(page_id)
             || transactions.page_pending_dealloc(page_id)
@@ -92,13 +84,8 @@ impl StorageRuntime {
                 crate::error::InvariantViolation::InvalidPageDeallocation { page_id },
             )));
         }
-        if let Some(id) = txn_id {
-            let mut log = Self::lock(&self.log, "log manager")?;
-            transactions.record_page_dealloc(&mut log, id, page_id)?;
-        } else {
-            allocator.set_allocated(page_id, false);
-        }
-        Ok(())
+        let mut log = Self::lock(&self.log, "log manager")?;
+        transactions.record_page_dealloc(&mut log, txn_id, page_id)
     }
 
     pub(crate) fn page_is_live(&self, page_id: PageId) -> StorageResult<bool> {
@@ -186,21 +173,18 @@ impl StorageRuntime {
 
     pub(crate) fn record_page_update(
         &self,
-        txn_id: Option<TxnId>,
+        txn_id: TxnId,
         page_id: PageId,
         before: &[u8; PAGE_SIZE],
         after: &[u8; PAGE_SIZE],
-    ) -> StorageResult<Option<LoggedPageUpdate>> {
-        let Some(txn_id) = txn_id else {
-            return Ok(None);
-        };
+    ) -> StorageResult<LoggedPageUpdate> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
         let mut log = Self::lock(&self.log, "log manager")?;
         let result = transactions.record_page_update(&mut log, txn_id, page_id, before, after);
         if result.is_err() {
             transactions.record_failure(txn_id);
         }
-        result.map(Some)
+        result
     }
 
     pub(crate) fn record_transaction_failure(&self, txn_id: TxnId) -> StorageResult<()> {

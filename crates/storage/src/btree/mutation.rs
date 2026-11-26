@@ -7,6 +7,31 @@ use super::{
 };
 
 impl TreeCursor {
+    fn mutate(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> StorageResult<()>,
+    ) -> StorageResult<()> {
+        if self.txn_id.is_some() {
+            self.page_cache.validate_transaction_write(self.txn_id)?;
+            operation(self)?;
+            // A write guard can discover a WAL failure when it is dropped.
+            return self.page_cache.validate_transaction_write(self.txn_id);
+        }
+
+        let state = self.state;
+        let result = self.page_cache.clone().autocommit(|txn_id| {
+            self.txn_id = Some(txn_id);
+            let result = operation(self);
+            self.txn_id = None;
+            result
+        });
+        if result.is_err() {
+            self.state = state;
+            self.mark_tree_mutated();
+        }
+        result
+    }
+
     fn checked_payload_len(&self, payload_len: usize) -> StorageResult<()> {
         if payload_len > u16::MAX as usize {
             return Err(PageError::CellTooLarge { len: payload_len, max: u16::MAX as usize }.into());
@@ -165,10 +190,7 @@ impl TreeCursor {
 
     /// Inserts a new raw key/value record into the tree.
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
-        self.page_cache.validate_transaction_write(self.txn_id)?;
-        self.insert_inner(key, value)?;
-        // A write guard can discover a WAL failure when it is dropped.
-        self.page_cache.validate_transaction_write(self.txn_id)
+        self.mutate(|tree| tree.insert_inner(key, value))
     }
 
     fn insert_inner(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
@@ -214,10 +236,7 @@ impl TreeCursor {
 
     /// Replaces the value stored for an existing `key`.
     pub fn update(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
-        self.page_cache.validate_transaction_write(self.txn_id)?;
-        self.update_inner(key, value)?;
-        // A write guard can discover a WAL failure when it is dropped.
-        self.page_cache.validate_transaction_write(self.txn_id)
+        self.mutate(|tree| tree.update_inner(key, value))
     }
 
     fn update_inner(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
@@ -257,10 +276,7 @@ impl TreeCursor {
 
     /// Deletes the record identified by `key`.
     pub fn delete(&mut self, key: &[u8]) -> StorageResult<()> {
-        self.page_cache.validate_transaction_write(self.txn_id)?;
-        self.delete_inner(key)?;
-        // A write guard can discover a WAL failure when it is dropped.
-        self.page_cache.validate_transaction_write(self.txn_id)
+        self.mutate(|tree| tree.delete_inner(key))
     }
 
     fn delete_inner(&mut self, key: &[u8]) -> StorageResult<()> {

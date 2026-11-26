@@ -58,12 +58,15 @@ impl Simulation {
         let mut rng = Rng::new(seed);
         let fs = MemoryFs::default();
         let storage = open(&fs, OpenMode::CreateNew)?;
+        let mut raw = storage.create_tree()?;
+        raw.insert(b"implicit transaction", &[0x45; 5000])?;
+        raw.update(b"implicit transaction", b"short value")?;
+        raw.delete(b"implicit transaction")?;
         let transaction = storage.begin_transaction()?;
-        let roots = (0..TREES)
-            .map(|_| {
-                storage.transaction_create_tree(transaction).map(|cursor| cursor.root_page_id())
-            })
-            .collect::<Result<_, _>>()?;
+        let mut roots = vec![raw.root_page_id()];
+        for _ in 1..TREES {
+            roots.push(storage.transaction_create_tree(transaction)?.root_page_id());
+        }
         storage.commit_transaction(transaction)?;
         storage.checkpoint()?;
         let faults = Rng::new(rng.next());
