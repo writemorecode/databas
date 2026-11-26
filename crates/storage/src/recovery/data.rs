@@ -37,13 +37,13 @@ impl<'a> DataRedo<'a> {
         Ok(())
     }
 
-    pub(super) fn patch(
+    pub(super) fn replay(
         &mut self,
         disk: &mut DiskManager,
         page_id: PageId,
         target: PageRecovery,
-        redo: &PagePatch,
         baseline: Option<(Lsn, &PagePatch)>,
+        redo: impl FnOnce(&mut [u8; PAGE_SIZE]) -> StorageResult<()>,
     ) -> StorageResult<()> {
         if target.incarnation == 0 || target.incarnation >= target.lsn {
             return Err(invalid_metadata(page_id, target));
@@ -69,7 +69,7 @@ impl<'a> DataRedo<'a> {
                     },
                 ));
             }
-            apply_patch(page_id, &mut image, target, redo)?;
+            apply_operation(page_id, &mut image, target, redo)?;
             disk.write_page(page_id, &image)?;
             self.pages.insert(page_id, target);
         }
@@ -171,18 +171,18 @@ fn invalid_metadata(page_id: PageId, recovery: PageRecovery) -> StorageError {
     )
 }
 
-pub(super) fn apply_patch(
+pub(super) fn apply_operation(
     page_id: PageId,
     image: &mut [u8; PAGE_SIZE],
     target: PageRecovery,
-    patch: &PagePatch,
+    apply: impl FnOnce(&mut [u8; PAGE_SIZE]) -> StorageResult<()>,
 ) -> StorageResult<()> {
     let current = validate_data(page_id, image)?;
     current.require_incarnation(page_id, target.incarnation)?;
     if current.lsn >= target.lsn {
         return Err(invalid_metadata(page_id, current));
     }
-    patch.apply(image).map_err(LogManagerError::from)?;
+    apply(image)?;
     target.write(image);
     validate_data(page_id, image)?;
     Ok(())

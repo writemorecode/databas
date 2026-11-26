@@ -33,6 +33,7 @@ use thiserror::Error;
 use crate::error::{InternalError, InvariantViolation, StorageError, StorageResult};
 use crate::log_manager::{LogManagerError, ZERO_LSN};
 use crate::page::{NodeMarker, Page, PageResult, Read, Write};
+use crate::page_operation::LeafOperation;
 use crate::page_recovery::{PageInitKind, PageRecovery};
 use crate::page_replacement::ClockPolicy;
 use crate::storage_runtime::StorageRuntime;
@@ -582,6 +583,7 @@ impl PinGuard {
             frame,
             page_id: self.page_id,
             txn_id,
+            leaf_redo: None,
         })
     }
 }
@@ -641,6 +643,7 @@ pub struct PageWriteGuard<'a> {
     frame: &'a Frame,
     page_id: PageId,
     txn_id: TxnId,
+    leaf_redo: Option<LeafOperation>,
 }
 
 impl PageWriteGuard<'_> {
@@ -651,7 +654,21 @@ impl PageWriteGuard<'_> {
 
     /// Returns the pinned page bytes mutably.
     pub(crate) fn page_mut(&mut self) -> &mut [u8; PAGE_SIZE] {
+        // An arbitrary write can no longer be reproduced by one typed op.
+        self.leaf_redo = None;
         &mut self.page
+    }
+
+    /// Execute a single physiological leaf mutation. The same operation can
+    /// be logged if it accounts for every byte changed by this guard.
+    pub(crate) fn apply_leaf(&mut self, operation: LeafOperation) -> PageResult<()> {
+        let pristine = *self.page == self.before;
+        self.leaf_redo = None;
+        operation.apply(&mut self.page)?;
+        if pristine {
+            self.leaf_redo = Some(operation);
+        }
+        Ok(())
     }
 
     /// Opens a typed mutable view over the page bytes.
@@ -677,7 +694,13 @@ impl Drop for PageWriteGuard<'_> {
             return;
         }
 
-        match self.runtime.record_page_update(self.txn_id, self.page_id, &self.before, &self.page) {
+        match self.runtime.record_page_update(
+            self.txn_id,
+            self.page_id,
+            &self.before,
+            &self.page,
+            self.leaf_redo.take(),
+        ) {
             Ok(lsn) => {
                 PageRecovery::stamp_lsn(&mut self.page, lsn);
                 self.frame.lsn.store(lsn, Ordering::Release);

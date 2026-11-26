@@ -1,3 +1,5 @@
+use crate::page_operation::{LeafOperation, LeafPayload};
+
 use super::payload::cell_corruption;
 use super::{
     CorruptionComponent, CorruptionError, CorruptionKind, INTERIOR_CELL_PREFIX_SIZE,
@@ -116,30 +118,9 @@ impl TreeCursor {
         )?)
     }
 
-    /// Rewrites one existing leaf slot using the same overflow layout as tree inserts.
-    fn update_leaf_payload_at(
-        &self,
-        leaf: &mut RawLeaf<Write<'_>>,
-        slot_index: u16,
-        key: &[u8],
-        value: &[u8],
-    ) -> StorageResult<u16> {
-        let old_overflow = leaf.cell_payload_parts(slot_index)?.2;
-        let (first_overflow_page_id, inline_payload, inline_payload_len) =
-            self.prepare_leaf_payload(key, value)?;
-        let slot = leaf.update_payload_at(
-            slot_index,
-            key.len(),
-            value.len(),
-            first_overflow_page_id,
-            &inline_payload[..inline_payload_len],
-        )?;
-        super::reclaim::reclaim_chains(
-            &self.page_cache,
-            self.txn_id,
-            old_overflow.into_iter().collect(),
-        )?;
-        Ok(slot)
+    fn prepare_logged_leaf_payload(&self, key: &[u8], value: &[u8]) -> StorageResult<LeafPayload> {
+        let (overflow, inline, len) = self.prepare_leaf_payload(key, value)?;
+        Ok(LeafPayload::new(key.len(), value.len(), overflow, &inline[..len])?)
     }
 
     pub(super) fn insert_interior_payload_at(
@@ -214,8 +195,8 @@ impl TreeCursor {
             let inserted_new_leaf_max;
             {
                 let mut leaf_guard = leaf_pin_guard.write(self.txn_id)?;
-                let mut page = leaf_guard.open_mut::<Leaf>()?;
-                let slot_index = self.insert_leaf_payload_at(&mut page, slot_index, key, value)?;
+                let cell = self.prepare_logged_leaf_payload(key, value)?;
+                leaf_guard.apply_leaf(LeafOperation::Insert { slot: slot_index, cell })?;
                 self.mark_tree_mutated();
                 self.set_positioned_state(leaf_page_id, slot_index);
                 inserted_new_leaf_max = slot_index == old_slot_count;
@@ -257,8 +238,14 @@ impl TreeCursor {
         if has_capacity {
             {
                 let mut leaf_guard = leaf_pin_guard.write(self.txn_id)?;
-                let mut page = leaf_guard.open_mut::<Leaf>()?;
-                let slot_index = self.update_leaf_payload_at(&mut page, slot_index, key, value)?;
+                let old_overflow = leaf_guard.open_mut::<Leaf>()?.cell_payload_parts(slot_index)?.2;
+                let cell = self.prepare_logged_leaf_payload(key, value)?;
+                leaf_guard.apply_leaf(LeafOperation::Replace { slot: slot_index, cell })?;
+                super::reclaim::reclaim_chains(
+                    &self.page_cache,
+                    self.txn_id,
+                    old_overflow.into_iter().collect(),
+                )?;
                 self.mark_tree_mutated();
                 self.set_positioned_state(leaf_page_id, slot_index);
             }
@@ -289,9 +276,8 @@ impl TreeCursor {
         {
             let leaf_pin_guard = self.page_cache.fetch_page(leaf_page_id)?;
             let mut leaf_guard = leaf_pin_guard.write(self.txn_id)?;
-            let mut page = leaf_guard.open_mut::<Leaf>()?;
-            old_overflow = page.cell_payload_parts(slot_index)?.2;
-            page.delete_at(slot_index)?;
+            old_overflow = leaf_guard.open_mut::<Leaf>()?.cell_payload_parts(slot_index)?.2;
+            leaf_guard.apply_leaf(LeafOperation::Delete { slot: slot_index })?;
             self.mark_tree_mutated();
         }
         super::reclaim::reclaim_chains(

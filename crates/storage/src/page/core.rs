@@ -424,7 +424,8 @@ where
         format::write_optional_u16(&mut packed, FIRST_FREEBLOCK_OFFSET, None);
         format::write_u16(&mut packed, FRAGMENTED_FREE_BYTES_OFFSET, 0);
 
-        *self.bytes_mut() = packed;
+        // Compaction changes the layout, not the allocation incarnation or LSN.
+        self.bytes_mut()[..USABLE_SPACE_END].copy_from_slice(&packed[..USABLE_SPACE_END]);
         self.debug_assert_valid();
         Ok(())
     }
