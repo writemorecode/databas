@@ -1,6 +1,6 @@
 //! Validate transaction history and identify the loser chains before redo.
 
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::error::{StorageError, StorageResult};
 use crate::log_manager::{
@@ -9,8 +9,7 @@ use crate::log_manager::{
 
 pub(super) struct Analysis<'a> {
     records: HashMap<Lsn, &'a RecoveryLogRecord>,
-    // Global reverse-LSN order, even when independent transactions interleave.
-    losers: BinaryHeap<(Lsn, TxnId)>,
+    losers: Vec<(TxnId, Lsn, Lsn)>,
 }
 
 struct Transaction {
@@ -52,45 +51,50 @@ impl<'a> Analysis<'a> {
             }
         }
 
-        let mut losers = BinaryHeap::new();
+        let mut losers = Vec::new();
         for (txn_id, state) in transactions {
             if state.completed {
                 continue; // Winners may start in a retained suffix; losers may not.
             }
-            if state.begin.is_none() {
-                return Err(LogManagerError::InvalidChain {
-                    txn_id,
-                    lsn: state.head,
-                    link: oldest,
-                }
-                .into());
-            }
-            losers.push((state.head, txn_id));
+            let begin = state.begin.ok_or(LogManagerError::InvalidChain {
+                txn_id,
+                lsn: state.head,
+                link: oldest,
+            })?;
+            losers.push((txn_id, begin, state.head));
         }
         Ok(Self { records: index, losers })
     }
 
-    pub(super) fn take_loser(&mut self) -> StorageResult<Option<&'a RecoveryLogRecord>> {
-        self.losers
-            .pop()
-            .map(|(lsn, txn_id)| {
-                self.records
-                    .get(&lsn)
+    pub(super) fn restore_losers(
+        self,
+        transactions: &mut crate::transaction_manager::TransactionManager,
+        mut take_pending: impl FnMut(TxnId) -> BTreeMap<crate::PageId, bool>,
+    ) -> StorageResult<()> {
+        for (txn_id, begin, mut head) in self.losers {
+            let mut chain = Vec::new();
+            while head != begin {
+                let record = self
+                    .records
+                    .get(&head)
                     .copied()
-                    .ok_or_else(|| LogManagerError::InvalidChain { txn_id, lsn, link: lsn }.into())
-            })
-            .transpose()
-    }
-
-    pub(super) fn resume_at(&mut self, txn_id: TxnId, lsn: Lsn) {
-        self.losers.push((lsn, txn_id));
+                    .ok_or(LogManagerError::InvalidChain { txn_id, lsn: head, link: head })?;
+                let next = undo_next(record);
+                chain.push((record, next));
+                head = next;
+            }
+            transactions.restore_loser(txn_id, begin, take_pending(txn_id), chain);
+        }
+        Ok(())
     }
 }
 
 pub(super) fn undo_next(record: &RecoveryLogRecord) -> Lsn {
     match record.kind {
         Kind::PageCompensation { undo_next_lsn, .. }
-        | Kind::AllocationCompensation { undo_next_lsn, .. } => undo_next_lsn,
+        | Kind::AllocationCompensation { undo_next_lsn, .. }
+        | Kind::LogicalEdit { undo_next_lsn, .. }
+        | Kind::SkipUndo { undo_next_lsn } => undo_next_lsn,
         _ => record.prev_lsn,
     }
 }

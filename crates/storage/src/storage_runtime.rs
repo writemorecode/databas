@@ -4,21 +4,16 @@ use crate::disk_manager::DiskManager;
 use crate::error::{InternalError, StorageError, StorageResult};
 use crate::filesystem::FileSystem;
 use crate::log_manager::{LogManager, Lsn, TxnId};
+use crate::logical_undo::LogicalUndo;
 use crate::page_allocator::PageAllocator;
 use crate::page_operation::LeafOperation;
 use crate::page_recovery::PageInitKind;
-use crate::recovery::recover_from_wal;
+use crate::recovery::{Restart, repeat_history};
 use crate::transaction_manager::{
-    PageRestore, TransactionManager, TransactionRollback, TransactionSavepoint,
+    ActionBoundary, TransactionManager, TransactionSavepoint, UndoStep,
 };
 use crate::{CheckpointOutcome, PAGE_SIZE, PageId};
 use std::sync::{Mutex, MutexGuard};
-
-type ActiveTransactionManager = TransactionManager;
-
-fn make_transaction_manager(max_txn_id: TxnId) -> ActiveTransactionManager {
-    TransactionManager::new(max_txn_id)
-}
 
 /// Shared concrete storage runtime for database pages and the write-ahead log.
 ///
@@ -32,25 +27,36 @@ pub struct StorageRuntime {
     checkpoint: Mutex<()>,
     disk: Mutex<DiskManager>,
     log: Mutex<LogManager>,
-    transactions: Mutex<ActiveTransactionManager>,
+    transactions: Mutex<TransactionManager>,
     allocator: Mutex<PageAllocator>,
 }
 
 impl StorageRuntime {
-    pub(crate) fn new(fs: FileSystem, path: PathBuf, mut disk: DiskManager) -> StorageResult<Self> {
+    pub(crate) fn new(
+        fs: FileSystem,
+        path: PathBuf,
+        mut disk: DiskManager,
+    ) -> StorageResult<(Self, bool)> {
         disk.lock_exclusive()?;
-        let recovery = recover_from_wal(&fs, &path, &mut disk)?;
-        let log = LogManager::new(fs, &path)?;
-        let allocator = PageAllocator::load(&mut disk)?;
-        let max_txn_id = recovery.max_txn_id.max(log.highest_txn_id());
-        Ok(Self {
-            checkpoint: Mutex::new(()),
-            path,
-            allocator: Mutex::new(allocator),
-            disk: Mutex::new(disk),
-            log: Mutex::new(log),
-            transactions: Mutex::new(make_transaction_manager(max_txn_id)),
-        })
+        let Restart { log, allocator, transactions, needs_checkpoint } =
+            repeat_history(fs, &path, &mut disk)?;
+        Ok((
+            Self {
+                checkpoint: Mutex::new(()),
+                path,
+                allocator: Mutex::new(allocator),
+                disk: Mutex::new(disk),
+                log: Mutex::new(log),
+                transactions: Mutex::new(transactions),
+            },
+            needs_checkpoint,
+        ))
+    }
+
+    pub(crate) fn validate_allocation_bounds(&self) -> StorageResult<()> {
+        let allocator = Self::lock(&self.allocator, "page allocator")?;
+        let disk = Self::lock(&self.disk, "disk manager")?;
+        allocator.validate_bounds(disk.page_count())
     }
 
     fn lock<'a, T>(mutex: &'a Mutex<T>, lock: &'static str) -> StorageResult<MutexGuard<'a, T>> {
@@ -148,13 +154,16 @@ impl StorageRuntime {
     {
         // Serialize the whole checkpoint, including cache flushing and WAL publication.
         let _checkpoint = Self::lock(&self.checkpoint, "checkpoint serialization")?;
-        // Capture a fixed horizon and preserve all undo for transactions alive
-        // now. New transactions begin after this horizon and are retained too.
+        // Keep undo for transactions already alive, including any CLR whose
+        // page effect is not yet in the cache. New writes start at the horizon.
         let mut retain_from = {
             let transactions = Self::lock(&self.transactions, "transaction manager")?;
             let log = Self::lock(&self.log, "log manager")?;
             let horizon = log.next_lsn()?;
-            transactions.oldest_begin_lsn().map_or(horizon, |oldest| oldest.min(horizon))
+            transactions
+                .oldest_begin_lsn()
+                .unwrap_or(horizon)
+                .min(transactions.oldest_pending_restore_lsn().unwrap_or(horizon))
         };
         // No transaction/log latch is held while entering the page cache.
         let deferred = flush_cache()?;
@@ -231,30 +240,73 @@ impl StorageRuntime {
         Self::lock(&self.transactions, "transaction manager")?.statement_savepoint(txn_id)
     }
 
-    pub(crate) fn rollback_to_savepoint(
-        &self,
-        savepoint: TransactionSavepoint,
-    ) -> StorageResult<Vec<PageRestore>> {
-        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
-        let mut log = Self::lock(&self.log, "log manager")?;
-        transactions.rollback_to_savepoint(&mut log, savepoint)
-    }
-
-    pub(crate) fn complete_savepoint_rollback(
-        &self,
-        savepoint: TransactionSavepoint,
-    ) -> StorageResult<()> {
-        Self::lock(&self.transactions, "transaction manager")?
-            .complete_savepoint_rollback(savepoint)
-    }
-
-    pub(crate) fn prepare_rollback_pages(
+    pub(crate) fn has_surviving_root(
         &self,
         txn_id: TxnId,
-    ) -> StorageResult<TransactionRollback> {
+        incarnation: Lsn,
+    ) -> StorageResult<bool> {
+        Self::lock(&self.transactions, "transaction manager")?
+            .has_surviving_root(txn_id, incarnation)
+    }
+
+    pub(crate) fn begin_action(&self, txn_id: TxnId) -> StorageResult<ActionBoundary> {
+        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let log = Self::lock(&self.log, "log manager")?;
+        transactions.begin_action(&log, txn_id)
+    }
+
+    pub(crate) fn complete_action(
+        &self,
+        txn_id: TxnId,
+        boundary: ActionBoundary,
+        inverse: LogicalUndo,
+    ) -> StorageResult<()> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
         let mut log = Self::lock(&self.log, "log manager")?;
-        transactions.prepare_rollback_pages(&mut log, txn_id)
+        transactions.complete_action(&mut log, txn_id, boundary, inverse)
+    }
+
+    pub(crate) fn start_abort(&self, txn_id: TxnId) -> StorageResult<()> {
+        Self::lock(&self.transactions, "transaction manager")?.start_abort(txn_id)
+    }
+
+    pub(crate) fn loser_heads(&self) -> StorageResult<std::collections::BinaryHeap<(Lsn, TxnId)>> {
+        Ok(Self::lock(&self.transactions, "transaction manager")?.loser_heads())
+    }
+
+    pub(crate) fn undo_head(&self, txn_id: TxnId) -> StorageResult<Lsn> {
+        Self::lock(&self.transactions, "transaction manager")?.undo_head(txn_id)
+    }
+
+    pub(crate) fn prepare_undo(
+        &self,
+        txn_id: TxnId,
+        savepoint: Option<TransactionSavepoint>,
+    ) -> StorageResult<UndoStep> {
+        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let mut log = Self::lock(&self.log, "log manager")?;
+        transactions.prepare_undo(&mut log, txn_id, savepoint)
+    }
+
+    pub(crate) fn finish_page_undo(&self, txn_id: TxnId) -> StorageResult<()> {
+        Self::lock(&self.transactions, "transaction manager")?.finish_page_undo(txn_id)
+    }
+
+    pub(crate) fn finish_logical_undo(
+        &self,
+        txn_id: TxnId,
+        boundary: ActionBoundary,
+        completed: bool,
+    ) -> StorageResult<()> {
+        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let mut log = Self::lock(&self.log, "log manager")?;
+        transactions.finish_logical_undo(&mut log, txn_id, boundary, completed)
+    }
+
+    pub(crate) fn flush_transaction_wal(&self, txn_id: TxnId) -> StorageResult<()> {
+        let mut log = Self::lock(&self.log, "log manager")?;
+        let lsn = log.transaction_head(txn_id);
+        Ok(log.flush_through(lsn)?)
     }
 
     pub(crate) fn finish_rollback(&self, txn_id: TxnId) -> StorageResult<()> {

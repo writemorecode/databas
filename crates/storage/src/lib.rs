@@ -15,6 +15,7 @@ mod engine;
 pub mod error;
 mod filesystem;
 pub(crate) mod log_manager;
+mod logical_undo;
 mod overflow;
 mod page;
 mod page_allocator;

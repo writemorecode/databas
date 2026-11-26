@@ -21,7 +21,7 @@ cargo clippy --workspace --all-targets --all-features
 
 ### Database file format
 
-Format version 13 reserves a common recovery trailer on each 4,096-byte
+Format version 14 reserves a common recovery trailer on each 4,096-byte
 page. It contains the page incarnation and page LSN, followed by a
 little-endian CRC32 over the physical page ID and the preceding 4,092 bytes. A required `.doublewrite` sidecar stages protected page
 writes and is bound to the database file's filesystem identity (currently Unix
@@ -34,8 +34,10 @@ page from its WAL record. The allocator reserves pages at initialization but
 publishes frees only at a durable transaction outcome. Redo uses verified
 page LSNs and incarnations to skip effects already reflected on disk. Data-page
 updates log page-local operations instead of full images. Ordinary leaf edits
-redo by slot; structural and overflow writes use byte runs. Undo still restores
-physical byte runs, so tree splits and merges cannot survive user rollback.
+redo by slot; structural and overflow writes use byte runs.
+
+On existing trees, completed row edits undo by tree incarnation and key.
+Interrupted edits and edits on newly created trees are undone physically.
 
 ### Storage simulation
 
@@ -48,7 +50,7 @@ CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo run --release -p databas-stora
 The simulator runs until the time limit or the first unexpected failure. Its
 clients share the storage engine and keep operating across injected I/O errors
 and power losses. Recovery checks the B+-trees against the client transaction
-history. To replay a failure, use the same build and seed and replace
+history. To replay a randomized failure, use the same build and seed and replace
 `--duration 15m` with the reported `--events N`.
 
 `DROP TABLE name;` removes a user table and all of its secondary indexes.

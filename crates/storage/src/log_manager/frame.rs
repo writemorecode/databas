@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 
 use crc::{CRC_32_ISO_HDLC, Crc, Digest};
 
+use crate::logical_undo::{Inverse, LogicalUndo};
 use crate::page::format::MAX_INLINE_OVERFLOW_PAYLOAD_BYTES;
 use crate::page_operation::{LeafOperation, LeafPayload, PageOperation};
 use crate::page_patch::{InvalidPagePatch, MAX_PATCH_BYTES, PagePatch};
@@ -15,7 +16,7 @@ pub(super) type DecodedRecord = (Lsn, RecoveryLogRecordKind);
 
 const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const FOOTER_MAGIC: [u8; 8] = *b"DBWALFTR";
-const WAL_FORMAT_VERSION: u16 = 8;
+const WAL_FORMAT_VERSION: u16 = 9;
 pub(super) const HEADER_LEN: usize = 8 + 2 + 8 + 4 + 8;
 const FOOTER_LEN: usize = 8 + 8 + 4;
 pub(super) const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
@@ -28,6 +29,12 @@ const KIND_PAGE_INIT: u8 = 5;
 const KIND_PAGE_DEALLOC: u8 = 6;
 const KIND_PAGE_COMPENSATION: u8 = 7;
 const KIND_ALLOCATION_COMPENSATION: u8 = 8;
+const KIND_LOGICAL_EDIT: u8 = 9;
+const KIND_SKIP_UNDO: u8 = 10;
+
+const INVERSE_DELETE: u8 = 1;
+const INVERSE_INSERT: u8 = 2;
+const INVERSE_REPLACE: u8 = 3;
 
 const OP_PATCH: u8 = 1;
 const OP_LEAF_INSERT: u8 = 2;
@@ -203,6 +210,11 @@ impl<R: Read> FramePayload<'_, R> {
                     undo_next_lsn,
                 })
             }
+            KIND_LOGICAL_EDIT => self.read_logical_undo(collect)?,
+            KIND_SKIP_UNDO => {
+                let undo_next_lsn = u64::from_le_bytes(self.read_array()?);
+                collect.then_some(Kind::SkipUndo { undo_next_lsn })
+            }
             KIND_PAGE_UPDATE => {
                 let page_id = u64::from_le_bytes(self.read_array()?);
                 let incarnation = u64::from_le_bytes(self.read_array()?);
@@ -220,6 +232,65 @@ impl<R: Read> FramePayload<'_, R> {
             kind => return Err(LogManagerError::UnknownRecordKind { kind }),
         };
         Ok(kind.map(|kind| (prev_lsn, kind)))
+    }
+
+    fn read_logical_undo(
+        &mut self,
+        collect: bool,
+    ) -> Result<Option<RecoveryLogRecordKind>, LogManagerError> {
+        let undo_next_lsn = u64::from_le_bytes(self.read_array()?);
+        let root = u64::from_le_bytes(self.read_array()?);
+        let incarnation = u64::from_le_bytes(self.read_array()?);
+        let tag = self.read_array::<1>()?[0];
+        let key_len = u16::from_le_bytes(self.read_array()?);
+        let value_len = u16::from_le_bytes(self.read_array()?);
+        if root == 0
+            || incarnation == 0
+            || key_len.checked_add(value_len).is_none()
+            || !matches!(tag, INVERSE_DELETE | INVERSE_INSERT | INVERSE_REPLACE)
+            || (tag == INVERSE_DELETE && value_len != 0)
+        {
+            return Err(LogManagerError::InvalidLogicalUndo);
+        }
+        let key = self.read_owned_payload(usize::from(key_len), collect)?;
+        let value = self.read_owned_payload(usize::from(value_len), collect)?;
+        Ok(key.zip(value).map(|(key, value)| RecoveryLogRecordKind::LogicalEdit {
+            undo: LogicalUndo {
+                root,
+                incarnation,
+                key,
+                action: match tag {
+                    INVERSE_DELETE => Inverse::Delete,
+                    INVERSE_INSERT => Inverse::Insert(value),
+                    _ => Inverse::Replace(value),
+                },
+            },
+            undo_next_lsn,
+        }))
+    }
+
+    fn read_owned_payload(
+        &mut self,
+        len: usize,
+        collect: bool,
+    ) -> Result<Option<Box<[u8]>>, LogManagerError> {
+        if self.remaining < len {
+            return Err(LogManagerError::TruncatedFrame { needed: len, remaining: self.remaining });
+        }
+        if collect {
+            let mut bytes = vec![0; len].into_boxed_slice();
+            self.read_payload(&mut bytes)?;
+            Ok(Some(bytes))
+        } else {
+            let mut bytes = [0; 1024];
+            let mut left = len;
+            while left > 0 {
+                let chunk = left.min(bytes.len());
+                self.read_payload(&mut bytes[..chunk])?;
+                left -= chunk;
+            }
+            Ok(None)
+        }
     }
 
     fn read_operation(&mut self, collect: bool) -> Result<Option<PageOperation>, LogManagerError> {
@@ -358,14 +429,14 @@ fn serialized_records_len(records: &[LogRecord<'_>]) -> Result<u64, LogManagerEr
     let mut len = 0u64;
     for record in records {
         len = len
-            .checked_add(8 + serialized_record_len(&record.kind))
+            .checked_add(8 + serialized_record_len(&record.kind)?)
             .ok_or(LogManagerError::PayloadLengthOverflow)?;
     }
     Ok(len)
 }
 
-fn serialized_record_len(kind: &LogRecordKind<'_>) -> u64 {
-    match kind {
+fn serialized_record_len(kind: &LogRecordKind<'_>) -> Result<u64, LogManagerError> {
+    Ok(match kind {
         LogRecordKind::Begin | LogRecordKind::Commit | LogRecordKind::Rollback => 1,
         LogRecordKind::PageUpdate { redo, undo, .. } => {
             1 + 8 + 8 + 8 + operation_len(redo) + 2 + undo.bytes().len() as u64
@@ -376,6 +447,31 @@ fn serialized_record_len(kind: &LogRecordKind<'_>) -> u64 {
             1 + 8 + 8 + 8 + 2 + redo.bytes().len() as u64
         }
         LogRecordKind::AllocationCompensation { .. } => 1 + 8 + 8 + 1,
+        LogRecordKind::LogicalEdit { undo, .. } => {
+            let (_, value) = inverse_payload(&undo.action);
+            let (key_len, value_len) = logical_lengths(undo, value)?;
+            1 + 8 + 8 + 8 + 1 + 2 + 2 + u64::from(key_len) + u64::from(value_len)
+        }
+        LogRecordKind::SkipUndo { .. } => 1 + 8,
+    })
+}
+
+fn logical_lengths(undo: &LogicalUndo, value: &[u8]) -> Result<(u16, u16), LogManagerError> {
+    let key_len =
+        u16::try_from(undo.key.len()).map_err(|_too_large| LogManagerError::InvalidLogicalUndo)?;
+    let value_len =
+        u16::try_from(value.len()).map_err(|_too_large| LogManagerError::InvalidLogicalUndo)?;
+    if undo.root == 0 || undo.incarnation == 0 || key_len.checked_add(value_len).is_none() {
+        return Err(LogManagerError::InvalidLogicalUndo);
+    }
+    Ok((key_len, value_len))
+}
+
+fn inverse_payload(inverse: &Inverse) -> (u8, &[u8]) {
+    match inverse {
+        Inverse::Delete => (INVERSE_DELETE, &[]),
+        Inverse::Insert(value) => (INVERSE_INSERT, value),
+        Inverse::Replace(value) => (INVERSE_REPLACE, value),
     }
 }
 
@@ -441,6 +537,23 @@ fn write_log_record_payload<W: Write>(
             write_crc_u64(writer, digest, *page_id)?;
             write_crc_u64(writer, digest, *undo_next_lsn)?;
             write_crc_u8(writer, digest, u8::from(*allocated))?;
+        }
+        LogRecordKind::LogicalEdit { undo, undo_next_lsn } => {
+            let (tag, value) = inverse_payload(&undo.action);
+            let (key_len, value_len) = logical_lengths(undo, value)?;
+            write_crc_u8(writer, digest, KIND_LOGICAL_EDIT)?;
+            write_crc_u64(writer, digest, *undo_next_lsn)?;
+            write_crc_u64(writer, digest, undo.root)?;
+            write_crc_u64(writer, digest, undo.incarnation)?;
+            write_crc_u8(writer, digest, tag)?;
+            write_crc_bytes(writer, digest, &key_len.to_le_bytes())?;
+            write_crc_bytes(writer, digest, &value_len.to_le_bytes())?;
+            write_crc_bytes(writer, digest, &undo.key)?;
+            write_crc_bytes(writer, digest, value)?;
+        }
+        LogRecordKind::SkipUndo { undo_next_lsn } => {
+            write_crc_u8(writer, digest, KIND_SKIP_UNDO)?;
+            write_crc_u64(writer, digest, *undo_next_lsn)?;
         }
         LogRecordKind::PageInit { page_id, kind } => {
             write_crc_u8(writer, digest, KIND_PAGE_INIT)?;

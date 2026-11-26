@@ -1,4 +1,4 @@
-//! Repeat physical history and compensate losers before handing pages to the cache.
+//! Repeat physical history before handing pages to logical or physical undo.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -6,15 +6,12 @@ use crate::disk_manager::DiskManager;
 use crate::error::{
     CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult,
 };
-use crate::log_manager::{
-    LogManager, LogManagerError, LogRecordKind, RecoveryLogRecord, RecoveryLogRecordKind as Kind,
-};
+use crate::log_manager::{LogManagerError, RecoveryLogRecord, RecoveryLogRecordKind as Kind};
 use crate::page_allocator::PageAllocator;
 use crate::page_recovery::PageRecovery;
-use crate::{Lsn, PAGE_SIZE, PageId, TxnId};
+use crate::{Lsn, PageId, TxnId};
 
-use super::analysis::{Analysis, undo_next};
-use super::data::{DataRedo, apply_operation};
+use super::data::DataRedo;
 
 /// Allocations reserve bits at PageInit. Frees and allocation CLRs change only
 /// the pending state until Commit/Rollback, exactly as during normal execution.
@@ -25,6 +22,10 @@ pub(super) struct AllocationReplay {
 }
 
 impl AllocationReplay {
+    pub(super) fn take_pending(&mut self, txn_id: TxnId) -> BTreeMap<PageId, bool> {
+        self.pending.remove(&txn_id).unwrap_or_default()
+    }
+
     fn request(&mut self, txn_id: TxnId, page_id: PageId, allocated: bool) {
         self.pending.entry(txn_id).or_default().insert(page_id, allocated);
     }
@@ -80,76 +81,10 @@ pub(super) fn redo(
             Kind::Commit | Kind::Rollback => {
                 allocations.publish(disk, allocator, record.txn_id, record.lsn)?;
             }
-            Kind::Begin => {}
+            Kind::Begin | Kind::LogicalEdit { .. } | Kind::SkipUndo { .. } => {}
         }
     }
     Ok(allocations)
-}
-
-/// Append compensation before installing its effect. A restart redoes any
-/// surviving CLRs and uses their skip links rather than undoing them again.
-pub(super) fn undo(
-    mut analysis: Analysis<'_>,
-    mut allocations: AllocationReplay,
-    log: &mut LogManager,
-    disk: &mut DiskManager,
-    allocator: &mut PageAllocator,
-) -> StorageResult<()> {
-    while let Some(record) = analysis.take_loser()? {
-        let txn_id = record.txn_id;
-        let next = undo_next(record);
-        match &record.kind {
-            Kind::PageUpdate { page_id, incarnation, undo, .. } => {
-                let mut image = [0; PAGE_SIZE];
-                disk.read_page(*page_id, &mut image)?;
-                debug_assert!(PageRecovery::read(&image).lsn >= record.lsn);
-                let target = PageRecovery { incarnation: *incarnation, lsn: log.next_lsn()? };
-                apply_operation(*page_id, &mut image, target, |image| {
-                    Ok(undo.apply(image).map_err(LogManagerError::from)?)
-                })?;
-                let lsn = log.append_record(
-                    txn_id,
-                    LogRecordKind::PageCompensation {
-                        page_id: *page_id,
-                        incarnation: *incarnation,
-                        redo: undo,
-                        undo_next_lsn: next,
-                    },
-                )?;
-                debug_assert_eq!(lsn, target.lsn);
-                log.flush_through(lsn)?;
-                disk.write_page(*page_id, &image)?;
-            }
-            Kind::PageInit { page_id, .. } | Kind::PageDealloc { page_id } => {
-                // Undo the reservation, not the initializer: restoring a former
-                // incarnation would make later redo mistake it for current.
-                let allocated = matches!(record.kind, Kind::PageDealloc { .. });
-                log.append_record(
-                    txn_id,
-                    LogRecordKind::AllocationCompensation {
-                        page_id: *page_id,
-                        allocated,
-                        undo_next_lsn: next,
-                    },
-                )?;
-                allocations.request(txn_id, *page_id, allocated);
-            }
-            Kind::Begin | Kind::PageCompensation { .. } | Kind::AllocationCompensation { .. } => {}
-            Kind::Commit | Kind::Rollback => {
-                return Err(
-                    LogManagerError::InvalidChain { txn_id, lsn: record.lsn, link: next }.into()
-                );
-            }
-        }
-        if next == 0 {
-            let lsn = log.append_record(txn_id, LogRecordKind::Rollback)?;
-            log.flush_through(lsn)?;
-            allocations.publish(disk, allocator, txn_id, lsn)?;
-        } else {
-            analysis.resume_at(txn_id, next);
-        }
-    }
-    Ok(())
 }
 
 fn set_allocation(

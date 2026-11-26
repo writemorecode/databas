@@ -1,52 +1,49 @@
-//! Repair the database from the valid WAL prefix before opening it to transactions.
-//!
-//! Analyze transaction chains, repeat physical history, then undo incomplete
-//! transactions with redo-only compensation (`recovery_protocol`, R1). Page
-//! LSNs bound redo only after checksum and incarnation verification.
+//! Repeat durable history, then hand reconstructed loser transactions to the
+//! same cache-backed undo path used by live rollback. No cursor is exposed
+//! until all losers are compensated and the recovered pages are durable.
 
 use std::path::Path;
 
 use crate::disk_manager::DiskManager;
 use crate::error::StorageResult;
 use crate::filesystem::FileSystem;
-use crate::log_manager::{LogManager, TxnId, read_recovery_log, retire_empty_wal};
+use crate::log_manager::{LogManager, read_recovery_log};
 use crate::page_allocator::PageAllocator;
+use crate::transaction_manager::TransactionManager;
 
 mod analysis;
 mod data;
 mod replay;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecoveryResult {
-    pub(crate) max_txn_id: TxnId,
+pub struct Restart {
+    pub log: LogManager,
+    pub allocator: PageAllocator,
+    pub transactions: TransactionManager,
+    pub needs_checkpoint: bool,
 }
 
-pub fn recover_from_wal(
-    fs: &FileSystem,
+pub fn repeat_history(
+    fs: FileSystem,
     path: &Path,
     disk: &mut DiskManager,
-) -> StorageResult<RecoveryResult> {
-    let scan = read_recovery_log(fs, path)?;
-    let max_txn_id = scan.max_txn_id;
-    if scan.records.is_empty() {
-        PageAllocator::load(disk)?.validate_bounds(disk.page_count())?;
-        if max_txn_id > 0 || scan.truncated_tail {
-            retire_empty_wal(fs, path, &scan)?;
-        }
-        return Ok(RecoveryResult { max_txn_id });
-    }
-
+) -> StorageResult<Restart> {
+    let scan = read_recovery_log(&fs, path)?;
     let analysis = analysis::Analysis::new(&scan.records)?;
-    let mut log = LogManager::new(fs.clone(), path)?;
-    // A valid prefix can include bytes that survived without an earlier sync.
-    // Force them before depending on them for any protected home write.
-    log.flush_all()?;
+    let mut log = LogManager::new(fs, path)?;
+    let mut transactions = TransactionManager::new(scan.max_txn_id.max(log.highest_txn_id()));
+    let needs_checkpoint = !scan.records.is_empty();
+    if needs_checkpoint {
+        // The surviving prefix can contain records not yet forced by the last
+        // process. Protect the home writes and any newly generated compensation.
+        log.flush_all()?;
+    }
     let mut allocator = PageAllocator::load(disk)?;
-    let allocations = replay::redo(&scan.records, disk, &mut allocator)?;
-    replay::undo(analysis, allocations, &mut log, disk, &mut allocator)?;
-    allocator.validate_bounds(disk.page_count())?;
-    allocator.flush(disk, &mut log)?;
-    disk.sync()?;
-    log.retire_after_recovery()?;
-    Ok(RecoveryResult { max_txn_id })
+    if needs_checkpoint {
+        let mut allocations = replay::redo(&scan.records, disk, &mut allocator)?;
+        analysis.restore_losers(&mut transactions, |id| allocations.take_pending(id))?;
+        log.retain_transaction_heads(|id| transactions.transaction_is_active(id));
+    } else {
+        allocator.validate_bounds(disk.page_count())?;
+    }
+    Ok(Restart { log, allocator, transactions, needs_checkpoint })
 }

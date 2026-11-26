@@ -88,8 +88,19 @@ impl Storage {
             return Err(missing_doublewrite().into());
         }
         let opened_page_count = disk_manager.page_count();
-        let runtime = Arc::new(StorageRuntime::new(fs, path.to_path_buf(), disk_manager)?);
+        let (runtime, needs_checkpoint) =
+            StorageRuntime::new(fs, path.to_path_buf(), disk_manager)?;
+        let runtime = Arc::new(runtime);
         let page_cache = PageCache::new(Arc::clone(&runtime), options.cache_frames)?;
+        if needs_checkpoint {
+            // Undo can be more demanding than the original edit (e.g. restoring
+            // a large value to a leaf that is now full). Give restart workspace
+            // independent of the caller's cache setting.
+            let recovery_cache = PageCache::new(Arc::clone(&runtime), 32)?;
+            recovery_cache.undo_restart_losers()?;
+            runtime.validate_allocation_bounds()?;
+            runtime.checkpoint(|| Ok(recovery_cache.flush_checkpoint()?))?;
+        }
         Ok(Self { runtime, page_cache, opened_page_count })
     }
 
@@ -136,12 +147,7 @@ impl Storage {
     }
 
     pub fn rollback_to_savepoint(&self, savepoint: TransactionSavepoint) -> StorageResult<()> {
-        let undo_pages = self.runtime.rollback_to_savepoint(savepoint)?;
-        if let Err(err) = self.page_cache.restore_rollback_pages(undo_pages) {
-            self.runtime.record_transaction_failure(savepoint.txn_id)?;
-            return Err(err.into());
-        }
-        self.runtime.complete_savepoint_rollback(savepoint)
+        self.page_cache.rollback_to_savepoint(savepoint)
     }
 
     pub fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
@@ -184,15 +190,19 @@ impl Storage {
         self.runtime.validate_transaction_write(txn_id)
     }
 
-    /// Returns a raw cursor rooted at an existing tree.
+    /// Returns a raw cursor rooted at an existing tree. The caller must
+    /// serialize raw mutations with other access to that tree.
     pub fn tree_cursor(&self, root_page_id: PageId) -> StorageResult<TreeCursor> {
         TreeCursor::new(self.page_cache.clone(), root_page_id)
     }
 
     /// Opens a cursor for an active, writable transaction.
     ///
-    /// Serialize transaction completion with all mutations using its cursors.
-    /// A retained cursor rejects mutations after the transaction ends.
+    /// Hold exclusive logical access to the tree through transaction completion,
+    /// and serialize completion with all mutations through its cursors. After
+    /// a failed mutation, roll back the statement savepoint or the transaction
+    /// before using the tree again. A retained cursor rejects mutations after
+    /// its transaction ends.
     pub fn transaction_tree_cursor(
         &self,
         txn_id: TxnId,
