@@ -1,8 +1,11 @@
 //! Recovery metadata is independent of page contents and survives a rebuild.
 
+use crate::error::{
+    CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult,
+};
 use crate::page::{RawInterior, RawLeaf, Write, format};
 use crate::types::{PAGE_CHECKSUM_OFFSET, PAGE_CONTENT_END};
-use crate::{Lsn, PAGE_SIZE};
+use crate::{Lsn, PAGE_SIZE, PageId};
 
 /// Fixed trailer shared by data pages, allocation bitmaps and page zero.
 /// Data-page incarnations are their PageInit LSN. Zero is reserved for
@@ -28,6 +31,20 @@ impl PageRecovery {
 
     pub fn stamp_lsn(bytes: &mut [u8; PAGE_SIZE], lsn: Lsn) {
         Self { lsn, ..Self::read(bytes) }.write(bytes);
+    }
+
+    pub fn require_incarnation(self, page_id: PageId, expected: Lsn) -> StorageResult<()> {
+        if self.incarnation != expected {
+            return Err(StorageError::Corruption(CorruptionError {
+                component: CorruptionComponent::DiskPage,
+                page_id: Some(page_id),
+                kind: CorruptionKind::UnexpectedPageIncarnation {
+                    expected,
+                    actual: self.incarnation,
+                },
+            }));
+        }
+        Ok(())
     }
 }
 

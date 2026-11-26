@@ -6,8 +6,9 @@ use crate::disk_manager::{DiskManager, DiskManagerError};
 use crate::error::{
     CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult,
 };
-use crate::log_manager::{RecoveryLogRecord, RecoveryLogRecordKind as Kind};
+use crate::log_manager::{LogManagerError, RecoveryLogRecord, RecoveryLogRecordKind as Kind};
 use crate::page_allocator::PageAllocator;
+use crate::page_patch::PagePatch;
 use crate::page_recovery::{PageInitKind, PageRecovery};
 use crate::{Lsn, PAGE_SIZE, PageId};
 
@@ -36,19 +37,40 @@ impl<'a> DataRedo<'a> {
         Ok(())
     }
 
-    pub(super) fn install(
+    pub(super) fn patch(
         &mut self,
         disk: &mut DiskManager,
         page_id: PageId,
-        lsn: Lsn,
-        image: &[u8; PAGE_SIZE],
+        target: PageRecovery,
+        redo: &PagePatch,
+        baseline: Option<(Lsn, &PagePatch)>,
     ) -> StorageResult<()> {
-        let target = validate_data(page_id, image)?;
-        if target.lsn != lsn || target.incarnation >= lsn {
+        if target.incarnation == 0 || target.incarnation >= target.lsn {
             return Err(invalid_metadata(page_id, target));
         }
+        if let Some((before, _)) = baseline
+            && !(target.incarnation..target.lsn).contains(&before)
+        {
+            return Err(invalid_metadata(page_id, PageRecovery { lsn: before, ..target }));
+        }
         if self.needs_redo(disk, page_id, target, false)? {
-            disk.write_page(page_id, image)?;
+            let mut image = [0; PAGE_SIZE];
+            disk.read_page(page_id, &mut image)?;
+            let current = validate_data(page_id, &image)?;
+            if let Some((before_lsn, undo)) = baseline
+                && (current.lsn != before_lsn
+                    || !undo.matches(&image).map_err(LogManagerError::from)?)
+            {
+                return Err(corruption(
+                    page_id,
+                    CorruptionKind::PagePatchBaselineMismatch {
+                        expected: before_lsn,
+                        actual: current.lsn,
+                    },
+                ));
+            }
+            apply_patch(page_id, &mut image, target, redo)?;
+            disk.write_page(page_id, &image)?;
             self.pages.insert(page_id, target);
         }
         Ok(())
@@ -94,11 +116,7 @@ impl<'a> DataRedo<'a> {
             if current.incarnation <= target.lsn
                 || !matches!(self.record(current.incarnation), Some(Kind::PageInit { page_id: owner, .. }) if *owner == page_id)
             {
-                return Err(unexpected_incarnation(
-                    page_id,
-                    target.incarnation,
-                    current.incarnation,
-                ));
+                current.require_incarnation(page_id, target.incarnation)?;
             }
         }
         if !self.record_matches(page_id, current) {
@@ -118,9 +136,9 @@ impl<'a> DataRedo<'a> {
                 *owner == page_id && current.incarnation == current.lsn
             }
             Some(
-                Kind::PageUpdate { page_id: owner, redo_data, .. }
-                | Kind::PageCompensation { page_id: owner, redo_data, .. },
-            ) => *owner == page_id && PageRecovery::read(redo_data) == current,
+                Kind::PageUpdate { page_id: owner, incarnation, .. }
+                | Kind::PageCompensation { page_id: owner, incarnation, .. },
+            ) => *owner == page_id && *incarnation == current.incarnation,
             _ => false,
         }
     }
@@ -153,8 +171,21 @@ fn invalid_metadata(page_id: PageId, recovery: PageRecovery) -> StorageError {
     )
 }
 
-pub(super) fn unexpected_incarnation(page_id: PageId, expected: Lsn, actual: Lsn) -> StorageError {
-    corruption(page_id, CorruptionKind::UnexpectedPageIncarnation { expected, actual })
+pub(super) fn apply_patch(
+    page_id: PageId,
+    image: &mut [u8; PAGE_SIZE],
+    target: PageRecovery,
+    patch: &PagePatch,
+) -> StorageResult<()> {
+    let current = validate_data(page_id, image)?;
+    current.require_incarnation(page_id, target.incarnation)?;
+    if current.lsn >= target.lsn {
+        return Err(invalid_metadata(page_id, current));
+    }
+    patch.apply(image).map_err(LogManagerError::from)?;
+    target.write(image);
+    validate_data(page_id, image)?;
+    Ok(())
 }
 
 fn corruption(page_id: PageId, kind: CorruptionKind) -> StorageError {

@@ -8,14 +8,15 @@
 //! still fall back to full abort. A durable rollback outcome forces CLRs, not
 //! compensated home pages (recovery_protocol T1/T2).
 //!
-//! Page payloads remain full images. Retained B+-tree structural actions must not
-//! be enabled until user undo follows logical identity rather than these physical
-//! before-images (recovery_protocol T3-T5).
+//! Data-page undo restores byte runs within one incarnation. Retained B+-tree
+//! structural actions must not be enabled until user undo follows logical
+//! identity rather than these physical offsets (recovery_protocol T3-T5).
 
 use std::collections::{BTreeMap, HashMap};
 
 use crate::error::{InternalError, InvariantViolation, StorageError, StorageResult};
 use crate::log_manager::{LogManager, LogRecordKind, Lsn, TxnId};
+use crate::page_patch::PagePatch;
 use crate::page_recovery::{PageInitKind, PageRecovery};
 use crate::{PAGE_SIZE, PageId};
 
@@ -27,7 +28,7 @@ struct UndoEntry {
 
 #[derive(Debug, Clone)]
 enum UndoKind {
-    Page { page_id: PageId, before: Box<[u8; PAGE_SIZE]> },
+    Page { page_id: PageId, incarnation: Lsn, undo: PagePatch },
     Allocation { page_id: PageId, allocated: bool },
 }
 
@@ -35,7 +36,8 @@ enum UndoKind {
 #[derive(Debug, Clone)]
 pub struct PageRestore {
     pub(crate) page_id: PageId,
-    pub(crate) image: [u8; PAGE_SIZE],
+    pub(crate) incarnation: Lsn,
+    pub(crate) patch: PagePatch,
     pub(crate) wal_flush_lsn: Lsn,
 }
 
@@ -50,13 +52,6 @@ pub struct TransactionRollback {
 pub struct TransactionSavepoint {
     pub(crate) txn_id: TxnId,
     undo_len: usize,
-}
-
-/// The image installed after logging, including its assigned page LSN.
-#[derive(Debug)]
-pub struct LoggedPageUpdate {
-    pub(crate) lsn: Lsn,
-    pub(crate) redo: [u8; PAGE_SIZE],
 }
 
 #[derive(Debug)]
@@ -176,23 +171,28 @@ impl TransactionManager {
         page_id: PageId,
         before: &[u8; PAGE_SIZE],
         after: &[u8; PAGE_SIZE],
-    ) -> StorageResult<LoggedPageUpdate> {
+    ) -> StorageResult<Lsn> {
         self.validate_transaction_write(txn_id)?;
         let result = (|| {
             let prev_lsn = log.transaction_head(txn_id);
-            let expected = log.next_lsn()?;
-            let mut redo = *after;
-            PageRecovery::stamp_lsn(&mut redo, expected);
+            let PageRecovery { incarnation, lsn: before_lsn } = PageRecovery::read(before);
+            debug_assert!(incarnation != 0 && incarnation <= before_lsn);
+            let (redo, undo) = PagePatch::between(before, after);
             let lsn = log.append_record(
                 txn_id,
-                LogRecordKind::PageUpdate { page_id, redo_data: &redo, undo_data: before },
+                LogRecordKind::PageUpdate {
+                    page_id,
+                    incarnation,
+                    before_lsn,
+                    redo: &redo,
+                    undo: &undo,
+                },
             )?;
             let active = self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
-            active.undo.push(UndoEntry {
-                prev_lsn,
-                kind: UndoKind::Page { page_id, before: Box::new(*before) },
-            });
-            Ok(LoggedPageUpdate { lsn, redo })
+            active
+                .undo
+                .push(UndoEntry { prev_lsn, kind: UndoKind::Page { page_id, incarnation, undo } });
+            Ok(lsn)
         })();
         result.inspect_err(|_| self.record_failure(txn_id))
     }
@@ -254,8 +254,8 @@ impl TransactionManager {
     }
 
     /// Emit CLRs in combined page/allocation order, never one class at a time:
-    /// every undo_next_lsn must skip only effects already compensated. Absolute
-    /// bit transitions and page images also make a failed installation retry safe.
+    /// every undo_next_lsn must skip only effects already compensated. A retry
+    /// of failed installation repeats the whole inverse sequence in that order.
     fn compensate_from(
         &mut self,
         log: &mut LogManager,
@@ -279,18 +279,22 @@ impl TransactionManager {
             let mut pages = Vec::new();
             for entry in entries.into_iter().rev() {
                 match entry.kind {
-                    UndoKind::Page { page_id, before } => {
-                        let mut image = *before;
-                        PageRecovery::stamp_lsn(&mut image, log.next_lsn()?);
+                    UndoKind::Page { page_id, incarnation, undo } => {
                         let lsn = log.append_record(
                             txn_id,
                             LogRecordKind::PageCompensation {
                                 page_id,
-                                redo_data: &image,
+                                incarnation,
+                                redo: &undo,
                                 undo_next_lsn: entry.prev_lsn,
                             },
                         )?;
-                        pages.push(PageRestore { page_id, image, wal_flush_lsn: lsn });
+                        pages.push(PageRestore {
+                            page_id,
+                            incarnation,
+                            patch: undo,
+                            wal_flush_lsn: lsn,
+                        });
                     }
                     UndoKind::Allocation { page_id, allocated } => {
                         let allocated = !allocated;

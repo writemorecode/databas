@@ -14,7 +14,7 @@ use crate::page_recovery::PageRecovery;
 use crate::{Lsn, PAGE_SIZE, PageId, TxnId};
 
 use super::analysis::{Analysis, undo_next};
-use super::data::{DataRedo, unexpected_incarnation, validate_data};
+use super::data::{DataRedo, apply_patch};
 
 /// Allocations reserve bits at PageInit. Frees and allocation CLRs change only
 /// the pending state until Commit/Rollback, exactly as during normal execution.
@@ -56,9 +56,13 @@ pub(super) fn redo(
     let mut data = DataRedo::new(records);
     for record in records {
         match &record.kind {
-            Kind::PageUpdate { page_id, redo_data, .. }
-            | Kind::PageCompensation { page_id, redo_data, .. } => {
-                data.install(disk, *page_id, record.lsn, redo_data)?;
+            Kind::PageUpdate { page_id, incarnation, before_lsn, redo, undo } => {
+                let target = PageRecovery { incarnation: *incarnation, lsn: record.lsn };
+                data.patch(disk, *page_id, target, redo, Some((*before_lsn, undo)))?;
+            }
+            Kind::PageCompensation { page_id, incarnation, redo, .. } => {
+                let target = PageRecovery { incarnation: *incarnation, lsn: record.lsn };
+                data.patch(disk, *page_id, target, redo, None)?;
             }
             Kind::PageInit { page_id, kind } => {
                 set_allocation(disk, allocator, *page_id, true, record.lsn)?;
@@ -91,28 +95,22 @@ pub(super) fn undo(
         let txn_id = record.txn_id;
         let next = undo_next(record);
         match &record.kind {
-            Kind::PageUpdate { page_id, undo_data, .. } => {
-                let mut current = [0; PAGE_SIZE];
-                disk.read_page(*page_id, &mut current)?;
-                let current = validate_data(*page_id, &current)?;
-                let mut image = **undo_data;
-                let before = validate_data(*page_id, &image)?;
-                if current.incarnation != before.incarnation {
-                    return Err(unexpected_incarnation(
-                        *page_id,
-                        before.incarnation,
-                        current.incarnation,
-                    ));
-                }
-                PageRecovery::stamp_lsn(&mut image, log.next_lsn()?);
+            Kind::PageUpdate { page_id, incarnation, undo, .. } => {
+                let mut image = [0; PAGE_SIZE];
+                disk.read_page(*page_id, &mut image)?;
+                debug_assert!(PageRecovery::read(&image).lsn >= record.lsn);
+                let target = PageRecovery { incarnation: *incarnation, lsn: log.next_lsn()? };
+                apply_patch(*page_id, &mut image, target, undo)?;
                 let lsn = log.append_record(
                     txn_id,
                     LogRecordKind::PageCompensation {
                         page_id: *page_id,
-                        redo_data: &image,
+                        incarnation: *incarnation,
+                        redo: undo,
                         undo_next_lsn: next,
                     },
                 )?;
+                debug_assert_eq!(lsn, target.lsn);
                 log.flush_through(lsn)?;
                 disk.write_page(*page_id, &image)?;
             }

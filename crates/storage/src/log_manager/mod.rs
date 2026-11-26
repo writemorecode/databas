@@ -32,10 +32,11 @@ use thiserror::Error;
 
 #[allow(clippy::redundant_pub_crate)] // Lsn is intentionally crate-private.
 pub(crate) use crate::Lsn;
+use crate::PageId;
 pub use crate::TxnId;
 use crate::filesystem::{File, FileSystem, OpenMode};
+use crate::page_patch::{InvalidPagePatch, PagePatch};
 use crate::page_recovery::PageInitKind;
-use crate::{PAGE_SIZE, PageId};
 
 mod frame;
 mod replacement;
@@ -53,7 +54,7 @@ pub const ZERO_LSN: Lsn = 0;
 const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
-const WAL_FILE_HEADER_VERSION: u16 = 5;
+const WAL_FILE_HEADER_VERSION: u16 = 6;
 pub const WAL_FILE_HEADER_LEN: usize = 32;
 const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
 
@@ -121,9 +122,9 @@ pub enum LogManagerError {
     /// The next LSN would exceed the numeric range of [`Lsn`].
     #[error("WAL LSN exhausted")]
     LsnExhausted,
-    /// A page update record did not contain full `PAGE_SIZE` images.
-    #[error("WAL full-page image has invalid length: expected {expected}, got {actual}")]
-    InvalidPageImageLength { expected: usize, actual: usize },
+    /// Page patches must be ordered, nonoverlapping runs within the page body.
+    #[error(transparent)]
+    InvalidPagePatch(#[from] InvalidPagePatch),
     /// The WAL file header failed its integrity checksum.
     #[error("WAL file header checksum mismatch: expected {expected}, got {actual}")]
     FileHeaderChecksumMismatch { expected: u32, actual: u32 },
@@ -184,24 +185,27 @@ pub enum LogRecordKind<'a> {
     Commit,
     /// Transaction rollback-complete marker.
     Rollback,
-    /// Full-page physical update.
-    ///
-    /// `redo_data` is installed during repeat-history redo, including for
-    /// losers. `undo_data` is the before-image used to construct compensation.
-    PageUpdate { page_id: PageId, redo_data: &'a [u8], undo_data: &'a [u8] },
+    /// Reversible byte runs within one page incarnation.
+    PageUpdate {
+        page_id: PageId,
+        incarnation: Lsn,
+        before_lsn: Lsn,
+        redo: &'a PagePatch,
+        undo: &'a PagePatch,
+    },
     /// Reserve a page and initialize a new incarnation without logging an image.
     PageInit { page_id: PageId, kind: PageInitKind },
     /// Deallocation of a database page by a transaction.
     PageDealloc { page_id: PageId },
     /// Redo-only page compensation with the next LSN to undo.
-    PageCompensation { page_id: PageId, redo_data: &'a [u8], undo_next_lsn: Lsn },
+    PageCompensation { page_id: PageId, incarnation: Lsn, redo: &'a PagePatch, undo_next_lsn: Lsn },
     /// Redo-only compensation of one allocation bit.
     AllocationCompensation { page_id: PageId, allocated: bool, undo_next_lsn: Lsn },
 }
 
 /// Owned WAL record returned by recovery scans.
 ///
-/// Unlike [`LogRecord`], this form owns page images and includes the LSN
+/// Unlike [`LogRecord`], this form owns page patches and includes the LSN
 /// assigned from the record's position in the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryLogRecord {
@@ -224,14 +228,20 @@ pub enum RecoveryLogRecordKind {
     Commit,
     /// Transaction rollback-complete marker.
     Rollback,
-    /// Full-page physical update with owned redo and undo page images.
-    PageUpdate { page_id: PageId, redo_data: Box<[u8; PAGE_SIZE]>, undo_data: Box<[u8; PAGE_SIZE]> },
+    /// Reversible byte runs within one page incarnation.
+    PageUpdate {
+        page_id: PageId,
+        incarnation: Lsn,
+        before_lsn: Lsn,
+        redo: PagePatch,
+        undo: PagePatch,
+    },
     /// Reserve a page and initialize a new incarnation without logging an image.
     PageInit { page_id: PageId, kind: PageInitKind },
     /// Deallocation of a database page by a transaction.
     PageDealloc { page_id: PageId },
     /// Redo-only page compensation with the next LSN to undo.
-    PageCompensation { page_id: PageId, redo_data: Box<[u8; PAGE_SIZE]>, undo_next_lsn: Lsn },
+    PageCompensation { page_id: PageId, incarnation: Lsn, redo: PagePatch, undo_next_lsn: Lsn },
     /// Redo-only compensation of one allocation bit.
     AllocationCompensation { page_id: PageId, allocated: bool, undo_next_lsn: Lsn },
 }
@@ -637,10 +647,11 @@ impl RecoveryLogRecordKind {
                 LogRecordKind::PageInit { page_id: *page_id, kind: *kind }
             }
             Self::PageDealloc { page_id } => LogRecordKind::PageDealloc { page_id: *page_id },
-            Self::PageCompensation { page_id, redo_data, undo_next_lsn } => {
+            Self::PageCompensation { page_id, incarnation, redo, undo_next_lsn } => {
                 LogRecordKind::PageCompensation {
                     page_id: *page_id,
-                    redo_data: redo_data.as_ref(),
+                    incarnation: *incarnation,
+                    redo,
                     undo_next_lsn: *undo_next_lsn,
                 }
             }
@@ -651,11 +662,15 @@ impl RecoveryLogRecordKind {
                     undo_next_lsn: *undo_next_lsn,
                 }
             }
-            Self::PageUpdate { page_id, redo_data, undo_data } => LogRecordKind::PageUpdate {
-                page_id: *page_id,
-                redo_data: redo_data.as_ref(),
-                undo_data: undo_data.as_ref(),
-            },
+            Self::PageUpdate { page_id, incarnation, before_lsn, redo, undo } => {
+                LogRecordKind::PageUpdate {
+                    page_id: *page_id,
+                    incarnation: *incarnation,
+                    before_lsn: *before_lsn,
+                    redo,
+                    undo,
+                }
+            }
         }
     }
 }
