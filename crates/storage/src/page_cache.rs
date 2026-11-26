@@ -30,7 +30,7 @@ use std::sync::{
 
 use thiserror::Error;
 
-use crate::error::{StorageError, StorageResult};
+use crate::error::{InternalError, InvariantViolation, StorageError, StorageResult};
 use crate::log_manager::ZERO_LSN;
 use crate::page::{NodeMarker, Page, PageResult, Read, Write};
 use crate::page_replacement::ClockPolicy;
@@ -68,6 +68,12 @@ pub type PageCacheResult<T> = Result<T, PageCacheError>;
 
 fn runtime_error(error: StorageError) -> PageCacheError {
     PageCacheError::Storage(Box::new(error))
+}
+
+fn mutation_txn(txn_id: Option<TxnId>) -> StorageResult<TxnId> {
+    txn_id.ok_or(StorageError::Internal(InternalError::InvariantViolation(
+        InvariantViolation::NoActiveTransaction,
+    )))
 }
 
 fn try_read_page_data(
@@ -202,6 +208,36 @@ impl PageCache {
         })
     }
 
+    /// Run a raw mutation in an implicit physical transaction. An uncertain
+    /// completion is not safe to retry as a fresh operation; reopen instead.
+    pub(crate) fn autocommit<T>(
+        &self,
+        operation: impl FnOnce(TxnId) -> StorageResult<T>,
+    ) -> StorageResult<T> {
+        let txn_id = self.inner.runtime.begin_transaction()?;
+        let result = operation(txn_id).and_then(|value| {
+            self.inner.runtime.validate_transaction_write(txn_id)?;
+            Ok(value)
+        });
+        match result {
+            Ok(value) => {
+                self.inner.runtime.commit_transaction(txn_id)?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.rollback_transaction(txn_id)?;
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
+        let rollback = self.inner.runtime.prepare_rollback_pages(txn_id)?;
+        self.restore_rollback_pages(rollback.pages)?;
+        // Completion forces WAL through the CLRs, not the compensated pages.
+        self.inner.runtime.finish_rollback(txn_id)
+    }
+
     /// Returns the mutation epoch shared by cursors over one B+-tree root.
     pub(crate) fn tree_mutation_epoch(
         &self,
@@ -249,10 +285,7 @@ impl PageCache {
     }
 
     pub(crate) fn validate_transaction_write(&self, txn_id: Option<TxnId>) -> StorageResult<()> {
-        if let Some(txn_id) = txn_id {
-            self.inner.runtime.validate_transaction_write(txn_id)?;
-        }
-        Ok(())
+        self.inner.runtime.validate_transaction_write(mutation_txn(txn_id)?)
     }
 
     /// Allocates a new on-disk page and returns it pinned in the cache.
@@ -263,7 +296,8 @@ impl PageCache {
         let mut meta = self.inner.lock_meta()?;
         let frame_id =
             self.select_victim_frame(&mut meta).ok_or(PageCacheError::NoEvictableFrame)?;
-        let page_id = self.inner.runtime.new_page(txn_id).map_err(runtime_error)?;
+        let id = mutation_txn(txn_id).map_err(runtime_error)?;
+        let page_id = self.inner.runtime.new_page(id).map_err(runtime_error)?;
         // A recycled page can still be cached. Reuse its frame rather than
         // creating a second mapping that could later overwrite its new owner.
         let frame_id = self.resident_frame_id(&meta, page_id)?.unwrap_or(frame_id);
@@ -291,6 +325,7 @@ impl PageCache {
         {
             return Err(PageCacheError::PinnedPage { page_id });
         }
+        let txn_id = mutation_txn(txn_id).map_err(runtime_error)?;
         self.inner.runtime.dealloc_page(txn_id, page_id).map_err(runtime_error)
     }
 
@@ -513,9 +548,8 @@ impl PinGuard {
     /// same frame. Acquiring a write guard marks the frame dirty even if the
     /// caller later decides not to mutate the page bytes.
     pub(crate) fn write(&self, txn_id: Option<TxnId>) -> PageCacheResult<PageWriteGuard<'_>> {
-        if let Some(txn_id) = txn_id {
-            self.page_cache.runtime.validate_transaction_write(txn_id).map_err(runtime_error)?;
-        }
+        let txn_id = mutation_txn(txn_id).map_err(runtime_error)?;
+        self.page_cache.runtime.validate_transaction_write(txn_id).map_err(runtime_error)?;
         let frame = &self.page_cache.frames[self.frame_id];
         debug_assert_eq!(frame.page_id(), Some(self.page_id), "pinned frame changed owner");
         let page = try_write_page_data(&frame.data, self.page_id)?;
@@ -524,11 +558,8 @@ impl PinGuard {
         if !was_dirty {
             // An in-flight guard may straddle checkpoint capture. Its actual
             // update LSN cannot precede this conservative pre-logging bound.
-            let oldest_unflushed_lsn = if txn_id.is_some() {
-                self.page_cache.runtime.next_wal_lsn().map_err(runtime_error)?
-            } else {
-                ZERO_LSN
-            };
+            let oldest_unflushed_lsn =
+                self.page_cache.runtime.next_wal_lsn().map_err(runtime_error)?;
             frame.oldest_unflushed_lsn.store(oldest_unflushed_lsn, Ordering::Release);
         }
         frame.dirty.store(true, Ordering::Release);
@@ -599,7 +630,7 @@ pub struct PageWriteGuard<'a> {
     runtime: Arc<StorageRuntime>,
     frame: &'a Frame,
     page_id: PageId,
-    txn_id: Option<TxnId>,
+    txn_id: TxnId,
     initializing: bool,
 }
 
@@ -635,23 +666,17 @@ impl Drop for PageWriteGuard<'_> {
         }
 
         match self.runtime.record_page_update(self.txn_id, self.page_id, &self.before, &self.page) {
-            Ok(Some(update)) => {
+            Ok(update) => {
                 *self.page = update.redo;
                 self.frame.lsn.store(update.lsn, Ordering::Release);
                 if !self.was_dirty {
                     self.frame.oldest_unflushed_lsn.store(update.lsn, Ordering::Release);
                 }
             }
-            Ok(None) => {
-                self.frame.lsn.store(ZERO_LSN, Ordering::Release);
-                self.frame.oldest_unflushed_lsn.store(ZERO_LSN, Ordering::Release);
-            }
             Err(_) => {
                 *self.page = self.before;
                 self.frame.dirty.store(self.was_dirty, Ordering::Release);
-                if let Some(txn_id) = self.txn_id {
-                    let _ = self.runtime.record_transaction_failure(txn_id);
-                }
+                let _ = self.runtime.record_transaction_failure(self.txn_id);
             }
         }
     }
