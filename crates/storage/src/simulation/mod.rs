@@ -1,6 +1,7 @@
 //! Long-running deterministic storage simulation.
 
 mod oracle;
+mod restart;
 mod runner;
 mod workload;
 
