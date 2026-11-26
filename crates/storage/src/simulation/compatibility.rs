@@ -73,12 +73,41 @@ pub(super) fn check_incompatible_opens() -> RunResult<()> {
     overwrite(&fs, &doublewrite, &incompatible_slots)?;
     require_rejection(&fs, target, OpenMode::Existing)?;
 
+    check_short_header(&fs, &foreign_wal)?;
+
     let fresh = Path::new("fresh.db");
     overwrite(&fs, &fresh.with_added_extension("wal"), &foreign_wal)?;
     require_rejection(&fs, fresh, OpenMode::CreateNew)?;
     require_rejection(&fs, fresh, OpenMode::Create)?;
     overwrite(&fs, fresh, &[])?;
     require_rejection(&fs, fresh, OpenMode::Create)
+}
+
+fn check_short_header(fs: &FileSystem, foreign_wal: &[u8]) -> RunResult<()> {
+    let path = Path::new("short.db");
+    let wal = path.with_added_extension("wal");
+    drop(open(fs, path, OpenMode::CreateNew)?);
+    let good_wal = bytes(fs, &wal)?;
+    stage_header(fs, path, FORMAT_VERSION)?;
+    let header = bytes(fs, path)?;
+    overwrite(fs, path, &header[..100])?;
+
+    // Even with a usable staged header, no extension or retirement before WAL preflight.
+    overwrite(fs, &wal, foreign_wal)?;
+    require_rejection(fs, path, OpenMode::Existing)?;
+    overwrite(fs, &wal, &good_wal)?;
+    drop(open(fs, path, OpenMode::Existing)?);
+    if bytes(fs, path)? != header {
+        return Err(RunError::Mismatch("short page zero not restored from staging".into()));
+    }
+
+    // With staging retired, a short but plausible header prefix is not enough.
+    // Preparation must reject it before the otherwise recoverable WAL tail is truncated.
+    overwrite(fs, path, &header[..100])?;
+    let mut torn_wal = good_wal;
+    torn_wal.push(0);
+    overwrite(fs, &wal, &torn_wal)?;
+    require_rejection(fs, path, OpenMode::Create)
 }
 
 fn stage_header(fs: &FileSystem, path: &Path, version: u16) -> StorageResult<()> {

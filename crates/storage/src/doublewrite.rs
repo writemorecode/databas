@@ -2,17 +2,17 @@
 //!
 //! Slots are appended and synced before their corresponding home writes. All
 //! occupied slots stay reserved until a successful home-file sync, followed by
-//! synced retirement of the entire batch. Startup reinstalls every valid slot
-//! in order without trusting potentially torn home pages or their LSNs. An
-//! incomplete staging suffix cannot have authorized home I/O. Slot checksums
-//! cover both the destination and data.
+//! synced retirement of the entire batch. Startup validates the staged prefix
+//! in append order. DiskManager selects one snapshot per address and compares
+//! its recovery trailer only with a checksum-verified home trailer. An incomplete
+//! staging suffix cannot have authorized home I/O. Slot checksums cover both
+//! the destination and data.
 //!
 //! Home writes are no-force until an explicit sync or the batch fills. Staging
 //! currently syncs each slot; grouping those syncs is a later optimization.
-//! This protects torn home writes, not arbitrary corruption or stale writes
-//! from a previous allocation. DiskManager seals each immutable snapshot with
-//! an address-bound checksum before staging. The full-page-image WAL remains
-//! authoritative; allocation incarnations are not yet implemented.
+//! This protects torn home writes, not arbitrary corruption. DiskManager seals
+//! each immutable snapshot (including its incarnation and page LSN) with an
+//! address-bound checksum before staging.
 
 use std::{
     io::{Read, Seek, SeekFrom, Write},
