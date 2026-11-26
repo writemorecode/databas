@@ -41,8 +41,8 @@ pub fn recover_from_wal(
     // Force them before depending on them for any protected home write.
     log.flush_all()?;
     let mut allocator = PageAllocator::load(disk)?;
-    replay::redo(&scan.records, disk, &mut allocator)?;
-    replay::undo(analysis, &mut log, disk, &mut allocator)?;
+    let allocations = replay::redo(&scan.records, disk, &mut allocator)?;
+    replay::undo(analysis, allocations, &mut log, disk, &mut allocator)?;
     allocator.validate_bounds(disk.page_count())?;
     allocator.flush(disk, &mut log)?;
     disk.sync()?;

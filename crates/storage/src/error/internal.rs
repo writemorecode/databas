@@ -52,6 +52,8 @@ pub enum InvariantViolation {
     TransactionIdExhausted,
     #[error("transaction {txn_id} failed before commit")]
     TransactionPoisoned { txn_id: TxnId },
+    #[error("transaction {txn_id} has an uncertain outcome; finish it or reopen the database")]
+    UncertainTransactionOutcome { txn_id: TxnId },
     #[error("page {page_id} is free, metadata, or already pending deallocation")]
     InvalidPageDeallocation { page_id: PageId },
     #[error("leaf split has no left-hand cells")]

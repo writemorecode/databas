@@ -74,7 +74,7 @@ impl StorageRuntime {
         let mut disk = Self::lock(&self.disk, "disk manager")?;
         let page_id = allocator.candidate(&mut disk)?;
         let lsn = transactions.record_page_init(&mut log, txn_id, page_id, kind)?;
-        allocator.set_allocated(page_id, true);
+        allocator.set_allocated(page_id, true, lsn);
         Ok((page_id, lsn))
     }
 
@@ -103,7 +103,8 @@ impl StorageRuntime {
     /// enter the cache while holding runtime latches. WAL protects bitmap writes
     /// even when a checkpoint persists reservations belonging to active writers.
     pub(crate) fn flush_allocations(&self) -> StorageResult<()> {
-        let _transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let transactions = Self::lock(&self.transactions, "transaction manager")?;
+        transactions.validate_can_append()?;
         let mut allocator = Self::lock(&self.allocator, "page allocator")?;
         let mut log = Self::lock(&self.log, "log manager")?;
         let mut disk = Self::lock(&self.disk, "disk manager")?;
@@ -211,12 +212,12 @@ impl StorageRuntime {
 
     pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
-        let changes = transactions.allocation_changes(txn_id)?;
+        let changes = transactions.allocation_states(txn_id)?;
         let mut allocator = Self::lock(&self.allocator, "page allocator")?;
         let mut log = Self::lock(&self.log, "log manager")?;
-        transactions.commit(&mut log, txn_id)?;
+        let lsn = transactions.commit(&mut log, txn_id)?;
         for (id, allocated) in changes {
-            allocator.set_allocated(id, allocated);
+            allocator.set_allocated(id, allocated, lsn);
         }
         Ok(())
     }
@@ -253,13 +254,12 @@ impl StorageRuntime {
 
     pub(crate) fn finish_rollback(&self, txn_id: TxnId) -> StorageResult<()> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
-        let changes = transactions.allocation_changes(txn_id)?;
+        let changes = transactions.allocation_states(txn_id)?;
         let mut allocator = Self::lock(&self.allocator, "page allocator")?;
         let mut log = Self::lock(&self.log, "log manager")?;
-        transactions.finish_rollback(&mut log, txn_id)?;
-        // The inverse of the first transition is each page's original state.
-        for (id, allocated) in changes.into_iter().rev() {
-            allocator.set_allocated(id, !allocated);
+        let lsn = transactions.finish_rollback(&mut log, txn_id)?;
+        for (id, allocated) in changes {
+            allocator.set_allocated(id, allocated, lsn);
         }
         Ok(())
     }

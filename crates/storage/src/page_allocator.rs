@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use crate::disk_manager::{DiskManager, DiskManagerError};
 use crate::error::StorageResult;
 use crate::log_manager::LogManager;
-use crate::{PAGE_SIZE, PageId};
+use crate::{Lsn, PAGE_SIZE, PageId};
 
 mod bitmap;
 
@@ -30,18 +30,12 @@ impl PageAllocator {
             let mut bytes = [0; PAGE_SIZE];
             let result = disk.read_page(page_id, &mut bytes);
             let trailing_bitmap = page_id != 0 && disk.page_count() == page_id + 1;
-            if trailing_bitmap
-                && (result.is_ok()
-                    || matches!(result, Err(DiskManagerError::ChecksumMismatch { .. })))
-            {
-                // No data pages follow this bitmap. Extent initialization may
-                // have been interrupted before its first sync.
-                let empty = AllocationBitmap::empty_page(page_id);
-                if result.is_err() || bytes != empty {
-                    disk.write_page(page_id, &empty)?;
-                    disk.sync()?;
-                    bytes = empty;
-                }
+            if trailing_bitmap && matches!(result, Err(DiskManagerError::ChecksumMismatch { .. })) {
+                // An interrupted extension can leave an uninitialized trailing
+                // bitmap. Do not replace a valid one or reset its page LSN.
+                bytes = AllocationBitmap::empty_page(page_id);
+                disk.write_page(page_id, &bytes)?;
+                disk.sync()?;
             } else {
                 result?;
             }
@@ -109,9 +103,14 @@ impl PageAllocator {
         Ok(())
     }
 
-    pub(crate) fn set_allocated(&mut self, page_id: PageId, allocated: bool) {
+    pub(crate) fn bitmap_lsn(&self, page_id: PageId) -> Lsn {
+        self.bitmap.page_lsn(page_id)
+    }
+
+    pub(crate) fn set_allocated(&mut self, page_id: PageId, allocated: bool, lsn: Lsn) {
+        debug_assert!(self.bitmap_lsn(page_id) <= lsn);
         if self.bitmap.is_allocated(page_id) != allocated {
-            self.bitmap.set_allocated(page_id, allocated);
+            self.bitmap.set_allocated(page_id, allocated, lsn);
             self.dirty.insert(AllocationBitmap::metadata_page_id(page_id));
         }
         if allocated {

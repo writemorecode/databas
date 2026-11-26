@@ -12,7 +12,7 @@
 //! be enabled until user undo follows logical identity rather than these physical
 //! before-images (recovery_protocol T3-T5).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::error::{InternalError, InvariantViolation, StorageError, StorageResult};
 use crate::log_manager::{LogManager, LogRecordKind, Lsn, TxnId};
@@ -63,17 +63,18 @@ pub struct LoggedPageUpdate {
 pub struct TransactionManager {
     max_txn_id: TxnId,
     transactions: HashMap<TxnId, ActiveTransaction>,
+    // A failed outcome flush must be retried in place or resolved on reopen
+    // before a newer allocation change can advance the same bitmap's LSN.
+    finishing: Option<TxnId>,
 }
 
 #[derive(Debug)]
 struct ActiveTransaction {
     begin_lsn: Lsn,
     undo: Vec<UndoEntry>,
-    // Preserve every transition, including savepoint compensation, so commit
-    // publishes the final state and abort can restore each page's original bit.
-    // The allocator itself keeps all reservations until transaction completion.
-    allocation_changes: Vec<(PageId, bool)>,
-    allocation_states: HashMap<PageId, bool>,
+    // The final state to publish at Commit or Rollback. The physical bitmap
+    // keeps all reservations until the outcome is durable.
+    allocation_states: BTreeMap<PageId, bool>,
     rollback_lsn: Option<Lsn>,
     commit_lsn: Option<Lsn>,
     poisoned: bool,
@@ -81,14 +82,23 @@ struct ActiveTransaction {
 
 impl TransactionManager {
     pub(crate) fn new(max_txn_id: TxnId) -> Self {
-        Self { max_txn_id, transactions: HashMap::new() }
+        Self { max_txn_id, transactions: HashMap::new(), finishing: None }
     }
 
     pub(crate) fn oldest_begin_lsn(&self) -> Option<Lsn> {
         self.transactions.values().map(|transaction| transaction.begin_lsn).min()
     }
 
+    /// No newer change may pass a transaction with uncertain completion.
+    pub(crate) fn validate_can_append(&self) -> StorageResult<()> {
+        if let Some(txn_id) = self.finishing {
+            return Err(invariant(InvariantViolation::UncertainTransactionOutcome { txn_id }));
+        }
+        Ok(())
+    }
+
     pub(crate) fn begin(&mut self, log: &mut LogManager) -> StorageResult<TxnId> {
+        self.validate_can_append()?;
         let txn_id = self
             .max_txn_id
             .checked_add(1)
@@ -100,8 +110,7 @@ impl TransactionManager {
             ActiveTransaction {
                 begin_lsn,
                 undo: Vec::new(),
-                allocation_changes: Vec::new(),
-                allocation_states: HashMap::new(),
+                allocation_states: BTreeMap::new(),
                 rollback_lsn: None,
                 commit_lsn: None,
                 poisoned: false,
@@ -110,8 +119,8 @@ impl TransactionManager {
         Ok(txn_id)
     }
 
-    pub(crate) fn allocation_changes(&self, txn_id: TxnId) -> StorageResult<Vec<(PageId, bool)>> {
-        Ok(self.transaction(txn_id)?.allocation_changes.clone())
+    pub(crate) fn allocation_states(&self, txn_id: TxnId) -> StorageResult<BTreeMap<PageId, bool>> {
+        Ok(self.transaction(txn_id)?.allocation_states.clone())
     }
 
     pub(crate) fn page_pending_dealloc(&self, page_id: PageId) -> bool {
@@ -156,7 +165,6 @@ impl TransactionManager {
         let lsn = log.append_record(txn_id, kind).inspect_err(|_| self.record_failure(txn_id))?;
         let active = self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
         active.undo.push(UndoEntry { prev_lsn, kind: UndoKind::Allocation { page_id, allocated } });
-        active.allocation_changes.push((page_id, allocated));
         active.allocation_states.insert(page_id, allocated);
         Ok(lsn)
     }
@@ -200,6 +208,7 @@ impl TransactionManager {
     }
 
     pub(crate) fn validate_transaction_write(&self, txn_id: TxnId) -> StorageResult<()> {
+        self.validate_can_append()?;
         if self.transaction(txn_id)?.poisoned {
             return Err(invariant(InvariantViolation::TransactionPoisoned { txn_id }));
         }
@@ -212,7 +221,7 @@ impl TransactionManager {
 
     /// Retain an uncertain Commit and its reservations for a flush retry. Never
     /// permit explicit abort after Commit may already have reached stable storage.
-    pub(crate) fn commit(&mut self, log: &mut LogManager, txn_id: TxnId) -> StorageResult<()> {
+    pub(crate) fn commit(&mut self, log: &mut LogManager, txn_id: TxnId) -> StorageResult<Lsn> {
         let commit_lsn = if let Some(lsn) = self.transaction(txn_id)?.commit_lsn {
             lsn
         } else {
@@ -223,11 +232,13 @@ impl TransactionManager {
             let active = self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
             active.commit_lsn = Some(lsn);
             active.poisoned = true;
+            self.finishing = Some(txn_id);
             lsn
         };
         log.flush_through(commit_lsn)?;
         self.transactions.remove(&txn_id);
-        Ok(())
+        self.finishing = None;
+        Ok(commit_lsn)
     }
 
     pub(crate) fn statement_savepoint(&self, txn_id: TxnId) -> StorageResult<TransactionSavepoint> {
@@ -251,6 +262,7 @@ impl TransactionManager {
         txn_id: TxnId,
         undo_len: usize,
     ) -> StorageResult<Vec<PageRestore>> {
+        self.validate_can_append()?;
         let result = (|| {
             let active = self.transaction(txn_id)?;
             if active.commit_lsn.is_some() {
@@ -292,7 +304,6 @@ impl TransactionManager {
                         )?;
                         let active =
                             self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
-                        active.allocation_changes.push((page_id, allocated));
                         active.allocation_states.insert(page_id, allocated);
                     }
                 }
@@ -331,6 +342,7 @@ impl TransactionManager {
         if active.rollback_lsn.is_some() {
             return Ok(TransactionRollback { pages: Vec::new() });
         }
+        self.validate_can_append()?;
         self.record_failure(txn_id); // Abort cannot be followed by a commit.
         Ok(TransactionRollback { pages: self.compensate_from(log, txn_id, 0)? })
     }
@@ -341,22 +353,26 @@ impl TransactionManager {
         &mut self,
         log: &mut LogManager,
         txn_id: TxnId,
-    ) -> StorageResult<()> {
-        let active = self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
+    ) -> StorageResult<Lsn> {
+        let active = self.transaction(txn_id)?;
         if active.commit_lsn.is_some() {
             return Err(invariant(InvariantViolation::TransactionPoisoned { txn_id }));
         }
-        active.poisoned = true;
         let rollback_lsn = if let Some(lsn) = active.rollback_lsn {
             lsn
         } else {
+            self.validate_can_append()?;
             let lsn = log.append_record(txn_id, LogRecordKind::Rollback)?;
+            let active = self.transactions.get_mut(&txn_id).ok_or_else(no_active_transaction)?;
+            active.poisoned = true;
             active.rollback_lsn = Some(lsn);
+            self.finishing = Some(txn_id);
             lsn
         };
         log.flush_through(rollback_lsn)?;
         self.transactions.remove(&txn_id);
-        Ok(())
+        self.finishing = None;
+        Ok(rollback_lsn)
     }
 
     fn transaction(&self, txn_id: TxnId) -> StorageResult<&ActiveTransaction> {
