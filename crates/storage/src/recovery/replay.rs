@@ -8,14 +8,13 @@ use crate::log_manager::{
     LogManager, LogManagerError, LogRecordKind, RecoveryLogRecord, RecoveryLogRecordKind as Kind,
 };
 use crate::page_allocator::PageAllocator;
-use crate::transaction_manager::stamp_page_lsn;
+use crate::page_recovery::PageRecovery;
 use crate::{PAGE_SIZE, PageId};
 
 use super::analysis::{Analysis, undo_next};
 
-/// Apply every retained effect in LSN order, including losers and CLRs. Until
-/// pages have allocation incarnations, the images are authoritative; a page LSN
-/// does not justify skipping redo. Allocation only changes one bit at a time.
+/// Apply every retained effect in LSN order, including losers and CLRs.
+/// Data-page incarnations are persisted, but redo still installs each update.
 pub(super) fn redo(
     records: &[RecoveryLogRecord],
     disk: &mut DiskManager,
@@ -27,7 +26,10 @@ pub(super) fn redo(
             | Kind::PageCompensation { page_id, redo_data, .. } => {
                 write_image(disk, *page_id, redo_data)?;
             }
-            Kind::PageAlloc { page_id } => set_allocation(disk, allocator, *page_id, true)?,
+            Kind::PageInit { page_id, kind } => {
+                set_allocation(disk, allocator, *page_id, true)?;
+                disk.write_page(*page_id, &kind.image(record.lsn))?;
+            }
             Kind::PageDealloc { page_id } => set_allocation(disk, allocator, *page_id, false)?,
             Kind::AllocationCompensation { page_id, allocated, .. } => {
                 set_allocation(disk, allocator, *page_id, *allocated)?;
@@ -52,7 +54,7 @@ pub(super) fn undo(
         match &record.kind {
             Kind::PageUpdate { page_id, undo_data, .. } => {
                 let mut image = **undo_data;
-                stamp_page_lsn(&mut image, log.next_lsn()?);
+                PageRecovery::stamp_lsn(&mut image, log.next_lsn()?);
                 let lsn = log.append_record(
                     txn_id,
                     LogRecordKind::PageCompensation {
@@ -64,7 +66,9 @@ pub(super) fn undo(
                 log.flush_through(lsn)?;
                 write_image(disk, *page_id, &image)?;
             }
-            Kind::PageAlloc { page_id } | Kind::PageDealloc { page_id } => {
+            Kind::PageInit { page_id, .. } | Kind::PageDealloc { page_id } => {
+                // Undo the reservation, not the initializer: restoring a former
+                // incarnation would make later redo mistake it for current.
                 let allocated = matches!(record.kind, Kind::PageDealloc { .. });
                 log.append_record(
                     txn_id,

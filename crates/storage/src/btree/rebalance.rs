@@ -673,7 +673,8 @@ impl TreeCursor {
         children: &[ChildEntry],
     ) -> StorageResult<PendingSplit> {
         let (prev_page_id, next_page_id) = self.read_interior_page_links(page_id)?;
-        let (right_page_id, right_page_guard) = self.page_cache.new_page(self.txn_id)?;
+        let (right_page_id, right_page_guard) =
+            self.page_cache.new_page(self.txn_id, crate::page_recovery::PageInitKind::Interior)?;
         drop(right_page_guard);
 
         let split_index = Self::choose_interior_fitting_split(children)

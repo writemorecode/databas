@@ -33,6 +33,7 @@ use thiserror::Error;
 use crate::error::{InternalError, InvariantViolation, StorageError, StorageResult};
 use crate::log_manager::ZERO_LSN;
 use crate::page::{NodeMarker, Page, PageResult, Read, Write};
+use crate::page_recovery::{PageInitKind, PageRecovery};
 use crate::page_replacement::ClockPolicy;
 use crate::storage_runtime::StorageRuntime;
 use crate::transaction_manager::PageRestore;
@@ -280,7 +281,7 @@ impl PageCache {
 
         let frame_id =
             self.select_victim_frame(&mut meta).ok_or(PageCacheError::NoEvictableFrame)?;
-        self.replace_frame(&mut meta, frame_id, page_id, false)?;
+        self.replace_frame(&mut meta, frame_id, page_id, None)?;
         Ok(PinGuard::new(Arc::clone(&self.inner), frame_id, page_id))
     }
 
@@ -292,26 +293,25 @@ impl PageCache {
     ///
     /// A victim frame is selected before allocation so a full pinned cache
     /// returns `NoEvictableFrame` without growing the file.
-    pub(crate) fn new_page(&self, txn_id: Option<TxnId>) -> PageCacheResult<(PageId, PinGuard)> {
+    pub(crate) fn new_page(
+        &self,
+        txn_id: Option<TxnId>,
+        kind: PageInitKind,
+    ) -> PageCacheResult<(PageId, PinGuard)> {
         let mut meta = self.inner.lock_meta()?;
         let frame_id =
             self.select_victim_frame(&mut meta).ok_or(PageCacheError::NoEvictableFrame)?;
-        let id = mutation_txn(txn_id).map_err(runtime_error)?;
-        let page_id = self.inner.runtime.new_page(id).map_err(runtime_error)?;
+        let txn_id = mutation_txn(txn_id).map_err(runtime_error)?;
+        let (page_id, init_lsn) =
+            self.inner.runtime.new_page(txn_id, kind).map_err(runtime_error)?;
         // A recycled page can still be cached. Reuse its frame rather than
         // creating a second mapping that could later overwrite its new owner.
         let frame_id = self.resident_frame_id(&meta, page_id)?.unwrap_or(frame_id);
         if self.inner.frames[frame_id].pin_count.load(Ordering::Acquire) != 0 {
             return Err(PageCacheError::PinnedPage { page_id });
         }
-        self.replace_frame(&mut meta, frame_id, page_id, true)?;
-        let pin = PinGuard::new(Arc::clone(&self.inner), frame_id, page_id);
-        drop(meta);
-        // A newly allocated frame already contains zeros. Still log that image
-        // so an empty allocation does not recover with its former owner's bytes.
-        pin.write(txn_id)?.initializing = true;
-        self.validate_transaction_write(txn_id).map_err(runtime_error)?;
-        Ok((page_id, pin))
+        self.replace_frame(&mut meta, frame_id, page_id, Some((kind, init_lsn)))?;
+        Ok((page_id, PinGuard::new(Arc::clone(&self.inner), frame_id, page_id)))
     }
 
     pub(crate) fn dealloc_page(
@@ -418,7 +418,7 @@ impl PageCache {
         meta: &mut CacheMeta,
         frame_id: FrameId,
         new_page_id: PageId,
-        newly_allocated: bool,
+        init: Option<(PageInitKind, Lsn)>,
     ) -> PageCacheResult<()> {
         debug_assert_eq!(
             self.inner.frames[frame_id].pin_count.load(Ordering::Acquire),
@@ -434,12 +434,14 @@ impl PageCache {
         let frame = &self.inner.frames[frame_id];
         let old_page_id = frame.page_id();
 
-        let mut data = [0u8; PAGE_SIZE];
-        // Fresh allocations have no previous owner to restore. Their old disk
-        // contents may be torn or absent after an interrupted file extension.
-        if !newly_allocated {
+        // New incarnations do not consult a former owner's disk bytes.
+        let data = if let Some((kind, lsn)) = init {
+            kind.image(lsn)
+        } else {
+            let mut data = [0; PAGE_SIZE];
             self.inner.runtime.read_page(new_page_id, &mut data).map_err(runtime_error)?;
-        }
+            data
+        };
 
         {
             let mut frame_data =
@@ -448,10 +450,10 @@ impl PageCache {
         }
 
         frame.set_page_id(Some(new_page_id));
-        frame.dirty.store(false, Ordering::Release);
+        frame.dirty.store(init.is_some(), Ordering::Release);
         // read_page verifies the checksum before exposing the stored page LSN.
-        frame.lsn.store(crate::page::page_lsn(&data), Ordering::Release);
-        frame.oldest_unflushed_lsn.store(ZERO_LSN, Ordering::Release);
+        frame.lsn.store(PageRecovery::read(&data).lsn, Ordering::Release);
+        frame.oldest_unflushed_lsn.store(init.map_or(ZERO_LSN, |(_, lsn)| lsn), Ordering::Release);
         frame.pin_count.store(1, Ordering::Release);
 
         if let Some(old_page_id) = old_page_id {
@@ -493,6 +495,10 @@ impl PageCache {
             let frame = &self.inner.frames[pin.frame_id];
             {
                 let mut data = try_write_page_data(&frame.data, restore.page_id)?;
+                debug_assert_eq!(
+                    PageRecovery::read(&data).incarnation,
+                    PageRecovery::read(&restore.image).incarnation
+                );
                 *data = restore.image;
                 let oldest = if frame.dirty.load(Ordering::Acquire) {
                     frame.oldest_unflushed_lsn.load(Ordering::Acquire).min(restore.wal_flush_lsn)
@@ -571,7 +577,6 @@ impl PinGuard {
             frame,
             page_id: self.page_id,
             txn_id,
-            initializing: false,
         })
     }
 }
@@ -631,7 +636,6 @@ pub struct PageWriteGuard<'a> {
     frame: &'a Frame,
     page_id: PageId,
     txn_id: TxnId,
-    initializing: bool,
 }
 
 impl PageWriteGuard<'_> {
@@ -656,8 +660,11 @@ impl PageWriteGuard<'_> {
 
 impl Drop for PageWriteGuard<'_> {
     fn drop(&mut self) {
-        self.page[crate::types::PAGE_CONTENT_END..].fill(0);
-        if !self.initializing && *self.page == self.before {
+        // Rebuilds can replace all bytes, but neither a split nor a copy from
+        // another page can replace the destination's recovery identity.
+        PageRecovery::read(&self.before).write(&mut self.page);
+        self.page[crate::types::PAGE_CHECKSUM_OFFSET..].fill(0);
+        if *self.page == self.before {
             self.frame.dirty.store(self.was_dirty, Ordering::Release);
             if !self.was_dirty {
                 self.frame.oldest_unflushed_lsn.store(ZERO_LSN, Ordering::Release);

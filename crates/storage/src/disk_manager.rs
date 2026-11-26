@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::doublewrite::Doublewrite;
 use crate::filesystem::{File, FileSystem, OpenMode};
-use crate::types::PAGE_CONTENT_END;
+use crate::types::PAGE_CHECKSUM_OFFSET;
 use crate::{PAGE_SIZE, PageId};
 
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
@@ -162,23 +162,23 @@ impl DiskManager {
         self.doublewrite.as_ref().ok_or_else(missing_doublewrite)?.ensure_healthy()?;
         self.read_page_unchecked(page_id, buf)?;
         Self::verify_checksum(page_id, buf)?;
-        buf[PAGE_CONTENT_END..].fill(0);
+        buf[PAGE_CHECKSUM_OFFSET..].fill(0);
         Ok(())
     }
 
     fn checksum(page_id: PageId, page: &[u8; PAGE_SIZE]) -> u32 {
         let mut digest = CRC32.digest();
         digest.update(&page_id.to_le_bytes());
-        digest.update(&page[..PAGE_CONTENT_END]);
+        digest.update(&page[..PAGE_CHECKSUM_OFFSET]);
         digest.finalize()
     }
 
     fn verify_checksum(page_id: PageId, buf: &[u8; PAGE_SIZE]) -> DiskManagerResult<()> {
         let expected = u32::from_le_bytes([
-            buf[PAGE_CONTENT_END],
-            buf[PAGE_CONTENT_END + 1],
-            buf[PAGE_CONTENT_END + 2],
-            buf[PAGE_CONTENT_END + 3],
+            buf[PAGE_CHECKSUM_OFFSET],
+            buf[PAGE_CHECKSUM_OFFSET + 1],
+            buf[PAGE_CHECKSUM_OFFSET + 2],
+            buf[PAGE_CHECKSUM_OFFSET + 3],
         ]);
         let actual = Self::checksum(page_id, buf);
         if expected != actual {
@@ -211,10 +211,10 @@ impl DiskManager {
         if page_id >= self.page_count {
             return Err(DiskManagerError::InvalidPageId { page_id });
         }
-        debug_assert!(buf[PAGE_CONTENT_END..].iter().all(|&byte| byte == 0));
+        debug_assert!(buf[PAGE_CHECKSUM_OFFSET..].iter().all(|&byte| byte == 0));
         let mut page = *buf;
         let checksum = Self::checksum(page_id, &page);
-        page[PAGE_CONTENT_END..].copy_from_slice(&checksum.to_le_bytes());
+        page[PAGE_CHECKSUM_OFFSET..].copy_from_slice(&checksum.to_le_bytes());
 
         let protection = self.doublewrite.as_mut().ok_or_else(missing_doublewrite)?;
         protection.ensure_healthy()?;

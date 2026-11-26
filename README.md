@@ -21,16 +21,17 @@ cargo clippy --workspace --all-targets --all-features
 
 ### Database file format
 
-Format version 9 stores a little-endian CRC32 in the last four bytes of each
-4,096-byte database page. The checksum covers the physical page ID and the
-preceding 4,092 bytes. A required `.doublewrite` sidecar stages protected page
+Format version 10 reserves a common recovery trailer on each 4,096-byte
+page. It contains the page incarnation and page LSN, followed by a
+little-endian CRC32 over the physical page ID and the preceding 4,092 bytes. A required `.doublewrite` sidecar stages protected page
 writes and is bound to the database file's filesystem identity (currently Unix
 for real files). Do not delete or copy it as if it were a portable backup.
 Older database files are not supported; there is no in-place migration.
 
 Restart recovery analyzes WAL transaction chains, repeats history, and logs
-compensation for incomplete transactions. Ordinary data-page updates still
-log full before- and after-images; physiological page records are not yet used.
+compensation for incomplete transactions. `PageInit` derives a typed empty
+page from its WAL record; ordinary page updates still log before- and
+after-images.
 
 ### Storage simulation
 

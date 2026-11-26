@@ -13,9 +13,6 @@ pub(super) fn overflow_roots(
     page_id: PageId,
 ) -> StorageResult<Vec<PageId>> {
     let mut roots = Vec::new();
-    if bytes.iter().all(|byte| *byte == 0) {
-        return Ok(roots);
-    }
     match read_page_kind(bytes, page_id)? {
         PageKind::RawLeaf => {
             let leaf = RawLeaf::<Read<'_>>::open(bytes)?;

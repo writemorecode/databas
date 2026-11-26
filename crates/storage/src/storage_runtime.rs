@@ -5,6 +5,7 @@ use crate::error::{InternalError, StorageError, StorageResult};
 use crate::filesystem::FileSystem;
 use crate::log_manager::{LogManager, Lsn, TxnId};
 use crate::page_allocator::PageAllocator;
+use crate::page_recovery::PageInitKind;
 use crate::recovery::recover_from_wal;
 use crate::transaction_manager::{
     LoggedPageUpdate, PageRestore, TransactionManager, TransactionRollback, TransactionSavepoint,
@@ -61,16 +62,20 @@ impl StorageRuntime {
         &self.path
     }
 
-    pub(crate) fn new_page(&self, txn_id: TxnId) -> StorageResult<PageId> {
+    pub(crate) fn new_page(
+        &self,
+        txn_id: TxnId,
+        kind: PageInitKind,
+    ) -> StorageResult<(PageId, Lsn)> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
         transactions.validate_transaction_write(txn_id)?;
         let mut allocator = Self::lock(&self.allocator, "page allocator")?;
         let mut log = Self::lock(&self.log, "log manager")?;
         let mut disk = Self::lock(&self.disk, "disk manager")?;
         let page_id = allocator.candidate(&mut disk)?;
-        transactions.record_page_alloc(&mut log, txn_id, page_id)?;
+        let lsn = transactions.record_page_init(&mut log, txn_id, page_id, kind)?;
         allocator.set_allocated(page_id, true);
-        Ok(page_id)
+        Ok((page_id, lsn))
     }
 
     pub(crate) fn dealloc_page(&self, txn_id: TxnId, page_id: PageId) -> StorageResult<()> {

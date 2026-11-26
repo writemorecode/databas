@@ -34,6 +34,7 @@ use thiserror::Error;
 pub(crate) use crate::Lsn;
 pub use crate::TxnId;
 use crate::filesystem::{File, FileSystem, OpenMode};
+use crate::page_recovery::PageInitKind;
 use crate::{PAGE_SIZE, PageId};
 
 mod frame;
@@ -52,7 +53,7 @@ pub const ZERO_LSN: Lsn = 0;
 const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
-const WAL_FILE_HEADER_VERSION: u16 = 4;
+const WAL_FILE_HEADER_VERSION: u16 = 5;
 pub const WAL_FILE_HEADER_LEN: usize = 32;
 const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
 
@@ -126,6 +127,9 @@ pub enum LogManagerError {
     /// The WAL file header failed its integrity checksum.
     #[error("WAL file header checksum mismatch: expected {expected}, got {actual}")]
     FileHeaderChecksumMismatch { expected: u32, actual: u32 },
+    /// An initializer must specify a supported data-page kind.
+    #[error("invalid WAL page initialization kind: {tag}")]
+    InvalidPageInitKind { tag: u8 },
     /// A compensation record must encode either allocated or free.
     #[error("invalid WAL allocation state: {state}")]
     InvalidAllocationState { state: u8 },
@@ -185,8 +189,8 @@ pub enum LogRecordKind<'a> {
     /// `redo_data` is installed during repeat-history redo, including for
     /// losers. `undo_data` is the before-image used to construct compensation.
     PageUpdate { page_id: PageId, redo_data: &'a [u8], undo_data: &'a [u8] },
-    /// Allocation of a database page by a transaction.
-    PageAlloc { page_id: PageId },
+    /// Reserve a page and initialize a new incarnation without logging an image.
+    PageInit { page_id: PageId, kind: PageInitKind },
     /// Deallocation of a database page by a transaction.
     PageDealloc { page_id: PageId },
     /// Redo-only page compensation with the next LSN to undo.
@@ -222,8 +226,8 @@ pub enum RecoveryLogRecordKind {
     Rollback,
     /// Full-page physical update with owned redo and undo page images.
     PageUpdate { page_id: PageId, redo_data: Box<[u8; PAGE_SIZE]>, undo_data: Box<[u8; PAGE_SIZE]> },
-    /// Allocation of a database page by a transaction.
-    PageAlloc { page_id: PageId },
+    /// Reserve a page and initialize a new incarnation without logging an image.
+    PageInit { page_id: PageId, kind: PageInitKind },
     /// Deallocation of a database page by a transaction.
     PageDealloc { page_id: PageId },
     /// Redo-only page compensation with the next LSN to undo.
@@ -626,7 +630,9 @@ impl RecoveryLogRecordKind {
             Self::Begin => LogRecordKind::Begin,
             Self::Commit => LogRecordKind::Commit,
             Self::Rollback => LogRecordKind::Rollback,
-            Self::PageAlloc { page_id } => LogRecordKind::PageAlloc { page_id: *page_id },
+            Self::PageInit { page_id, kind } => {
+                LogRecordKind::PageInit { page_id: *page_id, kind: *kind }
+            }
             Self::PageDealloc { page_id } => LogRecordKind::PageDealloc { page_id: *page_id },
             Self::PageCompensation { page_id, redo_data, undo_next_lsn } => {
                 LogRecordKind::PageCompensation {
