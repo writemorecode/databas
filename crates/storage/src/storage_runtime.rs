@@ -8,7 +8,7 @@ use crate::page_allocator::PageAllocator;
 use crate::page_recovery::PageInitKind;
 use crate::recovery::recover_from_wal;
 use crate::transaction_manager::{
-    LoggedPageUpdate, PageRestore, TransactionManager, TransactionRollback, TransactionSavepoint,
+    PageRestore, TransactionManager, TransactionRollback, TransactionSavepoint,
 };
 use crate::{CheckpointOutcome, PAGE_SIZE, PageId};
 use std::sync::{Mutex, MutexGuard};
@@ -185,7 +185,7 @@ impl StorageRuntime {
         page_id: PageId,
         before: &[u8; PAGE_SIZE],
         after: &[u8; PAGE_SIZE],
-    ) -> StorageResult<LoggedPageUpdate> {
+    ) -> StorageResult<Lsn> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
         let mut log = Self::lock(&self.log, "log manager")?;
         let result = transactions.record_page_update(&mut log, txn_id, page_id, before, after);

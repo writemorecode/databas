@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 
 use crc::{CRC_32_ISO_HDLC, Crc, Digest};
 
-use crate::PAGE_SIZE;
+use crate::page_patch::{InvalidPagePatch, MAX_PATCH_BYTES, PagePatch};
 use crate::page_recovery::PageInitKind;
 
 use super::{LogManagerError, LogRecord, LogRecordKind, Lsn, RecoveryLogRecordKind, TxnId};
@@ -13,7 +13,7 @@ pub(super) type DecodedRecord = (Lsn, RecoveryLogRecordKind);
 
 const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const FOOTER_MAGIC: [u8; 8] = *b"DBWALFTR";
-const WAL_FORMAT_VERSION: u16 = 6;
+const WAL_FORMAT_VERSION: u16 = 7;
 pub(super) const HEADER_LEN: usize = 8 + 2 + 8 + 4 + 8;
 const FOOTER_LEN: usize = 8 + 8 + 4;
 pub(super) const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
@@ -134,7 +134,7 @@ impl WalFrameHeader {
     }
 }
 
-/// Validate a frame without retaining any records or allocating page images.
+/// Validate a frame without retaining any records or allocating page patches.
 pub(super) fn scan_transaction_frame<R: Read>(
     reader: &mut R,
 ) -> Result<Option<WalFrameHeader>, LogManagerError> {
@@ -173,12 +173,12 @@ impl<R: Read> FramePayload<'_, R> {
             }
             KIND_PAGE_COMPENSATION => {
                 let page_id = u64::from_le_bytes(self.read_array()?);
+                let incarnation = u64::from_le_bytes(self.read_array()?);
                 let undo_next_lsn = u64::from_le_bytes(self.read_array()?);
-                let len = u32::from_le_bytes(self.read_array()?) as usize;
-                validate_page_image_len_value(len)?;
-                self.read_image(collect)?.map(|redo_data| Kind::PageCompensation {
+                self.read_patch(collect)?.map(|redo| Kind::PageCompensation {
                     page_id,
-                    redo_data,
+                    incarnation,
+                    redo,
                     undo_next_lsn,
                 })
             }
@@ -198,16 +198,16 @@ impl<R: Read> FramePayload<'_, R> {
             }
             KIND_PAGE_UPDATE => {
                 let page_id = u64::from_le_bytes(self.read_array()?);
-                let redo_len = u32::from_le_bytes(self.read_array()?) as usize;
-                let undo_len = u32::from_le_bytes(self.read_array()?) as usize;
-                validate_page_image_len_value(redo_len)?;
-                validate_page_image_len_value(undo_len)?;
-                let redo = self.read_image(collect)?;
-                let undo = self.read_image(collect)?;
-                redo.zip(undo).map(|(redo_data, undo_data)| Kind::PageUpdate {
+                let incarnation = u64::from_le_bytes(self.read_array()?);
+                let before_lsn = u64::from_le_bytes(self.read_array()?);
+                let redo = self.read_patch(collect)?;
+                let undo = self.read_patch(collect)?;
+                redo.zip(undo).map(|(redo, undo)| Kind::PageUpdate {
                     page_id,
-                    redo_data,
-                    undo_data,
+                    incarnation,
+                    before_lsn,
+                    redo,
+                    undo,
                 })
             }
             kind => return Err(LogManagerError::UnknownRecordKind { kind }),
@@ -215,22 +215,31 @@ impl<R: Read> FramePayload<'_, R> {
         Ok(kind.map(|kind| (prev_lsn, kind)))
     }
 
-    fn read_image(
-        &mut self,
-        collect: bool,
-    ) -> Result<Option<Box<[u8; PAGE_SIZE]>>, LogManagerError> {
-        let image = self.read_array()?;
-        Ok(collect.then(|| Box::new(image)))
+    fn read_patch(&mut self, collect: bool) -> Result<Option<PagePatch>, LogManagerError> {
+        let len = usize::from(u16::from_le_bytes(self.read_array()?));
+        let mut buffer = [0; MAX_PATCH_BYTES];
+        let bytes = buffer.get_mut(..len).ok_or(InvalidPagePatch)?;
+        self.read_payload(bytes)?;
+        Ok(PagePatch::decode(bytes, collect)?)
     }
 
     fn read_array<const N: usize>(&mut self) -> Result<[u8; N], LogManagerError> {
-        if self.remaining < N {
-            return Err(LogManagerError::TruncatedFrame { needed: N, remaining: self.remaining });
-        }
-        let bytes = read_array(&mut *self.reader)?;
-        self.digest.update(&bytes);
-        self.remaining -= N;
+        let mut bytes = [0; N];
+        self.read_payload(&mut bytes)?;
         Ok(bytes)
+    }
+
+    fn read_payload(&mut self, bytes: &mut [u8]) -> Result<(), LogManagerError> {
+        if self.remaining < bytes.len() {
+            return Err(LogManagerError::TruncatedFrame {
+                needed: bytes.len(),
+                remaining: self.remaining,
+            });
+        }
+        self.reader.read_exact(bytes)?;
+        self.digest.update(bytes);
+        self.remaining -= bytes.len();
+        Ok(())
     }
 }
 
@@ -308,45 +317,24 @@ fn serialized_records_len(records: &[LogRecord<'_>]) -> Result<u64, LogManagerEr
     let mut len = 0u64;
     for record in records {
         len = len
-            .checked_add(8 + serialized_record_len(&record.kind)?)
+            .checked_add(8 + serialized_record_len(&record.kind))
             .ok_or(LogManagerError::PayloadLengthOverflow)?;
     }
     Ok(len)
 }
 
-fn serialized_record_len(kind: &LogRecordKind<'_>) -> Result<u64, LogManagerError> {
+fn serialized_record_len(kind: &LogRecordKind<'_>) -> u64 {
     match kind {
-        LogRecordKind::Begin | LogRecordKind::Commit | LogRecordKind::Rollback => Ok(1),
-        LogRecordKind::PageUpdate { redo_data, undo_data, .. } => {
-            validate_page_image_len(redo_data)?;
-            validate_page_image_len(undo_data)?;
-            let redo_len = u32::try_from(redo_data.len()).map_err(|_out_of_range| {
-                LogManagerError::PayloadLengthTooLarge { payload_len: redo_data.len() as u64 }
-            })?;
-            let undo_len = u32::try_from(undo_data.len()).map_err(|_out_of_range| {
-                LogManagerError::PayloadLengthTooLarge { payload_len: undo_data.len() as u64 }
-            })?;
-            Ok(1 + 8 + 4 + 4 + u64::from(redo_len) + u64::from(undo_len))
+        LogRecordKind::Begin | LogRecordKind::Commit | LogRecordKind::Rollback => 1,
+        LogRecordKind::PageUpdate { redo, undo, .. } => {
+            1 + 8 + 8 + 8 + 2 + redo.bytes().len() as u64 + 2 + undo.bytes().len() as u64
         }
-        LogRecordKind::PageInit { .. } => Ok(1 + 8 + 1),
-        LogRecordKind::PageDealloc { .. } => Ok(1 + 8),
-        LogRecordKind::PageCompensation { redo_data, .. } => {
-            validate_page_image_len(redo_data)?;
-            Ok(1 + 8 + 8 + 4 + PAGE_SIZE as u64)
+        LogRecordKind::PageInit { .. } => 1 + 8 + 1,
+        LogRecordKind::PageDealloc { .. } => 1 + 8,
+        LogRecordKind::PageCompensation { redo, .. } => {
+            1 + 8 + 8 + 8 + 2 + redo.bytes().len() as u64
         }
-        LogRecordKind::AllocationCompensation { .. } => Ok(1 + 8 + 8 + 1),
-    }
-}
-
-fn validate_page_image_len(image: &[u8]) -> Result<(), LogManagerError> {
-    validate_page_image_len_value(image.len())
-}
-
-fn validate_page_image_len_value(len: usize) -> Result<(), LogManagerError> {
-    if len == PAGE_SIZE {
-        Ok(())
-    } else {
-        Err(LogManagerError::InvalidPageImageLength { expected: PAGE_SIZE, actual: len })
+        LogRecordKind::AllocationCompensation { .. } => 1 + 8 + 8 + 1,
     }
 }
 
@@ -382,30 +370,20 @@ fn write_log_record_payload<W: Write>(
         LogRecordKind::Begin => write_crc_u8(writer, digest, KIND_BEGIN)?,
         LogRecordKind::Commit => write_crc_u8(writer, digest, KIND_COMMIT)?,
         LogRecordKind::Rollback => write_crc_u8(writer, digest, KIND_ROLLBACK)?,
-        LogRecordKind::PageUpdate { page_id, redo_data, undo_data } => {
-            validate_page_image_len(redo_data)?;
-            validate_page_image_len(undo_data)?;
-            let redo_len = u32::try_from(redo_data.len()).map_err(|_out_of_range| {
-                LogManagerError::PayloadLengthTooLarge { payload_len: redo_data.len() as u64 }
-            })?;
-            let undo_len = u32::try_from(undo_data.len()).map_err(|_out_of_range| {
-                LogManagerError::PayloadLengthTooLarge { payload_len: undo_data.len() as u64 }
-            })?;
-
+        LogRecordKind::PageUpdate { page_id, incarnation, before_lsn, redo, undo } => {
             write_crc_u8(writer, digest, KIND_PAGE_UPDATE)?;
             write_crc_u64(writer, digest, *page_id)?;
-            write_crc_u32(writer, digest, redo_len)?;
-            write_crc_u32(writer, digest, undo_len)?;
-            write_crc_bytes(writer, digest, redo_data)?;
-            write_crc_bytes(writer, digest, undo_data)?;
+            write_crc_u64(writer, digest, *incarnation)?;
+            write_crc_u64(writer, digest, *before_lsn)?;
+            write_patch(writer, digest, redo)?;
+            write_patch(writer, digest, undo)?;
         }
-        LogRecordKind::PageCompensation { page_id, redo_data, undo_next_lsn } => {
-            validate_page_image_len(redo_data)?;
+        LogRecordKind::PageCompensation { page_id, incarnation, redo, undo_next_lsn } => {
             write_crc_u8(writer, digest, KIND_PAGE_COMPENSATION)?;
             write_crc_u64(writer, digest, *page_id)?;
+            write_crc_u64(writer, digest, *incarnation)?;
             write_crc_u64(writer, digest, *undo_next_lsn)?;
-            write_crc_u32(writer, digest, u32::from(crate::PAGE_SIZE_U16))?;
-            write_crc_bytes(writer, digest, redo_data)?;
+            write_patch(writer, digest, redo)?;
         }
         LogRecordKind::AllocationCompensation { page_id, allocated, undo_next_lsn } => {
             write_crc_u8(writer, digest, KIND_ALLOCATION_COMPENSATION)?;
@@ -434,12 +412,15 @@ fn write_crc_u8<W: Write>(
     write_crc_bytes(writer, digest, &[value])
 }
 
-fn write_crc_u32<W: Write>(
+fn write_patch<W: Write>(
     writer: &mut W,
     digest: &mut Digest<'_, u32>,
-    value: u32,
-) -> std::io::Result<()> {
-    write_crc_bytes(writer, digest, &value.to_le_bytes())
+    patch: &PagePatch,
+) -> Result<(), LogManagerError> {
+    let len = u16::try_from(patch.bytes().len()).map_err(|_out_of_range| InvalidPagePatch)?;
+    write_crc_bytes(writer, digest, &len.to_le_bytes())?;
+    write_crc_bytes(writer, digest, patch.bytes())?;
+    Ok(())
 }
 
 fn write_crc_u64<W: Write>(

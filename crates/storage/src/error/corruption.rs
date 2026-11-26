@@ -54,6 +54,8 @@ pub enum CorruptionKind {
     InvalidPageRecovery { incarnation: crate::Lsn, lsn: crate::Lsn },
     #[error("expected page incarnation {expected}, found {actual}")]
     UnexpectedPageIncarnation { expected: crate::Lsn, actual: crate::Lsn },
+    #[error("page patch baseline mismatch: expected LSN {expected}, actual LSN {actual}")]
+    PagePatchBaselineMismatch { expected: crate::Lsn, actual: crate::Lsn },
     #[error("unknown page kind: raw tag {actual}")]
     UnknownPageKind { actual: u8 },
     #[error("invalid page kind: expected {expected}, got raw tag {actual}")]

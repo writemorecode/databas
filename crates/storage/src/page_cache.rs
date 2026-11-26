@@ -31,7 +31,7 @@ use std::sync::{
 use thiserror::Error;
 
 use crate::error::{InternalError, InvariantViolation, StorageError, StorageResult};
-use crate::log_manager::ZERO_LSN;
+use crate::log_manager::{LogManagerError, ZERO_LSN};
 use crate::page::{NodeMarker, Page, PageResult, Read, Write};
 use crate::page_recovery::{PageInitKind, PageRecovery};
 use crate::page_replacement::ClockPolicy;
@@ -495,11 +495,16 @@ impl PageCache {
             let frame = &self.inner.frames[pin.frame_id];
             {
                 let mut data = try_write_page_data(&frame.data, restore.page_id)?;
-                debug_assert_eq!(
-                    PageRecovery::read(&data).incarnation,
-                    PageRecovery::read(&restore.image).incarnation
-                );
-                *data = restore.image;
+                let current = PageRecovery::read(&data);
+                current
+                    .require_incarnation(restore.page_id, restore.incarnation)
+                    .map_err(runtime_error)?;
+                debug_assert!(current.lsn < restore.wal_flush_lsn);
+                restore
+                    .patch
+                    .apply(&mut data)
+                    .map_err(|error| runtime_error(LogManagerError::from(error).into()))?;
+                PageRecovery::stamp_lsn(&mut data, restore.wal_flush_lsn);
                 let oldest = if frame.dirty.load(Ordering::Acquire) {
                     frame.oldest_unflushed_lsn.load(Ordering::Acquire).min(restore.wal_flush_lsn)
                 } else {
@@ -673,11 +678,11 @@ impl Drop for PageWriteGuard<'_> {
         }
 
         match self.runtime.record_page_update(self.txn_id, self.page_id, &self.before, &self.page) {
-            Ok(update) => {
-                *self.page = update.redo;
-                self.frame.lsn.store(update.lsn, Ordering::Release);
+            Ok(lsn) => {
+                PageRecovery::stamp_lsn(&mut self.page, lsn);
+                self.frame.lsn.store(lsn, Ordering::Release);
                 if !self.was_dirty {
-                    self.frame.oldest_unflushed_lsn.store(update.lsn, Ordering::Release);
+                    self.frame.oldest_unflushed_lsn.store(lsn, Ordering::Release);
                 }
             }
             Err(_) => {
