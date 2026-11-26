@@ -238,7 +238,6 @@ impl PageCache {
         let runtime = &self.inner.runtime;
         runtime.start_abort(txn_id)?;
         while self.undo_one(txn_id, None)? {}
-        // Completion forces WAL through the CLRs, not the compensated pages.
         runtime.finish_rollback(txn_id)
     }
 

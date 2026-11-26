@@ -55,6 +55,7 @@ struct Stats {
 
 impl Simulation {
     pub fn new(seed: u64) -> RunResult<Self> {
+        check_outcome_retries()?;
         super::restart::sweep_unpublished_wal()?;
         super::restart::sweep_retained_structure()?;
         super::restart::sweep_split_prefixes()?;
@@ -432,6 +433,59 @@ impl Simulation {
             s.interrupted_commits_lost,
         )
     }
+}
+
+// Report a sync error *after* the outcome reached storage. The only legal
+// completion is a retry of that outcome, with no additional WAL records.
+fn check_outcome_retries() -> RunResult<()> {
+    for commit in [true, false] {
+        let fs = MemoryFs::default();
+        let storage = open(&fs, OpenMode::CreateNew)?;
+        let txn = storage.begin_transaction()?;
+        let root = storage.transaction_create_tree(txn)?.root_page_id();
+        let finish = |commit| {
+            if commit { storage.commit_transaction(txn) } else { storage.rollback_transaction(txn) }
+        };
+        let last_lsn = || {
+            let probe = FileSystem::Memory(fs.fork_for_recovery());
+            let path = Path::new(DATABASE);
+            crate::log_manager::read_recovery_log(&probe, path)
+                .map(|log| log.last_assigned_lsn)
+                .map_err(StorageError::from)
+        };
+        fs.arm(Fault {
+            skip: 0,
+            effect: Effect::Error {
+                operation: Operation::SyncFile,
+                kind: io::ErrorKind::Other,
+                after: true,
+            },
+        });
+        if !matches!(finish(commit), Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::Other)
+            || fs.take_hit().is_none()
+        {
+            return Err(RunError::Mismatch("outcome sync fault did not fire".into()));
+        }
+        let pending = last_lsn()?;
+        if !storage.transaction_is_active(txn)?
+            || storage.begin_transaction().is_ok()
+            || finish(!commit).is_ok()
+        {
+            return Err(RunError::Mismatch(
+                "uncertain outcome did not block conflicting work".into(),
+            ));
+        }
+        finish(commit)?;
+        if last_lsn()? != pending
+            || storage.transaction_is_active(txn)?
+            || storage.tree_root_is_allocated(root)? != commit
+        {
+            return Err(RunError::Mismatch(
+                "outcome retry appended or finalized incorrectly".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn open(fs: &MemoryFs, mode: OpenMode) -> Result<Storage, StorageError> {

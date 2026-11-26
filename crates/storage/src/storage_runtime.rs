@@ -10,7 +10,8 @@ use crate::page_operation::LeafOperation;
 use crate::page_recovery::PageInitKind;
 use crate::recovery::{Restart, repeat_history};
 use crate::transaction_manager::{
-    ActionBoundary, TransactionManager, TransactionSavepoint, UndoStep,
+    ActionBoundary, CompletedTransaction, Outcome, TransactionManager, TransactionSavepoint,
+    UndoStep,
 };
 use crate::{CheckpointOutcome, PAGE_SIZE, PageId};
 use std::sync::{Mutex, MutexGuard};
@@ -228,12 +229,20 @@ impl StorageRuntime {
     }
 
     pub(crate) fn commit_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
+        self.finish_transaction(txn_id, Outcome::Commit)
+    }
+
+    pub(crate) fn finish_rollback(&self, txn_id: TxnId) -> StorageResult<()> {
+        self.finish_transaction(txn_id, Outcome::Rollback)
+    }
+
+    fn finish_transaction(&self, txn_id: TxnId, outcome: Outcome) -> StorageResult<()> {
         let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
-        let changes = transactions.allocation_states(txn_id)?;
         let mut allocator = Self::lock(&self.allocator, "page allocator")?;
         let mut log = Self::lock(&self.log, "log manager")?;
-        let lsn = transactions.commit(&mut log, txn_id)?;
-        for (id, allocated) in changes {
+        let CompletedTransaction { lsn, allocation_states } =
+            transactions.finish_outcome(&mut log, txn_id, outcome)?;
+        for (id, allocated) in allocation_states {
             allocator.set_allocated(id, allocated, lsn);
         }
         Ok(())
@@ -310,17 +319,5 @@ impl StorageRuntime {
         let mut log = Self::lock(&self.log, "log manager")?;
         let lsn = log.transaction_head(txn_id);
         Ok(log.flush_through(lsn)?)
-    }
-
-    pub(crate) fn finish_rollback(&self, txn_id: TxnId) -> StorageResult<()> {
-        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
-        let changes = transactions.allocation_states(txn_id)?;
-        let mut allocator = Self::lock(&self.allocator, "page allocator")?;
-        let mut log = Self::lock(&self.log, "log manager")?;
-        let lsn = transactions.finish_rollback(&mut log, txn_id)?;
-        for (id, allocated) in changes {
-            allocator.set_allocated(id, allocated, lsn);
-        }
-        Ok(())
     }
 }
