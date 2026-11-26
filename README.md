@@ -21,7 +21,7 @@ cargo clippy --workspace --all-targets --all-features
 
 ### Database file format
 
-Format version 10 reserves a common recovery trailer on each 4,096-byte
+Format version 11 reserves a common recovery trailer on each 4,096-byte
 page. It contains the page incarnation and page LSN, followed by a
 little-endian CRC32 over the physical page ID and the preceding 4,092 bytes. A required `.doublewrite` sidecar stages protected page
 writes and is bound to the database file's filesystem identity (currently Unix
@@ -30,8 +30,9 @@ Older database files are not supported; there is no in-place migration.
 
 Restart recovery analyzes WAL transaction chains, repeats history, and logs
 compensation for incomplete transactions. `PageInit` derives a typed empty
-page from its WAL record; ordinary page updates still log before- and
-after-images.
+page from its WAL record. The allocator reserves pages at initialization but
+publishes frees only at a durable transaction outcome. Ordinary page updates
+still log before- and after-images.
 
 ### Storage simulation
 

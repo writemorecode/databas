@@ -6,8 +6,8 @@ use crate::{PAGE_SIZE, PAGE_SIZE_U16, PageId};
 pub const DATABASE_HEADER_PAGE_ID: PageId = 0;
 
 const MAGIC: &[u8; 8] = b"DATABAS\0";
-// Version 10 adds the common recovery trailer, changing bitmap geometry.
-pub const FORMAT_VERSION: u16 = 10;
+// Version 11 gives the allocation bitmaps a redo watermark.
+pub const FORMAT_VERSION: u16 = 11;
 const HEADER_LEN: usize = 12;
 
 /// Fixed-format database file header stored on page 0.
