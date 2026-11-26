@@ -154,29 +154,32 @@ impl StorageRuntime {
     {
         // Serialize the whole checkpoint, including cache flushing and WAL publication.
         let _checkpoint = Self::lock(&self.checkpoint, "checkpoint serialization")?;
-        // Keep undo for transactions already alive, including any CLR whose
-        // page effect is not yet in the cache. New writes start at the horizon.
-        let mut retain_from = {
+        // Any write logged after this capture is at or above the horizon.
+        // Earlier writes are already durable, still in the cache, or have a
+        // pending CLR install. Capture the latter before scanning the cache.
+        // Preserve all undo for transactions already alive independently.
+        let (undo_from, mut redo_from) = {
             let transactions = Self::lock(&self.transactions, "transaction manager")?;
             let log = Self::lock(&self.log, "log manager")?;
             let horizon = log.next_lsn()?;
-            transactions
-                .oldest_begin_lsn()
-                .unwrap_or(horizon)
-                .min(transactions.oldest_pending_restore_lsn().unwrap_or(horizon))
+            (
+                transactions.oldest_begin_lsn().unwrap_or(horizon),
+                transactions.oldest_pending_restore_lsn().unwrap_or(horizon),
+            )
         };
         // No transaction/log latch is held while entering the page cache.
         let deferred = flush_cache()?;
         if let Some(oldest) = deferred {
-            retain_from = retain_from.min(oldest);
+            redo_from = redo_from.min(oldest);
         }
+        let retain_from = undo_from.min(redo_from);
         self.flush_allocations()?;
         self.sync_database_file()?;
         // Publication serializes with WAL appends, not
         // transaction lifetimes. Never acquire cache latches in this section.
         let _transactions = Self::lock(&self.transactions, "transaction manager")?;
         let mut log = Self::lock(&self.log, "log manager")?;
-        if log.reclaim_prefix(retain_from)? == 0 && deferred.is_none() {
+        if log.reclaim_prefix(retain_from, redo_from)? == 0 && deferred.is_none() {
             Ok(CheckpointOutcome::Completed)
         } else {
             Ok(CheckpointOutcome::Partial)

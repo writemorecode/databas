@@ -34,7 +34,8 @@ page from its WAL record. The allocator reserves pages at initialization but
 publishes frees only at a durable transaction outcome. Redo uses verified
 page LSNs and incarnations to skip effects already reflected on disk. Data-page
 updates log page-local operations instead of full images. Ordinary leaf edits
-redo by slot; structural and overflow writes use byte runs.
+redo by slot; structural and overflow writes use byte runs. A checkpoint records
+how far data-page redo can skip independently of the WAL kept for undo.
 
 On existing trees, completed row edits undo by tree incarnation and key. A
 split can complete before a row is inserted, and a merge can complete after a

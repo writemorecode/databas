@@ -11,6 +11,7 @@ use crate::{
         FileSystem, OpenMode,
         memory::{Effect, Fault, MemoryFs, Operation},
     },
+    log_manager::{RecoveryLogRecordKind, read_recovery_log},
     page::format::{KIND_OFFSET, PageKind},
     page_allocator::PageAllocator,
 };
@@ -101,6 +102,18 @@ pub(super) fn sweep_retained_structure() -> RunResult<()> {
     storage.rollback_to_savepoint(before_split)?;
     loser.insert(&[8], &value)?; // Splits before inserting; moves the earlier row too.
     storage.checkpoint()?; // WAL retained for undo even though the pages are durable.
+    let scan = read_recovery_log(&FileSystem::Memory(fs.fork_for_recovery()), DATABASE)
+        .map_err(StorageError::from)?;
+    if !scan
+        .records
+        .iter()
+        .any(|record| matches!(record.kind, RecoveryLogRecordKind::PageUpdate { .. }))
+        || scan.redo_from != scan.last_assigned_lsn + 1
+    {
+        return Err(RunError::Mismatch(
+            "checkpoint did not separate its redo and undo horizons".into(),
+        ));
+    }
     check_layout(&fs, root, PageKind::RawInterior, 3)?;
     sweep_recovery_cuts(&fs, "retained split", |fs, storage| {
         oracle::reconcile(storage, &[root], &mut expected, None)?;
