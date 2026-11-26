@@ -271,7 +271,13 @@ impl PageCache {
             return Err(PageCacheError::PinnedPage { page_id });
         }
         self.replace_frame(&mut meta, frame_id, page_id, true)?;
-        Ok((page_id, PinGuard::new(Arc::clone(&self.inner), frame_id, page_id)))
+        let pin = PinGuard::new(Arc::clone(&self.inner), frame_id, page_id);
+        drop(meta);
+        // A newly allocated frame already contains zeros. Still log that image
+        // so an empty allocation does not recover with its former owner's bytes.
+        pin.write(txn_id)?.initializing = true;
+        self.validate_transaction_write(txn_id).map_err(runtime_error)?;
+        Ok((page_id, pin))
     }
 
     pub(crate) fn dealloc_page(
@@ -408,7 +414,8 @@ impl PageCache {
 
         frame.set_page_id(Some(new_page_id));
         frame.dirty.store(false, Ordering::Release);
-        frame.lsn.store(ZERO_LSN, Ordering::Release);
+        // read_page verifies the checksum before exposing the stored page LSN.
+        frame.lsn.store(crate::page::page_lsn(&data), Ordering::Release);
         frame.oldest_unflushed_lsn.store(ZERO_LSN, Ordering::Release);
         frame.pin_count.store(1, Ordering::Release);
 
@@ -533,6 +540,7 @@ impl PinGuard {
             frame,
             page_id: self.page_id,
             txn_id,
+            initializing: false,
         })
     }
 }
@@ -592,6 +600,7 @@ pub struct PageWriteGuard<'a> {
     frame: &'a Frame,
     page_id: PageId,
     txn_id: Option<TxnId>,
+    initializing: bool,
 }
 
 impl PageWriteGuard<'_> {
@@ -616,7 +625,8 @@ impl PageWriteGuard<'_> {
 
 impl Drop for PageWriteGuard<'_> {
     fn drop(&mut self) {
-        if *self.page == self.before {
+        self.page[crate::types::PAGE_CONTENT_END..].fill(0);
+        if !self.initializing && *self.page == self.before {
             self.frame.dirty.store(self.was_dirty, Ordering::Release);
             if !self.was_dirty {
                 self.frame.oldest_unflushed_lsn.store(ZERO_LSN, Ordering::Release);

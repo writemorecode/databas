@@ -373,11 +373,11 @@ impl TransactionManager {
     }
 }
 
-/// Image-phase compatibility: only B+-tree pages currently have an on-page LSN.
-/// Overflow and bitmap recovery must keep using authoritative images/bit records
-/// until their new recovery envelopes are introduced.
+/// B-tree and overflow data pages share a tagged header and LSN location.
+/// Bitmap recovery still uses authoritative bit records; checksums and data-page
+/// LSNs alone do not authorize redo skipping without allocation incarnations.
 pub fn stamp_page_lsn(bytes: &mut [u8; PAGE_SIZE], lsn: Lsn) {
-    if page::is_current_btree_page(bytes) {
+    if page::is_current_btree_page(bytes) || crate::overflow::is_current_page(bytes) {
         page::format::write_u64(bytes, page::format::LSN_OFFSET, lsn);
     }
 }

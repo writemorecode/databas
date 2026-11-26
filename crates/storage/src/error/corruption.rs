@@ -86,6 +86,8 @@ pub enum CorruptionKind {
     CellLengthTooSmall,
     #[error("cell length runs past the usable page bounds")]
     CellLengthOutOfBounds,
+    #[error("invalid overflow-page header")]
+    InvalidOverflowHeader,
     #[error("overflow chain ended before {expected} bytes could be read")]
     OverflowChainTooShort { expected: usize, actual: usize },
     #[error("overflow chain has extra pages after {expected} bytes were read")]

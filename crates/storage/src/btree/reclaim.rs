@@ -4,7 +4,7 @@
 use super::root::read_page_kind;
 use super::{
     Interior, Leaf, PAGE_SIZE, PageCache, PageId, PageKind, RawInterior, RawLeaf, Read,
-    StorageResult, TreeCursor, TxnId, page,
+    StorageResult, TreeCursor, TxnId, overflow, page,
 };
 use std::collections::HashSet;
 
@@ -53,7 +53,7 @@ pub(super) fn reclaim_chains(
                 ));
             }
             let pin = cache.fetch_page(id)?;
-            next = page::format::read_optional_u64(pin.read()?.page(), 0);
+            next = overflow::next_page_id(id, pin.read()?.page())?;
             drop(pin);
             cache.dealloc_page(txn_id, id)?;
         }
@@ -86,7 +86,7 @@ pub fn destroy_tree(cache: &PageCache, txn_id: TxnId, root: PageId) -> StorageRe
         let pin = cache.fetch_page(id)?;
         let bytes = pin.read()?;
         if overflow {
-            if let Some(next) = page::format::read_optional_u64(bytes.page(), 0) {
+            if let Some(next) = crate::overflow::next_page_id(id, bytes.page())? {
                 pending.push((next, true));
             }
         } else {

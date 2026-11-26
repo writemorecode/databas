@@ -34,6 +34,16 @@ pub type RawLeaf<A> = Page<A, Leaf>;
 /// Raw B+-tree interior page storing separator byte keys and child pointers.
 pub type RawInterior<A> = Page<A, Interior>;
 
+/// Read metadata only from a verified disk snapshot or a latched cache image.
+/// This does not authorize redo skipping without allocation incarnations.
+pub fn page_lsn(bytes: &[u8; PAGE_SIZE]) -> crate::Lsn {
+    if is_current_btree_page(bytes) || crate::overflow::is_current_page(bytes) {
+        format::read_u64(bytes, format::LSN_OFFSET)
+    } else {
+        crate::log_manager::ZERO_LSN
+    }
+}
+
 pub fn is_current_btree_page(bytes: &[u8; PAGE_SIZE]) -> bool {
     format::PageKind::from_raw(bytes[format::KIND_OFFSET]).is_some()
         && bytes[format::VERSION_OFFSET] == format::FORMAT_VERSION
