@@ -55,6 +55,7 @@ struct Stats {
 
 impl Simulation {
     pub fn new(seed: u64) -> RunResult<Self> {
+        super::restart::sweep_unpublished_wal()?;
         let mut rng = Rng::new(seed);
         let fs = MemoryFs::default();
         let storage = open(&fs, OpenMode::CreateNew)?;

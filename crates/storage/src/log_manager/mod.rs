@@ -526,7 +526,10 @@ fn read_log(
     let wal_was_created = !fs.exists(wal_path)?;
     let mut wal_file = fs.open(wal_path, OpenMode::Create)?;
     let wal_header = ensure_wal_file_header(&mut wal_file)?;
-    if wal_was_created {
+    // An earlier replacement can have renamed the live WAL but failed its
+    // directory sync. Persist the name before recovery can append CLRs and
+    // write home pages whose LSNs depend on that replacement file.
+    if wal_was_created || mode == LogReadMode::Recovery {
         fs.sync_parent(wal_path)?;
     }
     let wal_len = wal_file.len()?;
