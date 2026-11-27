@@ -21,7 +21,6 @@ const KIND_ROLLBACK: u8 = 3;
 const KIND_PAGE_UPDATE: u8 = 4;
 const KIND_PAGE_ALLOC: u8 = 5;
 const KIND_PAGE_DEALLOC: u8 = 6;
-const KIND_BITMAP_IMAGE: u8 = 7;
 
 /// Serializes a complete transaction frame to `writer`.
 ///
@@ -165,10 +164,6 @@ impl<R: Read> FramePayload<'_, R> {
                     Kind::PageDealloc { page_id }
                 })
             }
-            KIND_BITMAP_IMAGE => {
-                let page_id = u64::from_le_bytes(self.read_array()?);
-                self.read_image(collect)?.map(|image| Kind::BitmapImage { page_id, image })
-            }
             KIND_PAGE_UPDATE => {
                 let page_id = u64::from_le_bytes(self.read_array()?);
                 let redo_len = u32::from_le_bytes(self.read_array()?) as usize;
@@ -301,10 +296,6 @@ fn serialized_record_len(kind: &LogRecordKind<'_>) -> Result<u64, LogManagerErro
             Ok(1 + 8 + 4 + 4 + u64::from(redo_len) + u64::from(undo_len))
         }
         LogRecordKind::PageAlloc { .. } | LogRecordKind::PageDealloc { .. } => Ok(1 + 8),
-        LogRecordKind::BitmapImage { image, .. } => {
-            validate_page_image_len(image)?;
-            Ok(1 + 8 + PAGE_SIZE as u64)
-        }
     }
 }
 
@@ -368,12 +359,6 @@ fn write_log_record_payload<W: Write>(
             write_crc_u32(writer, digest, undo_len)?;
             write_crc_bytes(writer, digest, redo_data)?;
             write_crc_bytes(writer, digest, undo_data)?;
-        }
-        LogRecordKind::BitmapImage { page_id, image } => {
-            validate_page_image_len(image)?;
-            write_crc_u8(writer, digest, KIND_BITMAP_IMAGE)?;
-            write_crc_u64(writer, digest, *page_id)?;
-            write_crc_bytes(writer, digest, image)?;
         }
         LogRecordKind::PageAlloc { page_id } | LogRecordKind::PageDealloc { page_id } => {
             let kind = if matches!(kind, LogRecordKind::PageAlloc { .. }) {

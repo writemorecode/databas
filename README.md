@@ -26,7 +26,7 @@ Format version 6 stores a little-endian CRC32 in the last four bytes of each
 preceding 4,092 bytes. A required `.doublewrite` sidecar stages protected page
 writes and is bound to the database file's filesystem identity (currently Unix
 for real files). Do not delete or copy it as if it were a portable backup.
-Older database files are not supported; there is no in-place migration.
+Doublewrite also protects allocation bitmap pages. Older database files are not supported; there is no in-place migration.
 
 ### Storage simulation
 

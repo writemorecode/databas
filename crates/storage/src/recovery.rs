@@ -30,8 +30,8 @@ pub fn recover_from_wal(
         return Ok(RecoveryResult { max_txn_id });
     }
 
-    // Replay page images before publishing free bits, and protect the bitmap
-    // writes themselves with WAL in case recovery is interrupted.
+    // Replay page images before publishing free bits,.
+    // Doublewrite protects the bitmap baseline if recovery is interrupted.
     let mut allocator = replay::repair(disk, scan.records)?;
     let mut log = LogManager::new(fs.clone(), path)?;
     allocator.flush(disk, &mut log)?;

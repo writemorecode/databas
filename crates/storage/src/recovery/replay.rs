@@ -39,7 +39,6 @@ struct PageWrite {
 
 #[derive(Default)]
 struct Replay {
-    bitmap_images: HashMap<PageId, PageImage>,
     allocations: Vec<AllocationRepair>,
     writes: Vec<PageWrite>,
 }
@@ -82,9 +81,6 @@ impl Replay {
             let outcome = outcomes.get(&txn_id).copied().unwrap_or(Outcome::Incomplete);
             match kind {
                 Kind::Begin | Kind::Commit | Kind::Rollback => {}
-                Kind::BitmapImage { page_id, image } => {
-                    replay.bitmap_images.insert(page_id, image);
-                }
                 kind @ (Kind::PageAlloc { page_id } | Kind::PageDealloc { page_id }) => {
                     let allocated = matches!(kind, Kind::PageAlloc { .. });
                     if matches!(outcome, Outcome::Committed) {
@@ -134,7 +130,7 @@ impl Replay {
     }
 
     fn apply(self, disk: &mut DiskManager) -> StorageResult<PageAllocator> {
-        let mut allocator = PageAllocator::load_with_images(disk, &self.bitmap_images)?;
+        let mut allocator = PageAllocator::load(disk)?;
         for AllocationRepair { page_id, allocated, direction } in self.allocations {
             match direction {
                 Direction::Redo => {
