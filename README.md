@@ -21,12 +21,12 @@ cargo clippy --workspace --all-targets --all-features
 
 ### Database file format
 
-Format version 6 stores a little-endian CRC32 in the last four bytes of each
+Format version 7 stores a little-endian CRC32 in the last four bytes of each
 4,096-byte database page. The checksum covers the physical page ID and the
 preceding 4,092 bytes. A required `.doublewrite` sidecar stages protected page
 writes and is bound to the database file's filesystem identity (currently Unix
 for real files). Do not delete or copy it as if it were a portable backup.
-Doublewrite also protects allocation bitmap pages. Older database files are not supported; there is no in-place migration.
+Older database files are not supported; there is no in-place migration.
 
 ### Storage simulation
 

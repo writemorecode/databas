@@ -6,11 +6,13 @@ use crc::{CRC_32_ISO_HDLC, Crc, Digest};
 
 use crate::PAGE_SIZE;
 
-use super::{LogManagerError, LogRecord, LogRecordKind, RecoveryLogRecordKind, TxnId};
+use super::{LogManagerError, LogRecord, LogRecordKind, Lsn, RecoveryLogRecordKind, TxnId};
+
+pub(super) type DecodedRecord = (Lsn, RecoveryLogRecordKind);
 
 const HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const FOOTER_MAGIC: [u8; 8] = *b"DBWALFTR";
-const WAL_FORMAT_VERSION: u16 = 3;
+const WAL_FORMAT_VERSION: u16 = 4;
 pub(super) const HEADER_LEN: usize = 8 + 2 + 8 + 4 + 8;
 const FOOTER_LEN: usize = 8 + 8 + 4;
 pub(super) const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
@@ -41,6 +43,7 @@ pub(super) fn serialize_transaction<W: Write>(
 
     let mut digest = CRC32.digest();
     for record in records {
+        write_crc_u64(&mut writer, &mut digest, record.prev_lsn)?;
         write_log_record_payload(&mut writer, &mut digest, &record.kind)?;
     }
 
@@ -91,7 +94,7 @@ impl WalFrameHeader {
     pub(super) fn decode_records(
         &self,
         mut body: &[u8],
-    ) -> Result<Vec<RecoveryLogRecordKind>, LogManagerError> {
+    ) -> Result<Vec<DecodedRecord>, LogManagerError> {
         let mut records = Vec::new();
         self.read_body(&mut body, Some(&mut records))?;
         debug_assert!(body.is_empty());
@@ -102,7 +105,7 @@ impl WalFrameHeader {
     fn read_body<R: Read>(
         &self,
         reader: &mut R,
-        mut records: Option<&mut Vec<RecoveryLogRecordKind>>,
+        mut records: Option<&mut Vec<DecodedRecord>>,
     ) -> Result<(), LogManagerError> {
         let mut payload =
             FramePayload { reader, remaining: self.payload_len()?, digest: CRC32.digest() };
@@ -147,12 +150,10 @@ struct FramePayload<'a, R> {
 }
 
 impl<R: Read> FramePayload<'_, R> {
-    fn read_record(
-        &mut self,
-        collect: bool,
-    ) -> Result<Option<RecoveryLogRecordKind>, LogManagerError> {
+    fn read_record(&mut self, collect: bool) -> Result<Option<DecodedRecord>, LogManagerError> {
         use RecoveryLogRecordKind as Kind;
-        Ok(match self.read_array::<1>()?[0] {
+        let prev_lsn = u64::from_le_bytes(self.read_array()?);
+        let kind = match self.read_array::<1>()?[0] {
             KIND_BEGIN => collect.then_some(Kind::Begin),
             KIND_COMMIT => collect.then_some(Kind::Commit),
             KIND_ROLLBACK => collect.then_some(Kind::Rollback),
@@ -179,7 +180,8 @@ impl<R: Read> FramePayload<'_, R> {
                 })
             }
             kind => return Err(LogManagerError::UnknownRecordKind { kind }),
-        })
+        };
+        Ok(kind.map(|kind| (prev_lsn, kind)))
     }
 
     fn read_image(
@@ -275,7 +277,7 @@ fn serialized_records_len(records: &[LogRecord<'_>]) -> Result<u64, LogManagerEr
     let mut len = 0u64;
     for record in records {
         len = len
-            .checked_add(serialized_record_len(&record.kind)?)
+            .checked_add(8 + serialized_record_len(&record.kind)?)
             .ok_or(LogManagerError::PayloadLengthOverflow)?;
     }
     Ok(len)

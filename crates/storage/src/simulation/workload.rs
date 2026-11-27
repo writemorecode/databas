@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{TreeCursor, TxnId};
+use crate::{TransactionSavepoint, TreeCursor, TxnId};
 
 pub const CLIENTS: usize = 8;
 pub const TREES: usize = 6;
@@ -80,6 +80,14 @@ impl Client {
             return if rng.chance(12) { Command::Rollback } else { Command::Commit };
         }
 
+        if rng.chance(12) {
+            return if transaction.savepoint.is_some() && rng.chance(2) {
+                Command::RollbackToSavepoint
+            } else {
+                Command::Savepoint
+            };
+        }
+
         let tree = transaction.cursors[rng.index(transaction.cursors.len())].0;
         let key = if rng.chance(3) { rng.below(KEYS) } else { rng.below(96) };
         let command = rng.below(100);
@@ -111,6 +119,7 @@ pub struct Transaction {
     pub id: TxnId,
     pub cursors: Vec<(usize, TreeCursor)>,
     pub writes: Changes,
+    pub savepoint: Option<(TransactionSavepoint, Changes)>,
     pub remaining: u64,
     pub read_heavy: bool,
 }
@@ -127,6 +136,8 @@ pub enum Command {
     Get { tree: usize, key: u64 },
     Set { tree: usize, key: u64, len: usize, token: u64 },
     Delete { tree: usize, key: u64 },
+    Savepoint,
+    RollbackToSavepoint,
     Commit,
     Rollback,
 }

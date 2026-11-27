@@ -26,7 +26,7 @@ pub struct Simulation {
     clients: Vec<Client>,
     model: Vec<Contents>,
     pending_commit: Option<Changes>,
-    recovery_cut: bool,
+    recovery_cuts_left: u64,
     checkpoint_at: u64,
     writeback_at: u64,
     fault_at: u64,
@@ -40,6 +40,7 @@ struct Stats {
     deletes: u64,
     commits: u64,
     rollbacks: u64,
+    savepoint_rollbacks: u64,
     checkpoints: u64,
     partial_checkpoints: u64,
     writebacks: u64,
@@ -76,7 +77,7 @@ impl Simulation {
             clients,
             model: vec![Contents::new(); TREES],
             pending_commit: None,
-            recovery_cut: false,
+            recovery_cuts_left: 0,
             checkpoint_at: 1_500,
             writeback_at: 120,
             fault_at: 3_000,
@@ -202,6 +203,7 @@ impl Simulation {
                     id,
                     cursors,
                     writes: Changes::new(),
+                    savepoint: None,
                     remaining,
                     read_heavy,
                 });
@@ -215,6 +217,24 @@ impl Simulation {
                 self.engine()?.rollback_transaction(id)?;
                 self.clients[client].transaction = None;
                 self.stats.rollbacks += 1;
+            }
+            Command::Savepoint => {
+                let id = transaction(&mut self.clients[client])?.id;
+                let savepoint = self.engine()?.statement_savepoint(id)?;
+                let tx = transaction(&mut self.clients[client])?;
+                tx.savepoint = Some((savepoint, tx.writes.clone()));
+                tx.remaining -= 1;
+            }
+            Command::RollbackToSavepoint => {
+                let (savepoint, writes) = transaction(&mut self.clients[client])?
+                    .savepoint
+                    .take()
+                    .ok_or_else(|| RunError::Mismatch("client has no savepoint".into()))?;
+                self.engine()?.rollback_to_savepoint(savepoint)?;
+                let tx = transaction(&mut self.clients[client])?;
+                tx.writes = writes;
+                tx.remaining -= 1;
+                self.stats.savepoint_rollbacks += 1;
             }
             Command::Get { tree, key } => {
                 let result = self.access(client, tree, key)?;
@@ -303,7 +323,8 @@ impl Simulation {
             if let Some(client) = commit {
                 self.pending_commit = self.clients[client].transaction.take().map(|tx| tx.writes);
             }
-            self.recovery_cut = self.faults.chance(9);
+            self.recovery_cuts_left =
+                if self.faults.chance(9) { 1 + self.faults.below(3) } else { 0 };
             self.restart(power_loss);
             return Ok(());
         }
@@ -328,12 +349,19 @@ impl Simulation {
     }
 
     fn recover(&mut self, now: u64, trace: &Trace) -> RunResult<()> {
-        if std::mem::take(&mut self.recovery_cut) {
+        if self.recovery_cuts_left > 0 {
+            self.recovery_cuts_left -= 1;
+            // Measure this restart without mutating the real device. A fixed
+            // small skip only exercises opening/scanning, missing redo and undo.
+            let probe = self.fs.fork_for_recovery();
+            let before = probe.io_count();
+            let _storage = open(&probe, OpenMode::Existing)?;
+            let calls = probe.io_count() - before;
             let fault = Fault {
-                skip: self.faults.below(32),
+                skip: self.faults.below(calls),
                 effect: Effect::PowerLoss { after: self.faults.chance(2) },
             };
-            trace.note(format_args!("arm during recovery {fault:?}"));
+            trace.note(format_args!("arm during recovery ({calls} calls) {fault:?}"));
             self.fs.arm(fault);
         }
         let opened = open(&self.fs, OpenMode::Existing);
@@ -343,6 +371,7 @@ impl Simulation {
             return Ok(());
         }
         self.fs.disarm();
+        self.recovery_cuts_left = 0;
         let storage = opened?;
         let pending = self.pending_commit.take();
         let ambiguous = pending.is_some();
@@ -377,12 +406,13 @@ impl Simulation {
     pub fn summary(&self) -> String {
         let s = &self.stats;
         format!(
-            "{} gets, {} sets, {} deletes, {} commits, {} rollbacks, {} checkpoints ({} partial), {} writeback events, {} I/O calls, {} short I/O faults, {} I/O errors, {} power losses ({} during recovery), {} verified recoveries, {} interrupted commits visible and {} unchanged",
+            "{} gets, {} sets, {} deletes, {} commits, {} rollbacks, {} savepoint rollbacks, {} checkpoints ({} partial), {} writeback events, {} I/O calls, {} short I/O faults, {} I/O errors, {} power losses ({} during recovery), {} verified recoveries, {} interrupted commits visible and {} unchanged",
             s.gets,
             s.sets,
             s.deletes,
             s.commits,
             s.rollbacks,
+            s.savepoint_rollbacks,
             s.checkpoints,
             s.partial_checkpoints,
             s.writebacks,

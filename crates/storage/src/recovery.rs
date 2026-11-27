@@ -8,6 +8,7 @@ use crate::filesystem::FileSystem;
 use crate::log_manager::{LogManager, TxnId, read_recovery_log, retire_empty_wal};
 use crate::page_allocator::PageAllocator;
 
+mod analysis;
 mod replay;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,7 @@ pub fn recover_from_wal(
     disk: &mut DiskManager,
 ) -> StorageResult<RecoveryResult> {
     let scan = read_recovery_log(fs, path)?;
+    analysis::validate(&scan.records)?;
     let max_txn_id = scan.max_txn_id;
     if scan.records.is_empty() {
         PageAllocator::load(disk)?.validate_bounds(disk.page_count())?;

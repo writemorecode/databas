@@ -77,7 +77,7 @@ impl Replay {
 
         // WAL order gives ascending redo order and each page's first allocation
         // transition without sorting by transaction or walking hash maps.
-        for RecoveryLogRecord { lsn, txn_id, kind } in records {
+        for RecoveryLogRecord { lsn, txn_id, kind, .. } in records {
             let outcome = outcomes.get(&txn_id).copied().unwrap_or(Outcome::Incomplete);
             match kind {
                 Kind::Begin | Kind::Commit | Kind::Rollback => {}
