@@ -5,7 +5,7 @@ use crate::PAGE_SIZE;
 use crate::types::{PAGE_CONTENT_END, PAGE_CONTENT_END_U16};
 
 const RUN_HEADER: usize = 4;
-pub const MAX_PATCH_BYTES: usize = PAGE_CONTENT_END + RUN_HEADER;
+const MAX_PATCH_BYTES: usize = PAGE_CONTENT_END + RUN_HEADER;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PagePatch(Box<[u8]>);
@@ -40,9 +40,9 @@ impl PagePatch {
         (Self(redo.into_boxed_slice()), Self(undo.into_boxed_slice()))
     }
 
-    pub fn decode(bytes: &[u8], collect: bool) -> Result<Option<Self>, InvalidPagePatch> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, InvalidPagePatch> {
         Self::validate(bytes)?;
-        Ok(collect.then(|| Self(Box::from(bytes))))
+        Ok(Self(bytes.into()))
     }
 
     pub fn bytes(&self) -> &[u8] {

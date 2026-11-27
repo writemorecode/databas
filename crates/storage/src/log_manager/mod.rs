@@ -24,7 +24,7 @@
 
 use std::{
     collections::HashMap,
-    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -43,15 +43,11 @@ use crate::page_recovery::PageInitKind;
 mod frame;
 mod replacement;
 
-use frame::{
-    CRC32, HEADER_LEN, WalFrameHeader, scan_transaction_frame, serialize_transaction,
-    wal_open_error,
-};
+use frame::{CRC32, HEADER_LEN, WalFrameHeader, serialize_transaction};
 
 /// Sentinel LSN used for pages that do not reflect any logged update.
 pub const ZERO_LSN: Lsn = 0;
 
-const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
 const WAL_FILE_HEADER_VERSION: u16 = 8;
@@ -364,7 +360,6 @@ pub struct LogManager {
     wal_path: PathBuf,
     wal_writer: ActiveWalWriter,
 
-    highest_txn_id: TxnId,
     transaction_heads: HashMap<TxnId, Lsn>,
     highest_appended_lsn: Option<Lsn>,
     highest_durable_lsn: Option<Lsn>,
@@ -377,64 +372,29 @@ impl LogManager {
         self.flush_through(self.highest_appended_lsn.unwrap_or(ZERO_LSN))
     }
 
-    /// Opens or creates the WAL file associated with `db_file_path`.
-    ///
-    /// Existing complete frames are scanned to reconstruct the highest appended
-    /// LSN and highest transaction id. Opening does not mark existing bytes as
-    /// durable in this process; callers must still use [`Self::flush_through`]
-    /// before relying on a newly appended record.
-    pub(crate) fn new(fs: FileSystem, db_file_path: impl AsRef<Path>) -> std::io::Result<Self> {
-        Self::open_wal(fs, db_file_path.as_ref().with_added_extension("wal"))
-    }
-
-    fn open_wal(fs: FileSystem, wal_path: PathBuf) -> std::io::Result<Self> {
-        let wal_was_created = !fs.exists(&wal_path)?;
-        let mut wal_file = fs.open(&wal_path, OpenMode::Create)?;
-        let wal_header = ensure_wal_file_header(&mut wal_file).map_err(wal_open_error)?;
-        if wal_was_created {
-            fs.sync_parent(&wal_path)?;
-        }
-
-        let mut highest_appended_lsn = if wal_header.last_assigned_lsn == ZERO_LSN {
-            None
-        } else {
-            Some(wal_header.last_assigned_lsn)
-        };
-        let mut highest_txn_id = wal_header.max_txn_id;
-        let mut transaction_heads = HashMap::new();
-        wal_file.seek(SeekFrom::Start(WAL_FILE_HEADER_LEN as u64))?;
-        {
-            let mut wal_reader = BufReader::with_capacity(WAL_READ_BUFFER_LEN, &mut wal_file);
-            while let Some(frame) =
-                scan_transaction_frame(&mut wal_reader).map_err(wal_open_error)?
-            {
-                highest_txn_id = highest_txn_id.max(frame.txn_id);
-                if frame.record_count > 0 {
-                    let next_lsn = highest_appended_lsn
-                        .unwrap_or(ZERO_LSN)
-                        .checked_add(u64::from(frame.record_count))
-                        .ok_or(LogManagerError::LsnExhausted)
-                        .map_err(wal_open_error)?;
-                    highest_appended_lsn = Some(next_lsn);
-                    transaction_heads.insert(frame.txn_id, next_lsn);
-                }
-            }
-        }
-        wal_file.seek(SeekFrom::End(0))?;
-
-        let wal_writer = make_wal_writer(wal_file);
-
-        Ok(Self {
+    /// Validate the WAL and position its writer after the surviving records.
+    pub(crate) fn open_for_recovery(
+        fs: FileSystem,
+        db_file_path: &Path,
+    ) -> Result<(Self, RecoveryLogScan), LogManagerError> {
+        let wal_path = db_file_path.with_added_extension("wal");
+        let (file, scan) = read_log(&fs, &wal_path, LogReadMode::Recovery)?;
+        let log = Self {
             fs,
             wal_path,
-            wal_writer,
-            highest_txn_id,
-            transaction_heads,
+            wal_writer: make_wal_writer(file),
+            transaction_heads: scan
+                .records
+                .iter()
+                .map(|record| (record.txn_id, record.lsn))
+                .collect(),
             highest_durable_lsn: None,
-            redo_from: wal_header.redo_from,
-            highest_appended_lsn,
+            redo_from: scan.redo_from,
+            highest_appended_lsn: (scan.last_assigned_lsn != ZERO_LSN)
+                .then_some(scan.last_assigned_lsn),
             poisoned: false,
-        })
+        };
+        Ok((log, scan))
     }
 
     /// Last appended record of a transaction, or zero for a new transaction.
@@ -444,11 +404,6 @@ impl LogManager {
 
     pub(crate) fn retain_transaction_heads(&mut self, mut active: impl FnMut(TxnId) -> bool) {
         self.transaction_heads.retain(|txn_id, _| active(*txn_id));
-    }
-
-    /// Returns the largest transaction id observed in the WAL.
-    pub(crate) fn highest_txn_id(&self) -> TxnId {
-        self.highest_txn_id
     }
 
     /// Returns the LSN that would be assigned to the next appended record.
@@ -485,7 +440,6 @@ impl LogManager {
             return Err(error);
         }
 
-        self.highest_txn_id = self.highest_txn_id.max(txn_id);
         self.highest_appended_lsn = Some(lsn);
         if completed {
             self.transaction_heads.remove(&txn_id);
@@ -548,18 +502,21 @@ enum LogReadMode {
 /// crash even when an earlier frame did not. Successfully synced bytes are
 /// assumed intact. File-header errors, unsupported nonzero frame versions, and
 /// I/O or allocation failures propagate without discarding the suffix.
+#[cfg(feature = "simulation")]
 pub fn read_recovery_log(
     fs: &FileSystem,
     db_file_path: impl AsRef<Path>,
 ) -> Result<RecoveryLogScan, LogManagerError> {
-    read_log(fs, &db_file_path.as_ref().with_added_extension("wal"), LogReadMode::Recovery)
+    let (_, scan) =
+        read_log(fs, &db_file_path.as_ref().with_added_extension("wal"), LogReadMode::Recovery)?;
+    Ok(scan)
 }
 
 fn read_log(
     fs: &FileSystem,
     wal_path: &Path,
     mode: LogReadMode,
-) -> Result<RecoveryLogScan, LogManagerError> {
+) -> Result<(File, RecoveryLogScan), LogManagerError> {
     let wal_was_created = !fs.exists(wal_path)?;
     let mut wal_file = fs.open(wal_path, OpenMode::Create)?;
     let wal_header = ensure_wal_file_header(&mut wal_file)?;
@@ -665,15 +622,17 @@ fn read_log(
         }
         wal_file.set_len(offset)?;
         wal_file.sync_all()?;
+        wal_file.seek(SeekFrom::Start(offset))?;
     }
 
-    Ok(RecoveryLogScan {
+    let scan = RecoveryLogScan {
         records,
         truncated_tail,
         max_txn_id,
         last_assigned_lsn: next_lsn,
         redo_from: wal_header.redo_from,
-    })
+    };
+    Ok((wal_file, scan))
 }
 
 impl RecoveryLogRecordKind {

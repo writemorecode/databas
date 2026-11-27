@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::disk_manager::DiskManager;
 use crate::error::StorageResult;
 use crate::filesystem::FileSystem;
-use crate::log_manager::{LogManager, read_recovery_log};
+use crate::log_manager::{LogManager, RecoveryLogScan};
 use crate::page_allocator::PageAllocator;
 use crate::transaction_manager::TransactionManager;
 
@@ -27,11 +27,11 @@ pub fn repeat_history(
     path: &Path,
     disk: &mut DiskManager,
 ) -> StorageResult<Restart> {
-    let scan = read_recovery_log(&fs, path)?;
-    let analysis = analysis::Analysis::new(&scan.records)?;
-    let mut log = LogManager::new(fs, path)?;
-    let mut transactions = TransactionManager::new(scan.max_txn_id.max(log.highest_txn_id()));
-    let needs_checkpoint = !scan.records.is_empty();
+    let (mut log, RecoveryLogScan { records, max_txn_id, redo_from, .. }) =
+        LogManager::open_for_recovery(fs, path)?;
+    let analysis = analysis::Analysis::new(&records)?;
+    let mut transactions = TransactionManager::new(max_txn_id);
+    let needs_checkpoint = !records.is_empty();
     if needs_checkpoint {
         // The surviving prefix can contain records not yet forced by the last
         // process. Protect the home writes and any newly generated compensation.
@@ -39,7 +39,7 @@ pub fn repeat_history(
     }
     let mut allocator = PageAllocator::load(disk)?;
     if needs_checkpoint {
-        let mut allocations = replay::redo(&scan.records, scan.redo_from, disk, &mut allocator)?;
+        let mut allocations = replay::redo(&records, redo_from, disk, &mut allocator)?;
         analysis.restore_losers(&mut transactions, |id| allocations.take_pending(id))?;
         log.retain_transaction_heads(|id| transactions.transaction_is_active(id));
     } else {

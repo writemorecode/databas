@@ -1,13 +1,12 @@
-//! WAL transaction-frame encoding and shared validation for both read paths.
+//! WAL transaction-frame encoding and validation.
 
 use std::io::{Read, Write};
 
 use crc::{CRC_32_ISO_HDLC, Crc, Digest};
 
 use crate::logical_undo::{Inverse, LogicalUndo};
-use crate::page::format::MAX_INLINE_OVERFLOW_PAYLOAD_BYTES;
 use crate::page_operation::{LeafOperation, LeafPayload, PageOperation};
-use crate::page_patch::{InvalidPagePatch, MAX_PATCH_BYTES, PagePatch};
+use crate::page_patch::{InvalidPagePatch, PagePatch};
 use crate::page_recovery::PageInitKind;
 
 use super::{LogManagerError, LogRecord, LogRecordKind, Lsn, RecoveryLogRecordKind, TxnId};
@@ -70,7 +69,7 @@ pub(super) fn serialize_transaction<W: Write>(
 
 pub(super) struct WalFrameHeader {
     pub(super) txn_id: TxnId,
-    pub(super) record_count: u32,
+    record_count: u32,
     payload_len: u64,
 }
 
@@ -110,91 +109,65 @@ impl WalFrameHeader {
     /// Decode records from the exact body (payload and footer) read for this header.
     pub(super) fn decode_records(
         &self,
-        mut body: &[u8],
+        body: &[u8],
     ) -> Result<Vec<DecodedRecord>, LogManagerError> {
+        let payload_len = self.payload_len()?;
+        let (bytes, footer) =
+            body.split_at_checked(payload_len).ok_or(LogManagerError::TruncatedFrame {
+                needed: payload_len,
+                remaining: body.len(),
+            })?;
+        let mut payload = FramePayload(bytes);
         let mut records = Vec::new();
-        self.read_body(&mut body, Some(&mut records))?;
-        debug_assert!(body.is_empty());
-        debug_assert_eq!(records.len(), self.record_count as usize);
-        Ok(records)
-    }
-
-    fn read_body<R: Read>(
-        &self,
-        reader: &mut R,
-        mut records: Option<&mut Vec<DecodedRecord>>,
-    ) -> Result<(), LogManagerError> {
-        let mut payload =
-            FramePayload { reader, remaining: self.payload_len()?, digest: CRC32.digest() };
-        let mut count = 0;
-        while payload.remaining != 0 {
-            if let Some(record) = payload.read_record(records.is_some())?
-                && let Some(records) = records.as_deref_mut()
-            {
-                records.push(record);
-            }
-            // Every record consumes at least one byte, so count cannot exceed payload length.
-            count += 1;
+        while !payload.0.is_empty() {
+            records.push(payload.read_record()?);
         }
-        if u32::try_from(count) != Ok(self.record_count) {
+        if u32::try_from(records.len()) != Ok(self.record_count) {
             return Err(LogManagerError::RecordCountMismatch {
                 expected: self.record_count,
-                actual: count,
+                actual: records.len(),
             });
         }
-        let footer = read_exact_or_eof::<_, FOOTER_LEN>(payload.reader)?
-            .ok_or(LogManagerError::TruncatedFrame { needed: FOOTER_LEN, remaining: 0 })?;
-        validate_footer(&footer, self.txn_id, payload.digest.finalize())
+        let footer = footer.try_into().map_err(|_length| LogManagerError::TruncatedFrame {
+            needed: FOOTER_LEN,
+            remaining: footer.len(),
+        })?;
+        validate_footer(footer, self.txn_id, CRC32.checksum(bytes))?;
+        Ok(records)
     }
 }
 
-/// Validate a frame without retaining any records or allocating page patches.
-pub(super) fn scan_transaction_frame<R: Read>(
-    reader: &mut R,
-) -> Result<Option<WalFrameHeader>, LogManagerError> {
-    let Some(bytes) = read_exact_or_eof::<_, HEADER_LEN>(reader)? else {
-        return Ok(None);
-    };
-    let header = WalFrameHeader::parse(&bytes)?;
-    header.read_body(reader, None)?;
-    Ok(Some(header))
-}
+struct FramePayload<'a>(&'a [u8]);
 
-struct FramePayload<'a, R> {
-    reader: &'a mut R,
-    remaining: usize,
-    digest: Digest<'static, u32>,
-}
-
-impl<R: Read> FramePayload<'_, R> {
-    fn read_record(&mut self, collect: bool) -> Result<Option<DecodedRecord>, LogManagerError> {
+impl<'a> FramePayload<'a> {
+    fn read_record(&mut self) -> Result<DecodedRecord, LogManagerError> {
         use RecoveryLogRecordKind as Kind;
         let prev_lsn = u64::from_le_bytes(self.read_array()?);
         let kind = match self.read_array::<1>()?[0] {
-            KIND_BEGIN => collect.then_some(Kind::Begin),
-            KIND_COMMIT => collect.then_some(Kind::Commit),
-            KIND_ROLLBACK => collect.then_some(Kind::Rollback),
+            KIND_BEGIN => Kind::Begin,
+            KIND_COMMIT => Kind::Commit,
+            KIND_ROLLBACK => Kind::Rollback,
             KIND_PAGE_INIT => {
                 let page_id = u64::from_le_bytes(self.read_array()?);
                 let tag = self.read_array::<1>()?[0];
                 let kind = PageInitKind::from_tag(tag)
                     .ok_or(LogManagerError::InvalidPageInitKind { tag })?;
-                collect.then_some(Kind::PageInit { page_id, kind })
+                Kind::PageInit { page_id, kind }
             }
             KIND_PAGE_DEALLOC => {
                 let page_id = u64::from_le_bytes(self.read_array()?);
-                collect.then_some(Kind::PageDealloc { page_id })
+                Kind::PageDealloc { page_id }
             }
             KIND_PAGE_COMPENSATION => {
                 let page_id = u64::from_le_bytes(self.read_array()?);
                 let incarnation = u64::from_le_bytes(self.read_array()?);
                 let undo_next_lsn = u64::from_le_bytes(self.read_array()?);
-                self.read_patch(collect)?.map(|redo| Kind::PageCompensation {
+                Kind::PageCompensation {
                     page_id,
                     incarnation,
-                    redo,
+                    redo: self.read_patch()?,
                     undo_next_lsn,
-                })
+                }
             }
             KIND_ALLOCATION_COMPENSATION => {
                 let page_id = u64::from_le_bytes(self.read_array()?);
@@ -204,40 +177,31 @@ impl<R: Read> FramePayload<'_, R> {
                     1 => true,
                     state => return Err(LogManagerError::InvalidAllocationState { state }),
                 };
-                collect.then_some(Kind::AllocationCompensation {
-                    page_id,
-                    allocated,
-                    undo_next_lsn,
-                })
+                Kind::AllocationCompensation { page_id, allocated, undo_next_lsn }
             }
-            KIND_LOGICAL_EDIT => self.read_logical_undo(collect)?,
+            KIND_LOGICAL_EDIT => self.read_logical_undo()?,
             KIND_SKIP_UNDO => {
                 let undo_next_lsn = u64::from_le_bytes(self.read_array()?);
-                collect.then_some(Kind::SkipUndo { undo_next_lsn })
+                Kind::SkipUndo { undo_next_lsn }
             }
             KIND_PAGE_UPDATE => {
                 let page_id = u64::from_le_bytes(self.read_array()?);
                 let incarnation = u64::from_le_bytes(self.read_array()?);
                 let before_lsn = u64::from_le_bytes(self.read_array()?);
-                let redo = self.read_operation(collect)?;
-                let undo = self.read_patch(collect)?;
-                redo.zip(undo).map(|(redo, undo)| Kind::PageUpdate {
+                Kind::PageUpdate {
                     page_id,
                     incarnation,
                     before_lsn,
-                    redo,
-                    undo,
-                })
+                    redo: self.read_operation()?,
+                    undo: self.read_patch()?,
+                }
             }
             kind => return Err(LogManagerError::UnknownRecordKind { kind }),
         };
-        Ok(kind.map(|kind| (prev_lsn, kind)))
+        Ok((prev_lsn, kind))
     }
 
-    fn read_logical_undo(
-        &mut self,
-        collect: bool,
-    ) -> Result<Option<RecoveryLogRecordKind>, LogManagerError> {
+    fn read_logical_undo(&mut self) -> Result<RecoveryLogRecordKind, LogManagerError> {
         let undo_next_lsn = u64::from_le_bytes(self.read_array()?);
         let root = u64::from_le_bytes(self.read_array()?);
         let incarnation = u64::from_le_bytes(self.read_array()?);
@@ -252,54 +216,26 @@ impl<R: Read> FramePayload<'_, R> {
         {
             return Err(LogManagerError::InvalidLogicalUndo);
         }
-        let key = self.read_owned_payload(usize::from(key_len), collect)?;
-        let value = self.read_owned_payload(usize::from(value_len), collect)?;
-        Ok(key.zip(value).map(|(key, value)| RecoveryLogRecordKind::LogicalEdit {
-            undo: LogicalUndo {
-                root,
-                incarnation,
-                key,
-                action: match tag {
-                    INVERSE_DELETE => Inverse::Delete,
-                    INVERSE_INSERT => Inverse::Insert(value),
-                    _ => Inverse::Replace(value),
-                },
-            },
+        let key = self.take(usize::from(key_len))?.into();
+        let value = self.take(usize::from(value_len))?;
+        let action = match tag {
+            INVERSE_DELETE => Inverse::Delete,
+            INVERSE_INSERT => Inverse::Insert(value.into()),
+            _ => Inverse::Replace(value.into()),
+        };
+        Ok(RecoveryLogRecordKind::LogicalEdit {
+            undo: LogicalUndo { root, incarnation, key, action },
             undo_next_lsn,
-        }))
+        })
     }
 
-    fn read_owned_payload(
-        &mut self,
-        len: usize,
-        collect: bool,
-    ) -> Result<Option<Box<[u8]>>, LogManagerError> {
-        if self.remaining < len {
-            return Err(LogManagerError::TruncatedFrame { needed: len, remaining: self.remaining });
-        }
-        if collect {
-            let mut bytes = vec![0; len].into_boxed_slice();
-            self.read_payload(&mut bytes)?;
-            Ok(Some(bytes))
-        } else {
-            let mut bytes = [0; 1024];
-            let mut left = len;
-            while left > 0 {
-                let chunk = left.min(bytes.len());
-                self.read_payload(&mut bytes[..chunk])?;
-                left -= chunk;
-            }
-            Ok(None)
-        }
-    }
-
-    fn read_operation(&mut self, collect: bool) -> Result<Option<PageOperation>, LogManagerError> {
+    fn read_operation(&mut self) -> Result<PageOperation, LogManagerError> {
         let tag = self.read_array::<1>()?[0];
         match tag {
-            OP_PATCH => Ok(self.read_patch(collect)?.map(PageOperation::Patch)),
+            OP_PATCH => Ok(PageOperation::Patch(self.read_patch()?)),
             OP_LEAF_DELETE => {
                 let slot = u16::from_le_bytes(self.read_array()?);
-                Ok(collect.then_some(PageOperation::Leaf(LeafOperation::Delete { slot })))
+                Ok(PageOperation::Leaf(LeafOperation::Delete { slot }))
             }
             OP_LEAF_INSERT | OP_LEAF_REPLACE => {
                 let slot = u16::from_le_bytes(self.read_array()?);
@@ -311,47 +247,39 @@ impl<R: Read> FramePayload<'_, R> {
                 };
                 let len = LeafPayload::inline_len(key_len, value_len, overflow)
                     .ok_or(LogManagerError::InvalidPageOperation { tag })?;
-                let mut buffer = [0; MAX_INLINE_OVERFLOW_PAYLOAD_BYTES];
-                let inline = &mut buffer[..len];
-                self.read_payload(inline)?;
-                Ok(collect.then(|| {
-                    let cell = LeafPayload { key_len, value_len, overflow, inline: inline.into() };
-                    PageOperation::Leaf(if tag == OP_LEAF_INSERT {
-                        LeafOperation::Insert { slot, cell }
-                    } else {
-                        LeafOperation::Replace { slot, cell }
-                    })
+                let inline = self.take(len)?.into();
+                let cell = LeafPayload { key_len, value_len, overflow, inline };
+                Ok(PageOperation::Leaf(if tag == OP_LEAF_INSERT {
+                    LeafOperation::Insert { slot, cell }
+                } else {
+                    LeafOperation::Replace { slot, cell }
                 }))
             }
             _ => Err(LogManagerError::InvalidPageOperation { tag }),
         }
     }
 
-    fn read_patch(&mut self, collect: bool) -> Result<Option<PagePatch>, LogManagerError> {
+    fn read_patch(&mut self) -> Result<PagePatch, LogManagerError> {
         let len = usize::from(u16::from_le_bytes(self.read_array()?));
-        let mut buffer = [0; MAX_PATCH_BYTES];
-        let bytes = buffer.get_mut(..len).ok_or(InvalidPagePatch)?;
-        self.read_payload(bytes)?;
-        Ok(PagePatch::decode(bytes, collect)?)
+        Ok(PagePatch::decode(self.take(len)?)?)
     }
 
     fn read_array<const N: usize>(&mut self) -> Result<[u8; N], LogManagerError> {
-        let mut bytes = [0; N];
-        self.read_payload(&mut bytes)?;
-        Ok(bytes)
+        let (bytes, rest) = self
+            .0
+            .split_first_chunk()
+            .ok_or(LogManagerError::TruncatedFrame { needed: N, remaining: self.0.len() })?;
+        self.0 = rest;
+        Ok(*bytes)
     }
 
-    fn read_payload(&mut self, bytes: &mut [u8]) -> Result<(), LogManagerError> {
-        if self.remaining < bytes.len() {
-            return Err(LogManagerError::TruncatedFrame {
-                needed: bytes.len(),
-                remaining: self.remaining,
-            });
-        }
-        self.reader.read_exact(bytes)?;
-        self.digest.update(bytes);
-        self.remaining -= bytes.len();
-        Ok(())
+    fn take(&mut self, len: usize) -> Result<&'a [u8], LogManagerError> {
+        let (bytes, rest) = self
+            .0
+            .split_at_checked(len)
+            .ok_or(LogManagerError::TruncatedFrame { needed: len, remaining: self.0.len() })?;
+        self.0 = rest;
+        Ok(bytes)
     }
 }
 
@@ -359,21 +287,6 @@ fn read_array<const N: usize>(mut reader: impl Read) -> std::io::Result<[u8; N]>
     let mut bytes = [0; N];
     reader.read_exact(&mut bytes)?;
     Ok(bytes)
-}
-
-fn read_exact_or_eof<R: Read, const N: usize>(reader: &mut R) -> std::io::Result<Option<[u8; N]>> {
-    let mut buf = [0; N];
-    let mut read_len = 0;
-    while read_len < N {
-        match reader.read(&mut buf[read_len..]) {
-            Ok(0) if read_len == 0 => return Ok(None),
-            Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
-            Ok(len) => read_len += len,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(Some(buf))
 }
 
 fn validate_footer(
@@ -401,13 +314,6 @@ fn validate_footer(
         });
     }
     Ok(())
-}
-
-pub(super) fn wal_open_error(err: LogManagerError) -> std::io::Error {
-    match err {
-        LogManagerError::Io(err) => err,
-        err => std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()),
-    }
 }
 
 pub(super) fn validate_record_txn_ids(
