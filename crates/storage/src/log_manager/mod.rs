@@ -42,8 +42,6 @@ use crate::page_recovery::PageInitKind;
 mod frame;
 mod replacement;
 
-pub(crate) use replacement::retire_empty_wal;
-
 use frame::{
     CRC32, HEADER_LEN, WalFrameHeader, scan_transaction_frame, serialize_transaction,
     wal_open_error,
@@ -263,7 +261,7 @@ pub struct RecoveryLogScan {
     pub(crate) last_assigned_lsn: Lsn,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct WalFileHeader {
     last_assigned_lsn: Lsn,
     max_txn_id: TxnId,
@@ -271,10 +269,11 @@ struct WalFileHeader {
 
 fn ensure_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
     if wal_file.len()? == 0 {
-        write_wal_file_header(wal_file, ZERO_LSN, 0)?;
+        let header = WalFileHeader::default();
+        write_wal_file_header(wal_file, header)?;
         wal_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
         wal_file.sync_all()?;
-        return Ok(WalFileHeader { last_assigned_lsn: ZERO_LSN, max_txn_id: 0 });
+        return Ok(header);
     }
     read_wal_file_header(wal_file)
 }
@@ -318,16 +317,12 @@ fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManager
     Ok(WalFileHeader { last_assigned_lsn, max_txn_id })
 }
 
-fn write_wal_file_header(
-    wal_file: &mut File,
-    last_assigned_lsn: Lsn,
-    max_txn_id: TxnId,
-) -> Result<(), LogManagerError> {
+fn write_wal_file_header(wal_file: &mut File, wal: WalFileHeader) -> Result<(), LogManagerError> {
     let mut header = [0; WAL_FILE_HEADER_LEN];
     header[0..8].copy_from_slice(&WAL_FILE_HEADER_MAGIC);
     header[8..10].copy_from_slice(&WAL_FILE_HEADER_VERSION.to_le_bytes());
-    header[16..24].copy_from_slice(&last_assigned_lsn.to_le_bytes());
-    header[24..32].copy_from_slice(&max_txn_id.to_le_bytes());
+    header[16..24].copy_from_slice(&wal.last_assigned_lsn.to_le_bytes());
+    header[24..32].copy_from_slice(&wal.max_txn_id.to_le_bytes());
     let checksum = CRC32.checksum(&header);
     header[WAL_FILE_HEADER_CHECKSUM_RANGE].copy_from_slice(&checksum.to_le_bytes());
     wal_file.seek(SeekFrom::Start(0))?;
@@ -421,6 +416,10 @@ impl LogManager {
     /// Last appended record of a transaction, or zero for a new transaction.
     pub(crate) fn transaction_head(&self, txn_id: TxnId) -> Lsn {
         self.transaction_heads.get(&txn_id).copied().unwrap_or(ZERO_LSN)
+    }
+
+    pub(crate) fn retain_transaction_heads(&mut self, mut active: impl FnMut(TxnId) -> bool) {
+        self.transaction_heads.retain(|txn_id, _| active(*txn_id));
     }
 
     /// Returns the largest transaction id observed in the WAL.

@@ -6,9 +6,8 @@ use std::{
 };
 
 use super::{
-    LogManager, LogManagerError, LogReadMode, LogRecord, Lsn, RecoveryLogRecord, RecoveryLogScan,
-    WAL_WRITE_BUFFER_LEN, WalFileHeader, ZERO_LSN, read_log, serialize_transaction,
-    write_wal_file_header,
+    LogManager, LogManagerError, LogReadMode, LogRecord, Lsn, RecoveryLogRecord,
+    WAL_WRITE_BUFFER_LEN, WalFileHeader, read_log, serialize_transaction, write_wal_file_header,
 };
 use crate::error::StorageResult;
 use crate::filesystem::{FileSystem, OpenMode};
@@ -28,11 +27,11 @@ impl LogManager {
         if prefix_len == 0 {
             return Ok(scan.records.len());
         }
+        let suffix = &scan.records[prefix_len..];
         let header = WalFileHeader {
             last_assigned_lsn: scan.records[prefix_len - 1].lsn,
             max_txn_id: scan.max_txn_id,
         };
-        let suffix = &scan.records[prefix_len..];
         publish_replacement(&self.fs, &self.wal_path, header, suffix, Some(&mut self.poisoned))?;
         let mut reopened = Self::open_wal(self.fs.clone(), self.wal_path.clone())?;
         reopened.transaction_heads.retain(|txn, _| self.transaction_heads.contains_key(txn));
@@ -42,29 +41,6 @@ impl LogManager {
         *self = reopened;
         Ok(suffix.len())
     }
-
-    /// Discard replayed records, including compensation written during recovery.
-    /// The caller must sync the database before retiring the WAL.
-    pub(crate) fn retire_after_recovery(self) -> Result<(), LogManagerError> {
-        let header = WalFileHeader {
-            last_assigned_lsn: self.highest_appended_lsn.unwrap_or(ZERO_LSN),
-            max_txn_id: self.highest_txn_id,
-        };
-        drop(self.wal_writer);
-        publish_replacement(&self.fs, &self.wal_path, header, &[], None)
-    }
-}
-
-/// Retire an already empty recovery log without opening an append writer.
-pub(crate) fn retire_empty_wal(
-    fs: &FileSystem,
-    db_path: &Path,
-    scan: &RecoveryLogScan,
-) -> Result<(), LogManagerError> {
-    debug_assert!(scan.records.is_empty());
-    let header =
-        WalFileHeader { last_assigned_lsn: scan.last_assigned_lsn, max_txn_id: scan.max_txn_id };
-    publish_replacement(fs, &db_path.with_added_extension("wal"), header, &[], None)
 }
 
 fn publish_replacement(
@@ -76,7 +52,7 @@ fn publish_replacement(
 ) -> Result<(), LogManagerError> {
     let staged_path = wal_path.with_added_extension("checkpoint");
     let mut staged = fs.open(&staged_path, OpenMode::Truncate)?;
-    write_wal_file_header(&mut staged, header.last_assigned_lsn, header.max_txn_id)?;
+    write_wal_file_header(&mut staged, header)?;
     if !suffix.is_empty() {
         let mut writer = BufWriter::with_capacity(WAL_WRITE_BUFFER_LEN, &mut staged);
         for record in suffix {

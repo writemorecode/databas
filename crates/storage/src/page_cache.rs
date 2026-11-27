@@ -37,7 +37,7 @@ use crate::page_operation::LeafOperation;
 use crate::page_recovery::{PageInitKind, PageRecovery};
 use crate::page_replacement::ClockPolicy;
 use crate::storage_runtime::StorageRuntime;
-use crate::transaction_manager::PageRestore;
+use crate::transaction_manager::{PageRestore, TransactionSavepoint, UndoStep};
 use crate::{PAGE_SIZE, PageId, TxnId};
 
 #[derive(Debug, Error)]
@@ -234,10 +234,57 @@ impl PageCache {
     }
 
     pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        let rollback = self.inner.runtime.prepare_rollback_pages(txn_id)?;
-        self.restore_rollback_pages(rollback.pages)?;
+        let runtime = &self.inner.runtime;
+        runtime.start_abort(txn_id)?;
+        while self.undo_one(txn_id, None)? {}
         // Completion forces WAL through the CLRs, not the compensated pages.
-        self.inner.runtime.finish_rollback(txn_id)
+        runtime.finish_rollback(txn_id)
+    }
+
+    pub(crate) fn rollback_to_savepoint(
+        &self,
+        savepoint: TransactionSavepoint,
+    ) -> StorageResult<()> {
+        let txn_id = savepoint.txn_id;
+        while self.undo_one(txn_id, Some(savepoint))? {}
+        self.inner.runtime.flush_transaction_wal(txn_id).inspect_err(|_| {
+            let _ = self.inner.runtime.record_transaction_failure(txn_id);
+        })
+    }
+
+    pub(crate) fn undo_restart_losers(&self) -> StorageResult<()> {
+        let runtime = &self.inner.runtime;
+        let mut losers = runtime.loser_heads()?;
+        while let Some((_, txn_id)) = losers.pop() {
+            if self.undo_one(txn_id, None)? {
+                losers.push((runtime.undo_head(txn_id)?, txn_id));
+            } else {
+                runtime.finish_rollback(txn_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn undo_one(
+        &self,
+        txn_id: TxnId,
+        savepoint: Option<TransactionSavepoint>,
+    ) -> StorageResult<bool> {
+        let runtime = &self.inner.runtime;
+        let result = (|| {
+            match runtime.prepare_undo(txn_id, savepoint)? {
+                UndoStep::Done => return Ok(false),
+                UndoStep::Allocation => {}
+                UndoStep::Page(restore) => {
+                    self.restore_rollback_page(&restore)?;
+                    runtime.finish_page_undo(txn_id)?;
+                }
+            }
+            Ok(true)
+        })();
+        result.inspect_err(|_| {
+            let _ = runtime.record_transaction_failure(txn_id);
+        })
     }
 
     /// Returns the mutation epoch shared by cursors over one B+-tree root.
@@ -487,35 +534,26 @@ impl PageCache {
         Ok(())
     }
 
-    pub(crate) fn restore_rollback_pages(
-        &self,
-        restore_pages: Vec<PageRestore>,
-    ) -> PageCacheResult<()> {
-        for restore in restore_pages {
-            let pin = self.fetch_page_impl(restore.page_id, true)?;
-            let frame = &self.inner.frames[pin.frame_id];
-            {
-                let mut data = try_write_page_data(&frame.data, restore.page_id)?;
-                let current = PageRecovery::read(&data);
-                current
-                    .require_incarnation(restore.page_id, restore.incarnation)
-                    .map_err(runtime_error)?;
-                debug_assert!(current.lsn < restore.wal_flush_lsn);
-                restore
-                    .patch
-                    .apply(&mut data)
-                    .map_err(|error| runtime_error(LogManagerError::from(error).into()))?;
-                PageRecovery::stamp_lsn(&mut data, restore.wal_flush_lsn);
-                let oldest = if frame.dirty.load(Ordering::Acquire) {
-                    frame.oldest_unflushed_lsn.load(Ordering::Acquire).min(restore.wal_flush_lsn)
-                } else {
-                    restore.wal_flush_lsn
-                };
-                frame.oldest_unflushed_lsn.store(oldest, Ordering::Release);
-                frame.lsn.store(restore.wal_flush_lsn, Ordering::Release);
-                frame.dirty.store(true, Ordering::Release);
-            }
-        }
+    fn restore_rollback_page(&self, restore: &PageRestore) -> PageCacheResult<()> {
+        let pin = self.fetch_page_impl(restore.page_id, true)?;
+        let frame = &self.inner.frames[pin.frame_id];
+        let mut data = try_write_page_data(&frame.data, restore.page_id)?;
+        let current = PageRecovery::read(&data);
+        current.require_incarnation(restore.page_id, restore.incarnation).map_err(runtime_error)?;
+        debug_assert!(current.lsn < restore.wal_flush_lsn);
+        restore
+            .patch
+            .apply(&mut data)
+            .map_err(|error| runtime_error(LogManagerError::from(error).into()))?;
+        PageRecovery::stamp_lsn(&mut data, restore.wal_flush_lsn);
+        let oldest = if frame.dirty.load(Ordering::Acquire) {
+            frame.oldest_unflushed_lsn.load(Ordering::Acquire).min(restore.wal_flush_lsn)
+        } else {
+            restore.wal_flush_lsn
+        };
+        frame.oldest_unflushed_lsn.store(oldest, Ordering::Release);
+        frame.lsn.store(restore.wal_flush_lsn, Ordering::Release);
+        frame.dirty.store(true, Ordering::Release);
         Ok(())
     }
 }
