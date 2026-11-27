@@ -81,7 +81,7 @@ pub(super) fn redo(
             Kind::Commit | Kind::Rollback => {
                 allocations.publish(disk, allocator, record.txn_id, record.lsn)?;
             }
-            Kind::Begin => {}
+            Kind::Begin | Kind::LogicalEdit { .. } | Kind::SkipUndo { .. } => {}
         }
     }
     Ok(allocations)

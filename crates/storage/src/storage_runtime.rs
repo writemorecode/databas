@@ -4,11 +4,14 @@ use crate::disk_manager::DiskManager;
 use crate::error::{InternalError, StorageError, StorageResult};
 use crate::filesystem::FileSystem;
 use crate::log_manager::{LogManager, Lsn, TxnId};
+use crate::logical_undo::LogicalUndo;
 use crate::page_allocator::PageAllocator;
 use crate::page_operation::LeafOperation;
 use crate::page_recovery::PageInitKind;
 use crate::recovery::{Restart, repeat_history};
-use crate::transaction_manager::{TransactionManager, TransactionSavepoint, UndoStep};
+use crate::transaction_manager::{
+    ActionBoundary, TransactionManager, TransactionSavepoint, UndoStep,
+};
 use crate::{CheckpointOutcome, PAGE_SIZE, PageId};
 use std::sync::{Mutex, MutexGuard};
 
@@ -237,6 +240,32 @@ impl StorageRuntime {
         Self::lock(&self.transactions, "transaction manager")?.statement_savepoint(txn_id)
     }
 
+    pub(crate) fn has_surviving_root(
+        &self,
+        txn_id: TxnId,
+        incarnation: Lsn,
+    ) -> StorageResult<bool> {
+        Self::lock(&self.transactions, "transaction manager")?
+            .has_surviving_root(txn_id, incarnation)
+    }
+
+    pub(crate) fn begin_action(&self, txn_id: TxnId) -> StorageResult<ActionBoundary> {
+        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let log = Self::lock(&self.log, "log manager")?;
+        transactions.begin_action(&log, txn_id)
+    }
+
+    pub(crate) fn complete_action(
+        &self,
+        txn_id: TxnId,
+        boundary: ActionBoundary,
+        inverse: LogicalUndo,
+    ) -> StorageResult<()> {
+        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let mut log = Self::lock(&self.log, "log manager")?;
+        transactions.complete_action(&mut log, txn_id, boundary, inverse)
+    }
+
     pub(crate) fn start_abort(&self, txn_id: TxnId) -> StorageResult<()> {
         Self::lock(&self.transactions, "transaction manager")?.start_abort(txn_id)
     }
@@ -261,6 +290,17 @@ impl StorageRuntime {
 
     pub(crate) fn finish_page_undo(&self, txn_id: TxnId) -> StorageResult<()> {
         Self::lock(&self.transactions, "transaction manager")?.finish_page_undo(txn_id)
+    }
+
+    pub(crate) fn finish_logical_undo(
+        &self,
+        txn_id: TxnId,
+        boundary: ActionBoundary,
+        completed: bool,
+    ) -> StorageResult<()> {
+        let mut transactions = Self::lock(&self.transactions, "transaction manager")?;
+        let mut log = Self::lock(&self.log, "log manager")?;
+        transactions.finish_logical_undo(&mut log, txn_id, boundary, completed)
     }
 
     pub(crate) fn flush_transaction_wal(&self, txn_id: TxnId) -> StorageResult<()> {

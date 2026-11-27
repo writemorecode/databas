@@ -35,6 +35,7 @@ pub(crate) use crate::Lsn;
 use crate::PageId;
 pub use crate::TxnId;
 use crate::filesystem::{File, FileSystem, OpenMode};
+use crate::logical_undo::LogicalUndo;
 use crate::page_operation::PageOperation;
 use crate::page_patch::{InvalidPagePatch, PagePatch};
 use crate::page_recovery::PageInitKind;
@@ -127,6 +128,9 @@ pub enum LogManagerError {
     /// A page operation has an unknown tag or invalid payload.
     #[error("invalid WAL page operation with tag {tag}")]
     InvalidPageOperation { tag: u8 },
+    /// Invalid encoding of a tree/key inverse.
+    #[error("invalid WAL logical undo payload")]
+    InvalidLogicalUndo,
     /// The WAL file header failed its integrity checksum.
     #[error("WAL file header checksum mismatch: expected {expected}, got {actual}")]
     FileHeaderChecksumMismatch { expected: u32, actual: u32 },
@@ -203,6 +207,10 @@ pub enum LogRecordKind<'a> {
     PageCompensation { page_id: PageId, incarnation: Lsn, redo: &'a PagePatch, undo_next_lsn: Lsn },
     /// Redo-only compensation of one allocation bit.
     AllocationCompensation { page_id: PageId, allocated: bool, undo_next_lsn: Lsn },
+    /// A completed edit replaces its physical undo entries with a key inverse.
+    LogicalEdit { undo: &'a LogicalUndo, undo_next_lsn: Lsn },
+    /// End a nested top action or a logical inverse; undo skips its physical work.
+    SkipUndo { undo_next_lsn: Lsn },
 }
 
 /// Owned WAL record returned by recovery scans.
@@ -246,6 +254,10 @@ pub enum RecoveryLogRecordKind {
     PageCompensation { page_id: PageId, incarnation: Lsn, redo: PagePatch, undo_next_lsn: Lsn },
     /// Redo-only compensation of one allocation bit.
     AllocationCompensation { page_id: PageId, allocated: bool, undo_next_lsn: Lsn },
+    /// A completed edit replaces its physical undo entries with a key inverse.
+    LogicalEdit { undo: LogicalUndo, undo_next_lsn: Lsn },
+    /// End a nested top action or a logical inverse; undo skips its physical work.
+    SkipUndo { undo_next_lsn: Lsn },
 }
 
 /// Result of scanning the WAL for recovery.
@@ -664,6 +676,12 @@ impl RecoveryLogRecordKind {
                     allocated: *allocated,
                     undo_next_lsn: *undo_next_lsn,
                 }
+            }
+            Self::LogicalEdit { undo, undo_next_lsn } => {
+                LogRecordKind::LogicalEdit { undo, undo_next_lsn: *undo_next_lsn }
+            }
+            Self::SkipUndo { undo_next_lsn } => {
+                LogRecordKind::SkipUndo { undo_next_lsn: *undo_next_lsn }
             }
             Self::PageUpdate { page_id, incarnation, before_lsn, redo, undo } => {
                 LogRecordKind::PageUpdate {

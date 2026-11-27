@@ -93,7 +93,9 @@ impl Storage {
         let runtime = Arc::new(runtime);
         let page_cache = PageCache::new(Arc::clone(&runtime), options.cache_frames)?;
         if needs_checkpoint {
-            // Give restart workspace independent of the caller's cache setting.
+            // Undo can be more demanding than the original edit (e.g. restoring
+            // a large value to a leaf that is now full). Give restart workspace
+            // independent of the caller's cache setting.
             let recovery_cache = PageCache::new(Arc::clone(&runtime), 32)?;
             recovery_cache.undo_restart_losers()?;
             runtime.validate_allocation_bounds()?;

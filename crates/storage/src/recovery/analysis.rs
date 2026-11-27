@@ -92,7 +92,9 @@ impl<'a> Analysis<'a> {
 pub(super) fn undo_next(record: &RecoveryLogRecord) -> Lsn {
     match record.kind {
         Kind::PageCompensation { undo_next_lsn, .. }
-        | Kind::AllocationCompensation { undo_next_lsn, .. } => undo_next_lsn,
+        | Kind::AllocationCompensation { undo_next_lsn, .. }
+        | Kind::LogicalEdit { undo_next_lsn, .. }
+        | Kind::SkipUndo { undo_next_lsn } => undo_next_lsn,
         _ => record.prev_lsn,
     }
 }

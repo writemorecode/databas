@@ -32,12 +32,13 @@ use thiserror::Error;
 
 use crate::error::{InternalError, InvariantViolation, StorageError, StorageResult};
 use crate::log_manager::{LogManagerError, ZERO_LSN};
+use crate::logical_undo::LogicalUndo;
 use crate::page::{NodeMarker, Page, PageResult, Read, Write};
 use crate::page_operation::LeafOperation;
 use crate::page_recovery::{PageInitKind, PageRecovery};
 use crate::page_replacement::ClockPolicy;
 use crate::storage_runtime::StorageRuntime;
-use crate::transaction_manager::{PageRestore, TransactionSavepoint, UndoStep};
+use crate::transaction_manager::{ActionBoundary, PageRestore, TransactionSavepoint, UndoStep};
 use crate::{PAGE_SIZE, PageId, TxnId};
 
 #[derive(Debug, Error)]
@@ -279,12 +280,40 @@ impl PageCache {
                     self.restore_rollback_page(&restore)?;
                     runtime.finish_page_undo(txn_id)?;
                 }
+                UndoStep::Logical { inverse, boundary } => {
+                    let result =
+                        crate::btree::TreeCursor::apply_inverse(self.clone(), txn_id, &inverse)
+                            .and_then(|()| runtime.validate_transaction_write(txn_id));
+                    runtime.finish_logical_undo(txn_id, boundary, result.is_ok())?;
+                    result?;
+                }
             }
             Ok(true)
         })();
         result.inspect_err(|_| {
             let _ = runtime.record_transaction_failure(txn_id);
         })
+    }
+
+    pub(crate) fn has_surviving_root(
+        &self,
+        txn_id: TxnId,
+        incarnation: Lsn,
+    ) -> StorageResult<bool> {
+        self.inner.runtime.has_surviving_root(txn_id, incarnation)
+    }
+
+    pub(crate) fn begin_action(&self, txn_id: TxnId) -> StorageResult<ActionBoundary> {
+        self.inner.runtime.begin_action(txn_id)
+    }
+
+    pub(crate) fn complete_action(
+        &self,
+        txn_id: TxnId,
+        boundary: ActionBoundary,
+        inverse: LogicalUndo,
+    ) -> StorageResult<()> {
+        self.inner.runtime.complete_action(txn_id, boundary, inverse)
     }
 
     /// Returns the mutation epoch shared by cursors over one B+-tree root.
