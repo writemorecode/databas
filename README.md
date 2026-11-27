@@ -21,12 +21,20 @@ cargo clippy --workspace --all-targets --all-features
 
 ### Database file format
 
-Format version 14 reserves a common recovery trailer on each 4,096-byte
+Format version 15 reserves a common recovery trailer on each 4,096-byte
 page. It contains the page incarnation and page LSN, followed by a
-little-endian CRC32 over the physical page ID and the preceding 4,092 bytes. A required `.doublewrite` sidecar stages protected page
-writes and is bound to the database file's filesystem identity (currently Unix
-for real files). Do not delete or copy it as if it were a portable backup.
-Older database files are not supported; there is no in-place migration.
+little-endian CRC32 over the physical page ID and the preceding 4,092 bytes.
+A required `.doublewrite` sidecar stages protected page writes. Both its
+bootstrap and each `.wal` file header (including checkpoint replacements)
+bind to the open database file's filesystem identity (device and inode on
+Unix), not just its pathname. WAL header version 9 includes this 16-byte
+identity in the header CRC32. This is not a persistent database UUID. Do not
+delete or copy sidecars as if they were portable backups. Restart checks the
+database format, doublewrite bootstrap, and WAL compatibility before applying
+staged writes or replaying records. A verified staged header can identify the
+format if page zero tore. An existing WAL with an incomplete file header is
+rejected, not reinitialized. Creating a database requires unoccupied sidecar
+paths. Older formats are rejected without migration.
 
 Restart recovery analyzes WAL transaction chains, repeats history, and logs
 compensation for incomplete transactions. `PageInit` derives a typed empty
@@ -54,9 +62,10 @@ CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo run --release -p databas-stora
 The simulator runs until the time limit or the first unexpected failure. Its
 clients share the storage engine and keep operating across injected I/O errors
 and power losses. Recovery checks the B+-trees against the client transaction
-history. Focused crash sweeps also verify interrupted splits and restartable
-undo across retained splits and merges. To replay a randomized failure, use
-the same build and seed and replace
+history. Focused scenarios verify that incompatible opens preserve pending
+repair slots and all file bytes, and crash sweeps verify interrupted splits
+and restartable undo across retained splits and merges. To replay a randomized
+failure, use the same build and seed and replace
 `--duration 15m` with the reported `--events N`.
 
 `DROP TABLE name;` removes a user table and all of its secondary indexes.

@@ -21,7 +21,12 @@ impl LogManager {
         redo_from: Lsn,
     ) -> StorageResult<usize> {
         self.flush_all()?;
-        let (_, scan) = match read_log(&self.fs, &self.wal_path, LogReadMode::Checkpoint) {
+        let (_, scan) = match read_log(
+            &self.fs,
+            &self.wal_path,
+            self.database_identity,
+            LogReadMode::Checkpoint,
+        ) {
             Ok(scan) => scan,
             Err(error) => {
                 self.poisoned = true;
@@ -35,6 +40,7 @@ impl LogManager {
         }
         let suffix = &scan.records[prefix_len..];
         let header = WalFileHeader {
+            database_identity: self.database_identity,
             last_assigned_lsn: suffix
                 .first()
                 .map_or(scan.last_assigned_lsn, |record| record.lsn - 1),

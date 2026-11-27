@@ -2,11 +2,8 @@
 //! same cache-backed undo path used by live rollback. No cursor is exposed
 //! until all losers are compensated and the recovered pages are durable.
 
-use std::path::Path;
-
 use crate::disk_manager::DiskManager;
 use crate::error::StorageResult;
-use crate::filesystem::FileSystem;
 use crate::log_manager::{LogManager, RecoveryLogScan};
 use crate::page_allocator::PageAllocator;
 use crate::transaction_manager::TransactionManager;
@@ -23,12 +20,10 @@ pub struct Restart {
 }
 
 pub fn repeat_history(
-    fs: FileSystem,
-    path: &Path,
+    mut log: LogManager,
+    RecoveryLogScan { records, max_txn_id, redo_from, .. }: RecoveryLogScan,
     disk: &mut DiskManager,
 ) -> StorageResult<Restart> {
-    let (mut log, RecoveryLogScan { records, max_txn_id, redo_from, .. }) =
-        LogManager::open_for_recovery(fs, path)?;
     let analysis = analysis::Analysis::new(&records)?;
     let mut transactions = TransactionManager::new(max_txn_id);
     let needs_checkpoint = !records.is_empty();

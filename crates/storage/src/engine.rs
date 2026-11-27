@@ -2,11 +2,11 @@ use std::path::Path;
 
 use crate::PageId;
 use crate::btree::{TreeCursor, initialize_empty_root, validate_tree_page_formats};
-use crate::database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header};
-use crate::disk_manager::{DiskManager, missing_doublewrite};
+use crate::database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader};
+use crate::disk_manager::DiskManager;
 use crate::error::StorageResult;
 use crate::filesystem::{FileSystem, OpenMode};
-use crate::log_manager::TxnId;
+use crate::log_manager::{LogManager, TxnId};
 use crate::page_cache::PageCache;
 use crate::storage_runtime::StorageRuntime;
 use crate::transaction_manager::TransactionSavepoint;
@@ -68,28 +68,34 @@ impl Storage {
         options: StorageOptions,
         mode: OpenMode,
     ) -> StorageResult<Self> {
+        // A create-capable open must not even leave an empty database beside
+        // an orphaned sidecar. Recheck under the file lock before initializing.
+        if matches!(mode, OpenMode::Create | OpenMode::CreateNew) && !fs.exists(path)? {
+            require_fresh_sidecars(&fs, path)?;
+        }
         let mut disk_manager = DiskManager::open(&fs, path, mode)?;
         disk_manager.lock_exclusive()?;
-        if matches!(mode, OpenMode::CreateNew)
-            || matches!(mode, OpenMode::Create) && disk_manager.page_count() == 0
+        let identity = disk_manager.identity()?;
+        let repair = if matches!(mode, OpenMode::CreateNew | OpenMode::Create)
+            && disk_manager.page_count() == 0
         {
+            require_fresh_sidecars(&fs, path)?;
             disk_manager.create_doublewrite(&fs, path)?;
             initialize_header_page(&mut disk_manager)?;
-        } else if disk_manager.repair_doublewrite(&fs, path)? {
-            validate_header_page(&mut disk_manager)?;
+            None
         } else {
-            if disk_manager.page_count() == 0 {
-                return Err(missing_header());
-            }
-            // Detect older formats without creating or modifying their sidecars.
-            let mut page = [0; crate::PAGE_SIZE];
-            disk_manager.read_page_unchecked(DATABASE_HEADER_PAGE_ID, &mut page)?;
-            DatabaseHeader::validate_page(&page)?;
-            return Err(missing_doublewrite().into());
+            Some(disk_manager.prepare_doublewrite(&fs, path)?)
+        };
+        // Bootstrap inspection above is read-only on restart. WAL scan validates
+        // identity and frame versions before publishing/truncating a crash tail;
+        // only then may we install home images or retire any repair slots.
+        let (log, scan) = LogManager::open_for_recovery(fs, path, identity)?;
+        if let Some(repair) = repair {
+            disk_manager.repair_doublewrite(repair)?;
         }
         let opened_page_count = disk_manager.page_count();
         let (runtime, needs_checkpoint) =
-            StorageRuntime::new(fs, path.to_path_buf(), disk_manager)?;
+            StorageRuntime::new(path.to_path_buf(), disk_manager, log, scan)?;
         let runtime = Arc::new(runtime);
         let page_cache = PageCache::new(Arc::clone(&runtime), options.cache_frames)?;
         if needs_checkpoint {
@@ -225,12 +231,16 @@ fn initialize_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
     Ok(())
 }
 
-fn validate_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
-    if disk_manager.page_count() == 0 {
-        return Err(missing_header());
+fn require_fresh_sidecars(fs: &FileSystem, path: &Path) -> StorageResult<()> {
+    for extension in ["doublewrite", "wal", "wal.checkpoint"] {
+        let sidecar = path.with_added_extension(extension);
+        if fs.exists(&sidecar)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("new database with existing sidecar: {}", sidecar.display()),
+            )
+            .into());
+        }
     }
-
-    let mut page = [0u8; crate::PAGE_SIZE];
-    disk_manager.read_page(DATABASE_HEADER_PAGE_ID, &mut page)?;
-    DatabaseHeader::validate_page(&page)
+    Ok(())
 }

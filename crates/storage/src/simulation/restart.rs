@@ -102,8 +102,13 @@ pub(super) fn sweep_retained_structure() -> RunResult<()> {
     storage.rollback_to_savepoint(before_split)?;
     loser.insert(&[8], &value)?; // Splits before inserting; moves the earlier row too.
     storage.checkpoint()?; // WAL retained for undo even though the pages are durable.
-    let scan = read_recovery_log(&FileSystem::Memory(fs.fork_for_recovery()), DATABASE)
+    let probe = FileSystem::Memory(fs.fork_for_recovery());
+    let path = Path::new(DATABASE);
+    let identity = probe
+        .open(path, OpenMode::Existing)
+        .and_then(|file| file.identity())
         .map_err(StorageError::from)?;
+    let scan = read_recovery_log(&probe, path, identity).map_err(StorageError::from)?;
     if !scan
         .records
         .iter()
@@ -225,9 +230,8 @@ fn read_layout(fs: &MemoryFs, root: PageId) -> RunResult<(u8, usize)> {
     let path = Path::new(DATABASE);
     let mut disk = DiskManager::open(&fs, path, OpenMode::Existing).map_err(StorageError::from)?;
     disk.lock_exclusive().map_err(StorageError::from)?;
-    if !disk.repair_doublewrite(&fs, path).map_err(StorageError::from)? {
-        return Err(RunError::Mismatch("layout probe is missing doublewrite".into()));
-    }
+    let repair = disk.prepare_doublewrite(&fs, path)?;
+    disk.repair_doublewrite(repair).map_err(StorageError::from)?;
     let mut page = [0; PAGE_SIZE];
     disk.read_page(root, &mut page).map_err(StorageError::from)?;
     let allocator = PageAllocator::load(&mut disk)?;

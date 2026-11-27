@@ -14,9 +14,10 @@
 //! ```
 //!
 //! LSNs are not stored explicitly in transaction frames. The WAL file header
-//! stores the durable high-water LSN before the current WAL segment, and records
-//! in complete frames are assigned logical LSNs after that value. Appending
-//! advances the highest appended LSN, while [`LogManager::flush_through`] is
+//! binds the segment to the database file's filesystem identity and stores the
+//! preceding durable high-water LSN. Records in complete frames are assigned
+//! logical LSNs after that value. Appending advances the highest appended LSN,
+//! while [`LogManager::flush_through`] is
 //! responsible for making appended bytes durable before pages protected by
 //! those LSNs are written to the database file.
 
@@ -50,8 +51,8 @@ pub const ZERO_LSN: Lsn = 0;
 
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
-const WAL_FILE_HEADER_VERSION: u16 = 8;
-pub const WAL_FILE_HEADER_LEN: usize = 40;
+const WAL_FILE_HEADER_VERSION: u16 = 9;
+pub const WAL_FILE_HEADER_LEN: usize = 56;
 const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
 
 trait DurableWrite: Write {
@@ -130,6 +131,9 @@ pub enum LogManagerError {
     /// The WAL file header failed its integrity checksum.
     #[error("WAL file header checksum mismatch: expected {expected}, got {actual}")]
     FileHeaderChecksumMismatch { expected: u32, actual: u32 },
+    /// A valid WAL header identifies a different database filesystem object.
+    #[error("WAL belongs to a different database file")]
+    ForeignDatabase,
     /// A checkpoint's redo horizon requires an absent durable WAL prefix.
     #[error("invalid checkpoint redo horizon {redo_from} after LSN {last_lsn}")]
     InvalidRedoHorizon { redo_from: Lsn, last_lsn: Lsn },
@@ -274,28 +278,22 @@ pub struct RecoveryLogScan {
     pub(crate) redo_from: Lsn,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WalFileHeader {
+    database_identity: [u8; 16],
     last_assigned_lsn: Lsn,
     max_txn_id: TxnId,
     redo_from: Lsn,
 }
 
-fn ensure_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
-    if wal_file.len()? == 0 {
-        let header = WalFileHeader::default();
-        write_wal_file_header(wal_file, header)?;
-        wal_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
-        wal_file.sync_all()?;
-        return Ok(header);
-    }
-    read_wal_file_header(wal_file)
-}
-
-fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
+fn read_wal_file_header(
+    wal_file: &mut File,
+    database_identity: [u8; 16],
+) -> Result<WalFileHeader, LogManagerError> {
     let mut header = [0; WAL_FILE_HEADER_LEN];
     wal_file.seek(SeekFrom::Start(0))?;
-    wal_file.read_exact(&mut header)?;
+    // Read the stable prefix first: an older header can be shorter.
+    wal_file.read_exact(&mut header[..10])?;
 
     let mut magic = [0; 8];
     magic.copy_from_slice(&header[..8]);
@@ -313,6 +311,7 @@ fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManager
         });
     }
 
+    wal_file.read_exact(&mut header[10..])?;
     let mut checksum_bytes = [0; 4];
     checksum_bytes.copy_from_slice(&header[WAL_FILE_HEADER_CHECKSUM_RANGE]);
     let expected = u32::from_le_bytes(checksum_bytes);
@@ -320,6 +319,10 @@ fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManager
     let actual = CRC32.checksum(&header);
     if actual != expected {
         return Err(LogManagerError::FileHeaderChecksumMismatch { expected, actual });
+    }
+
+    if header[40..] != database_identity {
+        return Err(LogManagerError::ForeignDatabase);
     }
 
     let mut last_assigned_lsn_bytes = [0; 8];
@@ -331,7 +334,7 @@ fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManager
     let mut redo_from_bytes = [0; 8];
     redo_from_bytes.copy_from_slice(&header[32..40]);
     let redo_from = u64::from_le_bytes(redo_from_bytes);
-    Ok(WalFileHeader { last_assigned_lsn, max_txn_id, redo_from })
+    Ok(WalFileHeader { database_identity, last_assigned_lsn, max_txn_id, redo_from })
 }
 
 fn write_wal_file_header(wal_file: &mut File, wal: WalFileHeader) -> Result<(), LogManagerError> {
@@ -341,6 +344,7 @@ fn write_wal_file_header(wal_file: &mut File, wal: WalFileHeader) -> Result<(), 
     header[16..24].copy_from_slice(&wal.last_assigned_lsn.to_le_bytes());
     header[24..32].copy_from_slice(&wal.max_txn_id.to_le_bytes());
     header[32..40].copy_from_slice(&wal.redo_from.to_le_bytes());
+    header[40..].copy_from_slice(&wal.database_identity);
     let checksum = CRC32.checksum(&header);
     header[WAL_FILE_HEADER_CHECKSUM_RANGE].copy_from_slice(&checksum.to_le_bytes());
     wal_file.seek(SeekFrom::Start(0))?;
@@ -359,6 +363,7 @@ pub struct LogManager {
     fs: FileSystem,
     wal_path: PathBuf,
     wal_writer: ActiveWalWriter,
+    database_identity: [u8; 16],
 
     transaction_heads: HashMap<TxnId, Lsn>,
     highest_appended_lsn: Option<Lsn>,
@@ -376,13 +381,15 @@ impl LogManager {
     pub(crate) fn open_for_recovery(
         fs: FileSystem,
         db_file_path: &Path,
+        database_identity: [u8; 16],
     ) -> Result<(Self, RecoveryLogScan), LogManagerError> {
         let wal_path = db_file_path.with_added_extension("wal");
-        let (file, scan) = read_log(&fs, &wal_path, LogReadMode::Recovery)?;
+        let (file, scan) = read_log(&fs, &wal_path, database_identity, LogReadMode::Recovery)?;
         let log = Self {
             fs,
             wal_path,
             wal_writer: make_wal_writer(file),
+            database_identity,
             transaction_heads: scan
                 .records
                 .iter()
@@ -505,27 +512,47 @@ enum LogReadMode {
 #[cfg(feature = "simulation")]
 pub fn read_recovery_log(
     fs: &FileSystem,
-    db_file_path: impl AsRef<Path>,
+    db_file_path: &Path,
+    database_identity: [u8; 16],
 ) -> Result<RecoveryLogScan, LogManagerError> {
-    let (_, scan) =
-        read_log(fs, &db_file_path.as_ref().with_added_extension("wal"), LogReadMode::Recovery)?;
+    let (_, scan) = read_log(
+        fs,
+        &db_file_path.with_added_extension("wal"),
+        database_identity,
+        LogReadMode::Recovery,
+    )?;
     Ok(scan)
 }
 
 fn read_log(
     fs: &FileSystem,
     wal_path: &Path,
+    database_identity: [u8; 16],
     mode: LogReadMode,
 ) -> Result<(File, RecoveryLogScan), LogManagerError> {
-    let wal_was_created = !fs.exists(wal_path)?;
-    let mut wal_file = fs.open(wal_path, OpenMode::Create)?;
-    let wal_header = ensure_wal_file_header(&mut wal_file)?;
-    // An earlier replacement can have renamed the live WAL but failed its
-    // directory sync. Persist the name before recovery can append CLRs and
-    // write home pages whose LSNs depend on that replacement file.
-    if wal_was_created || mode == LogReadMode::Recovery {
-        fs.sync_parent(wal_path)?;
-    }
+    let (mut wal_file, wal_header) = match fs.open(wal_path, OpenMode::Existing) {
+        Ok(mut file) => {
+            let header = read_wal_file_header(&mut file, database_identity)?;
+            (file, header)
+        }
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && mode == LogReadMode::Recovery =>
+        {
+            // Initial bootstrap: initialize only a new file. An existing but
+            // incomplete header cannot prove identity or supply a high-water LSN.
+            let mut file = fs.open(wal_path, OpenMode::CreateNew)?;
+            let header = WalFileHeader {
+                database_identity,
+                last_assigned_lsn: 0,
+                max_txn_id: 0,
+                redo_from: 0,
+            };
+            write_wal_file_header(&mut file, header)?;
+            file.sync_all()?;
+            (file, header)
+        }
+        Err(error) => return Err(error.into()),
+    };
     let wal_len = wal_file.len()?;
     wal_file.seek(SeekFrom::Start(WAL_FILE_HEADER_LEN as u64))?;
 
@@ -615,6 +642,12 @@ fn read_log(
             redo_from: wal_header.redo_from,
             last_lsn: next_lsn,
         });
+    }
+    // Only publish the namespace once both the file and frame versions pass.
+    // A previous replacement may have renamed the WAL but failed directory sync;
+    // restart writes depending on that WAL must wait for its name to be durable.
+    if mode == LogReadMode::Recovery {
+        fs.sync_parent(wal_path)?;
     }
     if truncated_tail {
         if mode == LogReadMode::Checkpoint {
