@@ -30,12 +30,15 @@ use std::sync::{
 
 use thiserror::Error;
 
-use crate::error::{StorageError, StorageResult};
-use crate::log_manager::ZERO_LSN;
+use crate::error::{InternalError, InvariantViolation, StorageError, StorageResult};
+use crate::log_manager::{LogManagerError, ZERO_LSN};
+use crate::logical_undo::LogicalUndo;
 use crate::page::{NodeMarker, Page, PageResult, Read, Write};
+use crate::page_operation::LeafOperation;
+use crate::page_recovery::{PageInitKind, PageRecovery};
 use crate::page_replacement::ClockPolicy;
 use crate::storage_runtime::StorageRuntime;
-use crate::transaction_manager::PageRestore;
+use crate::transaction_manager::{ActionBoundary, PageRestore, TransactionSavepoint, UndoStep};
 use crate::{PAGE_SIZE, PageId, TxnId};
 
 #[derive(Debug, Error)]
@@ -68,6 +71,12 @@ pub type PageCacheResult<T> = Result<T, PageCacheError>;
 
 fn runtime_error(error: StorageError) -> PageCacheError {
     PageCacheError::Storage(Box::new(error))
+}
+
+fn mutation_txn(txn_id: Option<TxnId>) -> StorageResult<TxnId> {
+    txn_id.ok_or(StorageError::Internal(InternalError::InvariantViolation(
+        InvariantViolation::NoActiveTransaction,
+    )))
 }
 
 fn try_read_page_data(
@@ -202,6 +211,110 @@ impl PageCache {
         })
     }
 
+    /// Run a raw mutation in an implicit physical transaction. An uncertain
+    /// completion is not safe to retry as a fresh operation; reopen instead.
+    pub(crate) fn autocommit<T>(
+        &self,
+        operation: impl FnOnce(TxnId) -> StorageResult<T>,
+    ) -> StorageResult<T> {
+        let txn_id = self.inner.runtime.begin_transaction()?;
+        let result = operation(txn_id).and_then(|value| {
+            self.inner.runtime.validate_transaction_write(txn_id)?;
+            Ok(value)
+        });
+        match result {
+            Ok(value) => {
+                self.inner.runtime.commit_transaction(txn_id)?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.rollback_transaction(txn_id)?;
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
+        let runtime = &self.inner.runtime;
+        runtime.start_abort(txn_id)?;
+        while self.undo_one(txn_id, None)? {}
+        runtime.finish_rollback(txn_id)
+    }
+
+    pub(crate) fn rollback_to_savepoint(
+        &self,
+        savepoint: TransactionSavepoint,
+    ) -> StorageResult<()> {
+        let txn_id = savepoint.txn_id;
+        while self.undo_one(txn_id, Some(savepoint))? {}
+        self.inner.runtime.flush_transaction_wal(txn_id).inspect_err(|_| {
+            let _ = self.inner.runtime.record_transaction_failure(txn_id);
+        })
+    }
+
+    pub(crate) fn undo_restart_losers(&self) -> StorageResult<()> {
+        let runtime = &self.inner.runtime;
+        let mut losers = runtime.loser_heads()?;
+        while let Some((_, txn_id)) = losers.pop() {
+            if self.undo_one(txn_id, None)? {
+                losers.push((runtime.undo_head(txn_id)?, txn_id));
+            } else {
+                runtime.finish_rollback(txn_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn undo_one(
+        &self,
+        txn_id: TxnId,
+        savepoint: Option<TransactionSavepoint>,
+    ) -> StorageResult<bool> {
+        let runtime = &self.inner.runtime;
+        let result = (|| {
+            match runtime.prepare_undo(txn_id, savepoint)? {
+                UndoStep::Done => return Ok(false),
+                UndoStep::Allocation => {}
+                UndoStep::Page(restore) => {
+                    self.restore_rollback_page(&restore)?;
+                    runtime.finish_page_undo(txn_id)?;
+                }
+                UndoStep::Logical { inverse, boundary } => {
+                    let result =
+                        crate::btree::TreeCursor::apply_inverse(self.clone(), txn_id, &inverse)
+                            .and_then(|()| runtime.validate_transaction_write(txn_id));
+                    runtime.finish_logical_undo(txn_id, boundary, result.is_ok())?;
+                    result?;
+                }
+            }
+            Ok(true)
+        })();
+        result.inspect_err(|_| {
+            let _ = runtime.record_transaction_failure(txn_id);
+        })
+    }
+
+    pub(crate) fn can_retain_structure(
+        &self,
+        txn_id: TxnId,
+        incarnation: Lsn,
+    ) -> StorageResult<bool> {
+        self.inner.runtime.has_surviving_root(txn_id, incarnation)
+    }
+
+    pub(crate) fn begin_action(&self, txn_id: TxnId) -> StorageResult<ActionBoundary> {
+        self.inner.runtime.begin_action(txn_id)
+    }
+
+    pub(crate) fn complete_action(
+        &self,
+        txn_id: TxnId,
+        boundary: ActionBoundary,
+        inverse: Option<LogicalUndo>,
+    ) -> StorageResult<()> {
+        self.inner.runtime.complete_action(txn_id, boundary, inverse)
+    }
+
     /// Returns the mutation epoch shared by cursors over one B+-tree root.
     pub(crate) fn tree_mutation_epoch(
         &self,
@@ -244,33 +357,36 @@ impl PageCache {
 
         let frame_id =
             self.select_victim_frame(&mut meta).ok_or(PageCacheError::NoEvictableFrame)?;
-        self.replace_frame(&mut meta, frame_id, page_id, false)?;
+        self.replace_frame(&mut meta, frame_id, page_id, None)?;
         Ok(PinGuard::new(Arc::clone(&self.inner), frame_id, page_id))
     }
 
     pub(crate) fn validate_transaction_write(&self, txn_id: Option<TxnId>) -> StorageResult<()> {
-        if let Some(txn_id) = txn_id {
-            self.inner.runtime.validate_transaction_write(txn_id)?;
-        }
-        Ok(())
+        self.inner.runtime.validate_transaction_write(mutation_txn(txn_id)?)
     }
 
     /// Allocates a new on-disk page and returns it pinned in the cache.
     ///
     /// A victim frame is selected before allocation so a full pinned cache
     /// returns `NoEvictableFrame` without growing the file.
-    pub(crate) fn new_page(&self, txn_id: Option<TxnId>) -> PageCacheResult<(PageId, PinGuard)> {
+    pub(crate) fn new_page(
+        &self,
+        txn_id: Option<TxnId>,
+        kind: PageInitKind,
+    ) -> PageCacheResult<(PageId, PinGuard)> {
         let mut meta = self.inner.lock_meta()?;
         let frame_id =
             self.select_victim_frame(&mut meta).ok_or(PageCacheError::NoEvictableFrame)?;
-        let page_id = self.inner.runtime.new_page(txn_id).map_err(runtime_error)?;
+        let txn_id = mutation_txn(txn_id).map_err(runtime_error)?;
+        let (page_id, init_lsn) =
+            self.inner.runtime.new_page(txn_id, kind).map_err(runtime_error)?;
         // A recycled page can still be cached. Reuse its frame rather than
         // creating a second mapping that could later overwrite its new owner.
         let frame_id = self.resident_frame_id(&meta, page_id)?.unwrap_or(frame_id);
         if self.inner.frames[frame_id].pin_count.load(Ordering::Acquire) != 0 {
             return Err(PageCacheError::PinnedPage { page_id });
         }
-        self.replace_frame(&mut meta, frame_id, page_id, true)?;
+        self.replace_frame(&mut meta, frame_id, page_id, Some((kind, init_lsn)))?;
         Ok((page_id, PinGuard::new(Arc::clone(&self.inner), frame_id, page_id)))
     }
 
@@ -285,24 +401,8 @@ impl PageCache {
         {
             return Err(PageCacheError::PinnedPage { page_id });
         }
+        let txn_id = mutation_txn(txn_id).map_err(runtime_error)?;
         self.inner.runtime.dealloc_page(txn_id, page_id).map_err(runtime_error)
-    }
-
-    /// Flushes one resident page if dirty.
-    ///
-    /// Non-resident pages are a no-op. Pinned pages return `PinnedPage`.
-    pub(crate) fn flush_page(&self, page_id: PageId) -> PageCacheResult<()> {
-        let meta = self.inner.lock_meta()?;
-        let Some(frame_id) = self.resident_frame_id(&meta, page_id)? else {
-            return Ok(());
-        };
-
-        let frame = &self.inner.frames[frame_id];
-        if frame.pin_count.load(Ordering::Acquire) > 0 {
-            return Err(PageCacheError::PinnedPage { page_id });
-        }
-
-        self.flush_frame_if_dirty(frame_id)
     }
 
     /// Flushes all dirty pages that are currently unpinned.
@@ -394,7 +494,7 @@ impl PageCache {
         meta: &mut CacheMeta,
         frame_id: FrameId,
         new_page_id: PageId,
-        newly_allocated: bool,
+        init: Option<(PageInitKind, Lsn)>,
     ) -> PageCacheResult<()> {
         debug_assert_eq!(
             self.inner.frames[frame_id].pin_count.load(Ordering::Acquire),
@@ -410,12 +510,14 @@ impl PageCache {
         let frame = &self.inner.frames[frame_id];
         let old_page_id = frame.page_id();
 
-        let mut data = [0u8; PAGE_SIZE];
-        // Fresh allocations have no previous owner to restore. Their old disk
-        // contents may be torn or absent after an interrupted file extension.
-        if !newly_allocated {
+        // New incarnations do not consult a former owner's disk bytes.
+        let data = if let Some((kind, lsn)) = init {
+            kind.image(lsn)
+        } else {
+            let mut data = [0; PAGE_SIZE];
             self.inner.runtime.read_page(new_page_id, &mut data).map_err(runtime_error)?;
-        }
+            data
+        };
 
         {
             let mut frame_data =
@@ -424,9 +526,10 @@ impl PageCache {
         }
 
         frame.set_page_id(Some(new_page_id));
-        frame.dirty.store(false, Ordering::Release);
-        frame.lsn.store(ZERO_LSN, Ordering::Release);
-        frame.oldest_unflushed_lsn.store(ZERO_LSN, Ordering::Release);
+        frame.dirty.store(init.is_some(), Ordering::Release);
+        // read_page verifies the checksum before exposing the stored page LSN.
+        frame.lsn.store(PageRecovery::read(&data).lsn, Ordering::Release);
+        frame.oldest_unflushed_lsn.store(init.map_or(ZERO_LSN, |(_, lsn)| lsn), Ordering::Release);
         frame.pin_count.store(1, Ordering::Release);
 
         if let Some(old_page_id) = old_page_id {
@@ -459,26 +562,26 @@ impl PageCache {
         Ok(())
     }
 
-    pub(crate) fn restore_rollback_pages(
-        &self,
-        restore_pages: Vec<PageRestore>,
-    ) -> PageCacheResult<()> {
-        for restore in restore_pages {
-            let pin = self.fetch_page_impl(restore.page_id, true)?;
-            let frame = &self.inner.frames[pin.frame_id];
-            {
-                let mut data = try_write_page_data(&frame.data, restore.page_id)?;
-                *data = restore.image;
-                let oldest = if frame.dirty.load(Ordering::Acquire) {
-                    frame.oldest_unflushed_lsn.load(Ordering::Acquire).min(restore.wal_flush_lsn)
-                } else {
-                    restore.wal_flush_lsn
-                };
-                frame.oldest_unflushed_lsn.store(oldest, Ordering::Release);
-                frame.lsn.store(restore.wal_flush_lsn, Ordering::Release);
-                frame.dirty.store(true, Ordering::Release);
-            }
-        }
+    fn restore_rollback_page(&self, restore: &PageRestore) -> PageCacheResult<()> {
+        let pin = self.fetch_page_impl(restore.page_id, true)?;
+        let frame = &self.inner.frames[pin.frame_id];
+        let mut data = try_write_page_data(&frame.data, restore.page_id)?;
+        let current = PageRecovery::read(&data);
+        current.require_incarnation(restore.page_id, restore.incarnation).map_err(runtime_error)?;
+        debug_assert!(current.lsn < restore.wal_flush_lsn);
+        restore
+            .patch
+            .apply(&mut data)
+            .map_err(|error| runtime_error(LogManagerError::from(error).into()))?;
+        PageRecovery::stamp_lsn(&mut data, restore.wal_flush_lsn);
+        let oldest = if frame.dirty.load(Ordering::Acquire) {
+            frame.oldest_unflushed_lsn.load(Ordering::Acquire).min(restore.wal_flush_lsn)
+        } else {
+            restore.wal_flush_lsn
+        };
+        frame.oldest_unflushed_lsn.store(oldest, Ordering::Release);
+        frame.lsn.store(restore.wal_flush_lsn, Ordering::Release);
+        frame.dirty.store(true, Ordering::Release);
         Ok(())
     }
 }
@@ -523,9 +626,8 @@ impl PinGuard {
     /// same frame. Acquiring a write guard marks the frame dirty even if the
     /// caller later decides not to mutate the page bytes.
     pub(crate) fn write(&self, txn_id: Option<TxnId>) -> PageCacheResult<PageWriteGuard<'_>> {
-        if let Some(txn_id) = txn_id {
-            self.page_cache.runtime.validate_transaction_write(txn_id).map_err(runtime_error)?;
-        }
+        let txn_id = mutation_txn(txn_id).map_err(runtime_error)?;
+        self.page_cache.runtime.validate_transaction_write(txn_id).map_err(runtime_error)?;
         let frame = &self.page_cache.frames[self.frame_id];
         debug_assert_eq!(frame.page_id(), Some(self.page_id), "pinned frame changed owner");
         let page = try_write_page_data(&frame.data, self.page_id)?;
@@ -534,11 +636,8 @@ impl PinGuard {
         if !was_dirty {
             // An in-flight guard may straddle checkpoint capture. Its actual
             // update LSN cannot precede this conservative pre-logging bound.
-            let oldest_unflushed_lsn = if txn_id.is_some() {
-                self.page_cache.runtime.next_wal_lsn().map_err(runtime_error)?
-            } else {
-                ZERO_LSN
-            };
+            let oldest_unflushed_lsn =
+                self.page_cache.runtime.next_wal_lsn().map_err(runtime_error)?;
             frame.oldest_unflushed_lsn.store(oldest_unflushed_lsn, Ordering::Release);
         }
         frame.dirty.store(true, Ordering::Release);
@@ -550,6 +649,7 @@ impl PinGuard {
             frame,
             page_id: self.page_id,
             txn_id,
+            leaf_redo: None,
         })
     }
 }
@@ -608,7 +708,8 @@ pub struct PageWriteGuard<'a> {
     runtime: Arc<StorageRuntime>,
     frame: &'a Frame,
     page_id: PageId,
-    txn_id: Option<TxnId>,
+    txn_id: TxnId,
+    leaf_redo: Option<LeafOperation>,
 }
 
 impl PageWriteGuard<'_> {
@@ -619,7 +720,21 @@ impl PageWriteGuard<'_> {
 
     /// Returns the pinned page bytes mutably.
     pub(crate) fn page_mut(&mut self) -> &mut [u8; PAGE_SIZE] {
+        // An arbitrary write can no longer be reproduced by one typed op.
+        self.leaf_redo = None;
         &mut self.page
+    }
+
+    /// Execute a single physiological leaf mutation. The same operation can
+    /// be logged if it accounts for every byte changed by this guard.
+    pub(crate) fn apply_leaf(&mut self, operation: LeafOperation) -> PageResult<()> {
+        let pristine = *self.page == self.before;
+        self.leaf_redo = None;
+        operation.apply(&mut self.page)?;
+        if pristine {
+            self.leaf_redo = Some(operation);
+        }
+        Ok(())
     }
 
     /// Opens a typed mutable view over the page bytes.
@@ -633,6 +748,10 @@ impl PageWriteGuard<'_> {
 
 impl Drop for PageWriteGuard<'_> {
     fn drop(&mut self) {
+        // Rebuilds can replace all bytes, but neither a split nor a copy from
+        // another page can replace the destination's recovery identity.
+        PageRecovery::read(&self.before).write(&mut self.page);
+        self.page[crate::types::PAGE_CHECKSUM_OFFSET..].fill(0);
         if *self.page == self.before {
             self.frame.dirty.store(self.was_dirty, Ordering::Release);
             if !self.was_dirty {
@@ -641,24 +760,24 @@ impl Drop for PageWriteGuard<'_> {
             return;
         }
 
-        match self.runtime.record_page_update(self.txn_id, self.page_id, &self.before, &self.page) {
-            Ok(Some(update)) => {
-                *self.page = update.redo;
-                self.frame.lsn.store(update.lsn, Ordering::Release);
+        match self.runtime.record_page_update(
+            self.txn_id,
+            self.page_id,
+            &self.before,
+            &self.page,
+            self.leaf_redo.take(),
+        ) {
+            Ok(lsn) => {
+                PageRecovery::stamp_lsn(&mut self.page, lsn);
+                self.frame.lsn.store(lsn, Ordering::Release);
                 if !self.was_dirty {
-                    self.frame.oldest_unflushed_lsn.store(update.lsn, Ordering::Release);
+                    self.frame.oldest_unflushed_lsn.store(lsn, Ordering::Release);
                 }
-            }
-            Ok(None) => {
-                self.frame.lsn.store(ZERO_LSN, Ordering::Release);
-                self.frame.oldest_unflushed_lsn.store(ZERO_LSN, Ordering::Release);
             }
             Err(_) => {
                 *self.page = self.before;
                 self.frame.dirty.store(self.was_dirty, Ordering::Release);
-                if let Some(txn_id) = self.txn_id {
-                    let _ = self.runtime.record_transaction_failure(txn_id);
-                }
+                let _ = self.runtime.record_transaction_failure(self.txn_id);
             }
         }
     }

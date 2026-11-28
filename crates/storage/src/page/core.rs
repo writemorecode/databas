@@ -1,14 +1,13 @@
 use core::marker::PhantomData;
 use std::cmp::Ordering;
 
-use crate::log_manager::ZERO_LSN;
 use crate::{PAGE_SIZE, PageId, SlotId};
 
 use super::{
     error::{PageCorruption, PageError, PageResult},
     format::{
         self, CELL_LENGTH_SIZE, CONTENT_START_OFFSET, FIRST_FREEBLOCK_OFFSET, FORMAT_VERSION,
-        FRAGMENTED_FREE_BYTES_OFFSET, FREEBLOCK_HEADER_SIZE, KIND_OFFSET, LSN_OFFSET,
+        FRAGMENTED_FREE_BYTES_OFFSET, FREEBLOCK_HEADER_SIZE, KIND_OFFSET,
         MAX_FRAGMENTED_FREE_BYTES, NEXT_PAGE_ID_OFFSET, PREV_PAGE_ID_OFFSET, SLOT_COUNT_OFFSET,
         USABLE_SPACE_END, USABLE_SPACE_END_U16, VERSION_OFFSET,
     },
@@ -425,7 +424,8 @@ where
         format::write_optional_u16(&mut packed, FIRST_FREEBLOCK_OFFSET, None);
         format::write_u16(&mut packed, FRAGMENTED_FREE_BYTES_OFFSET, 0);
 
-        *self.bytes_mut() = packed;
+        // Compaction changes the layout, not the allocation incarnation or LSN.
+        self.bytes_mut()[..USABLE_SPACE_END].copy_from_slice(&packed[..USABLE_SPACE_END]);
         self.debug_assert_valid();
         Ok(())
     }
@@ -664,7 +664,6 @@ where
         format::write_u16(bytes, FRAGMENTED_FREE_BYTES_OFFSET, 0);
         format::write_optional_u64(bytes, PREV_PAGE_ID_OFFSET, None);
         format::write_optional_u64(bytes, NEXT_PAGE_ID_OFFSET, None);
-        format::write_u64(bytes, LSN_OFFSET, ZERO_LSN);
         Self::new(Write { bytes })
     }
 }
@@ -704,7 +703,7 @@ fn validate_page(bytes: &[u8; PAGE_SIZE], expected_kind: format::PageKind) -> Pa
             actual: bytes[VERSION_OFFSET],
         });
     }
-    if bytes[USABLE_SPACE_END..].iter().any(|byte| *byte != 0) {
+    if bytes[crate::types::PAGE_CHECKSUM_OFFSET..].iter().any(|byte| *byte != 0) {
         return Err(PageError::MalformedPage(PageCorruption::ReservedFooterNotZero));
     }
 

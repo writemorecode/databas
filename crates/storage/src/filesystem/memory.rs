@@ -94,6 +94,16 @@ impl MemoryFs {
     pub fn restart(&self, power_loss: bool) -> Self {
         let mut state = self.state();
         state.powered_off = true;
+        Self::snapshot(&state, power_loss)
+    }
+
+    /// Probe a recovery without changing the device being tested. Sector data
+    /// is shared copy-on-write; the probe gets independent persistence state.
+    pub fn fork_for_recovery(&self) -> Self {
+        Self::snapshot(&self.state(), false)
+    }
+
+    fn snapshot(state: &State, power_loss: bool) -> Self {
         let live_names = if power_loss { &state.durable_names } else { &state.live_names };
         let ids: BTreeSet<_> = live_names.values().chain(state.durable_names.values()).collect();
         let files = ids
@@ -396,6 +406,12 @@ pub struct MemoryFile {
 }
 
 impl MemoryFile {
+    pub fn identity(&self) -> [u8; 16] {
+        let mut identity = [0; 16];
+        identity[8..].copy_from_slice(&self.id.to_le_bytes());
+        identity
+    }
+
     pub fn len(&self) -> io::Result<u64> {
         self.fs
             .state()

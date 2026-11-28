@@ -5,8 +5,9 @@ use crate::database_header::DatabaseHeader;
 use crate::error::{
     CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult,
 };
+use crate::page_recovery::PageRecovery;
 use crate::types::PAGE_CONTENT_END;
-use crate::{PAGE_SIZE, PageId};
+use crate::{Lsn, PAGE_SIZE, PageId};
 
 pub const BITMAP_OFFSET: usize = 16;
 const BITMAP_BITS: usize = (PAGE_CONTENT_END - BITMAP_OFFSET) * 8;
@@ -74,7 +75,9 @@ impl AllocationBitmap {
         } else if &bytes[..8] != BITMAP_MAGIC || bytes[8..16] != page_id.to_le_bytes() {
             return Err(invalid_bitmap(page_id));
         }
-        if !BitSet::new(&bytes[BITMAP_OFFSET..PAGE_CONTENT_END]).contains(0) {
+        if PageRecovery::read(&bytes).incarnation != 0
+            || !BitSet::new(&bytes[BITMAP_OFFSET..PAGE_CONTENT_END]).contains(0)
+        {
             return Err(invalid_bitmap(page_id));
         }
         self.pages.push(bytes);
@@ -92,9 +95,16 @@ impl AllocationBitmap {
             .is_some_and(|page| BitSet::new(&page[BITMAP_OFFSET..PAGE_CONTENT_END]).contains(bit))
     }
 
-    pub(super) fn set_allocated(&mut self, page_id: PageId, allocated: bool) {
+    pub(super) fn page_lsn(&self, page_id: PageId) -> Lsn {
+        PageRecovery::read(self.page(Self::metadata_page_id(page_id))).lsn
+    }
+
+    pub(super) fn set_allocated(&mut self, page_id: PageId, allocated: bool, lsn: Lsn) {
         let (extent, bit) = Self::location(page_id);
-        BitSet::new(&mut self.pages[extent][BITMAP_OFFSET..PAGE_CONTENT_END]).set(bit, allocated);
+        let bytes = &mut self.pages[extent];
+        debug_assert!(lsn >= PageRecovery::read(bytes).lsn);
+        BitSet::new(&mut bytes[BITMAP_OFFSET..PAGE_CONTENT_END]).set(bit, allocated);
+        PageRecovery::stamp_lsn(bytes, lsn);
     }
 
     pub(super) fn first_free_from(&self, page_id: PageId) -> Option<PageId> {

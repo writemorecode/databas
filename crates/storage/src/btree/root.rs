@@ -1,7 +1,8 @@
+use crate::page_recovery::PageInitKind;
+
 use super::{
     CorruptionComponent, CorruptionError, CorruptionKind, Interior, KIND_OFFSET, PAGE_SIZE,
-    PageCache, PageError, PageId, PageKind, RawLeaf, StorageError, StorageResult, TxnId, Write,
-    page,
+    PageCache, PageError, PageId, PageKind, StorageError, StorageResult, TxnId, page,
 };
 
 /// Allocates and initializes a brand-new empty raw root leaf page.
@@ -9,9 +10,7 @@ pub fn initialize_empty_root(
     page_cache: &PageCache,
     txn_id: Option<TxnId>,
 ) -> StorageResult<PageId> {
-    let (page_id, pin) = page_cache.new_page(txn_id)?;
-    let mut page = pin.write(txn_id)?;
-    let _ = RawLeaf::<Write<'_>>::initialize(page.page_mut());
+    let (page_id, _pin) = page_cache.new_page(txn_id, PageInitKind::Leaf)?;
     Ok(page_id)
 }
 

@@ -1,177 +1,124 @@
-//! Decide which WAL effects survive, then apply them without revisiting transaction outcomes.
+//! Repeat physical history before handing pages to logical or physical undo.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::disk_manager::DiskManager;
 use crate::error::{
     CorruptionComponent, CorruptionError, CorruptionKind, StorageError, StorageResult,
 };
-use crate::log_manager::{Lsn, RecoveryLogRecord, RecoveryLogRecordKind as Kind};
+use crate::log_manager::{LogManagerError, RecoveryLogRecord, RecoveryLogRecordKind as Kind};
 use crate::page_allocator::PageAllocator;
-use crate::{PAGE_SIZE, PageId};
+use crate::page_recovery::PageRecovery;
+use crate::{Lsn, PageId, TxnId};
 
-type PageImage = Box<[u8; PAGE_SIZE]>;
+use super::data::DataRedo;
 
-#[derive(Clone, Copy)]
-enum Outcome {
-    Committed,
-    RolledBack,
-    Incomplete,
+/// Allocations reserve bits at PageInit. Frees and allocation CLRs change only
+/// the pending state until Commit/Rollback, exactly as during normal execution.
+/// Applying them earlier would make a persisted bitmap LSN unsafe for redo.
+#[derive(Default)]
+pub(super) struct AllocationReplay {
+    pending: HashMap<TxnId, BTreeMap<PageId, bool>>,
 }
 
-#[derive(Clone, Copy)]
-enum Direction {
-    Redo,
-    Undo,
+impl AllocationReplay {
+    pub(super) fn take_pending(&mut self, txn_id: TxnId) -> BTreeMap<PageId, bool> {
+        self.pending.remove(&txn_id).unwrap_or_default()
+    }
+
+    fn request(&mut self, txn_id: TxnId, page_id: PageId, allocated: bool) {
+        self.pending.entry(txn_id).or_default().insert(page_id, allocated);
+    }
+
+    fn publish(
+        &mut self,
+        disk: &mut DiskManager,
+        allocator: &mut PageAllocator,
+        txn_id: TxnId,
+        lsn: Lsn,
+    ) -> StorageResult<()> {
+        if let Some(changes) = self.pending.remove(&txn_id) {
+            for (page_id, allocated) in changes {
+                set_allocation(disk, allocator, page_id, allocated, lsn)?;
+            }
+        }
+        Ok(())
+    }
 }
 
-struct AllocationRepair {
+/// Repeat retained history, including losers and CLRs, subject to each
+/// verified page's redo watermark.
+pub(super) fn redo(
+    records: &[RecoveryLogRecord],
+    redo_from: Lsn,
+    disk: &mut DiskManager,
+    allocator: &mut PageAllocator,
+) -> StorageResult<AllocationReplay> {
+    let mut allocations = AllocationReplay::default();
+    let mut data = DataRedo::new(records);
+    for record in records {
+        match &record.kind {
+            Kind::PageUpdate { page_id, incarnation, before_lsn, redo, undo }
+                if record.lsn >= redo_from =>
+            {
+                let target = PageRecovery { incarnation: *incarnation, lsn: record.lsn };
+                data.replay(disk, *page_id, target, Some((*before_lsn, undo)), |image| {
+                    redo.apply(image)
+                })?;
+            }
+            Kind::PageCompensation { page_id, incarnation, redo, .. }
+                if record.lsn >= redo_from =>
+            {
+                let target = PageRecovery { incarnation: *incarnation, lsn: record.lsn };
+                data.replay(disk, *page_id, target, None, |image| {
+                    Ok(redo.apply(image).map_err(LogManagerError::from)?)
+                })?;
+            }
+            Kind::PageInit { page_id, kind } => {
+                set_allocation(disk, allocator, *page_id, true, record.lsn)?;
+                allocations.request(record.txn_id, *page_id, true);
+                if record.lsn >= redo_from {
+                    data.initialize(disk, *page_id, record.lsn, *kind)?;
+                }
+            }
+            Kind::PageDealloc { page_id } => allocations.request(record.txn_id, *page_id, false),
+            Kind::AllocationCompensation { page_id, allocated, .. } => {
+                allocations.request(record.txn_id, *page_id, *allocated);
+            }
+            Kind::Commit | Kind::Rollback => {
+                allocations.publish(disk, allocator, record.txn_id, record.lsn)?;
+            }
+            Kind::PageUpdate { .. }
+            | Kind::PageCompensation { .. }
+            | Kind::Begin
+            | Kind::LogicalEdit { .. }
+            | Kind::SkipUndo { .. } => {}
+        }
+    }
+    Ok(allocations)
+}
+
+fn set_allocation(
+    disk: &mut DiskManager,
+    allocator: &mut PageAllocator,
     page_id: PageId,
     allocated: bool,
-    direction: Direction,
-}
-
-struct PageWrite {
-    page_id: PageId,
-    image: PageImage,
-    direction: Direction,
-}
-
-#[derive(Default)]
-struct Replay {
-    bitmap_images: HashMap<PageId, PageImage>,
-    allocations: Vec<AllocationRepair>,
-    writes: Vec<PageWrite>,
-}
-
-/// Repair the pages and allocation state. The caller must persist repaired bitmaps
-/// and sync the database before reclaiming the WAL.
-pub(super) fn repair(
-    disk: &mut DiskManager,
-    records: Vec<RecoveryLogRecord>,
-) -> StorageResult<PageAllocator> {
-    Replay::from_records(records).apply(disk)
-}
-
-impl Replay {
-    fn from_records(records: Vec<RecoveryLogRecord>) -> Self {
-        debug_assert!(records.windows(2).all(|pair| pair[0].lsn < pair[1].lsn));
-        let mut outcomes = HashMap::new();
-        for record in &records {
-            match record.kind {
-                Kind::Commit => {
-                    outcomes.insert(record.txn_id, Outcome::Committed);
-                }
-                Kind::Rollback => {
-                    outcomes.entry(record.txn_id).or_insert(Outcome::RolledBack);
-                }
-                _ => {}
-            }
-        }
-
-        let mut replay = Self::default();
-        let mut seen_uncommitted_allocations = HashSet::new();
-        let mut latest_committed_allocation = HashMap::new();
-        let mut latest_committed_write = HashMap::new();
-        let mut allocation_undo = Vec::new();
-        let mut page_undo = Vec::new();
-
-        // WAL order gives ascending redo order and each page's first allocation
-        // transition without sorting by transaction or walking hash maps.
-        for RecoveryLogRecord { lsn, txn_id, kind } in records {
-            let outcome = outcomes.get(&txn_id).copied().unwrap_or(Outcome::Incomplete);
-            match kind {
-                Kind::Begin | Kind::Commit | Kind::Rollback => {}
-                Kind::BitmapImage { page_id, image } => {
-                    replay.bitmap_images.insert(page_id, image);
-                }
-                kind @ (Kind::PageAlloc { page_id } | Kind::PageDealloc { page_id }) => {
-                    let allocated = matches!(kind, Kind::PageAlloc { .. });
-                    if matches!(outcome, Outcome::Committed) {
-                        latest_committed_allocation.insert(page_id, lsn);
-                        replay.allocations.push(AllocationRepair {
-                            page_id,
-                            allocated,
-                            direction: Direction::Redo,
-                        });
-                    } else if seen_uncommitted_allocations.insert((txn_id, page_id)) {
-                        // Completed rollback can still need allocation undo: its
-                        // outcome can reach disk before its bitmap changes do.
-                        allocation_undo.push((lsn, page_id, !allocated));
-                    }
-                }
-                Kind::PageUpdate { page_id, redo_data, undo_data } => match outcome {
-                    Outcome::Committed => {
-                        latest_committed_write.insert(page_id, lsn);
-                        replay.writes.push(PageWrite {
-                            page_id,
-                            image: redo_data,
-                            direction: Direction::Redo,
-                        });
-                    }
-                    Outcome::Incomplete => page_undo.push((lsn, page_id, undo_data)),
-                    Outcome::RolledBack => {} // Page undo was synced before the outcome.
-                },
-            }
-        }
-
-        // A later commit on the same page wins. Restore original allocation
-        // bits in WAL order, but walk physical before-images in reverse order.
-        replay.allocations.extend(allocation_undo.into_iter().filter_map(
-            |(lsn, page_id, allocated)| {
-                (!superseded(&latest_committed_allocation, page_id, lsn))
-                    .then_some(AllocationRepair { page_id, allocated, direction: Direction::Undo })
-            },
-        ));
-        replay.writes.extend(page_undo.into_iter().rev().filter_map(|(lsn, page_id, image)| {
-            (!superseded(&latest_committed_write, page_id, lsn)).then_some(PageWrite {
-                page_id,
-                image,
-                direction: Direction::Undo,
-            })
+    lsn: Lsn,
+) -> StorageResult<()> {
+    if PageAllocator::is_metadata(page_id) || (!allocated && page_id >= disk.page_count()) {
+        return Err(StorageError::Corruption(CorruptionError {
+            component: CorruptionComponent::DatabaseFile,
+            page_id: Some(page_id),
+            kind: CorruptionKind::InvalidAllocationBitmap,
         }));
-        replay
     }
-
-    fn apply(self, disk: &mut DiskManager) -> StorageResult<PageAllocator> {
-        let mut allocator = PageAllocator::load_with_images(disk, &self.bitmap_images)?;
-        for AllocationRepair { page_id, allocated, direction } in self.allocations {
-            match direction {
-                Direction::Redo => {
-                    if PageAllocator::is_metadata(page_id)
-                        || (!allocated && page_id >= disk.page_count())
-                    {
-                        return Err(StorageError::Corruption(CorruptionError {
-                            component: CorruptionComponent::DatabaseFile,
-                            page_id: Some(page_id),
-                            kind: CorruptionKind::InvalidAllocationBitmap,
-                        }));
-                    }
-                    if allocated {
-                        allocator.ensure_page(disk, page_id)?;
-                    }
-                }
-                Direction::Undo => {
-                    if !allocator.contains_page(page_id) || PageAllocator::is_metadata(page_id) {
-                        continue;
-                    }
-                }
-            }
-            allocator.set_allocated(page_id, allocated);
-        }
-        for PageWrite { page_id, image, direction } in self.writes {
-            match direction {
-                Direction::Redo => disk.ensure_page_exists(page_id)?,
-                Direction::Undo if page_id >= disk.page_count() => continue,
-                Direction::Undo => {}
-            }
-            disk.write_page(page_id, image.as_ref())?;
-        }
-        allocator.validate_bounds(disk.page_count())?;
-        Ok(allocator)
+    if allocated {
+        allocator.ensure_page(disk, page_id)?;
     }
-}
-
-fn superseded(latest_commit: &HashMap<PageId, Lsn>, page_id: PageId, lsn: Lsn) -> bool {
-    latest_commit.get(&page_id).is_some_and(|later| *later > lsn)
+    // Several different bits on one bitmap can share the outcome LSN. Equal
+    // LSNs are safe to reapply because the transitions set absolute states.
+    if allocator.bitmap_lsn(page_id) <= lsn {
+        allocator.set_allocated(page_id, allocated, lsn);
+    }
+    Ok(())
 }

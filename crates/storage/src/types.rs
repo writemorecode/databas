@@ -7,8 +7,9 @@ pub type TxnId = u64;
 pub type Lsn = u64;
 pub const PAGE_SIZE_U16: u16 = 4096;
 pub const PAGE_SIZE: usize = PAGE_SIZE_U16 as usize;
-/// Exclusive end of page content, before the four-byte on-disk CRC32 footer.
-pub const PAGE_CONTENT_END_U16: u16 = PAGE_SIZE_U16 - 4;
+pub const PAGE_CHECKSUM_OFFSET: usize = PAGE_SIZE - 4;
+/// Exclusive end of page contents, before the shared recovery trailer and CRC.
+pub const PAGE_CONTENT_END_U16: u16 = PAGE_SIZE_U16 - 4 - 16;
 pub const PAGE_CONTENT_END: usize = PAGE_CONTENT_END_U16 as usize;
 
 /// Progress of a WAL checkpoint.

@@ -20,8 +20,6 @@ pub mod format;
 mod interior;
 mod leaf;
 
-use crate::PAGE_SIZE;
-
 /// Page handles, marker types, access traits, and search helpers for typed page access.
 pub use core::{
     BoundResult, Interior, Leaf, NodeMarker, Page, Read, SearchResult, Write, validate_btree_page,
@@ -33,12 +31,3 @@ pub use error::{CellCorruption, PageCorruption, PageError, PageResult};
 pub type RawLeaf<A> = Page<A, Leaf>;
 /// Raw B+-tree interior page storing separator byte keys and child pointers.
 pub type RawInterior<A> = Page<A, Interior>;
-
-pub fn is_current_btree_page(bytes: &[u8; PAGE_SIZE]) -> bool {
-    format::PageKind::from_raw(bytes[format::KIND_OFFSET]).is_some()
-        && bytes[format::VERSION_OFFSET] == format::FORMAT_VERSION
-}
-
-pub fn is_overflow_page(bytes: &[u8; PAGE_SIZE]) -> bool {
-    !is_current_btree_page(bytes)
-}

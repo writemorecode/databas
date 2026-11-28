@@ -14,16 +14,18 @@
 //! ```
 //!
 //! LSNs are not stored explicitly in transaction frames. The WAL file header
-//! stores the durable high-water LSN before the current WAL segment, and records
-//! in complete frames are assigned logical LSNs after that value. Appending
-//! advances the highest appended LSN, while [`LogManager::flush_through`] is
+//! binds the segment to the database file's filesystem identity and stores the
+//! preceding durable high-water LSN. Records in complete frames are assigned
+//! logical LSNs after that value. Appending advances the highest appended LSN,
+//! while [`LogManager::flush_through`] is
 //! responsible for making appended bytes durable before pages protected by
 //! those LSNs are written to the database file.
 
 #![allow(clippy::redundant_pub_crate)]
 
 use std::{
-    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    collections::HashMap,
+    io::{BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -31,28 +33,26 @@ use thiserror::Error;
 
 #[allow(clippy::redundant_pub_crate)] // Lsn is intentionally crate-private.
 pub(crate) use crate::Lsn;
+use crate::PageId;
 pub use crate::TxnId;
 use crate::filesystem::{File, FileSystem, OpenMode};
-use crate::{PAGE_SIZE, PageId};
+use crate::logical_undo::LogicalUndo;
+use crate::page_operation::PageOperation;
+use crate::page_patch::{InvalidPagePatch, PagePatch};
+use crate::page_recovery::PageInitKind;
 
 mod frame;
 mod replacement;
 
-pub(crate) use replacement::retire_empty_wal;
-
-use frame::{
-    CRC32, HEADER_LEN, WalFrameHeader, scan_transaction_frame, serialize_transaction,
-    validate_record_txn_ids, wal_open_error,
-};
+use frame::{CRC32, HEADER_LEN, WalFrameHeader, serialize_transaction};
 
 /// Sentinel LSN used for pages that do not reflect any logged update.
 pub const ZERO_LSN: Lsn = 0;
 
-const WAL_READ_BUFFER_LEN: usize = 64 * 1024;
 const WAL_WRITE_BUFFER_LEN: usize = 64 * 1024;
 const WAL_FILE_HEADER_MAGIC: [u8; 8] = *b"DBWALHDR";
-const WAL_FILE_HEADER_VERSION: u16 = 2;
-pub const WAL_FILE_HEADER_LEN: usize = 32;
+const WAL_FILE_HEADER_VERSION: u16 = 9;
+pub const WAL_FILE_HEADER_LEN: usize = 56;
 const WAL_FILE_HEADER_CHECKSUM_RANGE: std::ops::Range<usize> = 10..14;
 
 trait DurableWrite: Write {
@@ -119,12 +119,33 @@ pub enum LogManagerError {
     /// The next LSN would exceed the numeric range of [`Lsn`].
     #[error("WAL LSN exhausted")]
     LsnExhausted,
-    /// A page update record did not contain full `PAGE_SIZE` images.
-    #[error("WAL full-page image has invalid length: expected {expected}, got {actual}")]
-    InvalidPageImageLength { expected: usize, actual: usize },
+    /// Page patches must be ordered, nonoverlapping runs within the page body.
+    #[error(transparent)]
+    InvalidPagePatch(#[from] InvalidPagePatch),
+    /// A page operation has an unknown tag or invalid payload.
+    #[error("invalid WAL page operation with tag {tag}")]
+    InvalidPageOperation { tag: u8 },
+    /// Invalid encoding of a tree/key inverse.
+    #[error("invalid WAL logical undo payload")]
+    InvalidLogicalUndo,
     /// The WAL file header failed its integrity checksum.
     #[error("WAL file header checksum mismatch: expected {expected}, got {actual}")]
     FileHeaderChecksumMismatch { expected: u32, actual: u32 },
+    /// A valid WAL header identifies a different database filesystem object.
+    #[error("WAL belongs to a different database file")]
+    ForeignDatabase,
+    /// A checkpoint's redo horizon requires an absent durable WAL prefix.
+    #[error("invalid checkpoint redo horizon {redo_from} after LSN {last_lsn}")]
+    InvalidRedoHorizon { redo_from: Lsn, last_lsn: Lsn },
+    /// An initializer must specify a supported data-page kind.
+    #[error("invalid WAL page initialization kind: {tag}")]
+    InvalidPageInitKind { tag: u8 },
+    /// A compensation record must encode either allocated or free.
+    #[error("invalid WAL allocation state: {state}")]
+    InvalidAllocationState { state: u8 },
+    /// A transaction/compensation link was forward, missing, or crossed owners.
+    #[error("invalid WAL chain for transaction {txn_id} at LSN {lsn}: {link}")]
+    InvalidChain { txn_id: TxnId, lsn: Lsn, link: Lsn },
     /// A previous append may have left a partial frame in this WAL stream.
     #[error("WAL manager is poisoned after a failed append")]
     Poisoned,
@@ -158,6 +179,8 @@ pub enum LogManagerFlushError {
 pub struct LogRecord<'a> {
     /// Transaction that owns this record.
     pub(crate) txn_id: TxnId,
+    /// Checksummed link to the previous record owned by this transaction.
+    pub(crate) prev_lsn: Lsn,
     /// Record payload.
     pub(crate) kind: LogRecordKind<'a>,
 }
@@ -171,29 +194,38 @@ pub enum LogRecordKind<'a> {
     Commit,
     /// Transaction rollback-complete marker.
     Rollback,
-    /// Full-page physical update.
-    ///
-    /// `redo_data` is the complete page image to install while redoing a
-    /// committed transaction. `undo_data` is the complete page image to restore
-    /// while undoing an incomplete transaction during recovery or explicit
-    /// rollback.
-    PageUpdate { page_id: PageId, redo_data: &'a [u8], undo_data: &'a [u8] },
-    /// Allocation of a database page by a transaction.
-    PageAlloc { page_id: PageId },
+    /// Page-local redo and inverse byte runs within one page incarnation.
+    PageUpdate {
+        page_id: PageId,
+        incarnation: Lsn,
+        before_lsn: Lsn,
+        redo: &'a PageOperation,
+        undo: &'a PagePatch,
+    },
+    /// Reserve a page and initialize a new incarnation without logging an image.
+    PageInit { page_id: PageId, kind: PageInitKind },
     /// Deallocation of a database page by a transaction.
     PageDealloc { page_id: PageId },
-    /// System redo image for repairing torn allocation bitmap writes.
-    BitmapImage { page_id: PageId, image: &'a [u8] },
+    /// Redo-only page compensation with the next LSN to undo.
+    PageCompensation { page_id: PageId, incarnation: Lsn, redo: &'a PagePatch, undo_next_lsn: Lsn },
+    /// Redo-only compensation of one allocation bit.
+    AllocationCompensation { page_id: PageId, allocated: bool, undo_next_lsn: Lsn },
+    /// A completed edit replaces its physical undo entries with a key inverse.
+    LogicalEdit { undo: &'a LogicalUndo, undo_next_lsn: Lsn },
+    /// End a nested top action or a logical inverse; undo skips its physical work.
+    SkipUndo { undo_next_lsn: Lsn },
 }
 
 /// Owned WAL record returned by recovery scans.
 ///
-/// Unlike [`LogRecord`], this form owns page images and includes the LSN
+/// Unlike [`LogRecord`], this form owns page operations and includes the LSN
 /// assigned from the record's position in the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryLogRecord {
     /// Logical LSN assigned to this record.
     pub(crate) lsn: Lsn,
+    /// Transaction-chain link preserved verbatim across WAL replacement.
+    pub(crate) prev_lsn: Lsn,
     /// Transaction that owns this record.
     pub(crate) txn_id: TxnId,
     /// Owned record payload.
@@ -209,14 +241,26 @@ pub enum RecoveryLogRecordKind {
     Commit,
     /// Transaction rollback-complete marker.
     Rollback,
-    /// Full-page physical update with owned redo and undo page images.
-    PageUpdate { page_id: PageId, redo_data: Box<[u8; PAGE_SIZE]>, undo_data: Box<[u8; PAGE_SIZE]> },
-    /// Allocation of a database page by a transaction.
-    PageAlloc { page_id: PageId },
+    /// Page-local redo and inverse byte runs within one page incarnation.
+    PageUpdate {
+        page_id: PageId,
+        incarnation: Lsn,
+        before_lsn: Lsn,
+        redo: PageOperation,
+        undo: PagePatch,
+    },
+    /// Reserve a page and initialize a new incarnation without logging an image.
+    PageInit { page_id: PageId, kind: PageInitKind },
     /// Deallocation of a database page by a transaction.
     PageDealloc { page_id: PageId },
-    /// System redo image for repairing torn allocation bitmap writes.
-    BitmapImage { page_id: PageId, image: Box<[u8; PAGE_SIZE]> },
+    /// Redo-only page compensation with the next LSN to undo.
+    PageCompensation { page_id: PageId, incarnation: Lsn, redo: PagePatch, undo_next_lsn: Lsn },
+    /// Redo-only compensation of one allocation bit.
+    AllocationCompensation { page_id: PageId, allocated: bool, undo_next_lsn: Lsn },
+    /// A completed edit replaces its physical undo entries with a key inverse.
+    LogicalEdit { undo: LogicalUndo, undo_next_lsn: Lsn },
+    /// End a nested top action or a logical inverse; undo skips its physical work.
+    SkipUndo { undo_next_lsn: Lsn },
 }
 
 /// Result of scanning the WAL for recovery.
@@ -230,28 +274,26 @@ pub struct RecoveryLogScan {
     pub(crate) max_txn_id: TxnId,
     /// Highest LSN assigned before this WAL segment plus all complete records.
     pub(crate) last_assigned_lsn: Lsn,
+    /// Earliest data-page redo that might not be durable at home.
+    pub(crate) redo_from: Lsn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WalFileHeader {
+    database_identity: [u8; 16],
     last_assigned_lsn: Lsn,
     max_txn_id: TxnId,
+    redo_from: Lsn,
 }
 
-fn ensure_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
-    if wal_file.len()? == 0 {
-        write_wal_file_header(wal_file, ZERO_LSN, 0)?;
-        wal_file.set_len(WAL_FILE_HEADER_LEN as u64)?;
-        wal_file.sync_all()?;
-        return Ok(WalFileHeader { last_assigned_lsn: ZERO_LSN, max_txn_id: 0 });
-    }
-    read_wal_file_header(wal_file)
-}
-
-fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManagerError> {
+fn read_wal_file_header(
+    wal_file: &mut File,
+    database_identity: [u8; 16],
+) -> Result<WalFileHeader, LogManagerError> {
     let mut header = [0; WAL_FILE_HEADER_LEN];
     wal_file.seek(SeekFrom::Start(0))?;
-    wal_file.read_exact(&mut header)?;
+    // Read the stable prefix first: an older header can be shorter.
+    wal_file.read_exact(&mut header[..10])?;
 
     let mut magic = [0; 8];
     magic.copy_from_slice(&header[..8]);
@@ -269,6 +311,7 @@ fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManager
         });
     }
 
+    wal_file.read_exact(&mut header[10..])?;
     let mut checksum_bytes = [0; 4];
     checksum_bytes.copy_from_slice(&header[WAL_FILE_HEADER_CHECKSUM_RANGE]);
     let expected = u32::from_le_bytes(checksum_bytes);
@@ -278,25 +321,30 @@ fn read_wal_file_header(wal_file: &mut File) -> Result<WalFileHeader, LogManager
         return Err(LogManagerError::FileHeaderChecksumMismatch { expected, actual });
     }
 
+    if header[40..] != database_identity {
+        return Err(LogManagerError::ForeignDatabase);
+    }
+
     let mut last_assigned_lsn_bytes = [0; 8];
     last_assigned_lsn_bytes.copy_from_slice(&header[16..24]);
     let last_assigned_lsn = u64::from_le_bytes(last_assigned_lsn_bytes);
     let mut max_txn_id_bytes = [0; 8];
     max_txn_id_bytes.copy_from_slice(&header[24..32]);
     let max_txn_id = u64::from_le_bytes(max_txn_id_bytes);
-    Ok(WalFileHeader { last_assigned_lsn, max_txn_id })
+    let mut redo_from_bytes = [0; 8];
+    redo_from_bytes.copy_from_slice(&header[32..40]);
+    let redo_from = u64::from_le_bytes(redo_from_bytes);
+    Ok(WalFileHeader { database_identity, last_assigned_lsn, max_txn_id, redo_from })
 }
 
-fn write_wal_file_header(
-    wal_file: &mut File,
-    last_assigned_lsn: Lsn,
-    max_txn_id: TxnId,
-) -> Result<(), LogManagerError> {
+fn write_wal_file_header(wal_file: &mut File, wal: WalFileHeader) -> Result<(), LogManagerError> {
     let mut header = [0; WAL_FILE_HEADER_LEN];
     header[0..8].copy_from_slice(&WAL_FILE_HEADER_MAGIC);
     header[8..10].copy_from_slice(&WAL_FILE_HEADER_VERSION.to_le_bytes());
-    header[16..24].copy_from_slice(&last_assigned_lsn.to_le_bytes());
-    header[24..32].copy_from_slice(&max_txn_id.to_le_bytes());
+    header[16..24].copy_from_slice(&wal.last_assigned_lsn.to_le_bytes());
+    header[24..32].copy_from_slice(&wal.max_txn_id.to_le_bytes());
+    header[32..40].copy_from_slice(&wal.redo_from.to_le_bytes());
+    header[40..].copy_from_slice(&wal.database_identity);
     let checksum = CRC32.checksum(&header);
     header[WAL_FILE_HEADER_CHECKSUM_RANGE].copy_from_slice(&checksum.to_le_bytes());
     wal_file.seek(SeekFrom::Start(0))?;
@@ -315,10 +363,12 @@ pub struct LogManager {
     fs: FileSystem,
     wal_path: PathBuf,
     wal_writer: ActiveWalWriter,
+    database_identity: [u8; 16],
 
-    highest_txn_id: TxnId,
+    transaction_heads: HashMap<TxnId, Lsn>,
     highest_appended_lsn: Option<Lsn>,
     highest_durable_lsn: Option<Lsn>,
+    redo_from: Lsn,
     poisoned: bool,
 }
 
@@ -327,65 +377,40 @@ impl LogManager {
         self.flush_through(self.highest_appended_lsn.unwrap_or(ZERO_LSN))
     }
 
-    /// Opens or creates the WAL file associated with `db_file_path`.
-    ///
-    /// Existing complete frames are scanned to reconstruct the highest appended
-    /// LSN and highest transaction id. Opening does not mark existing bytes as
-    /// durable in this process; callers must still use [`Self::flush_through`]
-    /// before relying on a newly appended record.
-    pub(crate) fn new(fs: FileSystem, db_file_path: impl AsRef<Path>) -> std::io::Result<Self> {
-        Self::open_wal(fs, db_file_path.as_ref().with_added_extension("wal"))
-    }
-
-    fn open_wal(fs: FileSystem, wal_path: PathBuf) -> std::io::Result<Self> {
-        let wal_was_created = !fs.exists(&wal_path)?;
-        let mut wal_file = fs.open(&wal_path, OpenMode::Create)?;
-        let wal_header = ensure_wal_file_header(&mut wal_file).map_err(wal_open_error)?;
-        if wal_was_created {
-            fs.sync_parent(&wal_path)?;
-        }
-
-        let mut highest_appended_lsn = if wal_header.last_assigned_lsn == ZERO_LSN {
-            None
-        } else {
-            Some(wal_header.last_assigned_lsn)
-        };
-        let mut highest_txn_id = wal_header.max_txn_id;
-        wal_file.seek(SeekFrom::Start(WAL_FILE_HEADER_LEN as u64))?;
-        {
-            let mut wal_reader = BufReader::with_capacity(WAL_READ_BUFFER_LEN, &mut wal_file);
-            while let Some(frame) =
-                scan_transaction_frame(&mut wal_reader).map_err(wal_open_error)?
-            {
-                highest_txn_id = highest_txn_id.max(frame.txn_id);
-                if frame.record_count > 0 {
-                    let next_lsn = highest_appended_lsn
-                        .unwrap_or(ZERO_LSN)
-                        .checked_add(u64::from(frame.record_count))
-                        .ok_or(LogManagerError::LsnExhausted)
-                        .map_err(wal_open_error)?;
-                    highest_appended_lsn = Some(next_lsn);
-                }
-            }
-        }
-        wal_file.seek(SeekFrom::End(0))?;
-
-        let wal_writer = make_wal_writer(wal_file);
-
-        Ok(Self {
+    /// Validate the WAL and position its writer after the surviving records.
+    pub(crate) fn open_for_recovery(
+        fs: FileSystem,
+        db_file_path: &Path,
+        database_identity: [u8; 16],
+    ) -> Result<(Self, RecoveryLogScan), LogManagerError> {
+        let wal_path = db_file_path.with_added_extension("wal");
+        let (file, scan) = read_log(&fs, &wal_path, database_identity, LogReadMode::Recovery)?;
+        let log = Self {
             fs,
             wal_path,
-            wal_writer,
-            highest_txn_id,
+            wal_writer: make_wal_writer(file),
+            database_identity,
+            transaction_heads: scan
+                .records
+                .iter()
+                .map(|record| (record.txn_id, record.lsn))
+                .collect(),
             highest_durable_lsn: None,
-            highest_appended_lsn,
+            redo_from: scan.redo_from,
+            highest_appended_lsn: (scan.last_assigned_lsn != ZERO_LSN)
+                .then_some(scan.last_assigned_lsn),
             poisoned: false,
-        })
+        };
+        Ok((log, scan))
     }
 
-    /// Returns the largest transaction id observed in the WAL.
-    pub(crate) fn highest_txn_id(&self) -> TxnId {
-        self.highest_txn_id
+    /// Last appended record of a transaction, or zero for a new transaction.
+    pub(crate) fn transaction_head(&self, txn_id: TxnId) -> Lsn {
+        self.transaction_heads.get(&txn_id).copied().unwrap_or(ZERO_LSN)
+    }
+
+    pub(crate) fn retain_transaction_heads(&mut self, mut active: impl FnMut(TxnId) -> bool) {
+        self.transaction_heads.retain(|txn_id, _| active(*txn_id));
     }
 
     /// Returns the LSN that would be assigned to the next appended record.
@@ -406,34 +431,14 @@ impl LogManager {
         txn_id: TxnId,
         kind: LogRecordKind<'_>,
     ) -> Result<Lsn, LogManagerError> {
-        self.append_transaction(txn_id, &[LogRecord { txn_id, kind }])
-    }
-
-    /// Appends a transaction frame containing `records`.
-    ///
-    /// All records must belong to `txn_id`. LSNs are assigned one per record in
-    /// frame order, and the return value is the highest LSN assigned by this
-    /// append. Empty frames are allowed for serializer symmetry and return the
-    /// current highest appended LSN without advancing it.
-    pub(crate) fn append_transaction(
-        &mut self,
-        txn_id: TxnId,
-        records: &[LogRecord<'_>],
-    ) -> Result<Lsn, LogManagerError> {
         if self.poisoned {
             return Err(LogManagerError::Poisoned);
         }
-        validate_record_txn_ids(txn_id, records)?;
-
-        let record_count = u64::try_from(records.len())
-            .map_err(|_out_of_range| LogManagerError::TooManyRecords { count: records.len() })?;
-        let lsn = self
-            .highest_appended_lsn
-            .unwrap_or(ZERO_LSN)
-            .checked_add(record_count)
-            .ok_or(LogManagerError::LsnExhausted)?;
-
-        if let Err(error) = serialize_transaction(&mut self.wal_writer, txn_id, records) {
+        let lsn = self.next_lsn()?;
+        let prev_lsn = self.transaction_head(txn_id);
+        let completed = matches!(kind, LogRecordKind::Commit | LogRecordKind::Rollback);
+        let record = LogRecord { txn_id, prev_lsn, kind };
+        if let Err(error) = serialize_transaction(&mut self.wal_writer, txn_id, &[record]) {
             // Serialization validates and sizes the complete transaction before emitting bytes,
             // so only an I/O error can leave a partial frame in the WAL stream.
             if matches!(&error, LogManagerError::Io(_)) {
@@ -442,9 +447,11 @@ impl LogManager {
             return Err(error);
         }
 
-        self.highest_txn_id = self.highest_txn_id.max(txn_id);
-        if record_count > 0 {
-            self.highest_appended_lsn = Some(lsn);
+        self.highest_appended_lsn = Some(lsn);
+        if completed {
+            self.transaction_heads.remove(&txn_id);
+        } else {
+            self.transaction_heads.insert(txn_id, lsn);
         }
         Ok(lsn)
     }
@@ -502,24 +509,50 @@ enum LogReadMode {
 /// crash even when an earlier frame did not. Successfully synced bytes are
 /// assumed intact. File-header errors, unsupported nonzero frame versions, and
 /// I/O or allocation failures propagate without discarding the suffix.
+#[cfg(feature = "simulation")]
 pub fn read_recovery_log(
     fs: &FileSystem,
-    db_file_path: impl AsRef<Path>,
+    db_file_path: &Path,
+    database_identity: [u8; 16],
 ) -> Result<RecoveryLogScan, LogManagerError> {
-    read_log(fs, &db_file_path.as_ref().with_added_extension("wal"), LogReadMode::Recovery)
+    let (_, scan) = read_log(
+        fs,
+        &db_file_path.with_added_extension("wal"),
+        database_identity,
+        LogReadMode::Recovery,
+    )?;
+    Ok(scan)
 }
 
 fn read_log(
     fs: &FileSystem,
     wal_path: &Path,
+    database_identity: [u8; 16],
     mode: LogReadMode,
-) -> Result<RecoveryLogScan, LogManagerError> {
-    let wal_was_created = !fs.exists(wal_path)?;
-    let mut wal_file = fs.open(wal_path, OpenMode::Create)?;
-    let wal_header = ensure_wal_file_header(&mut wal_file)?;
-    if wal_was_created {
-        fs.sync_parent(wal_path)?;
-    }
+) -> Result<(File, RecoveryLogScan), LogManagerError> {
+    let (mut wal_file, wal_header) = match fs.open(wal_path, OpenMode::Existing) {
+        Ok(mut file) => {
+            let header = read_wal_file_header(&mut file, database_identity)?;
+            (file, header)
+        }
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && mode == LogReadMode::Recovery =>
+        {
+            // Initial bootstrap: initialize only a new file. An existing but
+            // incomplete header cannot prove identity or supply a high-water LSN.
+            let mut file = fs.open(wal_path, OpenMode::CreateNew)?;
+            let header = WalFileHeader {
+                database_identity,
+                last_assigned_lsn: 0,
+                max_txn_id: 0,
+                redo_from: 0,
+            };
+            write_wal_file_header(&mut file, header)?;
+            file.sync_all()?;
+            (file, header)
+        }
+        Err(error) => return Err(error.into()),
+    };
     let wal_len = wal_file.len()?;
     wal_file.seek(SeekFrom::Start(WAL_FILE_HEADER_LEN as u64))?;
 
@@ -592,22 +625,47 @@ fn read_log(
             Err(error) => return Err(error),
         };
         max_txn_id = max_txn_id.max(header.txn_id);
-        for kind in kinds {
+        for (prev_lsn, kind) in kinds {
             next_lsn = next_lsn.checked_add(1).ok_or(LogManagerError::LsnExhausted)?;
-            records.push(RecoveryLogRecord { lsn: next_lsn, txn_id: header.txn_id, kind });
+            records.push(RecoveryLogRecord {
+                lsn: next_lsn,
+                txn_id: header.txn_id,
+                prev_lsn,
+                kind,
+            });
         }
         offset = frame_end;
     }
 
+    if wal_header.redo_from > next_lsn.saturating_add(1) {
+        return Err(LogManagerError::InvalidRedoHorizon {
+            redo_from: wal_header.redo_from,
+            last_lsn: next_lsn,
+        });
+    }
+    // Only publish the namespace once both the file and frame versions pass.
+    // A previous replacement may have renamed the WAL but failed directory sync;
+    // restart writes depending on that WAL must wait for its name to be durable.
+    if mode == LogReadMode::Recovery {
+        fs.sync_parent(wal_path)?;
+    }
     if truncated_tail {
         if mode == LogReadMode::Checkpoint {
             return Err(LogManagerError::TruncatedFrame { needed: 1, remaining: 0 });
         }
         wal_file.set_len(offset)?;
         wal_file.sync_all()?;
+        wal_file.seek(SeekFrom::Start(offset))?;
     }
 
-    Ok(RecoveryLogScan { records, truncated_tail, max_txn_id, last_assigned_lsn: next_lsn })
+    let scan = RecoveryLogScan {
+        records,
+        truncated_tail,
+        max_txn_id,
+        last_assigned_lsn: next_lsn,
+        redo_from: wal_header.redo_from,
+    };
+    Ok((wal_file, scan))
 }
 
 impl RecoveryLogRecordKind {
@@ -616,16 +674,40 @@ impl RecoveryLogRecordKind {
             Self::Begin => LogRecordKind::Begin,
             Self::Commit => LogRecordKind::Commit,
             Self::Rollback => LogRecordKind::Rollback,
-            Self::PageAlloc { page_id } => LogRecordKind::PageAlloc { page_id: *page_id },
-            Self::PageDealloc { page_id } => LogRecordKind::PageDealloc { page_id: *page_id },
-            Self::BitmapImage { page_id, image } => {
-                LogRecordKind::BitmapImage { page_id: *page_id, image: image.as_ref() }
+            Self::PageInit { page_id, kind } => {
+                LogRecordKind::PageInit { page_id: *page_id, kind: *kind }
             }
-            Self::PageUpdate { page_id, redo_data, undo_data } => LogRecordKind::PageUpdate {
-                page_id: *page_id,
-                redo_data: redo_data.as_ref(),
-                undo_data: undo_data.as_ref(),
-            },
+            Self::PageDealloc { page_id } => LogRecordKind::PageDealloc { page_id: *page_id },
+            Self::PageCompensation { page_id, incarnation, redo, undo_next_lsn } => {
+                LogRecordKind::PageCompensation {
+                    page_id: *page_id,
+                    incarnation: *incarnation,
+                    redo,
+                    undo_next_lsn: *undo_next_lsn,
+                }
+            }
+            Self::AllocationCompensation { page_id, allocated, undo_next_lsn } => {
+                LogRecordKind::AllocationCompensation {
+                    page_id: *page_id,
+                    allocated: *allocated,
+                    undo_next_lsn: *undo_next_lsn,
+                }
+            }
+            Self::LogicalEdit { undo, undo_next_lsn } => {
+                LogRecordKind::LogicalEdit { undo, undo_next_lsn: *undo_next_lsn }
+            }
+            Self::SkipUndo { undo_next_lsn } => {
+                LogRecordKind::SkipUndo { undo_next_lsn: *undo_next_lsn }
+            }
+            Self::PageUpdate { page_id, incarnation, before_lsn, redo, undo } => {
+                LogRecordKind::PageUpdate {
+                    page_id: *page_id,
+                    incarnation: *incarnation,
+                    before_lsn: *before_lsn,
+                    redo,
+                    undo,
+                }
+            }
         }
     }
 }

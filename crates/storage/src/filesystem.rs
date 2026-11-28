@@ -89,6 +89,28 @@ impl File {
         }
     }
 
+    /// Bind repair files to a filesystem object, not just its pathname.
+    pub fn identity(&self) -> io::Result<[u8; 16]> {
+        match self {
+            #[cfg(unix)]
+            Self::Os(file) => {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = file.metadata()?;
+                let mut identity = [0; 16];
+                identity[..8].copy_from_slice(&metadata.dev().to_le_bytes());
+                identity[8..].copy_from_slice(&metadata.ino().to_le_bytes());
+                Ok(identity)
+            }
+            #[cfg(not(unix))]
+            Self::Os(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "doublewrite requires stable filesystem identity",
+            )),
+            #[cfg(feature = "simulation")]
+            Self::Memory(file) => Ok(file.identity()),
+        }
+    }
+
     pub fn try_lock(&mut self) -> io::Result<()> {
         match self {
             Self::Os(file) => file.try_lock().map_err(io::Error::from),

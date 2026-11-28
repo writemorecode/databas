@@ -30,7 +30,7 @@ impl TreeCursor {
     }
 
     /// Returns the largest key in a leaf page, or `None` when the page is empty.
-    fn read_leaf_max_key(&self, page_id: PageId) -> StorageResult<Option<Vec<u8>>> {
+    pub(super) fn read_leaf_max_key(&self, page_id: PageId) -> StorageResult<Option<Vec<u8>>> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let key = {
             let page = pin.read()?;
@@ -427,7 +427,7 @@ impl TreeCursor {
     }
 
     /// Returns whether a leaf page is below the minimum occupancy target.
-    fn leaf_page_underoccupied(&self, page_id: PageId) -> StorageResult<bool> {
+    pub(super) fn leaf_page_underoccupied(&self, page_id: PageId) -> StorageResult<bool> {
         let pin = self.page_cache.fetch_page(page_id)?;
         let page = pin.read()?;
         let leaf = page.open::<Leaf>()?;
@@ -673,7 +673,8 @@ impl TreeCursor {
         children: &[ChildEntry],
     ) -> StorageResult<PendingSplit> {
         let (prev_page_id, next_page_id) = self.read_interior_page_links(page_id)?;
-        let (right_page_id, right_page_guard) = self.page_cache.new_page(self.txn_id)?;
+        let (right_page_id, right_page_guard) =
+            self.page_cache.new_page(self.txn_id, crate::page_recovery::PageInitKind::Interior)?;
         drop(right_page_guard);
 
         let split_index = Self::choose_interior_fitting_split(children)

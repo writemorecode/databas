@@ -50,6 +50,12 @@ pub enum CorruptionKind {
     PageChecksumMismatch { expected: u32, actual: u32 },
     #[error("invalid allocation bitmap")]
     InvalidAllocationBitmap,
+    #[error("invalid data-page recovery metadata: incarnation {incarnation}, LSN {lsn}")]
+    InvalidPageRecovery { incarnation: crate::Lsn, lsn: crate::Lsn },
+    #[error("expected page incarnation {expected}, found {actual}")]
+    UnexpectedPageIncarnation { expected: crate::Lsn, actual: crate::Lsn },
+    #[error("page patch baseline mismatch: expected LSN {expected}, actual LSN {actual}")]
+    PagePatchBaselineMismatch { expected: crate::Lsn, actual: crate::Lsn },
     #[error("unknown page kind: raw tag {actual}")]
     UnknownPageKind { actual: u8 },
     #[error("invalid page kind: expected {expected}, got raw tag {actual}")]
@@ -86,6 +92,8 @@ pub enum CorruptionKind {
     CellLengthTooSmall,
     #[error("cell length runs past the usable page bounds")]
     CellLengthOutOfBounds,
+    #[error("invalid overflow-page header")]
+    InvalidOverflowHeader,
     #[error("overflow chain ended before {expected} bytes could be read")]
     OverflowChainTooShort { expected: usize, actual: usize },
     #[error("overflow chain has extra pages after {expected} bytes were read")]

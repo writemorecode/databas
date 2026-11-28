@@ -268,35 +268,39 @@ impl CatalogManager {
     }
 
     fn initialize_or_validate_system_catalog(&self) -> RelationalResult<()> {
-        match self.storage.opened_page_count() {
-            0 => Err(missing_system_catalog_root(0)),
-            1 => self.initialize_system_catalog(),
-            2..=3 => Err(missing_system_catalog_root(self.storage.opened_page_count())),
-            _ => Ok(()),
+        let mut any_root_allocated = false;
+        let mut first_missing = None;
+        for table in system_table_schemas() {
+            if self.storage.tree_root_is_allocated(table.root_page_id)? {
+                any_root_allocated = true;
+            } else {
+                first_missing.get_or_insert(table.root_page_id);
+            }
         }
-    }
-
-    fn initialize_system_root(&self, expected_page_id: PageId) -> RelationalResult<()> {
-        let actual_page_id = match self.txn_id {
-            Some(txn_id) => self.storage.transaction_create_tree(txn_id)?,
-            None => self.storage.create_tree()?,
-        }
-        .root_page_id();
-        if actual_page_id == expected_page_id {
-            Ok(())
-        } else {
-            Err(unexpected_system_catalog_root(expected_page_id, actual_page_id))
+        match (any_root_allocated, first_missing) {
+            (false, _) => self.initialize_system_catalog(),
+            (true, Some(root)) => Err(missing_system_catalog_root(root)),
+            (true, None) => Ok(()),
         }
     }
 
     fn initialize_system_catalog(&self) -> RelationalResult<()> {
-        self.initialize_system_root(SYS_TABLES_ROOT_PAGE_ID)?;
-        self.initialize_system_root(SYS_INDEXES_ROOT_PAGE_ID)?;
-        self.initialize_system_root(SYS_COLUMNS_ROOT_PAGE_ID)?;
-        self.seed_system_catalog()?;
-        // Bootstrap is nontransactional. Persist its roots and allocation bits
-        // before a later transaction can commit changes to the catalog.
-        self.flush()
+        let txn_id = self.storage.begin_transaction()?;
+        let result = (|| {
+            for table in system_table_schemas() {
+                let actual = self.storage.transaction_create_tree(txn_id)?.root_page_id();
+                if actual != table.root_page_id {
+                    return Err(unexpected_system_catalog_root(table.root_page_id, actual));
+                }
+            }
+            self.for_transaction(txn_id).seed_system_catalog()
+        })();
+        if let Err(error) = result {
+            self.storage.rollback_transaction(txn_id)?;
+            return Err(error);
+        }
+        self.storage.commit_transaction(txn_id)?;
+        Ok(())
     }
 
     fn seed_system_catalog(&self) -> RelationalResult<()> {

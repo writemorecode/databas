@@ -1,6 +1,9 @@
 //! Long-running deterministic storage simulation.
 
+mod compatibility;
+mod doublewrite;
 mod oracle;
+mod restart;
 mod runner;
 mod workload;
 

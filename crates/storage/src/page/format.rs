@@ -4,12 +4,11 @@
 //! upward from the header, a packed cell-content region that grows downward
 //! from the end of usable space, and a CRC32 footer owned by the disk layer.
 
-use crate::log_manager::Lsn;
 use crate::types::{PAGE_CONTENT_END, PAGE_CONTENT_END_U16};
 use crate::{PAGE_SIZE, PageId, SlotId};
 
 /// Current on-disk page format version.
-pub const FORMAT_VERSION: u8 = 5;
+pub const FORMAT_VERSION: u8 = 6;
 /// Exclusive end offset of the usable region within a page buffer.
 pub const USABLE_SPACE_END: usize = PAGE_CONTENT_END;
 /// Exclusive end offset of the usable region within a page buffer.
@@ -32,8 +31,6 @@ pub const NO_OVERFLOW_PAGE_ID: PageId = PageId::MAX;
 pub const MIN_INLINE_OVERFLOW_PAYLOAD_BYTES: usize = 64;
 /// Maximum number of logical payload bytes an overflow cell may keep inline.
 pub const MAX_INLINE_OVERFLOW_PAYLOAD_BYTES: usize = 512;
-/// Width in bytes of the next-page field at the start of every overflow page.
-pub const OVERFLOW_NEXT_PAGE_ID_SIZE: usize = 8;
 /// Width in bytes of a freeblock header: next freeblock plus total span size.
 pub const FREEBLOCK_HEADER_SIZE: usize = 4;
 /// Maximum fragmented free bytes permitted on a page before defragmentation.
@@ -55,10 +52,8 @@ pub const FRAGMENTED_FREE_BYTES_OFFSET: usize = 8;
 pub const PREV_PAGE_ID_OFFSET: usize = 10;
 /// Offset of the next-page sibling pointer in the shared page header.
 pub const NEXT_PAGE_ID_OFFSET: usize = PREV_PAGE_ID_OFFSET + 8;
-/// Offset of the page LSN in the shared page header.
-pub const LSN_OFFSET: usize = NEXT_PAGE_ID_OFFSET + 8;
-/// Number of bytes in the header shared by all page kinds.
-pub const SHARED_HEADER_SIZE: usize = LSN_OFFSET + size_of::<Lsn>();
+/// Number of bytes in the header shared by B-tree and overflow data pages.
+pub const SHARED_HEADER_SIZE: usize = NEXT_PAGE_ID_OFFSET + size_of::<PageId>();
 /// Offset of the rightmost-child pointer in an interior-page header.
 pub const RIGHTMOST_CHILD_OFFSET: usize = SHARED_HEADER_SIZE;
 /// Total header size for a leaf page.

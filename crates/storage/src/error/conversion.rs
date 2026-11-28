@@ -74,6 +74,9 @@ impl From<LogManagerError> for StorageError {
     fn from(error: LogManagerError) -> Self {
         match error {
             LogManagerError::Io(error) => Self::Io(error),
+            LogManagerError::ForeignDatabase | LogManagerError::UnsupportedVersion { .. } => {
+                Self::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            }
             LogManagerError::Poisoned => invariant(InvariantViolation::WalPoisoned),
             error => invariant(InvariantViolation::WalLog { message: error.to_string() }),
         }

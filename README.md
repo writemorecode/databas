@@ -21,10 +21,35 @@ cargo clippy --workspace --all-targets --all-features
 
 ### Database file format
 
-Format version 5 stores a little-endian CRC32 in the last four bytes of each
-4,096-byte database page. The checksum covers the preceding 4,092 bytes and is
-verified when the page is read from disk. Older database files are not supported
-by this version; there is no in-place migration.
+Format version 15 reserves a common recovery trailer on each 4,096-byte
+page. It contains the page incarnation and page LSN, followed by a
+little-endian CRC32 over the physical page ID and the preceding 4,092 bytes.
+A required `.doublewrite` sidecar stages protected page writes. Both its
+bootstrap and each `.wal` file header (including checkpoint replacements)
+bind to the open database file's filesystem identity (device and inode on
+Unix), not just its pathname. WAL header version 9 includes this 16-byte
+identity in the header CRC32. This is not a persistent database UUID. Do not
+delete or copy sidecars as if they were portable backups. Restart checks the
+database format, doublewrite bootstrap, and WAL compatibility before applying
+staged writes or replaying records. A verified staged header can identify the
+format if page zero tore. An existing WAL with an incomplete file header is
+rejected, not reinitialized. Creating a database requires unoccupied sidecar
+paths. Older formats are rejected without migration.
+
+Restart recovery analyzes WAL transaction chains, repeats history, and logs
+compensation for incomplete transactions. `PageInit` derives a typed empty
+page from its WAL record. The allocator reserves pages at initialization but
+publishes frees only at a durable transaction outcome. Redo uses verified
+page LSNs and incarnations to skip effects already reflected on disk. Data-page
+updates log page-local operations instead of full images. Ordinary leaf edits
+redo by slot; structural and overflow writes use byte runs. A checkpoint records
+how far data-page redo can skip independently of the WAL kept for undo.
+
+On existing trees, completed row edits undo by tree incarnation and key. A
+split can complete before a row is inserted, and a merge can complete after a
+deletion has left a searchable tree. These completed structural actions can
+survive transaction or savepoint rollback. An interrupted action is undone
+physically; a tree created by an aborted transaction is reclaimed in full.
 
 ### Storage simulation
 
@@ -37,7 +62,10 @@ CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo run --release -p databas-stora
 The simulator runs until the time limit or the first unexpected failure. Its
 clients share the storage engine and keep operating across injected I/O errors
 and power losses. Recovery checks the B+-trees against the client transaction
-history. To replay a failure, use the same build and seed and replace
+history. Focused scenarios verify that incompatible opens preserve pending
+repair slots and all file bytes, and crash sweeps verify interrupted splits
+and restartable undo across retained splits and merges. To replay a randomized
+failure, use the same build and seed and replace
 `--duration 15m` with the reported `--events N`.
 
 `DROP TABLE name;` removes a user table and all of its secondary indexes.

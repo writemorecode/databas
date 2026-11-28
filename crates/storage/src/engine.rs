@@ -2,11 +2,11 @@ use std::path::Path;
 
 use crate::PageId;
 use crate::btree::{TreeCursor, initialize_empty_root, validate_tree_page_formats};
-use crate::database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader, missing_header};
+use crate::database_header::{DATABASE_HEADER_PAGE_ID, DatabaseHeader};
 use crate::disk_manager::DiskManager;
 use crate::error::StorageResult;
 use crate::filesystem::{FileSystem, OpenMode};
-use crate::log_manager::TxnId;
+use crate::log_manager::{LogManager, TxnId};
 use crate::page_cache::PageCache;
 use crate::storage_runtime::StorageRuntime;
 use crate::transaction_manager::TransactionSavepoint;
@@ -68,18 +68,45 @@ impl Storage {
         options: StorageOptions,
         mode: OpenMode,
     ) -> StorageResult<Self> {
+        // A create-capable open must not even leave an empty database beside
+        // an orphaned sidecar. Recheck under the file lock before initializing.
+        if matches!(mode, OpenMode::Create | OpenMode::CreateNew) && !fs.exists(path)? {
+            require_fresh_sidecars(&fs, path)?;
+        }
         let mut disk_manager = DiskManager::open(&fs, path, mode)?;
         disk_manager.lock_exclusive()?;
-        if matches!(mode, OpenMode::CreateNew)
-            || matches!(mode, OpenMode::Create) && disk_manager.page_count() == 0
+        let identity = disk_manager.identity()?;
+        let repair = if matches!(mode, OpenMode::CreateNew | OpenMode::Create)
+            && disk_manager.page_count() == 0
         {
+            require_fresh_sidecars(&fs, path)?;
+            disk_manager.create_doublewrite(&fs, path)?;
             initialize_header_page(&mut disk_manager)?;
+            None
         } else {
-            validate_header_page(&mut disk_manager)?;
+            Some(disk_manager.prepare_doublewrite(&fs, path)?)
+        };
+        // Bootstrap inspection above is read-only on restart. WAL scan validates
+        // identity and frame versions before publishing/truncating a crash tail;
+        // only then may we install home images or retire any repair slots.
+        let (log, scan) = LogManager::open_for_recovery(fs, path, identity)?;
+        if let Some(repair) = repair {
+            disk_manager.repair_doublewrite(repair)?;
         }
         let opened_page_count = disk_manager.page_count();
-        let runtime = Arc::new(StorageRuntime::new(fs, path.to_path_buf(), disk_manager)?);
+        let (runtime, needs_checkpoint) =
+            StorageRuntime::new(path.to_path_buf(), disk_manager, log, scan)?;
+        let runtime = Arc::new(runtime);
         let page_cache = PageCache::new(Arc::clone(&runtime), options.cache_frames)?;
+        if needs_checkpoint {
+            // Undo can be more demanding than the original edit (e.g. restoring
+            // a large value to a leaf that is now full). Give restart workspace
+            // independent of the caller's cache setting.
+            let recovery_cache = PageCache::new(Arc::clone(&runtime), 32)?;
+            recovery_cache.undo_restart_losers()?;
+            runtime.validate_allocation_bounds()?;
+            runtime.checkpoint(|| Ok(recovery_cache.flush_checkpoint()?))?;
+        }
         Ok(Self { runtime, page_cache, opened_page_count })
     }
 
@@ -126,29 +153,25 @@ impl Storage {
     }
 
     pub fn rollback_to_savepoint(&self, savepoint: TransactionSavepoint) -> StorageResult<()> {
-        let undo_pages = self.runtime.rollback_to_savepoint(savepoint)?;
-        if let Err(err) = self.page_cache.restore_rollback_pages(undo_pages) {
-            self.runtime.record_transaction_failure(savepoint.txn_id)?;
-            return Err(err.into());
-        }
-        self.runtime.complete_savepoint_rollback(savepoint)
+        self.page_cache.rollback_to_savepoint(savepoint)
     }
 
     pub fn rollback_transaction(&self, txn_id: TxnId) -> StorageResult<()> {
-        let rollback = self.runtime.prepare_rollback_pages(txn_id)?;
-        self.page_cache.restore_rollback_pages(rollback.pages)?;
-        for page_id in rollback.flush_page_ids {
-            self.page_cache.flush_page(page_id)?;
-        }
-        self.runtime.sync_database_file()?;
-        self.runtime.finish_rollback(txn_id)?;
-        Ok(())
+        self.page_cache.rollback_transaction(txn_id)
     }
 
-    /// Creates a new empty raw tree and returns a cursor rooted at it.
+    /// Creates a new empty raw tree in an implicit physical transaction.
     pub fn create_tree(&self) -> StorageResult<TreeCursor> {
-        let root_page_id = initialize_empty_root(&self.page_cache, None)?;
-        TreeCursor::new(self.page_cache.clone(), root_page_id)
+        self.page_cache.autocommit(|txn_id| {
+            let root_page_id = initialize_empty_root(&self.page_cache, Some(txn_id))?;
+            TreeCursor::new(self.page_cache.clone(), root_page_id)
+        })
+    }
+
+    /// Reports whether a known tree root's page is allocated. A file may have
+    /// grown past an unallocated root while an attempted creation rolled back.
+    pub fn tree_root_is_allocated(&self, root_page_id: PageId) -> StorageResult<bool> {
+        self.runtime.page_is_live(root_page_id)
     }
 
     pub fn transaction_create_tree(&self, txn_id: TxnId) -> StorageResult<TreeCursor> {
@@ -173,15 +196,19 @@ impl Storage {
         self.runtime.validate_transaction_write(txn_id)
     }
 
-    /// Returns a raw cursor rooted at an existing tree.
+    /// Returns a raw cursor rooted at an existing tree. The caller must
+    /// serialize raw mutations with other access to that tree.
     pub fn tree_cursor(&self, root_page_id: PageId) -> StorageResult<TreeCursor> {
         TreeCursor::new(self.page_cache.clone(), root_page_id)
     }
 
     /// Opens a cursor for an active, writable transaction.
     ///
-    /// Serialize transaction completion with all mutations using its cursors.
-    /// A retained cursor rejects mutations after the transaction ends.
+    /// Hold exclusive logical access to the tree through transaction completion,
+    /// and serialize completion with all mutations through its cursors. After
+    /// a failed mutation, roll back the statement savepoint or the transaction
+    /// before using the tree again. A retained cursor rejects mutations after
+    /// its transaction ends.
     pub fn transaction_tree_cursor(
         &self,
         txn_id: TxnId,
@@ -204,14 +231,16 @@ fn initialize_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
     Ok(())
 }
 
-fn validate_header_page(disk_manager: &mut DiskManager) -> StorageResult<()> {
-    if disk_manager.page_count() == 0 {
-        return Err(missing_header());
+fn require_fresh_sidecars(fs: &FileSystem, path: &Path) -> StorageResult<()> {
+    for extension in ["doublewrite", "wal", "wal.checkpoint"] {
+        let sidecar = path.with_added_extension(extension);
+        if fs.exists(&sidecar)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("new database with existing sidecar: {}", sidecar.display()),
+            )
+            .into());
+        }
     }
-
-    let mut page = [0u8; crate::PAGE_SIZE];
-    // Identify the format before recovery. The allocator validates the checksum
-    // for the entire header/bitmap page, with WAL repair for torn bitmap writes.
-    disk_manager.read_page_unchecked(DATABASE_HEADER_PAGE_ID, &mut page)?;
-    DatabaseHeader::validate_page(&page)
+    Ok(())
 }
